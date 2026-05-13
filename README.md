@@ -81,12 +81,15 @@ package:
 python validation/run_phase7_physical_validation.py --quick --out-dir results/phase7
 python validation/run_external_fem_comparison.py --quick --out-dir results/external_fem
 python validation/run_phase8_engineering_cases.py --quick --out-dir results/phase8
+python validation/run_external_contact_solver_comparison.py --quick --out-dir results/external_contact_solver
 ```
 
 The external FEM comparison uses `scikit-fem` as a validation-only open-source
 reference for equivalent linear TET4 cantilever models. Phase 8 adds
 engineering-style validation cases for a 3D beam, rigid flat indentation, and
-deformable-deformable normal contact.
+deformable-deformable normal contact. The external contact comparison uses
+SfePy as a validation-only open-source contact solver and replays its final
+deformed contact state with SFC gap queries.
 
 ## Current Limitations
 

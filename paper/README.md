@@ -28,10 +28,12 @@ Evidence source:
 - `../results/phase7/`
 - `../results/external_fem/`
 - `../results/phase8/`
+- `../results/external_contact_solver/`
 - `../docs/phase6_final_experiment_handoff.md`
 - `../docs/phase7_physical_validation_handoff.md`
 - `../docs/external_fem_comparison_handoff.md`
 - `../docs/phase8_engineering_cases_handoff.md`
+- `../docs/external_contact_solver_handoff.md`
 - `../docs/validation_plan.md`
 
 Scope for the submission draft:
@@ -53,6 +55,9 @@ Scope for the submission draft:
 - Phase-8 engineering examples add a 3D beam external FEM comparison, a
   prescribed rigid flat indenter on an elastic block, and two-block
   deformable-deformable normal contact with action-reaction diagnostics.
+- External contact solver evidence uses SfePy to solve a two-body penalty
+  contact problem and replays the final deformed geometry with SFC
+  current-surface gap queries.
 
 Unsupported claims that must not be added without new evidence:
 

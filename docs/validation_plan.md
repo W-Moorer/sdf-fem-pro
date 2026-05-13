@@ -19,7 +19,10 @@ physics. Phase 8 adds more engineering-style paper examples: a 3D beam
 external FEM comparison, a prescribed rigid flat indenter pressing an elastic
 block, and deformable-deformable block contact with action-reaction and 3D
 stress-cloud evidence. These remain linear TET4, oriented current-surface
-distance, and frictionless normal penalty contact validations.
+distance, and frictionless normal penalty contact validations. The external
+contact solver comparison adds a SfePy two-body nonlinear penalty contact solve
+and replays its final deformed contact state with SFC current-surface gap
+queries.
 
 ## Phase-3 Validation Case Table
 
@@ -88,6 +91,13 @@ distance, and frictionless normal penalty contact validations.
 | Rigid flat indenter pressing elastic block | Prescribed indentation, min gap, max penetration, active contact count, normal force, contact energy, action-reaction imbalance, block displacement, and 3D stress cloud are reported. | Implemented in Phase 8. | Validation-only prescribed-displacement contact load; the indenter is a flat rigid underside, not a Hertzian curved punch or nonlinear contact solve. |
 | Deformable-deformable block contact | Prescribed approach, min gap, penetration, active contact count, upper/lower normal forces, action-reaction imbalance, contact energy, and two-body 3D stress cloud are reported. | Implemented in Phase 8. | Frictionless normal penalty contact only; no self-contact, friction, nonlinear equilibrium iteration, or large-deformation material response. |
 | Phase-8 claim gates | External FEM agreement, rigid-indenter response direction/monotonicity, and two-body action-reaction balance must have backing CSV evidence. | Covered by Phase-8 tests. | Gates support the tested engineering cases only and do not broaden the method's physics scope. |
+
+## External Contact Solver Comparison Table
+
+| Case | Expected quantities | Current status | Limitations |
+| --- | --- | --- | --- |
+| SfePy two-body contact replay | SfePy solves its built-in two-body nonlinear penalty contact example. SFC replays the final deformed geometry and reports current-surface gap sign, gap magnitude, active contact count, and agreement with SfePy exported contact gaps. | Implemented in `validation/run_external_contact_solver_comparison.py`; covered by `tests/test_external_contact_solver_comparison.py` when SfePy is available. | This validates contact state/gap replay against an external contact solve; it is not a full SFC nonlinear contact equilibrium comparison. |
+| External contact claim gates | Contact state agreement and gap-scale checks must have backing CSV evidence before paper text can cite the external contact solver comparison. | Implemented in `external_contact_solver_claims.csv`. | SfePy gap is a contact-term surface average; SFC gap is a centroid closest-point projection replay. |
 
 ## Required Numerical Checks
 

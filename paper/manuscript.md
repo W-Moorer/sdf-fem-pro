@@ -10,7 +10,7 @@ Signed distance fields provide an attractive geometric representation for contac
 
 This paper presents a training-free dynamic surface-distance framework for finite-element contact. Instead of reconstructing a deformed SDF from data, the proposed method induces a local oriented surface distance directly from the current finite-element boundary. The contact gap is defined as the signed distance from a slave surface sample to the current master surface, and the corresponding normal, closest-point projection, contact Jacobian, and penalty contact force are assembled consistently from the current FEM geometry. A standalone implementation is developed without dependence on Abaqus-generated matrices, force files, or post-processing outputs.
 
-The implementation is validated on linear TET4 finite elements with normal penalty contact. Verification includes element-level stiffness and mass checks, analytic small-strain stress/strain and energy references, an external open-source FEM comparison using scikit-fem, brute-force closest-point projection references, material-space SDF baseline comparisons, contact force-displacement diagnostics, and repeated timing experiments. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions; a separate total-step timing check also remains faster than the brute-force counterpart in the tested cases. The current scope is limited to linear TET4 elasticity, oriented local surface distances, spatial-hash broad phase, and frictionless penalty normal contact.
+The implementation is validated on linear TET4 finite elements with normal penalty contact. Verification includes element-level stiffness and mass checks, analytic small-strain stress/strain and energy references, an external open-source FEM comparison using scikit-fem, an external contact-solver state comparison using SfePy, brute-force closest-point projection references, material-space SDF baseline comparisons, contact force-displacement diagnostics, and repeated timing experiments. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions; a separate total-step timing check also remains faster than the brute-force counterpart in the tested cases. The current scope is limited to linear TET4 elasticity, oriented local surface distances, spatial-hash broad phase, and frictionless penalty normal contact.
 
 ## 1. Introduction
 
@@ -24,7 +24,7 @@ This paper proposes a training-free dynamic surface-distance framework for defor
 
 The current-surface distance is used consistently in the contact formulation. The contact gap is defined as the signed distance from a slave surface sample to the current master surface. The slave and master Jacobian blocks are assembled from the same normal and shape-function weights used in the closest-point projection. A frictionless penalty contact force and Gauss-Newton contact stiffness approximation are then assembled from this Jacobian. This gives a compact contact pipeline in which geometry evaluation and force assembly share the same local surface representation.
 
-We implement the method in a standalone FEM-SDF prototype with internally assembled TET4 stiffness, mass, body-force, constraint, contact, and time-integration components. The core solver does not depend on Abaqus-generated matrices, force files, `.odb` files, or spreadsheet outputs. Experiments verify the linear TET4 implementation against analytic small-strain stress, strain, and energy references; compare stiffness, displacement, strain, stress, and von Mises fields against an equivalent scikit-fem model; compare contact forces against brute-force closest-point projection; evaluate a frozen material-space SDF baseline under deformation; and report repeated timing results. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions.
+We implement the method in a standalone FEM-SDF prototype with internally assembled TET4 stiffness, mass, body-force, constraint, contact, and time-integration components. The core solver does not depend on Abaqus-generated matrices, force files, `.odb` files, or spreadsheet outputs. Experiments verify the linear TET4 implementation against analytic small-strain stress, strain, and energy references; compare stiffness, displacement, strain, stress, and von Mises fields against an equivalent scikit-fem model; replay a SfePy external contact-solver final state with SFC gap queries; compare contact forces against brute-force closest-point projection; evaluate a frozen material-space SDF baseline under deformation; and report repeated timing results. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions.
 
 In summary, this work makes four contributions. First, it introduces a training-free current-surface-induced distance representation for deformable FEM contact. Second, it derives a consistent contact gap, normal, Jacobian, and penalty force assembly from local current-surface projection. Third, it provides a standalone linear TET4 FEM-SDF implementation independent of Abaqus-generated solver artifacts. Fourth, it presents a reproducible validation and evidence package including analytic stress/strain references, external open-source FEM comparisons, brute-force projection references, material-space SDF baseline comparisons, contact diagnostics, and repeated performance measurements.
 
@@ -233,13 +233,29 @@ Paper figures:
 - `results/phase8/phase8_rigid_indenter_stress_3d.pdf`
 - `results/phase8/phase8_deformable_deformable_stress_3d.pdf`
 
-### 5.5 Dynamic surface-distance reference comparison
+### 5.5 External contact-solver state comparison
+
+To add an external contact-solver reference, we run SfePy's open-source two-body nonlinear penalty contact example and replay the final deformed contact state with the SFC current-surface distance query. SfePy performs the contact solve; SFC evaluates the contact gap on the SfePy final geometry. This comparison checks whether the proposed current-surface gap query agrees with an independent contact solver's final contact state, but it is not a claim that the current SFC prototype implements a full nonlinear contact equilibrium solver.
+
+| Approach | SfePy mean gap | SFC replay mean gap | Abs. diff. | Active counts |
+| ---: | ---: | ---: | ---: | --- |
+| \(0.000000 \times 10^{0}\) | \(0.000000 \times 10^{0}\) | \(1.000000 \times 10^{-4}\) | \(1.000000 \times 10^{-4}\) | 0/0 |
+| \(4.000000 \times 10^{-2}\) | \(-2.107687 \times 10^{-3}\) | \(-2.581917 \times 10^{-3}\) | \(4.742296 \times 10^{-4}\) | 2/1 |
+| \(6.000000 \times 10^{-2}\) | \(-3.164172 \times 10^{-3}\) | \(-3.876110 \times 10^{-3}\) | \(7.119386 \times 10^{-4}\) | 2/1 |
+| \(8.000000 \times 10^{-2}\) | \(-4.220656 \times 10^{-3}\) | \(-5.170304 \times 10^{-3}\) | \(9.496477 \times 10^{-4}\) | 2/1 |
+| \(1.000000 \times 10^{-1}\) | \(-5.277141 \times 10^{-3}\) | \(-6.464498 \times 10^{-3}\) | \(1.187357 \times 10^{-3}\) | 2/1 |
+
+Paper figure:
+
+- `results/external_contact_solver/external_contact_gap_comparison.pdf`
+
+### 5.6 Dynamic surface-distance reference comparison
 
 The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.
 
 This confirms that the spatial-hash candidate pipeline and dynamic surface-distance query are consistent with brute-force closest-point projection for the tested geometry. It does not imply global SDF correctness for arbitrary non-manifold or inconsistently oriented geometry.
 
-### 5.6 Contact force-displacement reference
+### 5.7 Contact force-displacement reference
 
 The previous comparison checks gap and normal consistency. We also compare the actual normal penalty contact force against a brute-force all-triangle closest-point projection reference on the same rigid-plane surface. Both paths use the same penalty law, so the comparison isolates whether the accelerated dynamic SDF contact query produces the same active set and force-displacement response as the direct closest-point projection reference.
 
@@ -251,7 +267,7 @@ The previous comparison checks gap and normal consistency. We also compare the a
 | \(1.000000 \times 10^{-2}\) | 64/64 | \(3.200000 \times 10^{3}\) | \(3.200000 \times 10^{3}\) | \(0.000000 \times 10^{0}\) |
 | \(2.000000 \times 10^{-2}\) | 64/64 | \(6.400000 \times 10^{3}\) | \(6.400000 \times 10^{3}\) | \(0.000000 \times 10^{0}\) |
 
-### 5.7 Material-space SDF baseline
+### 5.8 Material-space SDF baseline
 
 A frozen material-space SDF baseline was evaluated under stretch and shear deformation. This baseline is not the proposed method; it is used only to demonstrate the errors introduced by carrying a reference-space distance function under deformation.
 
@@ -275,11 +291,11 @@ and the maximum normal angle error was
 
 These results support the motivation that a reference/material-space SDF is not sufficient to represent current-configuration distance and normal information under deformation.
 
-### 5.8 Contact time-history diagnostics
+### 5.9 Contact time-history diagnostics
 
 The contact experiments record time, minimum gap, maximum penetration, active contact count, normal force, contact energy, and action-reaction imbalance. These diagnostics verify that the contact pipeline produces consistent normal penalty forces and balanced deformable-deformable contact resultants for the tested cases.
 
-### 5.9 Performance scaling
+### 5.10 Performance scaling
 
 The final non-quick experiments were run with surface sizes 4, 8, 12, and 16, using five timing repeats per row. The dynamic FEM-induced SDF full pipeline achieved the following speedups over brute-force all-triangle projection.
 
@@ -314,13 +330,13 @@ Fourth, the broad phase is a uniform spatial hash. The reported speedups are mea
 
 Finally, timing results are hardware- and implementation-dependent. The final experiment metadata must accompany any performance table derived from these results. The reported numbers should be interpreted as evidence for the current standalone prototype and not as a universal performance bound.
 
-The physical comparison evidence is also bounded. The stress/strain check is an analytic affine patch test, and the external open-source comparison uses scikit-fem on the same linear TET4 cantilever model. These results verify consistency of the implemented linear formulation and reported stress quantities, but they are not yet a comparison against Abaqus, CalculiX, FEniCS, experimental measurements, nonlinear FEM, or a production contact code.
+The physical comparison evidence is also bounded. The stress/strain check is an analytic affine patch test, and the external open-source FEM comparison uses scikit-fem on matching linear TET4 cantilever models. The external contact-solver comparison uses SfePy's two-body penalty contact example and replays the final deformed contact state with SFC gap queries. These results verify consistency of the implemented linear formulation, reported stress quantities, and current-surface contact gap evaluation for the tested cases, but they are not yet comparisons against Abaqus, CalculiX, FEniCS, experimental measurements, nonlinear FEM, or a production contact code.
 
 ## 7. Conclusion
 
 This paper presented a training-free dynamic surface-distance framework for finite-element contact of deformable bodies. Unlike static SDFs or data-driven dynamic SDF reconstruction, the proposed method induces a local oriented distance directly from the current finite-element boundary. The resulting contact gap, normal, Jacobian, and penalty force are assembled consistently from the current FEM geometry.
 
-A standalone implementation was developed without dependence on Abaqus-generated matrices or data files. The prototype supports linear TET4 finite elements, spatial-hash contact candidates, dynamic surface-distance queries, local closest-point projection, and frictionless penalty contact. Validation includes analytic linear-elastic stress/strain references, external scikit-fem displacement/stress comparisons, brute-force closest-point projection references, material-space SDF baseline comparisons, contact force-displacement diagnostics, and repeated performance timing.
+A standalone implementation was developed without dependence on Abaqus-generated matrices or data files. The prototype supports linear TET4 finite elements, spatial-hash contact candidates, dynamic surface-distance queries, local closest-point projection, and frictionless penalty contact. Validation includes analytic linear-elastic stress/strain references, external scikit-fem displacement/stress comparisons, external SfePy contact-state replay, brute-force closest-point projection references, material-space SDF baseline comparisons, contact force-displacement diagnostics, and repeated performance timing.
 
 In the tested final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieved \(3.58\times\) to \(57.07\times\) speedup over brute-force all-triangle projection. These results suggest that current-surface-induced dynamic distance queries can provide an efficient and training-free geometric front end for deformable FEM contact. Future work will extend the framework to nonlinear FEM, frictional and self-contact, robust global sign handling, production BVH/GPU acceleration, and barrier or augmented-Lagrangian contact formulations.
 
