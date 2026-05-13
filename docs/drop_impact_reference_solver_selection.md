@@ -126,6 +126,22 @@ inspection, and allows CalculiX adaptive time stepping. It is a diagnostic
 visualization/comparison run, not a replacement for the short-window acceptance
 gate.
 
+High-resolution sphere diagnostic:
+
+```bash
+python validation/run_calculix_drop_impact_comparison.py --case sphere_like_drop --resolution 2 --duration 1.0 --dt 0.001 --output-frequency 10 --calculix-auto-step --calculix-timeout-seconds 600 --out-dir results/calculix_sphere_r2_dt001
+```
+
+This reruns the drop-sphere case on a finer validation mesh. Resolution `2`
+contains 257 nodes, 890 TET4 elements, 476 boundary faces, and 116 near-bottom
+contact faces. Because the model has an initial downward velocity, rebound
+above the starting height is not automatically rejected. The physicality gate
+uses the ballistic height bound `z0 + v0^2 / (2g)`, which is `0.748288` for the
+latest `r2` run. The latest `r2` run stays below that bound in both CalculiX
+and SFC, but CalculiX still times out at `0.678506 s` and reports a large
+energy-balance error in its log, so this high-resolution strong-impact sphere
+remains diagnostic only.
+
 Gentle external-contact reference candidate:
 
 ```bash
@@ -182,8 +198,10 @@ The comparison should report:
 - first impact time error;
 - peak normal force relative difference;
 - rebound height relative difference;
-- strict rebound physicality check: post-contact center-of-mass height must not
-  exceed the initial height;
+- rebound physicality check: post-contact center-of-mass height must remain
+  within the ballistic height bound implied by the initial downward velocity
+  and gravity. For drop-from-rest cases this reduces to not exceeding the
+  initial height;
 - minimum gap / maximum penetration trend;
 - center-of-mass trajectory error;
 - qualitative agreement of contact activation windows;
@@ -250,9 +268,10 @@ Current unsupported claims:
   and a higher penalty stiffness, and is limited to a short initial-impact
   window to avoid late persistent-contact convergence issues in CalculiX 2.17.
 - The 1-second strong-impact diagnostic is not accepted as validation evidence:
-  `sphere_like_drop` timed out in CalculiX, and the completed `block_drop`
-  strong-impact row rebounded above the starting mass-center height in both
-  CalculiX and SFC.
+  the high-resolution `sphere_like_drop r2` run stays below the ballistic
+  rebound-height bound but still times out in CalculiX and reports a large
+  CalculiX energy-balance error. It is therefore a mesh-quality diagnostic, not
+  a validated external reference.
 - CalculiX RF is parsed from the fixed master plane and is more direct than the
   previous acceleration proxy, but it remains an external-force total and must
   be interpreted with CalculiX's RF caveats.

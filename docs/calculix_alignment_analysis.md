@@ -104,11 +104,12 @@ Result summary:
 | max rebound z after contact, SFC | `4.439993e-01` |
 | physical rebound height claim | `supported` |
 
-The latest strong-impact 1-second diagnostic is intentionally not accepted:
-`sphere_like_drop` timed out in CalculiX, while the completed `block_drop`
-strong-impact case rebounded above the starting center-of-mass height in both
-CalculiX and SFC. This is treated as a rejected contact-dynamics setup rather
-than evidence for the method.
+The latest strong-impact sphere diagnostic is intentionally not accepted:
+`sphere_like_drop r2` uses a finer mesh and `dt=0.001`, and both CalculiX and
+SFC stay below the ballistic rebound-height bound implied by the initial
+downward velocity. However, CalculiX still times out before 1 second and its
+log reports a large energy-balance error, so this is treated as a rejected
+contact-dynamics setup rather than evidence for the method.
 
 ## Remaining Differences
 

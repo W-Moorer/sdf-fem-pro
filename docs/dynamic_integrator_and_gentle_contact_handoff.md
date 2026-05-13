@@ -100,12 +100,13 @@ integration points and scaled by spring area.
 The strong sphere/block long diagnostic remains unsupported and should not
 be used for paper evidence.
 
-The strong diagnostic has been shortened from 3 seconds to a 1-second run. Its
-latest 1-second output is still rejected by the physicality gate: the
-`sphere_like_drop` CalculiX run timed out before completion, and the
-`block_drop` run rebounded above the starting mass-center height in both
-CalculiX and SFC. The strong case is therefore retained only as a failure
-diagnostic for aggressive impact/contact settings.
+The strong diagnostic has been shortened from 3 seconds to a 1-second run. For
+nonzero downward initial velocity, rebound above the starting height is
+physically admissible up to the ballistic height bound `z0 + v0^2 / (2g)`.
+The high-resolution `sphere_like_drop r2` rerun with `dt=0.001` stays below
+that bound in both CalculiX and SFC, but CalculiX still times out and reports a
+large energy-balance error. The strong case is therefore retained only as a
+failure diagnostic for aggressive impact/contact settings.
 
 ## Remaining Risks
 

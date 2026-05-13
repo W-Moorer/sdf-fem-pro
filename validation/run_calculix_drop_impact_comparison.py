@@ -385,6 +385,7 @@ def build_model_suite(
     output_frequency: int = 1,
     direct_dynamic: bool = True,
     cases: list[str] | tuple[str, ...] | None = None,
+    resolutions: list[int] | tuple[int, ...] | None = None,
     initial_velocity_z: float | None = None,
     gravity: float | None = None,
     contact_stiffness_override: float | None = None,
@@ -392,10 +393,12 @@ def build_model_suite(
     """Return the model suite for quick or paper-scale external comparison."""
 
     case_names = ["sphere_like_drop", "block_drop"] if cases is None else list(cases)
-    resolutions = [1] if quick else [1, 2, 3]
+    resolution_values = [1] if quick else [1, 2, 3]
+    if resolutions is not None:
+        resolution_values = [int(value) for value in resolutions]
     models: list[DropModel] = []
     for case_name in case_names:
-        for resolution in resolutions:
+        for resolution in resolution_values:
             models.append(
                 build_drop_model(
                     quick=quick,
@@ -1029,12 +1032,19 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def _rebound_physicality(rows: list[Row]) -> Row:
-    """Return a conservative rebound-height physicality check."""
+def _rebound_physicality(model: DropModel, rows: list[Row]) -> Row:
+    """Return a rebound-height physicality check.
+
+    With an initial downward velocity, a rebound above the starting height can
+    be physically admissible. The conservative ceiling used here is the
+    starting mass-center height plus the ballistic height implied by the
+    initial kinetic energy in the gravity field.
+    """
 
     if not rows:
         return {
             "initial_z": "",
+            "allowed_rebound_z": "",
             "first_contact_time": "",
             "max_rebound_z": "",
             "rebound_overshoot": "",
@@ -1042,10 +1052,14 @@ def _rebound_physicality(rows: list[Row]) -> Row:
         }
     sorted_rows = sorted(rows, key=lambda row: float(row["time"]))
     initial_z = float(sorted_rows[0]["z_cm"])
+    allowed_rebound_z = initial_z
+    if float(model.gravity) > 0.0 and float(model.initial_velocity_z) < 0.0:
+        allowed_rebound_z += float(model.initial_velocity_z) ** 2 / (2.0 * float(model.gravity))
     first_contact = _first_contact_time(sorted_rows)
     if first_contact is None:
         return {
             "initial_z": initial_z,
+            "allowed_rebound_z": allowed_rebound_z,
             "first_contact_time": "",
             "max_rebound_z": "",
             "rebound_overshoot": "",
@@ -1053,9 +1067,10 @@ def _rebound_physicality(rows: list[Row]) -> Row:
         }
     post_contact = [row for row in sorted_rows if float(row["time"]) >= float(first_contact)]
     max_rebound_z = max(float(row["z_cm"]) for row in post_contact) if post_contact else initial_z
-    overshoot = max(0.0, max_rebound_z - initial_z)
+    overshoot = max(0.0, max_rebound_z - allowed_rebound_z)
     return {
         "initial_z": initial_z,
+        "allowed_rebound_z": allowed_rebound_z,
         "first_contact_time": first_contact,
         "max_rebound_z": max_rebound_z,
         "rebound_overshoot": overshoot,
@@ -1092,8 +1107,8 @@ def comparison_metrics(
 
     cx_first = _first_contact_time(calculix_rows)
     sfc_first = _first_contact_time(sfc_rows)
-    cx_rebound = _rebound_physicality(calculix_rows)
-    sfc_rebound = _rebound_physicality(sfc_rows)
+    cx_rebound = _rebound_physicality(model, calculix_rows)
+    sfc_rebound = _rebound_physicality(model, sfc_rows)
     first_contact_abs_error = "" if cx_first is None or sfc_first is None else abs(sfc_first - cx_first)
     both_contact = cx_first is not None and sfc_first is not None
     cx_contact_output_available = any(
@@ -1202,6 +1217,14 @@ def comparison_metrics(
         {
             "case": model.case,
             "resolution": model.resolution,
+            "metric": "allowed_rebound_z_calculix",
+            "value": cx_rebound["allowed_rebound_z"],
+            "status": "evidence",
+            "details": "starting height plus ballistic height from initial downward kinetic energy",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "max_rebound_z_after_contact_calculix",
             "value": cx_rebound["max_rebound_z"],
             "status": cx_rebound["status"],
@@ -1213,7 +1236,7 @@ def comparison_metrics(
             "metric": "rebound_overshoot_calculix",
             "value": cx_rebound["rebound_overshoot"],
             "status": cx_rebound["status"],
-            "details": "positive value means CalculiX rebound exceeded starting height",
+            "details": "positive value means CalculiX rebound exceeded the ballistic height bound",
         },
         {
             "case": model.case,
@@ -1222,6 +1245,14 @@ def comparison_metrics(
             "value": sfc_rebound["initial_z"],
             "status": "evidence",
             "details": "mass-weighted center height at the first SFC sample",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "allowed_rebound_z_sfc",
+            "value": sfc_rebound["allowed_rebound_z"],
+            "status": "evidence",
+            "details": "starting height plus ballistic height from initial downward kinetic energy",
         },
         {
             "case": model.case,
@@ -1237,7 +1268,7 @@ def comparison_metrics(
             "metric": "rebound_overshoot_sfc",
             "value": sfc_rebound["rebound_overshoot"],
             "status": sfc_rebound["status"],
-            "details": "positive value means SFC rebound exceeded starting height",
+            "details": "positive value means SFC rebound exceeded the ballistic height bound",
         },
         {
             "case": model.case,
@@ -1245,7 +1276,7 @@ def comparison_metrics(
             "metric": "physical_rebound_height_claim",
             "value": physical_status,
             "status": physical_status,
-            "details": "supported only if both histories keep post-contact rebound height at or below starting height",
+            "details": "supported only if both histories keep post-contact rebound height within the ballistic height bound",
         },
         {
             "case": model.case,
@@ -1358,6 +1389,11 @@ def write_markdown(
         if case_names != ["block_drop", "sphere_like_drop"]:
             for case_name in case_names:
                 reproduce_parts.extend(["--case", case_name])
+        resolution_values = sorted({int(model.resolution) for model in models})
+        default_resolution_values = [1] if quick else [1, 2, 3]
+        if resolution_values != default_resolution_values:
+            for resolution in resolution_values:
+                reproduce_parts.extend(["--resolution", str(resolution)])
     if models and len({round(float(model.initial_velocity_z), 12) for model in models}) == 1 and models[0].initial_velocity_z != -2.0:
         reproduce_parts.extend(["--initial-velocity-z", f"{models[0].initial_velocity_z:g}"])
     if models and len({round(float(model.gravity), 12) for model in models}) == 1 and models[0].gravity != 9.81:
@@ -1420,7 +1456,7 @@ def write_markdown(
         "| Claim | Status | Evidence | Gate |",
         "| --- | --- | --- | --- |",
         f"| external dynamic contact time-scale agreement | {'supported' if all_supported else 'not_supported'} | calculix_drop_metrics.csv::external_dynamic_contact_claim | {'all_supported' if all_supported else 'some_not_supported'} |",
-        f"| rebound height not above starting height | {'supported' if all_physical else 'not_supported'} | calculix_drop_metrics.csv::physical_rebound_height_claim | {'all_supported' if all_physical else 'some_not_supported'} |",
+        f"| rebound height within ballistic energy bound | {'supported' if all_physical else 'not_supported'} | calculix_drop_metrics.csv::physical_rebound_height_claim | {'all_supported' if all_physical else 'some_not_supported'} |",
         "<!-- evidence csv=calculix_drop_metrics.csv field=value -->",
         "",
         "## Metrics",
@@ -1461,6 +1497,7 @@ def run_comparison(
     output_frequency: int = 1,
     direct_dynamic: bool = True,
     cases: list[str] | tuple[str, ...] | None = None,
+    resolutions: list[int] | tuple[int, ...] | None = None,
     initial_velocity_z: float | None = None,
     gravity: float | None = None,
     contact_stiffness: float | None = None,
@@ -1480,6 +1517,7 @@ def run_comparison(
         output_frequency=output_frequency,
         direct_dynamic=direct_dynamic,
         cases=cases,
+        resolutions=resolutions,
         initial_velocity_z=initial_velocity_z,
         gravity=gravity,
         contact_stiffness_override=contact_stiffness,
@@ -1533,6 +1571,7 @@ def run_comparison(
             {"key": "duration_override", "value": "" if duration is None else duration},
             {"key": "dt_override", "value": "" if dt is None else dt},
             {"key": "output_frequency", "value": output_frequency},
+            {"key": "resolutions_override", "value": "" if resolutions is None else ",".join(str(int(value)) for value in resolutions)},
             {"key": "initial_velocity_z_override", "value": "" if initial_velocity_z is None else initial_velocity_z},
             {"key": "gravity_override", "value": "" if gravity is None else gravity},
             {"key": "contact_stiffness_override", "value": "" if contact_stiffness is None else contact_stiffness},
@@ -1567,6 +1606,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Limit the run to one or more cases. Repeat the option for multiple cases.",
     )
+    parser.add_argument("--resolution", action="append", type=int, default=None, help="Limit the run to one or more mesh resolutions.")
     parser.add_argument("--initial-velocity-z", type=float, default=None, help="Override the initial vertical velocity.")
     parser.add_argument("--gravity", type=float, default=None, help="Override gravitational acceleration magnitude.")
     parser.add_argument("--contact-stiffness", type=float, default=None, help="Override the pressure-overclosure stiffness.")
@@ -1589,6 +1629,7 @@ def main() -> None:
         output_frequency=args.output_frequency,
         direct_dynamic=not bool(args.calculix_auto_step),
         cases=args.case,
+        resolutions=args.resolution,
         initial_velocity_z=args.initial_velocity_z,
         gravity=args.gravity,
         contact_stiffness=args.contact_stiffness,

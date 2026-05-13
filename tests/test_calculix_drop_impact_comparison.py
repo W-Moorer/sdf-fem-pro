@@ -126,6 +126,18 @@ def test_calculix_drop_nonquick_suite_has_multiple_resolutions() -> None:
     assert all(float(model.surface_node_areas.sum()) > 0.0 for model in models)
 
 
+def test_calculix_drop_resolution_override_selects_single_high_resolution() -> None:
+    from validation.run_calculix_drop_impact_comparison import build_model_suite
+
+    models = build_model_suite(quick=False, cases=["sphere_like_drop"], resolutions=[2])
+
+    assert len(models) == 1
+    assert models[0].case == "sphere_like_drop"
+    assert models[0].resolution == 2
+    assert models[0].nodes.shape[0] > 200
+    assert models[0].tet_elements.shape[0] > 800
+
+
 def test_sphere_like_drop_has_regular_bottom_contact_patch() -> None:
     from validation.run_calculix_drop_impact_comparison import build_drop_model
 
@@ -139,6 +151,42 @@ def test_sphere_like_drop_has_regular_bottom_contact_patch() -> None:
     assert len(near_bottom_faces) >= 48
     assert model.nodes.shape[0] >= 100
     assert model.contact_stiffness > build_drop_model(quick=True, case="block_drop", resolution=1).contact_stiffness
+
+
+def test_rebound_gate_allows_ballistic_height_from_initial_velocity() -> None:
+    from validation.run_calculix_drop_impact_comparison import _rebound_physicality, build_drop_model
+
+    model = build_drop_model(quick=True, case="sphere_like_drop", resolution=1, initial_velocity_z=-2.0, gravity=9.81)
+    initial_z = 0.5
+    allowed = initial_z + 4.0 / (2.0 * 9.81)
+
+    rows = [
+        {"time": 0.0, "z_cm": initial_z, "active_contact_count": 0, "max_penetration": 0.0, "normal_force_proxy": 0.0},
+        {"time": 0.1, "z_cm": initial_z - 0.1, "active_contact_count": 1, "max_penetration": 0.01, "normal_force_proxy": 1.0},
+        {"time": 0.3, "z_cm": allowed - 1.0e-4, "active_contact_count": 0, "max_penetration": 0.0, "normal_force_proxy": 0.0},
+    ]
+    result = _rebound_physicality(model, rows)
+
+    assert result["allowed_rebound_z"] == pytest.approx(allowed)
+    assert result["status"] == "supported"
+
+
+def test_rebound_gate_rejects_height_above_ballistic_bound() -> None:
+    from validation.run_calculix_drop_impact_comparison import _rebound_physicality, build_drop_model
+
+    model = build_drop_model(quick=True, case="sphere_like_drop", resolution=1, initial_velocity_z=-2.0, gravity=9.81)
+    initial_z = 0.5
+    allowed = initial_z + 4.0 / (2.0 * 9.81)
+
+    rows = [
+        {"time": 0.0, "z_cm": initial_z, "active_contact_count": 0, "max_penetration": 0.0, "normal_force_proxy": 0.0},
+        {"time": 0.1, "z_cm": initial_z - 0.1, "active_contact_count": 1, "max_penetration": 0.01, "normal_force_proxy": 1.0},
+        {"time": 0.3, "z_cm": allowed + 1.0e-3, "active_contact_count": 0, "max_penetration": 0.0, "normal_force_proxy": 0.0},
+    ]
+    result = _rebound_physicality(model, rows)
+
+    assert result["rebound_overshoot"] == pytest.approx(1.0e-3)
+    assert result["status"] == "check"
 
 
 def test_drop_history_uses_mass_weighted_center_height() -> None:
