@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import csv
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "validation" / "run_calculix_drop_impact_comparison.py"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def _calculix_available() -> bool:
+    try:
+        from validation.run_calculix_drop_impact_comparison import calculix_available
+
+        return calculix_available()
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _calculix_available(), reason="CalculiX/ccx is unavailable through WSL")
+
+EXPECTED_FILES = {
+    "calculix_drop_time_history.csv",
+    "calculix_drop_metrics.csv",
+    "calculix_drop_commands.csv",
+    "calculix_drop_plots.csv",
+    "calculix_drop_metadata.csv",
+    "calculix_drop_summary.md",
+    "calculix_drop_z_cm.png",
+    "calculix_drop_z_cm.pdf",
+    "calculix_drop_min_gap.png",
+    "calculix_drop_min_gap.pdf",
+    "calculix_drop_force_proxy.png",
+    "calculix_drop_force_proxy.pdf",
+    "calculix_drop_contact_energy.png",
+    "calculix_drop_contact_energy.pdf",
+}
+
+
+@pytest.fixture(scope="session")
+def calculix_drop_output(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    out_dir = tmp_path_factory.mktemp("calculix-drop-impact")
+    subprocess.run(
+        [sys.executable, str(RUNNER), "--quick", "--out-dir", str(out_dir)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    return out_dir
+
+
+def _rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def test_calculix_drop_quick_mode_writes_expected_outputs(calculix_drop_output: Path) -> None:
+    produced = {path.name for path in calculix_drop_output.iterdir() if path.is_file()}
+
+    assert EXPECTED_FILES <= produced
+    assert all((calculix_drop_output / name).stat().st_size > 0 for name in EXPECTED_FILES)
+
+
+def test_calculix_drop_history_contains_external_and_sfc_contact(calculix_drop_output: Path) -> None:
+    rows = _rows(calculix_drop_output / "calculix_drop_time_history.csv")
+    sources = {row["source"] for row in rows}
+
+    assert sources == {"calculix", "sfc"}
+    assert any(int(row["active_contact_count"]) > 0 for row in rows if row["source"] == "calculix")
+    assert any(int(row["active_contact_count"]) > 0 for row in rows if row["source"] == "sfc")
+    assert min(float(row["min_gap"]) for row in rows if row["source"] == "calculix") >= -1.0e-10
+    assert min(float(row["min_gap"]) for row in rows if row["source"] == "sfc") < 0.0
+
+
+def test_calculix_drop_external_contact_claim_is_supported(calculix_drop_output: Path) -> None:
+    metrics = _rows(calculix_drop_output / "calculix_drop_metrics.csv")
+    by_metric = {row["metric"]: row for row in metrics}
+
+    assert by_metric["external_solver"]["value"] == "CalculiX"
+    assert by_metric["external_dynamic_contact_claim"]["status"] == "supported"
+    assert float(by_metric["first_contact_time_abs_error"]["value"]) <= 3.0e-3
+
+
+def test_calculix_drop_summary_claim_markers_have_backing_csv_fields(calculix_drop_output: Path) -> None:
+    marker = re.compile(r"<!--\s*evidence\s+csv=(?P<csv>\S+)\s+field=(?P<field>\S+)\s*-->")
+    text = (calculix_drop_output / "calculix_drop_summary.md").read_text(encoding="utf-8")
+    matches = list(marker.finditer(text))
+
+    assert matches
+    for match in matches:
+        csv_path = calculix_drop_output / match.group("csv")
+        assert csv_path.is_file()
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            fieldnames = csv.DictReader(f).fieldnames or []
+        assert match.group("field") in fieldnames
