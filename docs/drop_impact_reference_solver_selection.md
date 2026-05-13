@@ -116,12 +116,12 @@ Generated outputs:
 
 Quick mode currently runs:
 
-- `sphere_like_drop`, resolution `0`
+- `sphere_like_drop`, resolution `1`
 - `block_drop`, resolution `1`
 
 Non-quick mode supports multi-resolution dynamic comparison:
 
-- `sphere_like_drop`, resolutions `0, 1, 2`
+- `sphere_like_drop`, resolutions `1, 2, 3`
 - `block_drop`, resolutions `1, 2, 3`
 
 ## Required Time-History Outputs
@@ -165,6 +165,8 @@ Do not make a paper claim unless all of these are true:
 - The generated Markdown claim markers reference backing CSV fields.
 - The comparison explicitly states whether the external solver is CalculiX or
   FEBio.
+- CalculiX force and contact-energy curves are compared only when the runner
+  parses nonzero `RF` / `CONTACT PRINT` evidence from the `.dat` output.
 - If the external solver fails or is unavailable, the validation status is
   `not_available`, not `supported`.
 
@@ -195,14 +197,19 @@ External solver selected: **CalculiX/ccx primary, FEBio fallback**.
 Current supported claim:
 
 - CalculiX and the CalculiX-aligned SFC validation mode activate contact at the
-  same time scale on the generated quick-mode sphere-like and block drop-impact
-  models. The latest quick run reported first-contact differences no larger
-  than one output step.
+  same time scale on the generated quick-mode `block_drop` face-to-face impact
+  model. The latest quick run reported effectively identical first-contact
+  times for this block case.
 
 Current unsupported claims:
 
 - These are still reduced validation models, not high-fidelity production
   sphere-impact benchmarks.
+- The `sphere_like_drop` case remains a diagnostic only. Even after moving from
+  resolution `0` to resolution `1`, CalculiX's exported face-based contact RF
+  activates substantially later than the SFC point/surface penalty response.
+  This indicates that the sphere-like contact geometry is not yet an equivalent
+  external contact-force reference.
 - CalculiX RF is parsed from the fixed master plane and is more direct than the
   previous acceleration proxy, but it remains an external-force total and must
   be interpreted with CalculiX's RF caveats.
@@ -225,6 +232,8 @@ closely without copying GPL source code:
   mass matrix;
 - face-based slave surface instead of only a slave node set;
 - per-node surface-area weights from boundary faces;
+- CalculiX-unavailable contact outputs are left blank and excluded from force
+  or energy comparisons instead of being replaced by zero-valued proxy curves;
 - smooth overclosure activation inspired by CalculiX's linear
   pressure-overclosure regularization;
 - contact tangent included in the HHT effective solve;
@@ -235,3 +244,9 @@ This is still not a line-by-line reimplementation of CalculiX. The comparison
 is intentionally restricted to generated C3D4/TET4 linear dynamics with a fixed
 direct time increment. The contact gap and force remain the SFC dynamic-SDF
 validation method, because that is the variable under study.
+
+The earlier `sphere_like_drop` resolution `0` case was removed from the active
+comparison suite because its bottom contact is effectively vertex-like. In that
+configuration CalculiX 2.17 produced displacement output but no useful
+face-based contact RF/contact-energy output, so it was not a valid external
+contact-force reference.

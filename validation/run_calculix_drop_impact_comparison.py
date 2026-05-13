@@ -364,11 +364,11 @@ def build_model_suite(*, quick: bool) -> list[DropModel]:
 
     if quick:
         return [
-            build_drop_model(quick=True, case="sphere_like_drop", resolution=0),
+            build_drop_model(quick=True, case="sphere_like_drop", resolution=1),
             build_drop_model(quick=True, case="block_drop", resolution=1),
         ]
     return [
-        *(build_drop_model(quick=False, case="sphere_like_drop", resolution=r) for r in [0, 1, 2]),
+        *(build_drop_model(quick=False, case="sphere_like_drop", resolution=r) for r in [1, 2, 3]),
         *(build_drop_model(quick=False, case="block_drop", resolution=r) for r in [1, 2, 3]),
     ]
 
@@ -599,15 +599,20 @@ def _history_from_displacements(
         active_mask = penetration > 0.0
         totals = {} if contact_totals is None else contact_totals.get(float(time), {})
         if source == "calculix":
-            active_mask = np.logical_or(active_mask, int(totals.get("calculix_contact_count", 0)) > 0)
-        normal_force = float(model.contact_stiffness * np.sum(penetration))
-        contact_energy = float(0.5 * model.contact_stiffness * np.sum(penetration**2))
-        force_source = "penalty_gap"
-        if source == "calculix" and "normal_force_from_rf" in totals:
-            normal_force = float(totals["normal_force_from_rf"])
-            force_source = "floor_rf_total"
-        if source == "calculix" and "calculix_contact_energy" in totals:
-            contact_energy = float(totals["calculix_contact_energy"])
+            active_count_value = int(totals.get("calculix_contact_count", 0))
+            normal_force: float | str = ""
+            contact_energy: float | str = ""
+            force_source = "calculix_contact_output_unavailable"
+            if "normal_force_from_rf" in totals:
+                normal_force = float(totals["normal_force_from_rf"])
+                force_source = "floor_rf_total"
+            if "calculix_contact_energy" in totals:
+                contact_energy = float(totals["calculix_contact_energy"])
+        else:
+            active_count_value = int(np.count_nonzero(active_mask))
+            normal_force = float(model.contact_stiffness * np.sum(penetration))
+            contact_energy = float(0.5 * model.contact_stiffness * np.sum(penetration**2))
+            force_source = "penalty_gap"
         rows.append(
             {
                 "case": model.case,
@@ -618,7 +623,7 @@ def _history_from_displacements(
                 "v_cm_z": float(v_cm_z),
                 "min_gap": float(np.min(gaps)),
                 "max_penetration": float(np.max(penetration)),
-                "active_contact_count": int(np.count_nonzero(active_mask)),
+                "active_contact_count": active_count_value,
                 "normal_force_proxy": normal_force,
                 "normal_force_source": force_source,
                 "calculix_floor_rf_z": totals.get("floor_rf_z", ""),
@@ -862,8 +867,24 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
 
 
 def _first_contact_time(rows: list[Row]) -> float | None:
-    active = [row for row in rows if int(row["active_contact_count"]) > 0 or float(row["max_penetration"]) > 0.0]
+    active: list[Row] = []
+    for row in rows:
+        if str(row.get("source", "")) == "calculix":
+            force = _optional_float(row.get("normal_force_proxy", ""))
+            if int(row["active_contact_count"]) > 0 or (force is not None and force > 1.0e-12):
+                active.append(row)
+        elif int(row["active_contact_count"]) > 0 or float(row["max_penetration"]) > 0.0:
+            active.append(row)
     return None if not active else float(active[0]["time"])
+
+
+def _optional_float(value: Any) -> float | None:
+    if value == "" or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def comparison_metrics(model: DropModel, calculix_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
@@ -879,9 +900,19 @@ def comparison_metrics(model: DropModel, calculix_rows: list[Row], sfc_rows: lis
     sfc_first = _first_contact_time(sfc_rows)
     first_contact_abs_error = "" if cx_first is None or sfc_first is None else abs(sfc_first - cx_first)
     both_contact = cx_first is not None and sfc_first is not None
+    cx_contact_output_available = any(
+        int(row["active_contact_count"]) > 0
+        or ((_optional_float(row.get("normal_force_proxy", "")) or 0.0) > 1.0e-12)
+        for row in calculix_rows
+    )
     trajectory_rel = float(np.linalg.norm(z_errors) / max(np.linalg.norm([float(cx_by_time[t]["z_cm"]) for t in common_times]), 1.0e-30))
     gap_linf = float(np.max(np.abs(gap_errors))) if gap_errors.size else float("nan")
-    status = "supported" if both_contact and first_contact_abs_error != "" and float(first_contact_abs_error) <= 3.0e-3 else "check"
+    if not cx_contact_output_available:
+        status = "not_available"
+    elif both_contact and first_contact_abs_error != "" and float(first_contact_abs_error) <= 3.0e-3:
+        status = "supported"
+    else:
+        status = "check"
 
     return [
         {
@@ -898,7 +929,7 @@ def comparison_metrics(model: DropModel, calculix_rows: list[Row], sfc_rows: lis
             "metric": "first_contact_time_calculix",
             "value": "" if cx_first is None else cx_first,
             "status": "evidence",
-            "details": "first time with positive penetration or active contact count",
+            "details": "first time with exported CalculiX RF/contact count",
         },
         {
             "case": model.case,
@@ -906,7 +937,7 @@ def comparison_metrics(model: DropModel, calculix_rows: list[Row], sfc_rows: lis
             "metric": "first_contact_time_sfc",
             "value": "" if sfc_first is None else sfc_first,
             "status": "evidence",
-            "details": "first time with positive penetration or active contact count",
+            "details": "first time with positive SFC penalty contact",
         },
         {
             "case": model.case,
@@ -935,9 +966,17 @@ def comparison_metrics(model: DropModel, calculix_rows: list[Row], sfc_rows: lis
         {
             "case": model.case,
             "resolution": model.resolution,
+            "metric": "calculix_contact_output_available",
+            "value": str(cx_contact_output_available).lower(),
+            "status": "evidence" if cx_contact_output_available else "not_available",
+            "details": "true only when CalculiX exports nonzero RF/contact count; otherwise force/energy comparison is skipped",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "external_dynamic_contact_claim",
-            "value": "supported" if status == "supported" else "not_supported",
-            "status": "supported" if status == "supported" else "not_supported",
+            "value": "supported" if status == "supported" else status,
+            "status": "supported" if status == "supported" else status,
             "details": "supported only means both solvers activate contact at matching time scale on the generated model",
         },
     ]
@@ -953,7 +992,15 @@ def write_plots(out_dir: Path, history_rows: list[Row]) -> list[Row]:
 
     def series(rows_for_group: list[Row], source: str, field: str) -> tuple[list[float], list[float]]:
         rows = [row for row in rows_for_group if row["source"] == source]
-        return [float(row["time"]) for row in rows], [float(row[field]) for row in rows]
+        x: list[float] = []
+        y: list[float] = []
+        for row in rows:
+            value = _optional_float(row.get(field, ""))
+            if value is None:
+                continue
+            x.append(float(row["time"]))
+            y.append(value)
+        return x, y
 
     fields = [
         ("z_cm", "center-of-mass z", "calculix_drop_z_cm"),
@@ -968,6 +1015,8 @@ def write_plots(out_dir: Path, history_rows: list[Row]) -> list[Row]:
             fig, ax = plt.subplots(figsize=(6.4, 4.0))
             for source in sources:
                 x, y = series(rows_for_group, source, field)
+                if not x:
+                    continue
                 ax.plot(x, y, marker="o", markersize=3.0, linewidth=1.2, label=source)
             ax.axhline(0.0, color="0.35", linewidth=0.8)
             ax.set_xlabel("time")
@@ -1083,6 +1132,12 @@ def write_markdown(
 
 def run_comparison(out_dir: Path, *, quick: bool) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("calculix_drop_*"):
+        if stale.is_file():
+            stale.unlink()
+    run_dir = out_dir / "calculix_runs"
+    if run_dir.is_dir():
+        shutil.rmtree(run_dir)
     models = build_model_suite(quick=quick)
     history_rows: list[Row] = []
     metric_rows: list[Row] = []
@@ -1092,7 +1147,6 @@ def run_comparison(out_dir: Path, *, quick: bool) -> dict[str, Path]:
         displacement_blocks = _parse_calculix_dat_displacements(dat_path, model.node_ids)
         contact_totals = _parse_calculix_dat_contact_totals(dat_path)
         calculix_rows = _history_from_displacements("calculix", model, displacement_blocks, contact_totals)
-        _fill_acceleration_force_proxy(calculix_rows, model)
         sfc_rows = run_sfc_drop_history(model)
         history_rows.extend(calculix_rows)
         history_rows.extend(sfc_rows)
