@@ -54,6 +54,7 @@ FLOOR_SHELL_THICKNESS = 1.0e-2
 CALCULIX_MASTER_SURFACE_OFFSET = 0.5 * FLOOR_SHELL_THICKNESS
 CONTACT_SMOOTHING_EPSILON = 2.5e-3
 CALCULIX_DEFAULT_HHT_ALPHA = -0.05
+REBOUND_HEIGHT_TOLERANCE = 1.0e-6
 
 C3D4_FACE_LABELS = {
     (0, 1, 2): "S1",
@@ -492,7 +493,21 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_calculix(model: DropModel, out_dir: Path, *, case_name: str | None = None) -> tuple[Path, Row]:
+def _timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def run_calculix(
+    model: DropModel,
+    out_dir: Path,
+    *,
+    case_name: str | None = None,
+    timeout_seconds: int | None = None,
+) -> tuple[Path, Row]:
     """Run CalculiX through WSL and return the generated .dat path."""
 
     if not calculix_available():
@@ -507,17 +522,27 @@ def run_calculix(model: DropModel, out_dir: Path, *, case_name: str | None = Non
     wsl_run_dir = _wsl_path(run_dir)
     command = f"cd {wsl_run_dir} && ccx {case_name}"
     nominal_steps = max(1, int(np.ceil(model.total_time / model.dt)))
-    timeout = max(240, min(3600, 120 + 2 * nominal_steps))
-    proc = subprocess.run(
-        ["wsl", "--exec", "bash", "-lc", command],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    (run_dir / "calculix_stdout.log").write_text(proc.stdout, encoding="utf-8")
-    (run_dir / "calculix_stderr.log").write_text(proc.stderr, encoding="utf-8")
+    timeout = int(timeout_seconds) if timeout_seconds is not None else max(240, min(3600, 120 + 2 * nominal_steps))
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            ["wsl", "--exec", "bash", "-lc", command],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = proc.stdout
+        stderr = proc.stderr
+        return_code: int | str = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout = _timeout_text(exc.stdout)
+        stderr = _timeout_text(exc.stderr)
+        return_code = "timeout"
+    (run_dir / "calculix_stdout.log").write_text(stdout, encoding="utf-8")
+    (run_dir / "calculix_stderr.log").write_text(stderr, encoding="utf-8")
 
     dat_path = run_dir / f"{case_name}.dat"
     if not dat_path.is_file():
@@ -533,8 +558,9 @@ def run_calculix(model: DropModel, out_dir: Path, *, case_name: str | None = Non
         "dat_file": str(dat_path.relative_to(out_dir)),
         "stdout_log": str((run_dir / "calculix_stdout.log").relative_to(out_dir)),
         "stderr_log": str((run_dir / "calculix_stderr.log").relative_to(out_dir)),
-        "return_code": proc.returncode,
-        "completed": str(proc.returncode == 0).lower(),
+        "return_code": return_code,
+        "timed_out": str(timed_out).lower(),
+        "completed": str(return_code == 0).lower(),
     }
     return dat_path, command_row
 
@@ -1003,6 +1029,40 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _rebound_physicality(rows: list[Row]) -> Row:
+    """Return a conservative rebound-height physicality check."""
+
+    if not rows:
+        return {
+            "initial_z": "",
+            "first_contact_time": "",
+            "max_rebound_z": "",
+            "rebound_overshoot": "",
+            "status": "not_available",
+        }
+    sorted_rows = sorted(rows, key=lambda row: float(row["time"]))
+    initial_z = float(sorted_rows[0]["z_cm"])
+    first_contact = _first_contact_time(sorted_rows)
+    if first_contact is None:
+        return {
+            "initial_z": initial_z,
+            "first_contact_time": "",
+            "max_rebound_z": "",
+            "rebound_overshoot": "",
+            "status": "not_available",
+        }
+    post_contact = [row for row in sorted_rows if float(row["time"]) >= float(first_contact)]
+    max_rebound_z = max(float(row["z_cm"]) for row in post_contact) if post_contact else initial_z
+    overshoot = max(0.0, max_rebound_z - initial_z)
+    return {
+        "initial_z": initial_z,
+        "first_contact_time": first_contact,
+        "max_rebound_z": max_rebound_z,
+        "rebound_overshoot": overshoot,
+        "status": "supported" if overshoot <= REBOUND_HEIGHT_TOLERANCE else "check",
+    }
+
+
 def comparison_metrics(
     model: DropModel,
     calculix_rows: list[Row],
@@ -1032,6 +1092,8 @@ def comparison_metrics(
 
     cx_first = _first_contact_time(calculix_rows)
     sfc_first = _first_contact_time(sfc_rows)
+    cx_rebound = _rebound_physicality(calculix_rows)
+    sfc_rebound = _rebound_physicality(sfc_rows)
     first_contact_abs_error = "" if cx_first is None or sfc_first is None else abs(sfc_first - cx_first)
     both_contact = cx_first is not None and sfc_first is not None
     cx_contact_output_available = any(
@@ -1042,13 +1104,27 @@ def comparison_metrics(
     trajectory_rel = float(np.linalg.norm(z_errors) / max(np.linalg.norm(cx_z) if cx_times.size else 0.0, 1.0e-30))
     gap_linf = float(np.max(np.abs(gap_errors))) if gap_errors.size else float("nan")
     if not calculix_completed:
-        status = "incomplete"
+        contact_status = "incomplete"
     elif not cx_contact_output_available:
-        status = "not_available"
+        contact_status = "not_available"
     elif both_contact and first_contact_abs_error != "" and float(first_contact_abs_error) <= 3.0e-3:
-        status = "supported"
+        contact_status = "supported"
     else:
-        status = "check"
+        contact_status = "check"
+
+    if not calculix_completed:
+        physical_status = "incomplete"
+    elif cx_rebound["status"] == "supported" and sfc_rebound["status"] == "supported":
+        physical_status = "supported"
+    elif cx_rebound["status"] == "not_available" or sfc_rebound["status"] == "not_available":
+        physical_status = "not_available"
+    else:
+        physical_status = "check"
+
+    if contact_status == "supported" and physical_status != "supported":
+        status = physical_status
+    else:
+        status = contact_status
 
     return [
         {
@@ -1088,7 +1164,7 @@ def comparison_metrics(
             "resolution": model.resolution,
             "metric": "first_contact_time_abs_error",
             "value": first_contact_abs_error,
-            "status": status,
+            "status": contact_status,
             "details": "gate uses 3 ms tolerance in quick generated model",
         },
         {
@@ -1118,6 +1194,62 @@ def comparison_metrics(
         {
             "case": model.case,
             "resolution": model.resolution,
+            "metric": "initial_z_calculix",
+            "value": cx_rebound["initial_z"],
+            "status": "evidence",
+            "details": "mass-weighted center height at the first exported CalculiX sample",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "max_rebound_z_after_contact_calculix",
+            "value": cx_rebound["max_rebound_z"],
+            "status": cx_rebound["status"],
+            "details": "maximum CalculiX mass-center height after first contact",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "rebound_overshoot_calculix",
+            "value": cx_rebound["rebound_overshoot"],
+            "status": cx_rebound["status"],
+            "details": "positive value means CalculiX rebound exceeded starting height",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "initial_z_sfc",
+            "value": sfc_rebound["initial_z"],
+            "status": "evidence",
+            "details": "mass-weighted center height at the first SFC sample",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "max_rebound_z_after_contact_sfc",
+            "value": sfc_rebound["max_rebound_z"],
+            "status": sfc_rebound["status"],
+            "details": "maximum SFC mass-center height after first contact",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "rebound_overshoot_sfc",
+            "value": sfc_rebound["rebound_overshoot"],
+            "status": sfc_rebound["status"],
+            "details": "positive value means SFC rebound exceeded starting height",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "metric": "physical_rebound_height_claim",
+            "value": physical_status,
+            "status": physical_status,
+            "details": "supported only if both histories keep post-contact rebound height at or below starting height",
+        },
+        {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "calculix_contact_output_available",
             "value": str(cx_contact_output_available).lower(),
             "status": "evidence" if cx_contact_output_available else "not_available",
@@ -1129,7 +1261,7 @@ def comparison_metrics(
             "metric": "external_dynamic_contact_claim",
             "value": "supported" if status == "supported" else status,
             "status": "supported" if status == "supported" else status,
-            "details": "supported only means both solvers activate contact at matching time scale on a completed generated model",
+            "details": "supported only if contact timing agrees on a completed model and rebound height passes the physicality gate",
         },
     ]
 
@@ -1209,6 +1341,8 @@ def write_markdown(
 ) -> None:
     claim_rows = [row for row in metric_rows if row["metric"] == "external_dynamic_contact_claim"]
     all_supported = bool(claim_rows) and all(row["status"] == "supported" for row in claim_rows)
+    physical_rows = [row for row in metric_rows if row["metric"] == "physical_rebound_height_claim"]
+    all_physical = bool(physical_rows) and all(row["status"] == "supported" for row in physical_rows)
     first_command = command_rows[0] if command_rows else {"external_solver_version": "unknown", "command": ""}
     reproduce_parts = ["python", "validation/run_calculix_drop_impact_comparison.py"]
     if quick:
@@ -1286,6 +1420,7 @@ def write_markdown(
         "| Claim | Status | Evidence | Gate |",
         "| --- | --- | --- | --- |",
         f"| external dynamic contact time-scale agreement | {'supported' if all_supported else 'not_supported'} | calculix_drop_metrics.csv::external_dynamic_contact_claim | {'all_supported' if all_supported else 'some_not_supported'} |",
+        f"| rebound height not above starting height | {'supported' if all_physical else 'not_supported'} | calculix_drop_metrics.csv::physical_rebound_height_claim | {'all_supported' if all_physical else 'some_not_supported'} |",
         "<!-- evidence csv=calculix_drop_metrics.csv field=value -->",
         "",
         "## Metrics",
@@ -1329,6 +1464,7 @@ def run_comparison(
     initial_velocity_z: float | None = None,
     gravity: float | None = None,
     contact_stiffness: float | None = None,
+    calculix_timeout_seconds: int | None = None,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("calculix_drop_*"):
@@ -1352,7 +1488,7 @@ def run_comparison(
     metric_rows: list[Row] = []
     command_rows: list[Row] = []
     for model in models:
-        dat_path, command_row = run_calculix(model, out_dir)
+        dat_path, command_row = run_calculix(model, out_dir, timeout_seconds=calculix_timeout_seconds)
         displacement_blocks = _parse_calculix_dat_displacements(dat_path, model.node_ids)
         contact_totals = _parse_calculix_dat_contact_totals(dat_path)
         calculix_rows = _history_from_displacements("calculix", model, displacement_blocks, contact_totals)
@@ -1400,6 +1536,7 @@ def run_comparison(
             {"key": "initial_velocity_z_override", "value": "" if initial_velocity_z is None else initial_velocity_z},
             {"key": "gravity_override", "value": "" if gravity is None else gravity},
             {"key": "contact_stiffness_override", "value": "" if contact_stiffness is None else contact_stiffness},
+            {"key": "calculix_timeout_seconds", "value": "" if calculix_timeout_seconds is None else calculix_timeout_seconds},
             {"key": "calculix_direct_dynamic", "value": str(bool(direct_dynamic)).lower()},
             {"key": "calculix_dynamic_keyword", "value": _calculix_dynamic_keyword(models[0]) if models else "*DYNAMIC,DIRECT,ALPHA=-0.05"},
             {"key": "cases", "value": ",".join(f"{model.case}:r{model.resolution}" for model in models)},
@@ -1433,6 +1570,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-velocity-z", type=float, default=None, help="Override the initial vertical velocity.")
     parser.add_argument("--gravity", type=float, default=None, help="Override gravitational acceleration magnitude.")
     parser.add_argument("--contact-stiffness", type=float, default=None, help="Override the pressure-overclosure stiffness.")
+    parser.add_argument("--calculix-timeout-seconds", type=int, default=None, help="Override per-case CalculiX timeout.")
     parser.add_argument(
         "--calculix-auto-step",
         action="store_true",
@@ -1454,6 +1592,7 @@ def main() -> None:
         initial_velocity_z=args.initial_velocity_z,
         gravity=args.gravity,
         contact_stiffness=args.contact_stiffness,
+        calculix_timeout_seconds=args.calculix_timeout_seconds,
     )
     print("CalculiX drop-impact comparison complete.")
     for name, path in outputs.items():

@@ -114,14 +114,14 @@ Implemented runner:
 python validation/run_calculix_drop_impact_comparison.py --quick --out-dir results/calculix_drop_impact
 ```
 
-Long 3-second diagnostic runner:
+Long 1-second diagnostic runner:
 
 ```bash
-python validation/run_calculix_drop_impact_comparison.py --quick --duration 3.0 --dt 0.005 --output-frequency 10 --calculix-auto-step --out-dir results/calculix_drop_impact_3s
+python validation/run_calculix_drop_impact_comparison.py --quick --duration 1.0 --dt 0.005 --output-frequency 10 --calculix-auto-step --out-dir results/calculix_drop_impact_1s
 ```
 
 The long command keeps the same two quick-mode validation geometries but
-overrides the total time to `3.0 s`, uses a coarser nominal output increment for
+overrides the total time to `1.0 s`, uses a coarser nominal output increment for
 inspection, and allows CalculiX adaptive time stepping. It is a diagnostic
 visualization/comparison run, not a replacement for the short-window acceptance
 gate.
@@ -129,12 +129,14 @@ gate.
 Gentle external-contact reference candidate:
 
 ```bash
-python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 3.0 --dt 0.002 --output-frequency 5 --initial-velocity-z -0.1 --gravity 0.0 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
+python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 1.0 --dt 0.002 --output-frequency 1 --initial-velocity-z 0.0 --gravity 9.81 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
 ```
 
-This isolates a low-speed block/plane impact with no sustained gravitational
-pressing. It is intended as the next external reference attempt after the
-strong-impact 3-second run showed incomplete CalculiX convergence.
+This isolates a drop-from-rest block/plane impact with a conservative
+physicality gate: the post-contact rebound height must not exceed the starting
+height. It is intended as the next external reference attempt after the
+strong-impact long run showed incomplete CalculiX convergence and nonphysical
+rebound behavior.
 
 Generated outputs:
 
@@ -180,6 +182,8 @@ The comparison should report:
 - first impact time error;
 - peak normal force relative difference;
 - rebound height relative difference;
+- strict rebound physicality check: post-contact center-of-mass height must not
+  exceed the initial height;
 - minimum gap / maximum penetration trend;
 - center-of-mass trajectory error;
 - qualitative agreement of contact activation windows;
@@ -230,9 +234,10 @@ External solver selected: **CalculiX/ccx primary, FEBio fallback**.
 Current supported claim:
 
 - CalculiX and the CalculiX-aligned SFC validation mode activate contact at the
-  same time scale on the generated quick-mode `block_drop` face-to-face impact
-  model. The latest quick run reported effectively identical first-contact
-  times for this block case.
+  same time scale on the generated gentle 1-second `block_drop` face-to-face
+  impact model. The latest gentle run reported identical first-contact times
+  of `9.60e-02 s`, and both CalculiX and SFC kept the post-contact rebound
+  center-of-mass height below the starting height.
 
 Current unsupported claims:
 
@@ -244,6 +249,10 @@ Current unsupported claims:
   penetration. The current sphere-like case uses a regular bottom contact patch
   and a higher penalty stiffness, and is limited to a short initial-impact
   window to avoid late persistent-contact convergence issues in CalculiX 2.17.
+- The 1-second strong-impact diagnostic is not accepted as validation evidence:
+  `sphere_like_drop` timed out in CalculiX, and the completed `block_drop`
+  strong-impact row rebounded above the starting mass-center height in both
+  CalculiX and SFC.
 - CalculiX RF is parsed from the fixed master plane and is more direct than the
   previous acceleration proxy, but it remains an external-force total and must
   be interpreted with CalculiX's RF caveats.

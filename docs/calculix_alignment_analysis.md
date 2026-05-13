@@ -61,7 +61,7 @@ should not be used as a paper-level matching metric.
 
 ### 4. Strong Impact Is Still A Bad Reference Case
 
-The original 3-second strong sphere/block diagnostic still should not be used as
+The original strong sphere/block diagnostic still should not be used as
 external validation evidence. CalculiX returned nonzero status in that case,
 large overclosure occurred before termination, and the result is dominated by
 nonlinear contact convergence rather than by the SFC dynamic SDF formulation.
@@ -84,7 +84,7 @@ nonlinear contact convergence rather than by the SFC dynamic SDF formulation.
 Command:
 
 ```bash
-python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 3.0 --dt 0.002 --output-frequency 1 --initial-velocity-z -0.1 --gravity 0.0 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
+python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 1.0 --dt 0.002 --output-frequency 1 --initial-velocity-z 0.0 --gravity 9.81 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
 ```
 
 Result summary:
@@ -93,13 +93,22 @@ Result summary:
 | --- | ---: |
 | CalculiX return code | `0` |
 | CalculiX completed | `true` |
-| first contact time, CalculiX | `0.452 s` |
-| first contact time, SFC | `0.450 s` |
-| first contact time absolute error | `0.002 s` |
-| z center-of-mass relative error | `8.05e-04` |
-| minimum-gap L-infinity error | `1.21e-03` |
-| CalculiX max overclosure | `8.50e-04` |
-| SFC max overclosure | `1.07e-03` |
+| first contact time, CalculiX | `9.60e-02 s` |
+| first contact time, SFC | `9.60e-02 s` |
+| first contact time absolute error | `0.00e+00 s` |
+| z center-of-mass relative error | `1.054328e-02` |
+| minimum-gap L-infinity error | `1.446052e-02` |
+| CalculiX max overclosure | `1.088870e-02` |
+| SFC max overclosure | `1.003876e-02` |
+| max rebound z after contact, CalculiX | `4.448849e-01` |
+| max rebound z after contact, SFC | `4.439993e-01` |
+| physical rebound height claim | `supported` |
+
+The latest strong-impact 1-second diagnostic is intentionally not accepted:
+`sphere_like_drop` timed out in CalculiX, while the completed `block_drop`
+strong-impact case rebounded above the starting center-of-mass height in both
+CalculiX and SFC. This is treated as a rejected contact-dynamics setup rather
+than evidence for the method.
 
 ## Remaining Differences
 

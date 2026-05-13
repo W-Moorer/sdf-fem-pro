@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The previous strong 3-second drop-impact diagnostic is not acceptable as
+The previous strong long drop-impact diagnostic is not acceptable as
 validation evidence because CalculiX did not complete the run and the original
 height diagnostic used a nodal average instead of a mass-weighted center of
 mass. A second mismatch was the contact geometry: CalculiX contacts the shell
@@ -26,7 +26,7 @@ python validation/run_dynamic_integrator_benchmark.py --quick --out-dir results/
 Gentle CalculiX block/plane contact:
 
 ```bash
-python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 3.0 --dt 0.002 --output-frequency 1 --initial-velocity-z -0.1 --gravity 0.0 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
+python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 1.0 --dt 0.002 --output-frequency 1 --initial-velocity-z 0.0 --gravity 9.81 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
 ```
 
 Tests:
@@ -72,11 +72,14 @@ Gentle CalculiX contact:
 | Metric | Value | Status |
 | --- | ---: | --- |
 | CalculiX completed | `true` | evidence |
-| first contact time, CalculiX | `0.452 s` | evidence |
-| first contact time, SFC | `0.450 s` | evidence |
-| first contact time absolute error | `2.0e-03 s` | supported |
-| z center-of-mass relative error | `8.05e-04` | evidence |
-| min-gap L-infinity error | `1.21e-03` | evidence |
+| first contact time, CalculiX | `9.60e-02 s` | evidence |
+| first contact time, SFC | `9.60e-02 s` | evidence |
+| first contact time absolute error | `0.00e+00 s` | supported |
+| z center-of-mass relative error | `1.054328e-02` | evidence |
+| min-gap L-infinity error | `1.446052e-02` | evidence |
+| max rebound z after contact, CalculiX | `4.448849e-01` | supported |
+| max rebound z after contact, SFC | `4.439993e-01` | supported |
+| physical rebound height claim | `supported` | supported |
 | external dynamic contact claim | `supported` | supported |
 
 ## Interpretation
@@ -84,18 +87,25 @@ Gentle CalculiX contact:
 The no-contact benchmark supports the Newmark average-acceleration integrator
 for the tested analytic cases. This does not validate contact.
 
-The gentle block/plane case is a cleaner external contact reference than the
-strong 3-second drop-impact case. It completes in CalculiX, keeps overclosure
-near the `1e-3` length scale in both solvers, and gives first-contact time
-agreement within one SFC time step at the chosen output resolution.
+The gentle 1-second block/plane case is a cleaner external contact reference
+than the strong long drop-impact case. It is configured as a drop from rest
+under gravity so the conservative rebound-height gate is meaningful: after
+first contact the center-of-mass height must not exceed its starting height.
 
 The SFC validation runner now uses a face-centroid, area-scaled penalty contact
 approximation for this comparison, consistent with the CalculiX
 `springforc_f2f.f` structure where clearance is evaluated at slave-face
 integration points and scaled by spring area.
 
-The strong sphere/block 3-second diagnostic remains unsupported and should not
+The strong sphere/block long diagnostic remains unsupported and should not
 be used for paper evidence.
+
+The strong diagnostic has been shortened from 3 seconds to a 1-second run. Its
+latest 1-second output is still rejected by the physicality gate: the
+`sphere_like_drop` CalculiX run timed out before completion, and the
+`block_drop` run rebounded above the starting mass-center height in both
+CalculiX and SFC. The strong case is therefore retained only as a failure
+diagnostic for aggressive impact/contact settings.
 
 ## Remaining Risks
 

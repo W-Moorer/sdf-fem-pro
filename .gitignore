@@ -4,6 +4,10 @@ legacy_abaqus_prototype/
 
 results/
 
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # Keep paper sources versioned, but ignore transient LaTeX build files.
 paper/*.aux
 paper/*.bbl
