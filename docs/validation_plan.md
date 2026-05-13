@@ -22,7 +22,10 @@ stress-cloud evidence. These remain linear TET4, oriented current-surface
 distance, and frictionless normal penalty contact validations. The external
 contact solver comparison adds a SfePy two-body nonlinear penalty contact solve
 and replays its final deformed contact state with SFC current-surface gap
-queries.
+queries. The external dynamic contact comparison adds a SfePy transient
+elastodynamic reference with mass matrix and Newmark integration over `T = 3 s`,
+plus SfePy two-body penalty-contact snapshot references sampled along the same
+approach path.
 
 ## Phase-3 Validation Case Table
 
@@ -98,6 +101,15 @@ queries.
 | --- | --- | --- | --- |
 | SfePy two-body contact replay | SfePy solves its built-in two-body nonlinear penalty contact example. SFC replays the final deformed geometry and reports current-surface gap sign, gap magnitude, active contact count, and agreement with SfePy exported contact gaps. | Implemented in `validation/run_external_contact_solver_comparison.py`; covered by `tests/test_external_contact_solver_comparison.py` when SfePy is available. | This validates contact state/gap replay against an external contact solve; it is not a full SFC nonlinear contact equilibrium comparison. |
 | External contact claim gates | Contact state agreement and gap-scale checks must have backing CSV evidence before paper text can cite the external contact solver comparison. | Implemented in `external_contact_solver_claims.csv`. | SfePy gap is a contact-term surface average; SFC gap is a centroid closest-point projection replay. |
+
+## External Dynamic Contact Comparison Table
+
+| Case | Expected quantities | Current status | Limitations |
+| --- | --- | --- | --- |
+| SfePy transient elastodynamic reference | SfePy generated problem uses `de_mass`, `ts.newmark`, a mass matrix, and a prescribed 3-second upper-body motion. Time history includes displacement, velocity, acceleration norms, `T`, and `dt`. | Implemented in `validation/run_external_dynamic_contact_comparison.py`; covered by `tests/test_external_dynamic_contact_comparison.py` when SfePy is available. | This external dynamic run is an elastodynamic reference, not a coupled SfePy transient contact solve. |
+| SfePy contact snapshot reference | SfePy two-body penalty contact is solved at sampled times along the same 3-second path. SFC replays each contact snapshot with current-surface dynamic SDF gap queries. | Implemented in the external dynamic contact runner. | Snapshot contact references are quasi-static contact states; force is reported as a penalty-force proxy from exported gaps. |
+| SFC Newmark penalty-contact history | SFC runs a 3-second internal Newmark time history with assembled mass/stiffness matrices and lagged penalty contact forces against a moving rigid platen. | Implemented in the external dynamic contact runner. | This is not a nonlinear contact equilibrium solve; contact remains frictionless normal penalty contact. |
+| External dynamic claim gates | The runner checks `T = 3 s`, SfePy Newmark/mass evidence, SfePy/SFC contact activation agreement, gap-scale agreement, and SFC contact-force direction. | Implemented in `external_dynamic_contact_claims.csv`. | The gates support the tested generated model only. |
 
 ## Required Numerical Checks
 
