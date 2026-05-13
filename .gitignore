@@ -3,3 +3,14 @@ AGENTS.md
 legacy_abaqus_prototype/
 
 results/
+
+# Keep paper sources versioned, but ignore transient LaTeX build files.
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/*.toc
