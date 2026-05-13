@@ -111,6 +111,18 @@ Implemented runner:
 python validation/run_calculix_drop_impact_comparison.py --quick --out-dir results/calculix_drop_impact
 ```
 
+Long 3-second diagnostic runner:
+
+```bash
+python validation/run_calculix_drop_impact_comparison.py --quick --duration 3.0 --dt 0.005 --output-frequency 10 --calculix-auto-step --out-dir results/calculix_drop_impact_3s
+```
+
+The long command keeps the same two quick-mode validation geometries but
+overrides the total time to `3.0 s`, uses a coarser nominal output increment for
+inspection, and allows CalculiX adaptive time stepping. It is a diagnostic
+visualization/comparison run, not a replacement for the short-window acceptance
+gate.
+
 Generated outputs:
 
 - `results/calculix_drop_impact/calculix_drop_time_history.csv`

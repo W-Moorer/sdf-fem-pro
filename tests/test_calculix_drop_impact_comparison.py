@@ -156,6 +156,32 @@ def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Pat
     assert "*contact pair, interaction=contact,type=surface to surface" in text
 
 
+def test_calculix_drop_long_diagnostic_options_are_written(tmp_path: Path) -> None:
+    from validation.run_calculix_drop_impact_comparison import build_drop_model, write_calculix_input
+
+    model = build_drop_model(
+        quick=True,
+        case="block_drop",
+        resolution=1,
+        duration=3.0,
+        dt=5.0e-3,
+        output_frequency=10,
+        direct_dynamic=False,
+    )
+    inp = tmp_path / "drop_long.inp"
+    write_calculix_input(model, inp)
+    text = inp.read_text(encoding="utf-8").lower()
+
+    assert model.total_time == pytest.approx(3.0)
+    assert model.dt == pytest.approx(5.0e-3)
+    assert model.output_frequency == 10
+    assert not model.direct_dynamic
+    assert "*dynamic, alpha=-0.05" in text
+    assert "*dynamic, direct" not in text
+    assert "0.005, 3, 5e-07, 0.005" in text
+    assert "frequency=10" in text
+
+
 def test_calculix_drop_summary_claim_markers_have_backing_csv_fields(calculix_drop_output: Path) -> None:
     marker = re.compile(r"<!--\s*evidence\s+csv=(?P<csv>\S+)\s+field=(?P<field>\S+)\s*-->")
     text = (calculix_drop_output / "calculix_drop_summary.md").read_text(encoding="utf-8")
