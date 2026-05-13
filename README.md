@@ -80,10 +80,13 @@ package:
 ```bash
 python validation/run_phase7_physical_validation.py --quick --out-dir results/phase7
 python validation/run_external_fem_comparison.py --quick --out-dir results/external_fem
+python validation/run_phase8_engineering_cases.py --quick --out-dir results/phase8
 ```
 
 The external FEM comparison uses `scikit-fem` as a validation-only open-source
-reference for an equivalent linear TET4 cantilever model.
+reference for equivalent linear TET4 cantilever models. Phase 8 adds
+engineering-style validation cases for a 3D beam, rigid flat indentation, and
+deformable-deformable normal contact.
 
 ## Current Limitations
 

@@ -1,7 +1,8 @@
 # Paper Draft Package
 
 This directory contains the manuscript draft for the Phase-6 paper-result
-package plus the Phase-7 physical-comparison supplement.
+package plus the Phase-7 physical-comparison and Phase-8 engineering-case
+supplements.
 
 Primary TeX draft:
 
@@ -26,9 +27,11 @@ Evidence source:
 - `../results/paper_final/`
 - `../results/phase7/`
 - `../results/external_fem/`
+- `../results/phase8/`
 - `../docs/phase6_final_experiment_handoff.md`
 - `../docs/phase7_physical_validation_handoff.md`
 - `../docs/external_fem_comparison_handoff.md`
+- `../docs/phase8_engineering_cases_handoff.md`
 - `../docs/validation_plan.md`
 
 Scope for the submission draft:
@@ -47,6 +50,9 @@ Scope for the submission draft:
   von Mises stress plot, not only scalar trend lines.
 - External open-source FEM comparison uses scikit-fem for the same linear TET4
   cantilever model.
+- Phase-8 engineering examples add a 3D beam external FEM comparison, a
+  prescribed rigid flat indenter on an elastic block, and two-block
+  deformable-deformable normal contact with action-reaction diagnostics.
 
 Unsupported claims that must not be added without new evidence:
 
