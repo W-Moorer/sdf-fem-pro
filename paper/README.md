@@ -29,13 +29,11 @@ Evidence source:
 - `../results/external_fem/`
 - `../results/phase8/`
 - `../results/external_contact_solver/`
-- `../results/external_dynamic_contact/`
 - `../docs/phase6_final_experiment_handoff.md`
 - `../docs/phase7_physical_validation_handoff.md`
 - `../docs/external_fem_comparison_handoff.md`
 - `../docs/phase8_engineering_cases_handoff.md`
 - `../docs/external_contact_solver_handoff.md`
-- `../docs/external_dynamic_contact_handoff.md`
 - `../docs/validation_plan.md`
 
 Scope for the submission draft:
@@ -60,9 +58,6 @@ Scope for the submission draft:
 - External contact solver evidence uses SfePy to solve a two-body penalty
   contact problem and replays the final deformed geometry with SFC
   current-surface gap queries.
-- External dynamic evidence uses SfePy transient elastodynamics with mass and
-  Newmark integration over `T = 3 s`, plus SfePy contact snapshots along the
-  same path. It is not a single coupled SfePy transient contact solve.
 
 Unsupported claims that must not be added without new evidence:
 
