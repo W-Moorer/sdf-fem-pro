@@ -90,6 +90,13 @@ Implemented current version:
 - Use an initial downward velocity instead of a long gravity-only fall. This
   shortens runtime and makes first impact time deterministic.
 - Use both a sphere-like TET4 body and a structured TET4 block body.
+- The sphere-like body now uses a finer, regularized latitude-ring point set
+  with a small bottom contact patch. Quick `r1` has more than 100 nodes and
+  dozens of bottom/near-bottom boundary triangles, so CalculiX face-based
+  contact has real surface area and integration points near first impact.
+- The sphere-like case uses a higher linear contact stiffness than the block
+  case to limit penetration while retaining CalculiX convergence in the short
+  impact window.
 - Use the same nodal coordinates and TET4 connectivity for SFC and CalculiX.
 - Use face-based CalculiX slave surfaces and a fixed shell master plane.
 - Use matching SFC boundary-face area weights for smooth penalty contact.
@@ -205,11 +212,12 @@ Current unsupported claims:
 
 - These are still reduced validation models, not high-fidelity production
   sphere-impact benchmarks.
-- The `sphere_like_drop` case remains a diagnostic only. Even after moving from
-  resolution `0` to resolution `1`, CalculiX's exported face-based contact RF
-  activates substantially later than the SFC point/surface penalty response.
-  This indicates that the sphere-like contact geometry is not yet an equivalent
-  external contact-force reference.
+- The earlier `sphere_like_drop` resolution `0` and Cartesian-Delaunay
+  resolution `1` cases were not valid contact-force references: the bottom was
+  effectively point-like and CalculiX contact activated only after large
+  penetration. The current sphere-like case uses a regular bottom contact patch
+  and a higher penalty stiffness, and is limited to a short initial-impact
+  window to avoid late persistent-contact convergence issues in CalculiX 2.17.
 - CalculiX RF is parsed from the fixed master plane and is more direct than the
   previous acceleration proxy, but it remains an external-force total and must
   be interpreted with CalculiX's RF caveats.
@@ -245,8 +253,10 @@ is intentionally restricted to generated C3D4/TET4 linear dynamics with a fixed
 direct time increment. The contact gap and force remain the SFC dynamic-SDF
 validation method, because that is the variable under study.
 
-The earlier `sphere_like_drop` resolution `0` case was removed from the active
-comparison suite because its bottom contact is effectively vertex-like. In that
-configuration CalculiX 2.17 produced displacement output but no useful
-face-based contact RF/contact-energy output, so it was not a valid external
-contact-force reference.
+The earlier `sphere_like_drop` resolution `0` and Cartesian-Delaunay
+resolution `1` cases were removed from the active comparison suite because the
+bottom contact was effectively vertex-like. In those configurations CalculiX
+2.17 either produced no useful RF/contact-energy output or activated contact
+only after visible geometric penetration. The current regularized sphere-like
+mesh uses a small bottom contact patch so the external face-based contact model
+has enough bottom facets and integration points to trigger at first impact.

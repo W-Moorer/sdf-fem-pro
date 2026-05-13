@@ -247,54 +247,46 @@ def _structured_block_mesh(resolution: int, *, size: tuple[float, float, float],
 
 
 def _sphere_like_mesh(resolution: int, *, radius: float, center_z: float) -> tuple[np.ndarray, np.ndarray]:
-    if int(resolution) <= 0:
-        nodes = np.asarray(
-            [
-                [0.0, 0.0, center_z],
-                [0.0, 0.0, center_z + radius],
-                [0.0, 0.0, center_z - radius],
-                [radius, 0.0, center_z],
-                [0.0, radius, center_z],
-                [-radius, 0.0, center_z],
-                [0.0, -radius, center_z],
-            ],
-            dtype=float,
-        )
-        raw_tets = np.asarray(
-            [
-                [0, 1, 3, 4],
-                [0, 1, 4, 5],
-                [0, 1, 5, 6],
-                [0, 1, 6, 3],
-                [0, 2, 4, 3],
-                [0, 2, 5, 4],
-                [0, 2, 6, 5],
-                [0, 2, 3, 6],
-            ],
-            dtype=np.int64,
-        )
-        return nodes, orient_tet4_connectivity(nodes, raw_tets)
-
     from scipy.spatial import Delaunay
 
-    n = 2 * int(resolution) + 3
-    values = np.linspace(-radius, radius, n)
+    level = max(1, int(resolution))
+    n_theta = 12 + 4 * level
+    n_surface_layers = 5 + 2 * level
+    flat_radius = 0.24 * radius
+    bottom_z = center_z - radius
+    cap_z = center_z - np.sqrt(max(radius * radius - flat_radius * flat_radius, 0.0))
+
     pts: list[tuple[float, float, float]] = []
-    for z in values:
-        for y in values:
-            for x in values:
-                if x * x + y * y + z * z <= radius * radius * 1.000001:
-                    pts.append((float(x), float(y), float(center_z + z)))
-    for point in [
-        (radius, 0.0, center_z),
-        (-radius, 0.0, center_z),
-        (0.0, radius, center_z),
-        (0.0, -radius, center_z),
-        (0.0, 0.0, center_z + radius),
-        (0.0, 0.0, center_z - radius),
-    ]:
-        if point not in pts:
-            pts.append(point)
+
+    def add_ring(z: float, ring_radius: float, count: int = n_theta) -> None:
+        for i in range(count):
+            theta = 2.0 * np.pi * i / count
+            pts.append((float(ring_radius * np.cos(theta)), float(ring_radius * np.sin(theta)), float(z)))
+
+    # A tiny flat contact patch avoids the vertex-only contact that makes
+    # CalculiX face-to-face contact activate after large geometric penetration.
+    pts.append((0.0, 0.0, float(bottom_z)))
+    add_ring(float(bottom_z), 0.50 * flat_radius)
+    add_ring(float(bottom_z), flat_radius)
+
+    # Regular latitude rings on the rounded part of the sphere-like body.
+    z_values = np.linspace(float(cap_z), float(center_z + radius), n_surface_layers)
+    for z in z_values[:-1]:
+        dz = z - center_z
+        ring_radius = np.sqrt(max(radius * radius - dz * dz, 0.0))
+        add_ring(float(z), float(max(ring_radius, flat_radius)))
+    pts.append((0.0, 0.0, float(center_z + radius)))
+
+    # Interior axis and half-radius rings make the Delaunay tetrahedra more
+    # regular without changing the boundary contact patch.
+    interior_z_values = np.linspace(float(bottom_z + 0.15 * radius), float(center_z + 0.75 * radius), max(3, level + 3))
+    for z in interior_z_values:
+        dz = z - center_z
+        outer_radius = np.sqrt(max(radius * radius - dz * dz, 0.0))
+        pts.append((0.0, 0.0, float(z)))
+        if outer_radius > 0.12 * radius:
+            add_ring(float(z), 0.45 * float(outer_radius), max(8, n_theta // 2))
+
     nodes = np.unique(np.asarray(pts, dtype=float), axis=0)
     tets = np.asarray(Delaunay(nodes).simplices, dtype=np.int64)
     coords = nodes[tets]
@@ -313,12 +305,16 @@ def build_drop_model(*, quick: bool, case: str = "sphere_like_drop", resolution:
         center_z = floor_z + initial_gap + radius
         nodes, tet_elements = _sphere_like_mesh(int(resolution), radius=radius, center_z=center_z)
         floor_half_width = 1.25
-        model_source = "generated_sphere_like_tet4"
+        model_source = "regularized_sphere_like_tet4_with_bottom_contact_patch"
+        total_time = 0.05 if quick else 0.06
+        contact_stiffness = 2.0e5
     elif case == "block_drop":
         block_height = 0.8
         nodes, tet_elements = _structured_block_mesh(max(1, int(resolution)), size=(0.8, 0.8, block_height), bottom_z=floor_z + initial_gap)
         floor_half_width = 1.15
         model_source = "generated_structured_block_tet4"
+        total_time = 0.08 if quick else 0.14
+        contact_stiffness = 2.0e4
     else:
         raise ValueError("case must be 'sphere_like_drop' or 'block_drop'")
 
@@ -327,7 +323,6 @@ def build_drop_model(*, quick: bool, case: str = "sphere_like_drop", resolution:
     surface_node_ids = node_ids[surface_indices]
     floor_nodes, floor_elements = _floor(floor_half_width, floor_z, start_id=int(node_ids[-1]) + 1)
 
-    total_time = 0.08 if quick else 0.14
     dt = 5.0e-4
     initial_velocity_z = -2.0
 
@@ -349,7 +344,7 @@ def build_drop_model(*, quick: bool, case: str = "sphere_like_drop", resolution:
         density=1.0,
         gravity=9.81,
         initial_velocity_z=initial_velocity_z,
-        contact_stiffness=2.0e4,
+        contact_stiffness=contact_stiffness,
         total_time=total_time,
         dt=dt,
         sfc_substeps=2 if quick else 4,

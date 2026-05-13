@@ -94,7 +94,7 @@ def test_calculix_drop_external_contact_claim_is_supported(calculix_drop_output:
     assert {row["value"] for row in metrics if row["metric"] == "external_solver"} == {"CalculiX"}
     claims_by_case = {row["case"]: row for row in claims}
     assert claims_by_case["block_drop"]["status"] == "supported"
-    assert claims_by_case["sphere_like_drop"]["status"] in {"check", "not_available"}
+    assert claims_by_case["sphere_like_drop"]["status"] == "supported"
     supported_errors = [
         float(row["value"])
         for row in metrics
@@ -116,6 +116,21 @@ def test_calculix_drop_nonquick_suite_has_multiple_resolutions() -> None:
     assert resolutions_by_case["block_drop"] == {1, 2, 3}
     assert all(model.slave_face_refs for model in models)
     assert all(float(model.surface_node_areas.sum()) > 0.0 for model in models)
+
+
+def test_sphere_like_drop_has_regular_bottom_contact_patch() -> None:
+    from validation.run_calculix_drop_impact_comparison import build_drop_model
+
+    model = build_drop_model(quick=True, case="sphere_like_drop", resolution=1)
+    bottom_z = float(model.nodes[:, 2].min())
+    bottom_faces = [face for face in model.surface_faces if np.allclose(model.nodes[face, 2], bottom_z)]
+    near_bottom_faces = [face for face in model.surface_faces if float(model.nodes[face, 2].mean()) <= bottom_z + 0.02]
+
+    assert "bottom_contact_patch" in model.model_source
+    assert len(bottom_faces) >= 24
+    assert len(near_bottom_faces) >= 48
+    assert model.nodes.shape[0] >= 100
+    assert model.contact_stiffness > build_drop_model(quick=True, case="block_drop", resolution=1).contact_stiffness
 
 
 def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Path) -> None:
