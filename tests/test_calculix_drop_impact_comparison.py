@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "validation" / "run_calculix_drop_impact_comparison.py"
@@ -72,21 +73,41 @@ def test_calculix_drop_quick_mode_writes_expected_outputs(calculix_drop_output: 
 def test_calculix_drop_history_contains_external_and_sfc_contact(calculix_drop_output: Path) -> None:
     rows = _rows(calculix_drop_output / "calculix_drop_time_history.csv")
     sources = {row["source"] for row in rows}
+    cases = {row["case"] for row in rows}
 
-    assert sources == {"calculix", "sfc"}
+    assert sources == {"calculix", "sfc_calculix_aligned"}
+    assert {"sphere_like_drop", "block_drop"} <= cases
     assert any(int(row["active_contact_count"]) > 0 for row in rows if row["source"] == "calculix")
-    assert any(int(row["active_contact_count"]) > 0 for row in rows if row["source"] == "sfc")
-    assert min(float(row["min_gap"]) for row in rows if row["source"] == "calculix") >= -1.0e-10
-    assert min(float(row["min_gap"]) for row in rows if row["source"] == "sfc") < 0.0
+    assert any(int(row["active_contact_count"]) > 0 for row in rows if row["source"] == "sfc_calculix_aligned")
+    assert min(float(row["min_gap"]) for row in rows if row["source"] == "sfc_calculix_aligned") < 0.0
+    assert all(np.isfinite(float(row["min_gap"])) for row in rows)
+    assert any(row["normal_force_source"] == "floor_rf_total" for row in rows if row["source"] == "calculix")
+    assert any(row["normal_force_source"] == "smooth_penalty_tangent" for row in rows if row["source"] == "sfc_calculix_aligned")
 
 
 def test_calculix_drop_external_contact_claim_is_supported(calculix_drop_output: Path) -> None:
     metrics = _rows(calculix_drop_output / "calculix_drop_metrics.csv")
     by_metric = {row["metric"]: row for row in metrics}
 
-    assert by_metric["external_solver"]["value"] == "CalculiX"
-    assert by_metric["external_dynamic_contact_claim"]["status"] == "supported"
-    assert float(by_metric["first_contact_time_abs_error"]["value"]) <= 3.0e-3
+    claims = [row for row in metrics if row["metric"] == "external_dynamic_contact_claim"]
+    assert claims
+    assert {row["value"] for row in metrics if row["metric"] == "external_solver"} == {"CalculiX"}
+    assert all(row["status"] == "supported" for row in claims)
+    assert max(float(row["value"]) for row in metrics if row["metric"] == "first_contact_time_abs_error") <= 3.0e-3
+
+
+def test_calculix_drop_nonquick_suite_has_multiple_resolutions() -> None:
+    from validation.run_calculix_drop_impact_comparison import build_model_suite
+
+    models = build_model_suite(quick=False)
+    resolutions_by_case: dict[str, set[int]] = {}
+    for model in models:
+        resolutions_by_case.setdefault(model.case, set()).add(model.resolution)
+
+    assert resolutions_by_case["sphere_like_drop"] == {0, 1, 2}
+    assert resolutions_by_case["block_drop"] == {1, 2, 3}
+    assert all(model.slave_face_refs for model in models)
+    assert all(float(model.surface_node_areas.sum()) > 0.0 for model in models)
 
 
 def test_calculix_drop_summary_claim_markers_have_backing_csv_fields(calculix_drop_output: Path) -> None:

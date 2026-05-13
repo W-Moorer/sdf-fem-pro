@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse import csc_matrix, csr_matrix
-from scipy.sparse.linalg import factorized, spsolve
+from scipy.sparse import csc_matrix, coo_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -52,15 +52,33 @@ Row = dict[str, Any]
 DEFAULT_CASE_NAME = "sfc_calculix_ball_drop"
 CONTACT_ACTIVATION_TOLERANCE = 5.0e-3
 
+C3D4_FACE_LABELS = {
+    (0, 1, 2): "S1",
+    (0, 1, 3): "S2",
+    (1, 2, 3): "S3",
+    (0, 2, 3): "S4",
+}
+LOCAL_FACE_NODES = {
+    "S1": (0, 1, 2),
+    "S2": (0, 1, 3),
+    "S3": (1, 2, 3),
+    "S4": (0, 2, 3),
+}
+
 
 @dataclass(slots=True)
 class DropModel:
     """Generated drop-impact model shared by CalculiX and SFC."""
 
+    case: str
+    resolution: int
     node_ids: np.ndarray
     nodes: np.ndarray
     tet_elements: np.ndarray
+    surface_faces: np.ndarray
+    slave_face_refs: list[tuple[int, str]]
     surface_node_ids: np.ndarray
+    surface_node_areas: np.ndarray
     floor_nodes: np.ndarray
     floor_element_ids: np.ndarray
     floor_z: float
@@ -72,6 +90,8 @@ class DropModel:
     contact_stiffness: float
     total_time: float
     dt: float
+    sfc_substeps: int
+    contact_smoothing_epsilon: float
     model_source: str
 
     @property
@@ -143,62 +163,182 @@ def _wsl_path(path: Path) -> str:
     return "/mnt/" + drive + "/" + "/".join(part.replace("\\", "/") for part in parts)
 
 
-def build_drop_model(*, quick: bool) -> DropModel:
+def _boundary_face_data(nodes: np.ndarray, elements: np.ndarray) -> tuple[np.ndarray, list[tuple[int, str]], np.ndarray, np.ndarray]:
+    """Return boundary faces, CalculiX face refs, node ids, and nodal areas."""
+
+    face_records: dict[tuple[int, int, int], list[tuple[int, str, tuple[int, int, int]]]] = {}
+    for element_id, element in enumerate(elements, start=1):
+        for label, local in LOCAL_FACE_NODES.items():
+            face = tuple(int(element[i]) for i in local)
+            key = tuple(sorted(face))
+            face_records.setdefault(key, []).append((element_id, label, face))
+
+    faces: list[tuple[int, int, int]] = []
+    refs: list[tuple[int, str]] = []
+    for records in face_records.values():
+        if len(records) == 1:
+            element_id, label, face = records[0]
+            faces.append(face)
+            refs.append((element_id, label))
+
+    surface_faces = np.asarray(faces, dtype=np.int64)
+    surface_indices = np.unique(surface_faces.ravel())
+    areas = np.zeros(nodes.shape[0], dtype=float)
+    for face in surface_faces:
+        a, b, c = nodes[face]
+        area = 0.5 * float(np.linalg.norm(np.cross(b - a, c - a)))
+        areas[face] += area / 3.0
+    return surface_faces, refs, surface_indices, areas
+
+
+def _floor(half_width: float, z: float, *, start_id: int) -> tuple[np.ndarray, np.ndarray]:
+    floor_nodes = np.asarray(
+        [
+            [start_id, -half_width, -half_width, z],
+            [start_id + 1, half_width, -half_width, z],
+            [start_id + 2, half_width, half_width, z],
+            [start_id + 3, -half_width, half_width, z],
+        ],
+        dtype=float,
+    )
+    floor_elements = np.asarray([[0, start_id, start_id + 1, start_id + 2, start_id + 3]], dtype=np.int64)
+    return floor_nodes, floor_elements
+
+
+def _structured_block_mesh(resolution: int, *, size: tuple[float, float, float], bottom_z: float) -> tuple[np.ndarray, np.ndarray]:
+    n = int(resolution)
+    lx, ly, lz = size
+    nodes: list[tuple[float, float, float]] = []
+    node_id: dict[tuple[int, int, int], int] = {}
+    for k in range(n + 1):
+        z = bottom_z + lz * k / n
+        for j in range(n + 1):
+            y = -0.5 * ly + ly * j / n
+            for i in range(n + 1):
+                x = -0.5 * lx + lx * i / n
+                node_id[(i, j, k)] = len(nodes)
+                nodes.append((x, y, z))
+
+    tets: list[tuple[int, int, int, int]] = []
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                v000 = node_id[(i, j, k)]
+                v100 = node_id[(i + 1, j, k)]
+                v010 = node_id[(i, j + 1, k)]
+                v110 = node_id[(i + 1, j + 1, k)]
+                v001 = node_id[(i, j, k + 1)]
+                v101 = node_id[(i + 1, j, k + 1)]
+                v011 = node_id[(i, j + 1, k + 1)]
+                v111 = node_id[(i + 1, j + 1, k + 1)]
+                tets.extend(
+                    [
+                        (v000, v100, v010, v001),
+                        (v100, v110, v010, v111),
+                        (v100, v010, v001, v111),
+                        (v010, v001, v011, v111),
+                        (v100, v001, v101, v111),
+                    ]
+                )
+    nodes_arr = np.asarray(nodes, dtype=float)
+    return nodes_arr, orient_tet4_connectivity(nodes_arr, np.asarray(tets, dtype=np.int64))
+
+
+def _sphere_like_mesh(resolution: int, *, radius: float, center_z: float) -> tuple[np.ndarray, np.ndarray]:
+    if int(resolution) <= 0:
+        nodes = np.asarray(
+            [
+                [0.0, 0.0, center_z],
+                [0.0, 0.0, center_z + radius],
+                [0.0, 0.0, center_z - radius],
+                [radius, 0.0, center_z],
+                [0.0, radius, center_z],
+                [-radius, 0.0, center_z],
+                [0.0, -radius, center_z],
+            ],
+            dtype=float,
+        )
+        raw_tets = np.asarray(
+            [
+                [0, 1, 3, 4],
+                [0, 1, 4, 5],
+                [0, 1, 5, 6],
+                [0, 1, 6, 3],
+                [0, 2, 4, 3],
+                [0, 2, 5, 4],
+                [0, 2, 6, 5],
+                [0, 2, 3, 6],
+            ],
+            dtype=np.int64,
+        )
+        return nodes, orient_tet4_connectivity(nodes, raw_tets)
+
+    from scipy.spatial import Delaunay
+
+    n = 2 * int(resolution) + 3
+    values = np.linspace(-radius, radius, n)
+    pts: list[tuple[float, float, float]] = []
+    for z in values:
+        for y in values:
+            for x in values:
+                if x * x + y * y + z * z <= radius * radius * 1.000001:
+                    pts.append((float(x), float(y), float(center_z + z)))
+    for point in [
+        (radius, 0.0, center_z),
+        (-radius, 0.0, center_z),
+        (0.0, radius, center_z),
+        (0.0, -radius, center_z),
+        (0.0, 0.0, center_z + radius),
+        (0.0, 0.0, center_z - radius),
+    ]:
+        if point not in pts:
+            pts.append(point)
+    nodes = np.unique(np.asarray(pts, dtype=float), axis=0)
+    tets = np.asarray(Delaunay(nodes).simplices, dtype=np.int64)
+    coords = nodes[tets]
+    dets = np.linalg.det(np.stack((coords[:, 1] - coords[:, 0], coords[:, 2] - coords[:, 0], coords[:, 3] - coords[:, 0]), axis=2))
+    tets = tets[np.abs(dets) > 1.0e-12]
+    return nodes, orient_tet4_connectivity(nodes, tets)
+
+
+def build_drop_model(*, quick: bool, case: str = "sphere_like_drop", resolution: int = 0) -> DropModel:
     """Build the shared CalculiX/SFC drop-impact model."""
 
     radius = 0.5
     initial_gap = 0.05
     floor_z = 0.0
-    center_z = floor_z + initial_gap + radius
-    node_ids = np.arange(1, 8, dtype=np.int64)
-    nodes = np.asarray(
-        [
-            [0.0, 0.0, center_z],  # center
-            [0.0, 0.0, center_z + radius],  # top
-            [0.0, 0.0, center_z - radius],  # bottom
-            [radius, 0.0, center_z],
-            [0.0, radius, center_z],
-            [-radius, 0.0, center_z],
-            [0.0, -radius, center_z],
-        ],
-        dtype=float,
-    )
-    raw_tets = np.asarray(
-        [
-            [0, 1, 3, 4],
-            [0, 1, 4, 5],
-            [0, 1, 5, 6],
-            [0, 1, 6, 3],
-            [0, 2, 4, 3],
-            [0, 2, 5, 4],
-            [0, 2, 6, 5],
-            [0, 2, 3, 6],
-        ],
-        dtype=np.int64,
-    )
-    tet_elements = orient_tet4_connectivity(nodes, raw_tets)
-    surface_node_ids = np.asarray([2, 3, 4, 5, 6, 7], dtype=np.int64)
-    floor_half_width = 1.1
-    floor_nodes = np.asarray(
-        [
-            [101, -floor_half_width, -floor_half_width, floor_z],
-            [102, floor_half_width, -floor_half_width, floor_z],
-            [103, floor_half_width, floor_half_width, floor_z],
-            [104, -floor_half_width, floor_half_width, floor_z],
-        ],
-        dtype=float,
-    )
-    floor_elements = np.asarray([[0, 101, 102, 103, 104]], dtype=np.int64)
+    if case == "sphere_like_drop":
+        center_z = floor_z + initial_gap + radius
+        nodes, tet_elements = _sphere_like_mesh(int(resolution), radius=radius, center_z=center_z)
+        floor_half_width = 1.25
+        model_source = "generated_sphere_like_tet4"
+    elif case == "block_drop":
+        block_height = 0.8
+        nodes, tet_elements = _structured_block_mesh(max(1, int(resolution)), size=(0.8, 0.8, block_height), bottom_z=floor_z + initial_gap)
+        floor_half_width = 1.15
+        model_source = "generated_structured_block_tet4"
+    else:
+        raise ValueError("case must be 'sphere_like_drop' or 'block_drop'")
 
-    total_time = 0.08 if quick else 0.16
+    surface_faces, slave_face_refs, surface_indices, surface_areas = _boundary_face_data(nodes, tet_elements)
+    node_ids = np.arange(1, nodes.shape[0] + 1, dtype=np.int64)
+    surface_node_ids = node_ids[surface_indices]
+    floor_nodes, floor_elements = _floor(floor_half_width, floor_z, start_id=int(node_ids[-1]) + 1)
+
+    total_time = 0.08 if quick else 0.14
     dt = 0.002 if quick else 0.001
     initial_velocity_z = -2.0
 
     return DropModel(
+        case=case,
+        resolution=int(resolution),
         node_ids=node_ids,
         nodes=nodes,
         tet_elements=tet_elements,
+        surface_faces=surface_faces,
+        slave_face_refs=slave_face_refs,
         surface_node_ids=surface_node_ids,
+        surface_node_areas=surface_areas,
         floor_nodes=floor_nodes,
         floor_element_ids=floor_elements,
         floor_z=floor_z,
@@ -210,8 +350,24 @@ def build_drop_model(*, quick: bool) -> DropModel:
         contact_stiffness=2.0e4,
         total_time=total_time,
         dt=dt,
-        model_source="generated_octahedral_tet4_sphere",
+        sfc_substeps=2 if quick else 4,
+        contact_smoothing_epsilon=2.5e-3,
+        model_source=model_source,
     )
+
+
+def build_model_suite(*, quick: bool) -> list[DropModel]:
+    """Return the model suite for quick or paper-scale external comparison."""
+
+    if quick:
+        return [
+            build_drop_model(quick=True, case="sphere_like_drop", resolution=0),
+            build_drop_model(quick=True, case="block_drop", resolution=1),
+        ]
+    return [
+        *(build_drop_model(quick=False, case="sphere_like_drop", resolution=r) for r in [0, 1, 2]),
+        *(build_drop_model(quick=False, case="block_drop", resolution=r) for r in [1, 2, 3]),
+    ]
 
 
 def _format_id_list(ids: np.ndarray, *, width: int = 10) -> list[str]:
@@ -247,6 +403,9 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
 
     lines.append("*NSET,NSET=nsurface")
     lines.extend(_format_id_list(model.surface_node_ids))
+    lines.append("*surface, name=ball, type=element")
+    for element_id, label in model.slave_face_refs:
+        lines.append(f"{int(element_id)}, {label}")
     lines.extend(
         [
             "*time points, name=times, generate",
@@ -265,9 +424,7 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
             f"nall, 3, {model.initial_velocity_z:.12g}",
             "*surface, name=floor, type=element",
             "efloor, SPOS",
-            "*surface, name=ball, type=node",
-            "nsurface",
-            "*contact pair, interaction=contact,TYPE=NODE TO SURFACE",
+            "*contact pair, interaction=contact,TYPE=SURFACE TO SURFACE",
             "ball, floor",
             "*surface interaction, name=contact",
             "*surface behavior, pressure-overclosure=linear",
@@ -279,6 +436,10 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
             f"elall, grav, {model.gravity:.12g}, 0.0, 0.0, -1.0",
             "*node print, nset=nall, time points=times",
             "u",
+            "*node print, nset=nfloor, totals=only, global=yes, time points=times",
+            "rf",
+            "*contact print, time points=times, totals=only",
+            "cdis, cstr, cels, cnum",
             "*endstep",
             "",
         ]
@@ -286,13 +447,14 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_calculix(model: DropModel, out_dir: Path, *, case_name: str = DEFAULT_CASE_NAME) -> tuple[Path, Row]:
+def run_calculix(model: DropModel, out_dir: Path, *, case_name: str | None = None) -> tuple[Path, Row]:
     """Run CalculiX through WSL and return the generated .dat path."""
 
     if not calculix_available():
         raise SystemExit("CalculiX/ccx is not available in WSL.")
 
-    run_dir = out_dir / "calculix_run"
+    case_name = case_name or f"{model.case}_r{model.resolution}"
+    run_dir = out_dir / "calculix_runs" / case_name
     run_dir.mkdir(parents=True, exist_ok=True)
     inp_path = run_dir / f"{case_name}.inp"
     write_calculix_input(model, inp_path)
@@ -308,6 +470,8 @@ def run_calculix(model: DropModel, out_dir: Path, *, case_name: str = DEFAULT_CA
         raise RuntimeError(f"CalculiX did not produce {dat_path}")
 
     command_row = {
+        "case": model.case,
+        "resolution": model.resolution,
         "external_solver": "CalculiX",
         "external_solver_version": _calculix_version(),
         "command": f"wsl --exec bash -lc \"cd {wsl_run_dir} && ccx {case_name}\"",
@@ -361,10 +525,58 @@ def _parse_calculix_dat_displacements(path: Path, node_ids: np.ndarray) -> dict[
     return dict(sorted(blocks.items()))
 
 
+def _parse_calculix_dat_contact_totals(path: Path) -> dict[float, dict[str, float | int]]:
+    """Parse CalculiX total RF/contact energy/contact count from .dat output."""
+
+    totals: dict[float, dict[str, float | int]] = {}
+    pending: tuple[str, float] | None = None
+    number = r"([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)"
+    headers = {
+        "floor_rf": re.compile(r"total force .* time\s+" + number, re.IGNORECASE),
+        "contact_energy": re.compile(r"total contact spring energy for time\s+" + number, re.IGNORECASE),
+        "contact_count": re.compile(r"total number of contact elements for time\s+" + number, re.IGNORECASE),
+    }
+    vector_pattern = re.compile(r"^\s*" + number + r"\s+" + number + r"\s+" + number + r"\s*$")
+    scalar_pattern = re.compile(r"^\s*" + number + r"\s*$")
+    integer_pattern = re.compile(r"^\s*(\d+)\s*$")
+
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        matched_header = False
+        for kind, pattern in headers.items():
+            match = pattern.search(line)
+            if match:
+                pending = (kind, float(match.group(1)))
+                totals.setdefault(float(match.group(1)), {})
+                matched_header = True
+                break
+        if matched_header or pending is None:
+            continue
+
+        kind, time = pending
+        if kind == "floor_rf":
+            match = vector_pattern.match(line)
+            if match:
+                fx, fy, fz = (float(match.group(i)) for i in range(1, 4))
+                totals[time].update({"floor_rf_x": fx, "floor_rf_y": fy, "floor_rf_z": fz, "normal_force_from_rf": abs(fz)})
+                pending = None
+        elif kind == "contact_energy":
+            match = scalar_pattern.match(line)
+            if match:
+                totals[time]["calculix_contact_energy"] = float(match.group(1))
+                pending = None
+        elif kind == "contact_count":
+            match = integer_pattern.match(line)
+            if match:
+                totals[time]["calculix_contact_count"] = int(match.group(1))
+                pending = None
+    return dict(sorted(totals.items()))
+
+
 def _history_from_displacements(
     source: str,
     model: DropModel,
     displacement_blocks: dict[float, np.ndarray],
+    contact_totals: dict[float, dict[str, float | int]] | None = None,
 ) -> list[Row]:
     """Convert displacement blocks into comparable drop-impact diagnostics."""
 
@@ -384,11 +596,21 @@ def _history_from_displacements(
         gaps = current[surface, 2] - model.floor_z
         penetration = np.maximum(-gaps, 0.0)
         active_mask = penetration > 0.0
+        totals = {} if contact_totals is None else contact_totals.get(float(time), {})
         if source == "calculix":
-            active_mask = np.logical_or(active_mask, gaps <= CONTACT_ACTIVATION_TOLERANCE)
-        normal_force_proxy = float(model.contact_stiffness * np.sum(penetration))
+            active_mask = np.logical_or(active_mask, int(totals.get("calculix_contact_count", 0)) > 0)
+        normal_force = float(model.contact_stiffness * np.sum(penetration))
+        contact_energy = float(0.5 * model.contact_stiffness * np.sum(penetration**2))
+        force_source = "penalty_gap"
+        if source == "calculix" and "normal_force_from_rf" in totals:
+            normal_force = float(totals["normal_force_from_rf"])
+            force_source = "floor_rf_total"
+        if source == "calculix" and "calculix_contact_energy" in totals:
+            contact_energy = float(totals["calculix_contact_energy"])
         rows.append(
             {
+                "case": model.case,
+                "resolution": model.resolution,
                 "source": source,
                 "time": float(time),
                 "z_cm": z_cm,
@@ -396,11 +618,14 @@ def _history_from_displacements(
                 "min_gap": float(np.min(gaps)),
                 "max_penetration": float(np.max(penetration)),
                 "active_contact_count": int(np.count_nonzero(active_mask)),
-                "normal_force_proxy": normal_force_proxy,
+                "normal_force_proxy": normal_force,
+                "normal_force_source": force_source,
+                "calculix_floor_rf_z": totals.get("floor_rf_z", ""),
+                "calculix_contact_count": totals.get("calculix_contact_count", ""),
                 "kinetic_energy_proxy": "",
                 "strain_energy": "",
-                "contact_energy_proxy": float(0.5 * model.contact_stiffness * np.sum(penetration**2)),
-                "details": "postprocessed from CalculiX displacement output; active contact uses gap tolerance"
+                "contact_energy_proxy": contact_energy,
+                "details": "postprocessed from CalculiX displacement, floor RF, and CONTACT PRINT output"
                 if source == "calculix"
                 else "computed by SFC Newmark linear TET4 prototype",
             }
@@ -433,8 +658,13 @@ def _fill_acceleration_force_proxy(rows: list[Row], model: DropModel) -> None:
                 continue
             acceleration = (float(row["v_cm_z"]) - float(previous["v_cm_z"])) / dt
             force_proxy = total_mass * (acceleration + model.gravity)
-            if str(row["source"]) == "calculix" and int(row["active_contact_count"]) > 0:
+            if (
+                str(row["source"]) == "calculix"
+                and int(row["active_contact_count"]) > 0
+                and row.get("normal_force_source") != "floor_rf_total"
+            ):
                 row["normal_force_proxy"] = float(max(force_proxy, 0.0))
+                row["normal_force_source"] = "acceleration_proxy_fallback"
 
 
 def _plane_contact_force(
@@ -461,8 +691,64 @@ def _plane_contact_force(
     )
 
 
+def _smooth_overclosure_response(d: np.ndarray, *, stiffness: np.ndarray, epsilon: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """CalculiX-inspired smooth non-attractive linear pressure-overclosure law."""
+
+    eps = max(float(epsilon), 1.0e-12)
+    s = d / eps
+    smooth_heaviside = 0.5 + np.arctan(s) / np.pi
+    raw_lambda = stiffness * d * smooth_heaviside
+    raw_tangent = stiffness * (smooth_heaviside + s / (np.pi * (1.0 + s * s)))
+    active = raw_lambda > 0.0
+    lambdas = np.where(active, raw_lambda, 0.0)
+    tangents = np.where(active, np.maximum(raw_tangent, 0.0), 0.0)
+    energy = 0.5 * np.where(active, stiffness * d * d * smooth_heaviside, 0.0)
+    return lambdas, tangents, energy
+
+
+def _calculix_aligned_plane_contact(
+    model: DropModel,
+    x_current: np.ndarray,
+) -> tuple[np.ndarray, csr_matrix, float, int, float, float]:
+    """Return smooth penalty force and tangent for a rigid horizontal plane."""
+
+    n_dofs = 3 * x_current.shape[0]
+    surface = model.surface_indices
+    gaps = x_current[surface, 2] - model.floor_z
+    overclosure = CONTACT_ACTIVATION_TOLERANCE - gaps
+    nodal_stiffness = model.contact_stiffness * model.surface_node_areas[surface]
+    lambdas, tangents, energies = _smooth_overclosure_response(
+        overclosure,
+        stiffness=nodal_stiffness,
+        epsilon=model.contact_smoothing_epsilon,
+    )
+
+    force = np.zeros(n_dofs, dtype=float)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for node, lam, tangent in zip(surface, lambdas, tangents, strict=True):
+        dof = 3 * int(node) + 2
+        force[dof] += float(lam)
+        if tangent > 0.0:
+            rows.append(dof)
+            cols.append(dof)
+            data.append(float(tangent))
+
+    Kc = coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()
+    physical_penetration = np.maximum(-gaps, 0.0)
+    return (
+        force,
+        Kc,
+        float(np.min(gaps)),
+        int(np.count_nonzero(lambdas > 1.0e-12)),
+        float(np.max(physical_penetration)),
+        float(np.sum(energies)),
+    )
+
+
 def run_sfc_drop_history(model: DropModel) -> list[Row]:
-    """Run the matching SFC TET4 Newmark/penalty-contact drop model."""
+    """Run the matching SFC TET4 Newmark model with CalculiX-aligned contact."""
 
     mesh = VolumeMesh(
         model.nodes,
@@ -480,36 +766,25 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
     v = np.zeros(n_dofs, dtype=float)
     v[2::3] = model.initial_velocity_z
     x_current = model.nodes + u.reshape((-1, 3))
-    f_contact, min_gap, active_count, max_penetration, contact_energy = _plane_contact_force(
-        x_current,
-        model.surface_indices,
-        floor_z=model.floor_z,
-        stiffness=model.contact_stiffness,
-    )
+    f_contact, _, _, _, _, _ = _calculix_aligned_plane_contact(model, x_current)
     a = np.asarray(spsolve(M, f_gravity + f_contact - K @ u - C @ v), dtype=float)
 
-    dt = model.dt
     beta = 0.25
     gamma = 0.5
-    c0 = 1.0 / (beta * dt * dt)
-    c1 = gamma / (beta * dt)
-    K_eff = csc_matrix(K + c0 * M + c1 * C)
-    solve_eff = factorized(K_eff)
-    times = np.arange(0.0, model.total_time + 0.5 * dt, dt)
+    output_dt = model.dt
+    substeps = max(1, int(model.sfc_substeps))
+    times = np.arange(0.0, model.total_time + 0.5 * output_dt, output_dt)
     rows: list[Row] = []
 
     for step, time in enumerate(times):
         x_current = model.nodes + u.reshape((-1, 3))
-        f_contact, min_gap, active_count, max_penetration, contact_energy = _plane_contact_force(
-            x_current,
-            model.surface_indices,
-            floor_z=model.floor_z,
-            stiffness=model.contact_stiffness,
-        )
+        f_contact, _, min_gap, active_count, max_penetration, contact_energy = _calculix_aligned_plane_contact(model, x_current)
         z_cm = float(np.mean(x_current[:, 2]))
         rows.append(
             {
-                "source": "sfc",
+                "case": model.case,
+                "resolution": model.resolution,
+                "source": "sfc_calculix_aligned",
                 "time": float(time),
                 "z_cm": z_cm,
                 "v_cm_z": float(np.mean(v.reshape((-1, 3))[:, 2])),
@@ -517,22 +792,40 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
                 "max_penetration": max_penetration,
                 "active_contact_count": active_count,
                 "normal_force_proxy": float(np.sum(f_contact[2::3])),
+                "normal_force_source": "smooth_penalty_tangent",
+                "calculix_floor_rf_z": "",
+                "calculix_contact_count": "",
                 "kinetic_energy_proxy": float(0.5 * v @ (M @ v)),
                 "strain_energy": float(0.5 * u @ (K @ u)),
                 "contact_energy_proxy": contact_energy,
-                "details": "computed by SFC Newmark linear TET4 prototype",
+                "details": f"CalculiX-aligned smooth penalty with tangent, area weighting, and {substeps} substeps",
             }
         )
         if step == len(times) - 1:
             break
 
-        u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
-        v_pred = v + dt * (1.0 - gamma) * a
-        rhs = f_gravity + f_contact + M @ (c0 * u_pred) + C @ (c1 * u_pred - v_pred)
-        u_new = np.asarray(solve_eff(rhs), dtype=float)
-        a_new = c0 * (u_new - u_pred)
-        v_new = v_pred + gamma * dt * a_new
-        u, v, a = u_new, v_new, a_new
+        for _ in range(substeps):
+            dt = output_dt / substeps
+            c0 = 1.0 / (beta * dt * dt)
+            c1 = gamma / (beta * dt)
+            u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
+            v_pred = v + dt * (1.0 - gamma) * a
+            K_base = (K + c0 * M + c1 * C).tocsr()
+            rhs_base = f_gravity + M @ (c0 * u_pred) + C @ (c1 * u_pred - v_pred)
+            u_guess = u_pred.copy()
+            for _iteration in range(8):
+                x_guess = model.nodes + u_guess.reshape((-1, 3))
+                f_contact, K_contact, *_ = _calculix_aligned_plane_contact(model, x_guess)
+                residual = K_base @ u_guess - rhs_base - f_contact
+                tangent = csc_matrix(K_base + K_contact)
+                correction = np.asarray(spsolve(tangent, -residual), dtype=float)
+                u_guess += correction
+                if np.linalg.norm(correction) <= 1.0e-10 * max(1.0, np.linalg.norm(u_guess)):
+                    break
+            u_new = u_guess
+            a_new = c0 * (u_new - u_pred)
+            v_new = v_pred + gamma * dt * a_new
+            u, v, a = u_new, v_new, a_new
 
     return rows
 
@@ -542,7 +835,7 @@ def _first_contact_time(rows: list[Row]) -> float | None:
     return None if not active else float(active[0]["time"])
 
 
-def comparison_metrics(calculix_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
+def comparison_metrics(model: DropModel, calculix_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
     """Return summary metrics comparing CalculiX and SFC time histories."""
 
     cx_by_time = {round(float(row["time"]), 12): row for row in calculix_rows}
@@ -561,42 +854,56 @@ def comparison_metrics(calculix_rows: list[Row], sfc_rows: list[Row]) -> list[Ro
 
     return [
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "external_solver",
             "value": "CalculiX",
             "status": "evidence",
             "details": "external transient dynamic contact solver used through WSL ccx",
         },
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "first_contact_time_calculix",
             "value": "" if cx_first is None else cx_first,
             "status": "evidence",
             "details": "first time with positive penetration or active contact count",
         },
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "first_contact_time_sfc",
             "value": "" if sfc_first is None else sfc_first,
             "status": "evidence",
             "details": "first time with positive penetration or active contact count",
         },
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "first_contact_time_abs_error",
             "value": first_contact_abs_error,
             "status": status,
             "details": "gate uses 3 ms tolerance in quick generated model",
         },
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "z_cm_l2_relative_error",
             "value": trajectory_rel,
             "status": "evidence",
             "details": "center-of-mass trajectory difference over common output times",
         },
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "min_gap_linf_abs_error",
             "value": gap_linf,
             "status": "evidence",
             "details": "minimum gap difference over common output times",
         },
         {
+            "case": model.case,
+            "resolution": model.resolution,
             "metric": "external_dynamic_contact_claim",
             "value": "supported" if status == "supported" else "not_supported",
             "status": "supported" if status == "supported" else "not_supported",
@@ -610,34 +917,41 @@ def write_plots(out_dir: Path, history_rows: list[Row]) -> list[Row]:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     plots: list[Row] = []
-    sources = sorted({str(row["source"]) for row in history_rows})
 
-    def series(source: str, field: str) -> tuple[list[float], list[float]]:
-        rows = [row for row in history_rows if row["source"] == source]
+    groups = sorted({(str(row["case"]), int(row["resolution"])) for row in history_rows})
+
+    def series(rows_for_group: list[Row], source: str, field: str) -> tuple[list[float], list[float]]:
+        rows = [row for row in rows_for_group if row["source"] == source]
         return [float(row["time"]) for row in rows], [float(row[field]) for row in rows]
 
-    for field, ylabel, name in [
+    fields = [
         ("z_cm", "center-of-mass z", "calculix_drop_z_cm"),
         ("min_gap", "minimum gap to rigid plane", "calculix_drop_min_gap"),
         ("normal_force_proxy", "normal force proxy", "calculix_drop_force_proxy"),
         ("contact_energy_proxy", "contact energy proxy", "calculix_drop_contact_energy"),
-    ]:
-        fig, ax = plt.subplots(figsize=(6.4, 4.0))
-        for source in sources:
-            x, y = series(source, field)
-            ax.plot(x, y, marker="o", markersize=3.0, linewidth=1.2, label=source)
-        ax.axhline(0.0, color="0.35", linewidth=0.8)
-        ax.set_xlabel("time")
-        ax.set_ylabel(ylabel)
-        ax.legend()
-        ax.grid(True, color="0.9", linewidth=0.5)
-        fig.tight_layout()
-        png = out_dir / f"{name}.png"
-        pdf = out_dir / f"{name}.pdf"
-        fig.savefig(png, dpi=180)
-        fig.savefig(pdf)
-        plt.close(fig)
-        plots.append({"plot": name, "png": png.name, "pdf": pdf.name, "status": "ok"})
+    ]
+    for group_index, (case, resolution) in enumerate(groups):
+        rows_for_group = [row for row in history_rows if row["case"] == case and int(row["resolution"]) == resolution]
+        sources = sorted({str(row["source"]) for row in rows_for_group})
+        for field, ylabel, base_name in fields:
+            fig, ax = plt.subplots(figsize=(6.4, 4.0))
+            for source in sources:
+                x, y = series(rows_for_group, source, field)
+                ax.plot(x, y, marker="o", markersize=3.0, linewidth=1.2, label=source)
+            ax.axhline(0.0, color="0.35", linewidth=0.8)
+            ax.set_xlabel("time")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"{case} r{resolution}")
+            ax.legend()
+            ax.grid(True, color="0.9", linewidth=0.5)
+            fig.tight_layout()
+            name = base_name if group_index == 0 else f"{base_name}_{case}_r{resolution}"
+            png = out_dir / f"{name}.png"
+            pdf = out_dir / f"{name}.pdf"
+            fig.savefig(png, dpi=180)
+            fig.savefig(pdf)
+            plt.close(fig)
+            plots.append({"plot": name, "case": case, "resolution": resolution, "png": png.name, "pdf": pdf.name, "status": "ok"})
 
     return plots
 
@@ -654,17 +968,19 @@ def _fieldnames(rows: list[Row]) -> list[str]:
 def write_markdown(
     path: Path,
     *,
-    model: DropModel,
-    command_row: Row,
+    models: list[DropModel],
+    command_rows: list[Row],
     metric_rows: list[Row],
     plots: list[Row],
     quick: bool,
 ) -> None:
-    claim = next(row for row in metric_rows if row["metric"] == "external_dynamic_contact_claim")
+    claim_rows = [row for row in metric_rows if row["metric"] == "external_dynamic_contact_claim"]
+    all_supported = bool(claim_rows) and all(row["status"] == "supported" for row in claim_rows)
+    first_command = command_rows[0] if command_rows else {"external_solver_version": "unknown", "command": ""}
     lines = [
         "# CalculiX Drop-Impact Comparison",
         "",
-        "This validation uses CalculiX/ccx as an external open-source transient dynamic contact reference. The generated model is a small vertical elastic ball/drop impact against a fixed rigid plane, represented by a deterministic octahedral TET4 mesh so that CalculiX and SFC use the same TET4 connectivity.",
+        "This validation uses CalculiX/ccx as an external open-source transient dynamic contact reference. The generated models are vertical elastic drop-impact cases against a fixed rigid plane. SFC uses the same TET4 meshes, material constants, gravity, initial velocity, and rigid-plane location as each CalculiX input.",
         "",
         "## Reproduce",
         "",
@@ -675,33 +991,46 @@ def write_markdown(
         "## External Solver",
         "",
         f"- Solver: CalculiX/ccx",
-        f"- Version: `{command_row['external_solver_version']}`",
-        f"- Command: `{command_row['command']}`",
-        f"- Model source: `{model.model_source}`",
+        f"- Version: `{first_command['external_solver_version']}`",
+        f"- Example command: `{first_command['command']}`",
         "",
-        "## Model",
+        "## Models",
         "",
-        f"- Nodes: {model.nodes.shape[0]}",
-        f"- TET4 elements: {model.tet_elements.shape[0]}",
-        f"- Surface nodes: {model.surface_node_ids.size}",
-        f"- Total time: {_format_float(model.total_time)}",
-        f"- Time step: {_format_float(model.dt)}",
-        f"- Initial vertical velocity: {_format_float(model.initial_velocity_z)}",
-        f"- Rigid plane z: {_format_float(model.floor_z)}",
-        f"- Linear material: E={_format_float(model.E)}, nu={_format_float(model.nu)}, density={_format_float(model.density)}",
+        "| Case | Resolution | Nodes | TET4 elements | Boundary faces | SFC substeps | Model source |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for model in models:
+        lines.append(
+            f"| {model.case} | {model.resolution} | {model.nodes.shape[0]} | {model.tet_elements.shape[0]} | {model.surface_faces.shape[0]} | {model.sfc_substeps} | {model.model_source} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Common setup:",
+            "",
+            f"- Initial vertical velocity: {_format_float(models[0].initial_velocity_z)}",
+            f"- Rigid plane z: {_format_float(models[0].floor_z)}",
+            f"- Linear material: E={_format_float(models[0].E)}, nu={_format_float(models[0].nu)}, density={_format_float(models[0].density)}",
+            "- CalculiX slave surfaces are face-based element surfaces; SFC uses matching boundary-face area weights.",
+            "- SFC contact uses a CalculiX-aligned smooth pressure-overclosure law, area weighting, contact tangent, Newton iterations, and substepping.",
+        ]
+    )
+    lines.extend(
+        [
         "",
         "## Claim Gate",
         "",
         "| Claim | Status | Evidence | Gate |",
         "| --- | --- | --- | --- |",
-        f"| external dynamic contact time-scale agreement | {claim['status']} | calculix_drop_metrics.csv::external_dynamic_contact_claim | {claim['value']} |",
+        f"| external dynamic contact time-scale agreement | {'supported' if all_supported else 'not_supported'} | calculix_drop_metrics.csv::external_dynamic_contact_claim | {'all_supported' if all_supported else 'some_not_supported'} |",
         "<!-- evidence csv=calculix_drop_metrics.csv field=value -->",
         "",
         "## Metrics",
         "",
         "| Metric | Value | Status | Details |",
         "| --- | ---: | --- | --- |",
-    ]
+        ]
+    )
     for row in metric_rows:
         lines.append(f"| {row['metric']} | {row['value']} | {row['status']} | {row['details']} |")
     lines.extend(["", "## Plots", ""])
@@ -713,9 +1042,8 @@ def write_markdown(
             "## Interpretation",
             "",
             "- CalculiX performs an independent transient dynamic contact solve.",
-            "- SFC uses the same generated TET4 geometry with its current linear TET4 Newmark prototype and a normal penalty rigid-plane contact force.",
-            "- The force curves are proxy quantities derived from the common gap and configured penalty stiffness; they are not claimed to be identical CalculiX reaction-force output.",
-            "- The accepted claim is limited to contact activation and trajectory diagnostics for this generated case. It is not a validation of friction, self-contact, nonlinear FEM, or production contact algorithms.",
+            "- The CalculiX force history uses the fixed-floor RF total when available; SFC reports its assembled smooth penalty normal force.",
+            "- The accepted claim is limited to the generated linear TET4 normal-impact cases. It is not a validation of friction, self-contact, nonlinear FEM, or production contact algorithms.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -723,14 +1051,23 @@ def write_markdown(
 
 def run_comparison(out_dir: Path, *, quick: bool) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    model = build_drop_model(quick=quick)
-    dat_path, command_row = run_calculix(model, out_dir)
-    displacement_blocks = _parse_calculix_dat_displacements(dat_path, model.node_ids)
-    calculix_rows = _history_from_displacements("calculix", model, displacement_blocks)
-    _fill_acceleration_force_proxy(calculix_rows, model)
-    sfc_rows = run_sfc_drop_history(model)
-    history_rows = sorted(calculix_rows + sfc_rows, key=lambda row: (float(row["time"]), str(row["source"])))
-    metric_rows = comparison_metrics(calculix_rows, sfc_rows)
+    models = build_model_suite(quick=quick)
+    history_rows: list[Row] = []
+    metric_rows: list[Row] = []
+    command_rows: list[Row] = []
+    for model in models:
+        dat_path, command_row = run_calculix(model, out_dir)
+        displacement_blocks = _parse_calculix_dat_displacements(dat_path, model.node_ids)
+        contact_totals = _parse_calculix_dat_contact_totals(dat_path)
+        calculix_rows = _history_from_displacements("calculix", model, displacement_blocks, contact_totals)
+        _fill_acceleration_force_proxy(calculix_rows, model)
+        sfc_rows = run_sfc_drop_history(model)
+        history_rows.extend(calculix_rows)
+        history_rows.extend(sfc_rows)
+        metric_rows.extend(comparison_metrics(model, calculix_rows, sfc_rows))
+        command_rows.append(command_row)
+
+    history_rows = sorted(history_rows, key=lambda row: (str(row["case"]), int(row["resolution"]), float(row["time"]), str(row["source"])))
     plots = write_plots(out_dir, history_rows)
 
     history_csv = out_dir / "calculix_drop_time_history.csv"
@@ -742,7 +1079,7 @@ def run_comparison(out_dir: Path, *, quick: bool) -> dict[str, Path]:
 
     _write_csv(history_csv, _fieldnames(history_rows), history_rows)
     _write_csv(metrics_csv, _fieldnames(metric_rows), metric_rows)
-    _write_csv(commands_csv, _fieldnames([command_row]), [command_row])
+    _write_csv(commands_csv, _fieldnames(command_rows), command_rows)
     _write_csv(plots_csv, _fieldnames(plots), plots)
     _write_csv(
         metadata_csv,
@@ -750,14 +1087,13 @@ def run_comparison(out_dir: Path, *, quick: bool) -> dict[str, Path]:
         [
             {"key": "python", "value": sys.version.split()[0]},
             {"key": "platform", "value": platform.platform()},
-            {"key": "calculix_version", "value": command_row["external_solver_version"]},
+            {"key": "calculix_version", "value": command_rows[0]["external_solver_version"] if command_rows else "unknown"},
             {"key": "quick", "value": str(bool(quick)).lower()},
-            {"key": "nodes", "value": model.nodes.shape[0]},
-            {"key": "tet4_elements", "value": model.tet_elements.shape[0]},
-            {"key": "surface_nodes", "value": model.surface_node_ids.size},
+            {"key": "model_count", "value": len(models)},
+            {"key": "cases", "value": ",".join(f"{model.case}:r{model.resolution}" for model in models)},
         ],
     )
-    write_markdown(summary_md, model=model, command_row=command_row, metric_rows=metric_rows, plots=plots, quick=quick)
+    write_markdown(summary_md, models=models, command_rows=command_rows, metric_rows=metric_rows, plots=plots, quick=quick)
     return {
         "history": history_csv,
         "metrics": metrics_csv,
