@@ -99,6 +99,9 @@ Implemented current version:
   impact window.
 - Use the same nodal coordinates and TET4 connectivity for SFC and CalculiX.
 - Use face-based CalculiX slave surfaces and a fixed shell master plane.
+- Use the shell `SPOS` master surface as the effective contact plane. The
+  generated shell thickness is `0.01`, so the contact plane is `floor_z +
+  0.005`, not the shell mid-surface at `floor_z`.
 - Use matching SFC boundary-face area weights for smooth penalty contact.
 - Use explicit `*DYNAMIC,DIRECT,ALPHA=-0.05` in the generated CalculiX input
   and the same HHT-alpha parameters in the SFC validation runner.
@@ -160,7 +163,7 @@ Both SFC and the external solver should output:
 - `time`
 - TET4 reference-volume-weighted center-of-mass height `z_cm`
 - TET4 reference-volume-weighted center-of-mass velocity proxy `v_cm_z`
-- minimum gap to plane `min_gap`
+- minimum gap to the effective CalculiX `SPOS` contact plane `min_gap`
 - maximum penetration `max_penetration`
 - active contact count or active contact area proxy
 - normal contact force proxy
@@ -262,7 +265,10 @@ closely without copying GPL source code:
 - the SFC alignment mode uses a consistent mass matrix, not the earlier lumped
   mass matrix;
 - face-based slave surface instead of only a slave node set;
-- per-node surface-area weights from boundary faces;
+- one centroid integration point per boundary triangle, area-scaled force, and
+  shape-function distribution to slave face nodes, matching the structure of
+  CalculiX `springforc_f2f.f` more closely than the previous nodal-area
+  approximation;
 - CalculiX-unavailable contact outputs are left blank and excluded from force
   or energy comparisons instead of being replaced by zero-valued proxy curves;
 - smooth overclosure activation inspired by CalculiX's linear

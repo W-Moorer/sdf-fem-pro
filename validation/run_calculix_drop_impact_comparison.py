@@ -50,7 +50,9 @@ from validation.run_phase4_paper_validation import _format_float  # noqa: E402
 Row = dict[str, Any]
 
 DEFAULT_CASE_NAME = "sfc_calculix_ball_drop"
-CONTACT_ACTIVATION_TOLERANCE = 5.0e-3
+FLOOR_SHELL_THICKNESS = 1.0e-2
+CALCULIX_MASTER_SURFACE_OFFSET = 0.5 * FLOOR_SHELL_THICKNESS
+CONTACT_SMOOTHING_EPSILON = 2.5e-3
 CALCULIX_DEFAULT_HHT_ALPHA = -0.05
 
 C3D4_FACE_LABELS = {
@@ -368,7 +370,7 @@ def build_drop_model(
         output_frequency=max(1, int(output_frequency)),
         direct_dynamic=bool(direct_dynamic),
         sfc_substeps=2 if quick else 4,
-        contact_smoothing_epsilon=2.5e-3,
+        contact_smoothing_epsilon=CONTACT_SMOOTHING_EPSILON,
         hht_alpha=CALCULIX_DEFAULT_HHT_ALPHA,
         model_source=model_source,
     )
@@ -462,7 +464,7 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
             f"{model.density:.12g}",
             "*solid section, elset=elall, material=gummi",
             "*shell section, elset=efloor, material=gummi",
-            "0.01",
+            f"{FLOOR_SHELL_THICKNESS:.12g}",
             "*initial conditions, type=velocity",
             f"nall, 3, {model.initial_velocity_z:.12g}",
             "*surface, name=floor, type=element",
@@ -633,7 +635,6 @@ def _history_from_displacements(
 ) -> list[Row]:
     """Convert displacement blocks into comparable drop-impact diagnostics."""
 
-    surface = model.surface_indices
     rows: list[Row] = []
     times = [0.0] + [float(t) for t in displacement_blocks]
     displacements = [np.zeros_like(model.nodes)] + [displacement_blocks[t] for t in displacement_blocks]
@@ -646,7 +647,7 @@ def _history_from_displacements(
             v_cm_z = model.initial_velocity_z
         else:
             v_cm_z = (z_cm - previous_z_cm) / max(float(time) - float(previous_time), 1.0e-30)
-        gaps = current[surface, 2] - model.floor_z
+        gaps = _surface_face_gaps_to_contact_plane(model, current)
         penetration = np.maximum(-gaps, 0.0)
         active_mask = penetration > 0.0
         totals = {} if contact_totals is None else contact_totals.get(float(time), {})
@@ -697,6 +698,28 @@ def _history_from_displacements(
 
 def _total_mass(model: DropModel) -> float:
     return float(model.density * sum(tet4_volume(model.nodes[element]) for element in model.tet_elements))
+
+
+def _contact_plane_z(model: DropModel) -> float:
+    """Return the CalculiX shell SPOS master contact plane."""
+
+    return float(model.floor_z + CALCULIX_MASTER_SURFACE_OFFSET)
+
+
+def _surface_face_geometry(current_nodes: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return boundary-face centroids and current triangle areas."""
+
+    tri = current_nodes[faces]
+    centroids = np.mean(tri, axis=1)
+    areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    return centroids, areas
+
+
+def _surface_face_gaps_to_contact_plane(model: DropModel, current_nodes: np.ndarray) -> np.ndarray:
+    """Return face-integration-point gaps to the CalculiX master contact plane."""
+
+    centroids, _ = _surface_face_geometry(current_nodes, model.surface_faces)
+    return centroids[:, 2] - _contact_plane_z(model)
 
 
 def _reference_element_volumes(model: DropModel) -> np.ndarray:
@@ -792,16 +815,23 @@ def _calculix_aligned_plane_contact(
     model: DropModel,
     x_current: np.ndarray,
 ) -> tuple[np.ndarray, csr_matrix, float, int, float, float]:
-    """Return smooth penalty force and tangent for a rigid horizontal plane."""
+    """Return face-based smooth penalty force and tangent for a rigid plane.
+
+    CalculiX face-to-face contact evaluates clearance at slave-face integration
+    points and scales the linear overclosure pressure by spring area.  This
+    validation approximation uses one centroid integration point per boundary
+    triangle and distributes the normal force back to the TET4 face nodes.
+    """
 
     n_dofs = 3 * x_current.shape[0]
-    surface = model.surface_indices
-    gaps = x_current[surface, 2] - model.floor_z
-    overclosure = CONTACT_ACTIVATION_TOLERANCE - gaps
-    nodal_stiffness = model.contact_stiffness * model.surface_node_areas[surface]
+    faces = model.surface_faces
+    centroids, areas = _surface_face_geometry(x_current, faces)
+    gaps = centroids[:, 2] - _contact_plane_z(model)
+    overclosure = -gaps
+    face_stiffness = model.contact_stiffness * areas
     lambdas, tangents, energies = _smooth_overclosure_response(
         overclosure,
-        stiffness=nodal_stiffness,
+        stiffness=face_stiffness,
         epsilon=model.contact_smoothing_epsilon,
     )
 
@@ -809,13 +839,17 @@ def _calculix_aligned_plane_contact(
     rows: list[int] = []
     cols: list[int] = []
     data: list[float] = []
-    for node, lam, tangent in zip(surface, lambdas, tangents, strict=True):
-        dof = 3 * int(node) + 2
-        force[dof] += float(lam)
+    weights = np.full(3, 1.0 / 3.0, dtype=float)
+    for face, lam, tangent in zip(faces, lambdas, tangents, strict=True):
+        z_dofs = [3 * int(node) + 2 for node in face]
+        for dof, weight in zip(z_dofs, weights, strict=True):
+            force[dof] += float(weight * lam)
         if tangent > 0.0:
-            rows.append(dof)
-            cols.append(dof)
-            data.append(float(tangent))
+            for row_dof, row_weight in zip(z_dofs, weights, strict=True):
+                for col_dof, col_weight in zip(z_dofs, weights, strict=True):
+                    rows.append(row_dof)
+                    cols.append(col_dof)
+                    data.append(float(row_weight * col_weight * tangent))
 
     Kc = coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()
     physical_penetration = np.maximum(-gaps, 0.0)
@@ -1233,14 +1267,15 @@ def write_markdown(
             "Common setup:",
             "",
             f"- Initial vertical velocity: {_format_float(models[0].initial_velocity_z)}",
-            f"- Rigid plane z: {_format_float(models[0].floor_z)}",
+            f"- Rigid shell mid-surface z: {_format_float(models[0].floor_z)}",
+            f"- CalculiX SPOS contact plane z: {_format_float(_contact_plane_z(models[0]))}",
             f"- Linear material: E={_format_float(models[0].E)}, nu={_format_float(models[0].nu)}, density={_format_float(models[0].density)}",
             f"- Nominal time increment: {_format_float(models[0].dt)}",
             f"- CalculiX dynamic mode: {'direct fixed increment' if models[0].direct_dynamic else 'adaptive increment'}",
             f"- CalculiX output frequency: {models[0].output_frequency}",
             "- CalculiX slave surfaces are face-based element surfaces; SFC uses matching boundary-face area weights.",
             "- SFC dynamics uses the same generated C3D4/TET4 mesh, isotropic linear elastic constants, consistent mass, gravity, initial velocity, and HHT-alpha parameters as the CalculiX input.",
-            "- SFC contact uses a CalculiX-aligned smooth pressure-overclosure law, area weighting, contact tangent, Newton iterations, and substepping.",
+            "- SFC contact uses a CalculiX-aligned face-centroid pressure-overclosure law, area weighting, contact tangent, Newton iterations, and substepping.",
         ]
     )
     lines.extend(

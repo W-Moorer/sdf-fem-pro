@@ -5,7 +5,9 @@
 The previous strong 3-second drop-impact diagnostic is not acceptable as
 validation evidence because CalculiX did not complete the run and the original
 height diagnostic used a nodal average instead of a mass-weighted center of
-mass.
+mass. A second mismatch was the contact geometry: CalculiX contacts the shell
+`SPOS` surface at `floor_z + 0.005`, while the earlier diagnostic reported gaps
+to the shell mid-surface at `floor_z`.
 
 This handoff separates the validation into two layers:
 
@@ -71,10 +73,10 @@ Gentle CalculiX contact:
 | --- | ---: | --- |
 | CalculiX completed | `true` | evidence |
 | first contact time, CalculiX | `0.452 s` | evidence |
-| first contact time, SFC | `0.452 s` | evidence |
-| first contact time absolute error | `0.0 s` | supported |
-| z center-of-mass relative error | `8.23e-04` | evidence |
-| min-gap L-infinity error | `1.27e-03` | evidence |
+| first contact time, SFC | `0.450 s` | evidence |
+| first contact time absolute error | `2.0e-03 s` | supported |
+| z center-of-mass relative error | `8.05e-04` | evidence |
+| min-gap L-infinity error | `1.21e-03` | evidence |
 | external dynamic contact claim | `supported` | supported |
 
 ## Interpretation
@@ -83,9 +85,14 @@ The no-contact benchmark supports the Newmark average-acceleration integrator
 for the tested analytic cases. This does not validate contact.
 
 The gentle block/plane case is a cleaner external contact reference than the
-strong 3-second drop-impact case. It completes in CalculiX, avoids visible
-penetration in both solvers, and gives matching first-contact time at the
-chosen output resolution.
+strong 3-second drop-impact case. It completes in CalculiX, keeps overclosure
+near the `1e-3` length scale in both solvers, and gives first-contact time
+agreement within one SFC time step at the chosen output resolution.
+
+The SFC validation runner now uses a face-centroid, area-scaled penalty contact
+approximation for this comparison, consistent with the CalculiX
+`springforc_f2f.f` structure where clearance is evaluated at slave-face
+integration points and scaled by spring area.
 
 The strong sphere/block 3-second diagnostic remains unsupported and should not
 be used for paper evidence.

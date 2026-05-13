@@ -150,6 +150,33 @@ def test_drop_history_uses_mass_weighted_center_height() -> None:
     assert min(current[:, 2]) <= mass_weighted <= max(current[:, 2])
 
 
+def test_drop_contact_uses_calculix_spos_plane_and_face_integration() -> None:
+    from validation.run_calculix_drop_impact_comparison import (
+        CALCULIX_MASTER_SURFACE_OFFSET,
+        _calculix_aligned_plane_contact,
+        _contact_plane_z,
+        _surface_face_gaps_to_contact_plane,
+        build_drop_model,
+    )
+
+    model = build_drop_model(quick=True, case="block_drop", resolution=1, gravity=0.0, initial_velocity_z=0.0)
+    x_current = model.nodes.copy()
+    gaps = _surface_face_gaps_to_contact_plane(model, x_current)
+
+    assert _contact_plane_z(model) == pytest.approx(model.floor_z + CALCULIX_MASTER_SURFACE_OFFSET)
+    assert np.min(gaps) == pytest.approx(0.045)
+
+    x_current[:, 2] -= 0.046
+    force, stiffness, min_gap, active_count, max_penetration, contact_energy = _calculix_aligned_plane_contact(model, x_current)
+
+    assert min_gap < 0.0
+    assert max_penetration > 0.0
+    assert active_count > 0
+    assert contact_energy > 0.0
+    assert np.sum(force[2::3]) > 0.0
+    assert stiffness.nnz > 0
+
+
 def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Path) -> None:
     from validation.run_calculix_drop_impact_comparison import (
         CALCULIX_DEFAULT_HHT_ALPHA,
