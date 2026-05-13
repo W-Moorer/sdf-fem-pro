@@ -148,8 +148,8 @@ Non-quick mode supports multi-resolution dynamic comparison:
 Both SFC and the external solver should output:
 
 - `time`
-- center-of-mass height `z_cm`
-- center-of-mass velocity proxy `v_cm_z`
+- TET4 reference-volume-weighted center-of-mass height `z_cm`
+- TET4 reference-volume-weighted center-of-mass velocity proxy `v_cm_z`
 - minimum gap to plane `min_gap`
 - maximum penetration `max_penetration`
 - active contact count or active contact area proxy
@@ -157,6 +157,7 @@ Both SFC and the external solver should output:
 - kinetic energy
 - strain/internal energy if available
 - contact penalty energy if available
+- gravitational potential and total mechanical energy proxy for SFC
 - rebound height after first impact
 
 ## Comparison Metrics

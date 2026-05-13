@@ -659,7 +659,7 @@ def _history_from_displacements(
     previous_time: float | None = None
     for time, u_nodes in zip(times, displacements, strict=True):
         current = model.nodes + u_nodes
-        z_cm = float(np.mean(current[:, 2]))
+        z_cm = _mass_weighted_center_z(model, current)
         if previous_z_cm is None:
             v_cm_z = model.initial_velocity_z
         else:
@@ -700,6 +700,8 @@ def _history_from_displacements(
                 "calculix_contact_count": totals.get("calculix_contact_count", ""),
                 "kinetic_energy_proxy": "",
                 "strain_energy": "",
+                "gravitational_potential_energy": "",
+                "total_mechanical_energy_proxy": "",
                 "contact_energy_proxy": contact_energy,
                 "details": "postprocessed from CalculiX displacement, floor RF, and CONTACT PRINT output"
                 if source == "calculix"
@@ -713,6 +715,28 @@ def _history_from_displacements(
 
 def _total_mass(model: DropModel) -> float:
     return float(model.density * sum(tet4_volume(model.nodes[element]) for element in model.tet_elements))
+
+
+def _reference_element_volumes(model: DropModel) -> np.ndarray:
+    """Return positive reference volumes for all TET4 elements."""
+
+    return np.asarray([tet4_volume(model.nodes[element]) for element in model.tet_elements], dtype=float)
+
+
+def _mass_weighted_center_z(model: DropModel, current_nodes: np.ndarray) -> float:
+    """Return the uniform-density TET4 mass center height."""
+
+    volumes = _reference_element_volumes(model)
+    element_center_z = np.mean(current_nodes[model.tet_elements, 2], axis=1)
+    return float(np.dot(volumes, element_center_z) / np.sum(volumes))
+
+
+def _mass_weighted_velocity_z(model: DropModel, nodal_velocity: np.ndarray) -> float:
+    """Return the uniform-density TET4 mass-averaged vertical velocity."""
+
+    volumes = _reference_element_volumes(model)
+    element_velocity_z = np.mean(nodal_velocity.reshape((-1, 3))[model.tet_elements, 2], axis=1)
+    return float(np.dot(volumes, element_velocity_z) / np.sum(volumes))
 
 
 def _fill_acceleration_force_proxy(rows: list[Row], model: DropModel) -> None:
@@ -878,7 +902,11 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
     for step, time in enumerate(times):
         x_current = model.nodes + u.reshape((-1, 3))
         f_contact, _, min_gap, active_count, max_penetration, contact_energy = _calculix_aligned_plane_contact(model, x_current)
-        z_cm = float(np.mean(x_current[:, 2]))
+        z_cm = _mass_weighted_center_z(model, x_current)
+        kinetic_energy = float(0.5 * v @ (M @ v))
+        strain_energy = float(0.5 * u @ (K @ u))
+        gravitational_energy = float(_total_mass(model) * model.gravity * z_cm)
+        total_energy = kinetic_energy + strain_energy + contact_energy + gravitational_energy
         rows.append(
             {
                 "case": model.case,
@@ -886,7 +914,7 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
                 "source": "sfc_calculix_aligned",
                 "time": float(time),
                 "z_cm": z_cm,
-                "v_cm_z": float(np.mean(v.reshape((-1, 3))[:, 2])),
+                "v_cm_z": _mass_weighted_velocity_z(model, v),
                 "min_gap": min_gap,
                 "max_penetration": max_penetration,
                 "active_contact_count": active_count,
@@ -894,9 +922,11 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
                 "normal_force_source": "smooth_penalty_tangent",
                 "calculix_floor_rf_z": "",
                 "calculix_contact_count": "",
-                "kinetic_energy_proxy": float(0.5 * v @ (M @ v)),
-                "strain_energy": float(0.5 * u @ (K @ u)),
+                "kinetic_energy_proxy": kinetic_energy,
+                "strain_energy": strain_energy,
+                "gravitational_potential_energy": gravitational_energy,
                 "contact_energy_proxy": contact_energy,
+                "total_mechanical_energy_proxy": total_energy,
                 "details": (
                     "CalculiX-aligned C3D4/TET4 linear dynamics with consistent mass, "
                     f"HHT alpha={alpha:g}, tangent contact, area weighting, and {substeps} substeps"
@@ -1113,6 +1143,7 @@ def write_plots(out_dir: Path, history_rows: list[Row]) -> list[Row]:
         ("min_gap", "minimum gap to rigid plane", "calculix_drop_min_gap"),
         ("normal_force_proxy", "normal force proxy", "calculix_drop_force_proxy"),
         ("contact_energy_proxy", "contact energy proxy", "calculix_drop_contact_energy"),
+        ("total_mechanical_energy_proxy", "SFC total mechanical energy proxy", "calculix_drop_total_energy"),
     ]
     for group_index, (case, resolution) in enumerate(groups):
         rows_for_group = [row for row in history_rows if row["case"] == case and int(row["resolution"]) == resolution]

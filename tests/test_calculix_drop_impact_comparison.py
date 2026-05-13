@@ -41,6 +41,8 @@ EXPECTED_FILES = {
     "calculix_drop_force_proxy.pdf",
     "calculix_drop_contact_energy.png",
     "calculix_drop_contact_energy.pdf",
+    "calculix_drop_total_energy.png",
+    "calculix_drop_total_energy.pdf",
 }
 
 
@@ -83,6 +85,7 @@ def test_calculix_drop_history_contains_external_and_sfc_contact(calculix_drop_o
     assert all(np.isfinite(float(row["min_gap"])) for row in rows)
     assert any(row["normal_force_source"] == "floor_rf_total" for row in rows if row["source"] == "calculix")
     assert any(row["normal_force_source"] == "smooth_penalty_tangent" for row in rows if row["source"] == "sfc_calculix_aligned")
+    assert all(row["total_mechanical_energy_proxy"] != "" for row in rows if row["source"] == "sfc_calculix_aligned")
 
 
 def test_calculix_drop_external_contact_claim_is_supported(calculix_drop_output: Path) -> None:
@@ -131,6 +134,20 @@ def test_sphere_like_drop_has_regular_bottom_contact_patch() -> None:
     assert len(near_bottom_faces) >= 48
     assert model.nodes.shape[0] >= 100
     assert model.contact_stiffness > build_drop_model(quick=True, case="block_drop", resolution=1).contact_stiffness
+
+
+def test_drop_history_uses_mass_weighted_center_height() -> None:
+    from validation.run_calculix_drop_impact_comparison import build_drop_model, _mass_weighted_center_z
+
+    model = build_drop_model(quick=True, case="sphere_like_drop", resolution=1)
+    current = model.nodes.copy()
+    current[model.surface_indices[0], 2] += 10.0
+
+    nodal_average = float(np.mean(current[:, 2]))
+    mass_weighted = _mass_weighted_center_z(model, current)
+
+    assert mass_weighted != pytest.approx(nodal_average)
+    assert min(current[:, 2]) <= mass_weighted <= max(current[:, 2])
 
 
 def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Path) -> None:
