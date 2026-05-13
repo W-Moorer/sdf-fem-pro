@@ -199,6 +199,36 @@ def test_calculix_drop_long_diagnostic_options_are_written(tmp_path: Path) -> No
     assert "frequency=10" in text
 
 
+def test_calculix_drop_gentle_reference_overrides_are_written(tmp_path: Path) -> None:
+    from validation.run_calculix_drop_impact_comparison import build_model_suite, write_calculix_input
+
+    models = build_model_suite(
+        quick=True,
+        cases=["block_drop"],
+        duration=3.0,
+        dt=2.0e-3,
+        initial_velocity_z=-0.1,
+        gravity=0.0,
+        contact_stiffness_override=5000.0,
+    )
+
+    assert len(models) == 1
+    model = models[0]
+    assert model.case == "block_drop"
+    assert model.total_time == pytest.approx(3.0)
+    assert model.dt == pytest.approx(2.0e-3)
+    assert model.initial_velocity_z == pytest.approx(-0.1)
+    assert model.gravity == pytest.approx(0.0)
+    assert model.contact_stiffness == pytest.approx(5000.0)
+
+    inp = tmp_path / "gentle.inp"
+    write_calculix_input(model, inp)
+    text = inp.read_text(encoding="utf-8").lower()
+    assert "nall, 3, -0.1" in text
+    assert "elall, grav, 0, 0.0, 0.0, -1.0" in text
+    assert "\n5000\n" in text
+
+
 def test_calculix_drop_summary_claim_markers_have_backing_csv_fields(calculix_drop_output: Path) -> None:
     marker = re.compile(r"<!--\s*evidence\s+csv=(?P<csv>\S+)\s+field=(?P<field>\S+)\s*-->")
     text = (calculix_drop_output / "calculix_drop_summary.md").read_text(encoding="utf-8")

@@ -123,6 +123,16 @@ inspection, and allows CalculiX adaptive time stepping. It is a diagnostic
 visualization/comparison run, not a replacement for the short-window acceptance
 gate.
 
+Gentle external-contact reference candidate:
+
+```bash
+python validation/run_calculix_drop_impact_comparison.py --quick --case block_drop --duration 3.0 --dt 0.002 --output-frequency 5 --initial-velocity-z -0.1 --gravity 0.0 --contact-stiffness 5000 --out-dir results/calculix_gentle_contact_reference
+```
+
+This isolates a low-speed block/plane impact with no sustained gravitational
+pressing. It is intended as the next external reference attempt after the
+strong-impact 3-second run showed incomplete CalculiX convergence.
+
 Generated outputs:
 
 - `results/calculix_drop_impact/calculix_drop_time_history.csv`

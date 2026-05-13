@@ -306,6 +306,9 @@ def build_drop_model(
     dt: float | None = None,
     output_frequency: int = 1,
     direct_dynamic: bool = True,
+    initial_velocity_z: float | None = None,
+    gravity: float | None = None,
+    contact_stiffness_override: float | None = None,
 ) -> DropModel:
     """Build the shared CalculiX/SFC drop-impact model."""
 
@@ -337,7 +340,9 @@ def build_drop_model(
     if duration is not None:
         total_time = float(duration)
     dt_value = 5.0e-4 if dt is None else float(dt)
-    initial_velocity_z = -2.0
+    velocity_value = -2.0 if initial_velocity_z is None else float(initial_velocity_z)
+    gravity_value = 9.81 if gravity is None else float(gravity)
+    contact_stiffness_value = float(contact_stiffness) if contact_stiffness_override is None else float(contact_stiffness_override)
 
     return DropModel(
         case=case,
@@ -355,9 +360,9 @@ def build_drop_model(
         E=1000.0,
         nu=0.3,
         density=1.0,
-        gravity=9.81,
-        initial_velocity_z=initial_velocity_z,
-        contact_stiffness=contact_stiffness,
+        gravity=gravity_value,
+        initial_velocity_z=velocity_value,
+        contact_stiffness=contact_stiffness_value,
         total_time=total_time,
         dt=dt_value,
         output_frequency=max(1, int(output_frequency)),
@@ -376,56 +381,33 @@ def build_model_suite(
     dt: float | None = None,
     output_frequency: int = 1,
     direct_dynamic: bool = True,
+    cases: list[str] | tuple[str, ...] | None = None,
+    initial_velocity_z: float | None = None,
+    gravity: float | None = None,
+    contact_stiffness_override: float | None = None,
 ) -> list[DropModel]:
     """Return the model suite for quick or paper-scale external comparison."""
 
-    if quick:
-        return [
-            build_drop_model(
-                quick=True,
-                case="sphere_like_drop",
-                resolution=1,
-                duration=duration,
-                dt=dt,
-                output_frequency=output_frequency,
-                direct_dynamic=direct_dynamic,
-            ),
-            build_drop_model(
-                quick=True,
-                case="block_drop",
-                resolution=1,
-                duration=duration,
-                dt=dt,
-                output_frequency=output_frequency,
-                direct_dynamic=direct_dynamic,
-            ),
-        ]
-    return [
-        *(
-            build_drop_model(
-                quick=False,
-                case="sphere_like_drop",
-                resolution=r,
-                duration=duration,
-                dt=dt,
-                output_frequency=output_frequency,
-                direct_dynamic=direct_dynamic,
+    case_names = ["sphere_like_drop", "block_drop"] if cases is None else list(cases)
+    resolutions = [1] if quick else [1, 2, 3]
+    models: list[DropModel] = []
+    for case_name in case_names:
+        for resolution in resolutions:
+            models.append(
+                build_drop_model(
+                    quick=quick,
+                    case=case_name,
+                    resolution=resolution,
+                    duration=duration,
+                    dt=dt,
+                    output_frequency=output_frequency,
+                    direct_dynamic=direct_dynamic,
+                    initial_velocity_z=initial_velocity_z,
+                    gravity=gravity,
+                    contact_stiffness_override=contact_stiffness_override,
+                )
             )
-            for r in [1, 2, 3]
-        ),
-        *(
-            build_drop_model(
-                quick=False,
-                case="block_drop",
-                resolution=r,
-                duration=duration,
-                dt=dt,
-                output_frequency=output_frequency,
-                direct_dynamic=direct_dynamic,
-            )
-            for r in [1, 2, 3]
-        ),
-    ]
+    return models
 
 
 def _format_id_list(ids: np.ndarray, *, width: int = 10) -> list[str]:
@@ -1203,6 +1185,19 @@ def write_markdown(
         reproduce_parts.extend(["--dt", f"{models[0].dt:g}"])
     if models and len({int(model.output_frequency) for model in models}) == 1 and models[0].output_frequency != 1:
         reproduce_parts.extend(["--output-frequency", str(models[0].output_frequency)])
+    if models:
+        case_names = sorted({model.case for model in models})
+        if case_names != ["block_drop", "sphere_like_drop"]:
+            for case_name in case_names:
+                reproduce_parts.extend(["--case", case_name])
+    if models and len({round(float(model.initial_velocity_z), 12) for model in models}) == 1 and models[0].initial_velocity_z != -2.0:
+        reproduce_parts.extend(["--initial-velocity-z", f"{models[0].initial_velocity_z:g}"])
+    if models and len({round(float(model.gravity), 12) for model in models}) == 1 and models[0].gravity != 9.81:
+        reproduce_parts.extend(["--gravity", f"{models[0].gravity:g}"])
+    if models and len({round(float(model.contact_stiffness), 12) for model in models}) == 1:
+        default_stiffness = 2.0e5 if models[0].case == "sphere_like_drop" else 2.0e4
+        if models[0].contact_stiffness != default_stiffness:
+            reproduce_parts.extend(["--contact-stiffness", f"{models[0].contact_stiffness:g}"])
     if models and not models[0].direct_dynamic:
         reproduce_parts.append("--calculix-auto-step")
     reproduce_parts.extend(["--out-dir", path.parent.as_posix()])
@@ -1295,6 +1290,10 @@ def run_comparison(
     dt: float | None = None,
     output_frequency: int = 1,
     direct_dynamic: bool = True,
+    cases: list[str] | tuple[str, ...] | None = None,
+    initial_velocity_z: float | None = None,
+    gravity: float | None = None,
+    contact_stiffness: float | None = None,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("calculix_drop_*"):
@@ -1309,6 +1308,10 @@ def run_comparison(
         dt=dt,
         output_frequency=output_frequency,
         direct_dynamic=direct_dynamic,
+        cases=cases,
+        initial_velocity_z=initial_velocity_z,
+        gravity=gravity,
+        contact_stiffness_override=contact_stiffness,
     )
     history_rows: list[Row] = []
     metric_rows: list[Row] = []
@@ -1359,6 +1362,9 @@ def run_comparison(
             {"key": "duration_override", "value": "" if duration is None else duration},
             {"key": "dt_override", "value": "" if dt is None else dt},
             {"key": "output_frequency", "value": output_frequency},
+            {"key": "initial_velocity_z_override", "value": "" if initial_velocity_z is None else initial_velocity_z},
+            {"key": "gravity_override", "value": "" if gravity is None else gravity},
+            {"key": "contact_stiffness_override", "value": "" if contact_stiffness is None else contact_stiffness},
             {"key": "calculix_direct_dynamic", "value": str(bool(direct_dynamic)).lower()},
             {"key": "calculix_dynamic_keyword", "value": _calculix_dynamic_keyword(models[0]) if models else "*DYNAMIC,DIRECT,ALPHA=-0.05"},
             {"key": "cases", "value": ",".join(f"{model.case}:r{model.resolution}" for model in models)},
@@ -1383,6 +1389,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=None, help="Override the nominal integration/output increment.")
     parser.add_argument("--output-frequency", type=int, default=1, help="CalculiX print frequency in increments.")
     parser.add_argument(
+        "--case",
+        action="append",
+        choices=["sphere_like_drop", "block_drop"],
+        default=None,
+        help="Limit the run to one or more cases. Repeat the option for multiple cases.",
+    )
+    parser.add_argument("--initial-velocity-z", type=float, default=None, help="Override the initial vertical velocity.")
+    parser.add_argument("--gravity", type=float, default=None, help="Override gravitational acceleration magnitude.")
+    parser.add_argument("--contact-stiffness", type=float, default=None, help="Override the pressure-overclosure stiffness.")
+    parser.add_argument(
         "--calculix-auto-step",
         action="store_true",
         help="Use CalculiX adaptive *DYNAMIC instead of fixed direct increments for long diagnostics.",
@@ -1399,6 +1415,10 @@ def main() -> None:
         dt=args.dt,
         output_frequency=args.output_frequency,
         direct_dynamic=not bool(args.calculix_auto_step),
+        cases=args.case,
+        initial_velocity_z=args.initial_velocity_z,
+        gravity=args.gravity,
+        contact_stiffness=args.contact_stiffness,
     )
     print("CalculiX drop-impact comparison complete.")
     for name, path in outputs.items():
