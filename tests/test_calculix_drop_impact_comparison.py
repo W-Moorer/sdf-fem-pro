@@ -110,6 +110,29 @@ def test_calculix_drop_nonquick_suite_has_multiple_resolutions() -> None:
     assert all(float(model.surface_node_areas.sum()) > 0.0 for model in models)
 
 
+def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Path) -> None:
+    from validation.run_calculix_drop_impact_comparison import (
+        CALCULIX_DEFAULT_HHT_ALPHA,
+        _hht_newmark_parameters,
+        build_drop_model,
+        write_calculix_input,
+    )
+
+    beta, gamma = _hht_newmark_parameters(CALCULIX_DEFAULT_HHT_ALPHA)
+    assert beta == pytest.approx(0.25 * (1.0 - CALCULIX_DEFAULT_HHT_ALPHA) ** 2)
+    assert gamma == pytest.approx(0.5 - CALCULIX_DEFAULT_HHT_ALPHA)
+
+    model = build_drop_model(quick=True, case="block_drop", resolution=1)
+    inp = tmp_path / "drop.inp"
+    write_calculix_input(model, inp)
+    text = inp.read_text(encoding="utf-8").lower()
+
+    assert "*dynamic, direct, alpha=-0.05" in text
+    assert "*element, type=c3d4" in text
+    assert "*surface, name=ball, type=element" in text
+    assert "*contact pair, interaction=contact,type=surface to surface" in text
+
+
 def test_calculix_drop_summary_claim_markers_have_backing_csv_fields(calculix_drop_output: Path) -> None:
     marker = re.compile(r"<!--\s*evidence\s+csv=(?P<csv>\S+)\s+field=(?P<field>\S+)\s*-->")
     text = (calculix_drop_output / "calculix_drop_summary.md").read_text(encoding="utf-8")
@@ -122,3 +145,7 @@ def test_calculix_drop_summary_claim_markers_have_backing_csv_fields(calculix_dr
         with csv_path.open(newline="", encoding="utf-8") as f:
             fieldnames = csv.DictReader(f).fieldnames or []
         assert match.group("field") in fieldnames
+
+    metadata = {row["key"]: row["value"] for row in _rows(calculix_drop_output / "calculix_drop_metadata.csv")}
+    assert metadata["sfc_mass_matrix"] == "consistent"
+    assert metadata["calculix_dynamic_keyword"] == "*DYNAMIC,DIRECT,ALPHA=-0.05"

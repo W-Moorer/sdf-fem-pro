@@ -93,8 +93,10 @@ Implemented current version:
 - Use the same nodal coordinates and TET4 connectivity for SFC and CalculiX.
 - Use face-based CalculiX slave surfaces and a fixed shell master plane.
 - Use matching SFC boundary-face area weights for smooth penalty contact.
-- Use a CalculiX-aligned SFC validation mode with smooth overclosure law,
-  contact tangent, Newton iterations, and substepping.
+- Use explicit `*DYNAMIC,DIRECT,ALPHA=-0.05` in the generated CalculiX input
+  and the same HHT-alpha parameters in the SFC validation runner.
+- Use a CalculiX-aligned SFC validation mode with consistent mass, smooth
+  overclosure law, contact tangent, Newton iterations, and substepping.
 
 Implemented runner:
 
@@ -175,9 +177,9 @@ Do not make a paper claim unless all of these are true:
 4. Done: added WSL `ccx` solver discovery.
 5. Done: added parser for CalculiX `.dat` displacement, fixed-floor RF total,
    contact spring energy, and contact element count output.
-6. Done: added SFC time-history runner using assembled `M`, `K`, Newmark,
-   smooth overclosure penalty, slave area weighting, contact tangent, Newton
-   iterations, and substepping.
+6. Done: added SFC time-history runner using assembled consistent `M`, `K`,
+   HHT-alpha implicit dynamics, smooth overclosure penalty, slave area
+   weighting, contact tangent, Newton iterations, and substepping.
 7. Done: added plots for center-of-mass height, RF/normal force comparison,
    minimum gap, and contact energy.
 8. Done: added quick-mode tests that skip when CalculiX is unavailable and
@@ -212,10 +214,24 @@ Current unsupported claims:
 The SFC validation mode now follows the CalculiX penalty-contact structure more
 closely without copying GPL source code:
 
+- source review used the public CalculiX code paths `dyna.c`, `dynamics.f`,
+  `shape4tet.f`, `calcmass.f`, `contactprints.f`, `springforc_f2f.f`, and the
+  public *DYNAMIC documentation;
+- C3D4/TET4 linear element geometry follows the same constant-gradient
+  four-node tetrahedral formulation;
+- implicit dynamics uses the documented HHT alpha method, with alpha fixed to
+  the CalculiX default `-0.05` through `*DYNAMIC,DIRECT,ALPHA=-0.05`;
+- the SFC alignment mode uses a consistent mass matrix, not the earlier lumped
+  mass matrix;
 - face-based slave surface instead of only a slave node set;
 - per-node surface-area weights from boundary faces;
 - smooth overclosure activation inspired by CalculiX's linear
   pressure-overclosure regularization;
-- contact tangent included in the Newmark effective solve;
+- contact tangent included in the HHT effective solve;
 - Newton iterations inside each time step;
 - optional substepping, enabled by default in this validation runner.
+
+This is still not a line-by-line reimplementation of CalculiX. The comparison
+is intentionally restricted to generated C3D4/TET4 linear dynamics with a fixed
+direct time increment. The contact gap and force remain the SFC dynamic-SDF
+validation method, because that is the variable under study.
