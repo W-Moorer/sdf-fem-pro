@@ -13,9 +13,11 @@ from .narrow_phase import (
     contact_constraint_from_sample,
 )
 from .penalty import penalty_contact_response
+from .sdf_geometry import DynamicSurfaceSDFContactGeometry
 
 __all__ = [
     "ContactConstraint",
+    "DynamicSurfaceSDFContactGeometry",
     "SurfaceSample",
     "UniformTriangleAABBHash",
     "assemble_contact_jacobian",

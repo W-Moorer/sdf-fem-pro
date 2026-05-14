@@ -1,11 +1,12 @@
 """Geometric nonlinear contact validation against CalculiX.
 
-This runner is deliberately separate from the core solver.  It uses the
-validation-only StVK geometric nonlinear dynamics path and compares a
-block-plane dynamic contact case against CalculiX contact output when ccx is
-available.  The comparison records contact activation, penetration, normal
-reaction, contact energy, center-of-mass motion, rebound height, contact-zone
-stress, mesh/time-step trends, and ParaView VTK stress clouds.
+This runner is deliberately separate from the core solver.  It uses a
+clean-room CalculiX-aligned StVK geometric nonlinear dynamics backend and
+compares a block-plane dynamic contact case against CalculiX contact output
+when ccx is available.  The comparison records contact activation,
+penetration, normal reaction, contact energy, center-of-mass motion, rebound
+height, contact-zone stress, mesh/time-step trends, and ParaView VTK stress
+clouds.
 """
 
 from __future__ import annotations
@@ -50,14 +51,17 @@ from validation.run_geometric_nonlinear_acceptance import (  # noqa: E402
     _parse_final_stress_voigt,
     _voigt_von_mises,
 )
+from sfc.fem.calculix_aligned import (  # noqa: E402
+    MechanicsModel,
+    MechanicsState,
+    PlaneContactGeometry,
+    StepDiagnostics,
+    evaluate_state,
+    hht_step,
+    initial_state,
+)
 from validation.run_geometric_nonlinear_vtk import (  # noqa: E402
     NonlinearState,
-    _compute_state,
-    _contact_response_with_tangent,
-    _implicit_hht_step,
-    _lumped_mass,
-    _static_residual_and_tangent,
-    _tet_reference_data,
     _write_vtk,
 )
 
@@ -158,111 +162,101 @@ def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout
 
 
 def run_sfc_geometric_contact_history(model: DropModel) -> tuple[list[Row], np.ndarray, NonlinearState]:
-    """Run the validation StVK geometric nonlinear contact model."""
+    """Run the clean-room CalculiX-aligned StVK contact backend."""
 
-    X = model.nodes
-    elements = model.tet_elements
-    faces = model.surface_faces
-    plane_z = _contact_plane_z(model)
-    volumes, grads = _tet_reference_data(X, elements)
-    mass = _lumped_mass(X.shape[0], elements, volumes, model.density)
-    x = X.copy()
-    v = np.zeros_like(X)
-    v[:, 2] = model.initial_velocity_z
-    state, acceleration, _ = _compute_state(
-        X,
-        elements,
-        volumes,
-        grads,
-        faces,
-        x,
-        v,
-        mass,
+    mechanics = MechanicsModel.from_tet4_mesh(
+        model.nodes,
+        model.tet_elements,
         E=model.E,
         nu=model.nu,
         density=model.density,
-        gravity=model.gravity,
-        plane_z=plane_z,
-        contact_stiffness=model.contact_stiffness,
-        assemble_tangent=True,
     )
-    previous_static_residual, _, _ = _static_residual_and_tangent(
-        X,
-        elements,
-        volumes,
-        grads,
-        faces,
-        x,
-        mass,
-        E=model.E,
-        nu=model.nu,
-        gravity=model.gravity,
-        plane_z=plane_z,
-        contact_stiffness=model.contact_stiffness,
+    contact = PlaneContactGeometry(
+        model.surface_faces,
+        plane_z=_contact_plane_z(model),
+        stiffness=model.contact_stiffness,
     )
+    state, previous_static_residual = initial_state(
+        mechanics,
+        contact,
+        gravity=model.gravity,
+        initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+    )
+    diagnostics = evaluate_state(mechanics, state, contact, gravity=model.gravity, assemble_tangent=True)
     times = np.arange(0.0, model.total_time + 0.5 * model.dt, model.dt)
     rows: list[Row] = []
     for step, time in enumerate(times):
         state.time = float(time)
-        fcontact, _, _, active_count, max_penetration, contact_energy = _contact_response_with_tangent(
-            x,
-            faces,
-            plane_z=plane_z,
-            stiffness=model.contact_stiffness,
-            assemble_tangent=True,
-        )
-        centroid_gaps = _surface_face_gaps_to_contact_plane(model, x)
+        centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
         rows.append(
             {
                 "case": model.case,
                 "resolution": model.resolution,
                 "source": "sfc_geometric_nonlinear",
                 "time": float(time),
-                "z_cm": _mass_weighted_center_z(model, x),
-                "v_cm_z": _mass_weighted_velocity_z(model, v.reshape(-1)),
+                "z_cm": _mass_weighted_center_z(model, state.x),
+                "v_cm_z": _mass_weighted_velocity_z(model, state.v.reshape(-1)),
                 "min_gap": float(np.min(centroid_gaps)),
-                "quadrature_min_gap": state.min_gap,
-                "max_penetration": max(float(max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
-                "active_contact_count": active_count,
-                "normal_force_proxy": float(np.sum(fcontact[:, 2])),
+                "quadrature_min_gap": diagnostics.contact.min_gap,
+                "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
+                "active_contact_count": diagnostics.contact.active_count,
+                "normal_force_proxy": diagnostics.contact.normal_force,
                 "normal_force_source": "geometric_nonlinear_penalty_tangent",
                 "calculix_floor_rf_z": "",
                 "calculix_contact_count": "",
-                "kinetic_energy_proxy": state.kinetic_energy,
-                "strain_energy": state.strain_energy,
-                "gravitational_potential_energy": state.gravitational_energy,
-                "contact_energy_proxy": contact_energy,
-                "total_mechanical_energy_proxy": state.total_energy,
-                "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, state.von_mises),
-                "newton_iterations": state.newton_iterations,
-                "newton_residual_norm": state.newton_residual_norm,
-                "details": "StVK geometric nonlinear implicit HHT/Newmark validation path",
+                "kinetic_energy_proxy": diagnostics.kinetic_energy,
+                "strain_energy": diagnostics.internal.strain_energy,
+                "gravitational_potential_energy": diagnostics.gravitational_energy,
+                "contact_energy_proxy": diagnostics.contact.energy,
+                "total_mechanical_energy_proxy": diagnostics.total_energy,
+                "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, diagnostics.internal.von_mises),
+                "newton_iterations": diagnostics.newton_iterations,
+                "newton_residual_norm": diagnostics.newton_residual_norm,
+                "details": "clean-room CalculiX-aligned StVK backend; contact geometry remains swappable",
             }
         )
         if step == len(times) - 1:
             break
-        x, v, acceleration, state, previous_static_residual = _implicit_hht_step(
-            X,
-            elements,
-            volumes,
-            grads,
-            faces,
-            x,
-            v,
-            acceleration,
-            mass,
+        state, previous_static_residual, diagnostics = hht_step(
+            mechanics,
+            state,
             previous_static_residual,
+            contact,
             dt=model.dt,
-            E=model.E,
-            nu=model.nu,
             gravity=model.gravity,
-            plane_z=plane_z,
-            contact_stiffness=model.contact_stiffness,
             alpha=model.hht_alpha,
             max_iterations=12,
             tolerance=1.0e-10,
         )
-    return rows, x, state
+    return rows, state.x, _vtk_state_from_backend(state, diagnostics)
+
+
+def _vtk_state_from_backend(state: MechanicsState, diagnostics: StepDiagnostics) -> NonlinearState:
+    return NonlinearState(
+        time=state.time,
+        x=state.x.copy(),
+        v=state.v.copy(),
+        element_strain=diagnostics.internal.strain.copy(),
+        element_stress=diagnostics.internal.stress.copy(),
+        von_mises=diagnostics.internal.von_mises.copy(),
+        min_gap=diagnostics.contact.min_gap,
+        max_penetration=diagnostics.contact.max_penetration,
+        active_contact_count=diagnostics.contact.active_count,
+        kinetic_energy=diagnostics.kinetic_energy,
+        strain_energy=diagnostics.internal.strain_energy,
+        gravitational_energy=diagnostics.gravitational_energy,
+        contact_energy=diagnostics.contact.energy,
+        total_energy=diagnostics.total_energy,
+        material_tangent_norm=float(np.linalg.norm(diagnostics.internal.material_tangent.data))
+        if diagnostics.internal.material_tangent.nnz
+        else 0.0,
+        geometric_tangent_norm=float(np.linalg.norm(diagnostics.internal.geometric_tangent.data))
+        if diagnostics.internal.geometric_tangent.nnz
+        else 0.0,
+        contact_tangent_norm=float(np.linalg.norm(diagnostics.contact.tangent.data)) if diagnostics.contact.tangent.nnz else 0.0,
+        newton_iterations=diagnostics.newton_iterations,
+        newton_residual_norm=diagnostics.newton_residual_norm,
+    )
 
 
 def _contact_zone_elements(model: DropModel) -> np.ndarray:
@@ -591,7 +585,7 @@ def _write_markdown(
     lines = [
         "# Geometric Nonlinear Contact Validation",
         "",
-        "This validation compares the validation-only SFC StVK geometric nonlinear block-plane contact path against CalculiX dynamic contact output.",
+        "This validation compares the clean-room CalculiX-aligned SFC StVK geometric nonlinear block-plane contact path against CalculiX dynamic contact output.",
         "",
         "## Outputs",
         "",
@@ -626,7 +620,8 @@ def _write_markdown(
             "",
             "## Limitations",
             "",
-            "- This validates the diagnostic StVK TET4 contact path, not the production core solver.",
+            "- This validates the diagnostic clean-room StVK TET4 contact path, not a copied CalculiX implementation.",
+            "- The mechanics backend is swappable with SFC dynamic-SDF contact geometry; this runner uses rigid-plane contact for external alignment.",
             "- Passing the scoped gate is not a source-level CalculiX contact equivalence claim.",
             "- If CalculiX does not export RF/contact-energy data, the affected force/energy comparison fields remain blank.",
             "- Mesh/time-step trend files do not claim theoretical convergence order.",

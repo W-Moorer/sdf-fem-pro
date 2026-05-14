@@ -4,9 +4,10 @@
 
 This handoff records the external contact evidence added after the no-contact
 geometric nonlinear acceptance suite. The case is a gravity-driven deformable
-block impacting a rigid plane. SFC uses the validation-only StVK geometric
-nonlinear implicit HHT/Newmark path with penalty plane contact. CalculiX 2.17
-is used as the external dynamic contact reference.
+block impacting a rigid plane. SFC uses a clean-room CalculiX-aligned StVK
+geometric nonlinear implicit HHT/Newmark path with consistent TET4 mass,
+material/geometric tangent, and penalty plane contact. CalculiX 2.17 is used
+as the external dynamic contact reference.
 
 This is a scoped validation. It does not claim source-level equivalence to
 CalculiX surface-to-surface contact.
@@ -48,9 +49,9 @@ CalculiX completed for r1, r2, and r3 with return code `0`.
 
 | Resolution | first contact C/SFC | max pen. C | max pen. SFC | peak force C | peak force SFC | contact-zone VM C | contact-zone VM SFC | status |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | `0.096 / 0.096` | `3.144397e-03` | `4.492628e-03` | `4.118874e+01` | `5.092889e+01` | `1.994642e+01` | `2.621428e+01` | `passed_scoped_gate` |
-| 2 | `0.096 / 0.096` | `2.743927e-03` | `3.856746e-03` | `3.077931e+01` | `4.368614e+01` | `2.735979e+01` | `2.785272e+01` | `passed_scoped_gate` |
-| 3 | `0.096 / 0.096` | `2.690467e-03` | `3.424553e-03` | `2.922631e+01` | `4.001598e+01` | `3.473394e+01` | `3.968473e+01` | `passed_scoped_gate` |
+| 1 | `0.096 / 0.096` | `3.144397e-03` | `3.387373e-03` | `4.118874e+01` | `3.981581e+01` | `1.994642e+01` | `2.374152e+01` | `passed_scoped_gate` |
+| 2 | `0.096 / 0.096` | `2.743927e-03` | `3.255793e-03` | `3.077931e+01` | `3.497837e+01` | `2.735979e+01` | `2.840869e+01` | `passed_scoped_gate` |
+| 3 | `0.096 / 0.096` | `2.690467e-03` | `3.021339e-03` | `2.922631e+01` | `3.451957e+01` | `3.473394e+01` | `3.356425e+01` | `passed_scoped_gate` |
 
 The scoped gate is intentionally loose. It confirms that the contact event,
 force scale, penetration scale, and contact-zone stress scale are comparable.
@@ -60,9 +61,9 @@ It is not a high-precision contact equivalence claim.
 
 | Resolution | max penetration | peak normal force | peak contact energy | contact-zone max VM |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | `4.492628e-03` | `5.092889e+01` | `1.025650e-01` | `2.621428e+01` |
-| 2 | `3.856746e-03` | `4.368614e+01` | `7.415377e-02` | `2.785272e+01` |
-| 3 | `3.424553e-03` | `4.001598e+01` | `6.292567e-02` | `3.968473e+01` |
+| 1 | `3.387373e-03` | `3.981581e+01` | `6.038913e-02` | `2.374152e+01` |
+| 2 | `3.255793e-03` | `3.497837e+01` | `4.915444e-02` | `2.840869e+01` |
+| 3 | `3.021339e-03` | `3.451957e+01` | `4.625076e-02` | `3.356425e+01` |
 
 This is a trend table only. No theoretical convergence order is claimed.
 
@@ -70,9 +71,9 @@ This is a trend table only. No theoretical convergence order is claimed.
 
 | dt | max penetration | peak normal force | peak contact energy | final z_cm |
 | ---: | ---: | ---: | ---: | ---: |
-| `2.0e-03` | `4.492628e-03` | `5.092889e+01` | `1.025650e-01` | `3.957842e-01` |
-| `1.0e-03` | `4.571633e-03` | `5.157889e+01` | `1.066094e-01` | `3.958978e-01` |
-| `5.0e-04` | `4.605301e-03` | `5.188659e+01` | `1.070565e-01` | `3.959287e-01` |
+| `2.0e-03` | `3.387373e-03` | `3.981581e+01` | `6.038913e-02` | `3.949636e-01` |
+| `1.0e-03` | `3.583168e-03` | `3.963416e+01` | `5.987266e-02` | `3.949591e-01` |
+| `5.0e-04` | `3.665087e-03` | `3.965632e+01` | `5.986156e-02` | `3.949543e-01` |
 
 ## ParaView Stress Clouds
 
@@ -103,8 +104,11 @@ The full run reports:
 
 ## Limitations
 
-- This validates the diagnostic geometric nonlinear contact path, not the core
-  production solver.
+- This validates the diagnostic clean-room CalculiX-aligned contact path, not
+  a copied CalculiX implementation.
+- The mechanics backend is separated from contact geometry so SFC dynamic-SDF
+  contact queries can be swapped in; this external alignment runner uses the
+  rigid-plane contact geometry for a controlled comparison.
 - Contact remains normal penalty contact against a rigid plane.
 - The scoped gate does not mean exact CalculiX surface-to-surface contact
   equivalence.
