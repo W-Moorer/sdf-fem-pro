@@ -61,12 +61,25 @@ The runner now reports both force-producing active sample count and generated
 contact spring count where available. This separates CalculiX-style contact
 element bookkeeping from negative-clearance force activation.
 
-## Contact Convergence / Cutback Diagnostic
+## Contact Convergence / Cutback Retry
 
 `CalculixContactConvergenceHeuristic` records active-count and residual trends.
 It recommends a cutback/retry when residuals grow or active-set counts
-oscillate. This is a clean-room diagnostic heuristic, not a copied CalculiX
-`checkconvergence.c` implementation.
+oscillate. The geometric nonlinear validation runner now uses that
+recommendation actively:
+
+1. run a trial HHT/Newmark step;
+2. evaluate contact active-count and residual trend;
+3. if cutback is recommended, rollback the contact lifecycle and heuristic;
+4. halve `dt`;
+5. mark the retry as a cutback retry so persistent contact springs can reuse
+   previous generated state;
+6. accept when the diagnostic stabilizes or the retry/minimum-step guard is
+   reached.
+
+This is a clean-room retry heuristic guided by the local CalculiX source
+structure. It is not a copied CalculiX `dyna.c` / `checkconvergence.c`
+implementation.
 
 ## Deformable-Deformable Master DOF Assembly
 
@@ -122,8 +135,8 @@ python validation/run_geometric_nonlinear_contact_validation.py --quick --skip-c
 - Provides a contact-spring-element style diagnostic record with slave face,
   master face, shape weights, normal, spring area, clearance, and active flag.
 - Adds persistent spring lifecycle bookkeeping and generated spring count.
-- Adds a cutback/contact convergence diagnostic based on residual and active-set
-  trends.
+- Adds an active cutback/contact convergence retry loop based on residual and
+  active-set trends.
 - Adds deformable-deformable master DOF force and tangent assembly.
 - Keeps dynamic SDF isolated as a contact-query provider rather than changing
   the mechanics/contact enforcement backend.
@@ -133,6 +146,8 @@ python validation/run_geometric_nonlinear_contact_validation.py --quick --skip-c
 - The mode is a clean-room implementation, not copied CalculiX source.
 - Persistent/cutback behavior is a clean-room approximation and still does not
   claim source-level CalculiX equivalence.
+- The retry loop uses a simple halving rule and fixed retry guard; it is not a
+  complete reproduction of CalculiX automatic time increment control.
 - The geometric nonlinear block-plane runner still uses rigid master contact;
   deformable-deformable master DOF assembly is implemented and unit tested as a
   validation primitive, not yet a full two-body dynamic runner.
@@ -151,4 +166,5 @@ The added tests check that:
   `persistent_calculix_c3d4_f2f`;
 - persistent lifecycle generation, persistence, and release work as expected;
 - cutback diagnostics flag active-set oscillation;
+- cutback recommendations can reduce accepted `dt` and report retry counts;
 - deformable-deformable master/slave contact force is action-reaction balanced.

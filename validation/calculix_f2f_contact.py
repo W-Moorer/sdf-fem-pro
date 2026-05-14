@@ -155,6 +155,18 @@ class CalculixF2FContactLifecycle:
         self.events = events
         return list(next_active.values())
 
+    def snapshot(self) -> tuple[dict[int, CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]:
+        """Return a rollback snapshot of generated springs and events."""
+
+        return dict(self.active_springs or {}), list(self.events or [])
+
+    def restore(self, snapshot: tuple[dict[int, CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]) -> None:
+        """Restore a rollback snapshot."""
+
+        springs, events = snapshot
+        self.active_springs = dict(springs)
+        self.events = list(events)
+
     @property
     def generated_count(self) -> int:
         """Return number of currently generated contact spring elements."""
@@ -193,7 +205,11 @@ class CalculixContactConvergenceHeuristic:
         reason = "stable_or_improving"
         cutback = False
         previous = self.history[-1] if self.history else None
-        if previous is not None and residual > float(previous.residual_norm) * float(self.residual_growth_factor):
+        if (
+            previous is not None
+            and float(previous.residual_norm) > 1.0e-14
+            and residual > float(previous.residual_norm) * float(self.residual_growth_factor)
+        ):
             cutback = True
             reason = "residual_growth"
         if len(self.history) >= 2:
@@ -268,6 +284,7 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
     stiffness: float
     normal: np.ndarray | None = None
     lifecycle: CalculixF2FContactLifecycle | None = None
+    cutback_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
@@ -289,7 +306,12 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
             self.normal,
         )
         assert self.lifecycle is not None
-        return self.lifecycle.update(stateless.contact_springs(x_current))
+        return self.lifecycle.update(stateless.contact_springs(x_current), cutback=self.cutback_retry)
+
+    def set_cutback_retry(self, value: bool) -> None:
+        """Set whether this evaluation is part of a cutback retry."""
+
+        self.cutback_retry = bool(value)
 
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
         """Yield samples from generated springs."""
@@ -356,6 +378,7 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
     candidate_provider: CandidateProvider
     stiffness: float
     lifecycle: CalculixF2FContactLifecycle | None = None
+    cutback_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
@@ -378,7 +401,12 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
             self.stiffness,
         )
         assert self.lifecycle is not None
-        return self.lifecycle.update(stateless.contact_springs(x_current))
+        return self.lifecycle.update(stateless.contact_springs(x_current), cutback=self.cutback_retry)
+
+    def set_cutback_retry(self, value: bool) -> None:
+        """Set whether this evaluation is part of a cutback retry."""
+
+        self.cutback_retry = bool(value)
 
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
         """Yield samples from generated springs."""

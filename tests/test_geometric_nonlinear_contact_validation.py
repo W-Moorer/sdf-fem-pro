@@ -40,6 +40,8 @@ def test_sfc_geometric_contact_history_activates_contact() -> None:
     assert any(row["generated_contact_spring_count"] != "" for row in rows)
     assert all(row["contact_cutback_recommended"] in {"true", "false"} for row in rows)
     assert all(row["contact_convergence_reason"] for row in rows)
+    assert any(int(row["cutback_retry_count"]) > 0 for row in rows)
+    assert min(float(row["accepted_dt"]) for row in rows[1:]) < model.dt
     assert max(float(row["normal_force_proxy"]) for row in rows) > 0.0
     assert max(float(row["contact_energy_proxy"]) for row in rows) > 0.0
     assert max(int(row["newton_iterations"]) for row in rows) > 0

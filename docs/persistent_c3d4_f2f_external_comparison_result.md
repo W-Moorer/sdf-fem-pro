@@ -1,5 +1,11 @@
 # Persistent C3D4 F2F External Comparison Result
 
+Update note: this report was generated before the active cutback retry loop was
+added. It remains useful as a baseline for passive persistent bookkeeping. The
+post-retry implementation is documented in
+`docs/active_cutback_retry_handoff.md`; the external CalculiX comparison should
+be rerun before drawing final RF/CELS/CNUM/max-penetration conclusions.
+
 ## Command
 
 ```bash

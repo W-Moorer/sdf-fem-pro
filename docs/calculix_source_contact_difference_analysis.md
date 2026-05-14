@@ -352,8 +352,12 @@ been added in `validation/calculix_f2f_contact.py` and wired into
    - flag residual growth and active-set oscillation as cutback/retry
      candidates.
 
-   Status: implemented as `CalculixContactConvergenceHeuristic` and reported by
-   the geometric nonlinear contact validation runner.
+   Status: implemented as `CalculixContactConvergenceHeuristic` and used by the
+   geometric nonlinear contact validation runner. A trial step that triggers a
+   cutback recommendation is rejected, contact lifecycle/heuristic state is
+   restored, `dt` is reduced, and the step is retried. This is a clean-room
+   approximation guided by the local CalculiX source structure, not a copied
+   implementation of CalculiX automatic incrementation.
 
 4. Add deformable-deformable master DOF spring assembly:
    - assemble `dg/dx_slave = N_slave n^T`;

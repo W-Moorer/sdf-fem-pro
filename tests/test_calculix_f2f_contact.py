@@ -106,6 +106,19 @@ def test_persistent_lifecycle_generates_persists_and_releases_springs() -> None:
     assert lifecycle.generated_count == 0
 
 
+def test_lifecycle_snapshot_restore_rolls_back_trial_contact_state() -> None:
+    lifecycle = CalculixF2FContactLifecycle(release_tolerance=0.02)
+    lifecycle.update([_spring(clearance=-0.01)])
+    snapshot = lifecycle.snapshot()
+
+    lifecycle.update([_spring(clearance=0.03)])
+    assert lifecycle.generated_count == 0
+
+    lifecycle.restore(snapshot)
+    assert lifecycle.generated_count == 1
+    assert lifecycle.events[0].status == "generated"
+
+
 def test_persistent_plane_geometry_reports_generated_count_separately() -> None:
     x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
     faces = np.asarray([[0, 1, 2]], dtype=np.int64)

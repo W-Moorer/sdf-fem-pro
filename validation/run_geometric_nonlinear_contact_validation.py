@@ -193,63 +193,147 @@ def run_sfc_geometric_contact_history(
         initial_velocity=(0.0, 0.0, model.initial_velocity_z),
     )
     diagnostics = evaluate_state(mechanics, state, contact, gravity=model.gravity, assemble_tangent=True)
-    times = np.arange(0.0, model.total_time + 0.5 * model.dt, model.dt)
     rows: list[Row] = []
     contact_heuristic = CalculixContactConvergenceHeuristic()
-    for step, time in enumerate(times):
-        state.time = float(time)
-        centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
-        generated_count = _generated_contact_count(contact)
-        convergence_record = contact_heuristic.update(
-            iteration=step,
-            active_count=int(generated_count) if generated_count != "" else int(diagnostics.contact.active_count),
-            residual_norm=float(diagnostics.newton_residual_norm),
-        )
-        rows.append(
-            {
-                "case": model.case,
-                "resolution": model.resolution,
-                "source": source,
-                "contact_mode": contact_mode,
-                "time": float(time),
-                "z_cm": _mass_weighted_center_z(model, state.x),
-                "v_cm_z": _mass_weighted_velocity_z(model, state.v.reshape(-1)),
-                "min_gap": float(np.min(centroid_gaps)),
-                "quadrature_min_gap": diagnostics.contact.min_gap,
-                "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
-                "active_contact_count": diagnostics.contact.active_count,
-                "generated_contact_spring_count": generated_count,
-                "normal_force_proxy": diagnostics.contact.normal_force,
-                "normal_force_source": _normal_force_source(contact_mode),
-                "calculix_floor_rf_z": "",
-                "calculix_contact_count": "",
-                "kinetic_energy_proxy": diagnostics.kinetic_energy,
-                "strain_energy": diagnostics.internal.strain_energy,
-                "gravitational_potential_energy": diagnostics.gravitational_energy,
-                "contact_energy_proxy": diagnostics.contact.energy,
-                "total_mechanical_energy_proxy": diagnostics.total_energy,
-                "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, diagnostics.internal.von_mises),
-                "newton_iterations": diagnostics.newton_iterations,
-                "newton_residual_norm": diagnostics.newton_residual_norm,
-                "contact_cutback_recommended": str(convergence_record.recommended_cutback).lower(),
-                "contact_convergence_reason": convergence_record.reason,
-                "details": details,
-            }
-        )
-        if step == len(times) - 1:
-            break
-        state, previous_static_residual, diagnostics = hht_step(
-            mechanics,
+    state.time = 0.0
+    initial_record = contact_heuristic.update(
+        iteration=0,
+        active_count=_contact_count_for_heuristic(contact, diagnostics),
+        residual_norm=float(diagnostics.newton_residual_norm),
+    )
+    rows.append(
+        _sfc_history_row(
+            model,
             state,
-            previous_static_residual,
+            diagnostics,
             contact,
-            dt=model.dt,
-            gravity=model.gravity,
-            alpha=model.hht_alpha,
-            max_iterations=12,
-            tolerance=1.0e-10,
+            source=source,
+            contact_mode=contact_mode,
+            convergence_record=initial_record,
+            details=details,
+            accepted_dt=0.0,
+            cutback_retry_count=0,
+            cutback_limited=False,
         )
+    )
+    current_time = 0.0
+    step = 0
+    min_dt = max(float(model.dt) / 16.0, 1.0e-8)
+    max_retries = 6
+    while current_time < float(model.total_time) - 1.0e-12:
+        nominal_dt = min(float(model.dt), float(model.total_time) - current_time)
+        trial_dt = nominal_dt
+        retry_count = 0
+        while True:
+            lifecycle_snapshot = _snapshot_contact_lifecycle(contact)
+            heuristic_snapshot = _snapshot_contact_heuristic(contact_heuristic)
+            _set_contact_cutback_retry(contact, retry_count > 0)
+            trial_state, trial_previous_static, trial_diagnostics = hht_step(
+                mechanics,
+                state,
+                previous_static_residual,
+                contact,
+                dt=trial_dt,
+                gravity=model.gravity,
+                alpha=model.hht_alpha,
+                max_iterations=12,
+                tolerance=1.0e-10,
+            )
+            trial_time = current_time + trial_dt
+            trial_state.time = float(trial_time)
+            record = contact_heuristic.update(
+                iteration=step + 1,
+                active_count=_contact_count_for_heuristic(contact, trial_diagnostics),
+                residual_norm=float(trial_diagnostics.newton_residual_norm),
+            )
+            should_retry = (
+                _contact_cutback_enabled(contact_mode)
+                and record.recommended_cutback
+                and retry_count < max_retries
+                and trial_dt > min_dt * 1.000001
+            )
+            if should_retry:
+                _restore_contact_lifecycle(contact, lifecycle_snapshot)
+                _restore_contact_heuristic(contact_heuristic, heuristic_snapshot)
+                trial_dt = max(min_dt, 0.5 * trial_dt)
+                retry_count += 1
+                continue
+
+            cutback_limited = bool(record.recommended_cutback and retry_count >= max_retries)
+            state = trial_state
+            previous_static_residual = trial_previous_static
+            diagnostics = trial_diagnostics
+            current_time = trial_time
+            step += 1
+            _set_contact_cutback_retry(contact, False)
+            rows.append(
+                _sfc_history_row(
+                    model,
+                    state,
+                    diagnostics,
+                    contact,
+                    source=source,
+                    contact_mode=contact_mode,
+                    convergence_record=record,
+                    details=details,
+                    accepted_dt=trial_dt,
+                    cutback_retry_count=retry_count,
+                    cutback_limited=cutback_limited,
+                )
+            )
+            break
     return rows, state.x, _vtk_state_from_backend(state, diagnostics)
+
+
+def _sfc_history_row(
+    model: DropModel,
+    state: MechanicsState,
+    diagnostics: StepDiagnostics,
+    contact: ContactGeometry,
+    *,
+    source: str,
+    contact_mode: str,
+    convergence_record: Any,
+    details: str,
+    accepted_dt: float,
+    cutback_retry_count: int,
+    cutback_limited: bool,
+) -> Row:
+    centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
+    generated_count = _generated_contact_count(contact)
+    return {
+        "case": model.case,
+        "resolution": model.resolution,
+        "source": source,
+        "contact_mode": contact_mode,
+        "time": float(state.time),
+        "accepted_dt": float(accepted_dt),
+        "nominal_dt": float(model.dt),
+        "cutback_retry_count": int(cutback_retry_count),
+        "cutback_limited": str(bool(cutback_limited)).lower(),
+        "z_cm": _mass_weighted_center_z(model, state.x),
+        "v_cm_z": _mass_weighted_velocity_z(model, state.v.reshape(-1)),
+        "min_gap": float(np.min(centroid_gaps)),
+        "quadrature_min_gap": diagnostics.contact.min_gap,
+        "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
+        "active_contact_count": diagnostics.contact.active_count,
+        "generated_contact_spring_count": generated_count,
+        "normal_force_proxy": diagnostics.contact.normal_force,
+        "normal_force_source": _normal_force_source(contact_mode),
+        "calculix_floor_rf_z": "",
+        "calculix_contact_count": "",
+        "kinetic_energy_proxy": diagnostics.kinetic_energy,
+        "strain_energy": diagnostics.internal.strain_energy,
+        "gravitational_potential_energy": diagnostics.gravitational_energy,
+        "contact_energy_proxy": diagnostics.contact.energy,
+        "total_mechanical_energy_proxy": diagnostics.total_energy,
+        "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, diagnostics.internal.von_mises),
+        "newton_iterations": diagnostics.newton_iterations,
+        "newton_residual_norm": diagnostics.newton_residual_norm,
+        "contact_cutback_recommended": str(convergence_record.recommended_cutback).lower(),
+        "contact_convergence_reason": convergence_record.reason,
+        "details": details,
+    }
 
 
 def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[ContactGeometry, str]:
@@ -361,6 +445,48 @@ def _generated_contact_count(contact: ContactGeometry) -> int | str:
     if value is None:
         return ""
     return int(value)
+
+
+def _contact_count_for_heuristic(contact: ContactGeometry, diagnostics: StepDiagnostics) -> int:
+    generated = _generated_contact_count(contact)
+    if generated != "":
+        return int(generated)
+    return int(diagnostics.contact.active_count)
+
+
+def _contact_cutback_enabled(contact_mode: str) -> bool:
+    return contact_mode.startswith("persistent_")
+
+
+def _snapshot_contact_lifecycle(contact: ContactGeometry) -> Any:
+    lifecycle = getattr(contact, "lifecycle", None)
+    if lifecycle is None or not hasattr(lifecycle, "snapshot"):
+        return None
+    return (lifecycle.snapshot(), bool(getattr(contact, "cutback_retry", False)))
+
+
+def _restore_contact_lifecycle(contact: ContactGeometry, snapshot: Any) -> None:
+    if snapshot is None:
+        return
+    lifecycle_snapshot, cutback_retry = snapshot
+    lifecycle = getattr(contact, "lifecycle", None)
+    if lifecycle is not None and hasattr(lifecycle, "restore"):
+        lifecycle.restore(lifecycle_snapshot)
+    _set_contact_cutback_retry(contact, bool(cutback_retry))
+
+
+def _set_contact_cutback_retry(contact: ContactGeometry, value: bool) -> None:
+    setter = getattr(contact, "set_cutback_retry", None)
+    if setter is not None:
+        setter(bool(value))
+
+
+def _snapshot_contact_heuristic(heuristic: CalculixContactConvergenceHeuristic) -> list[Any]:
+    return list(heuristic.history or [])
+
+
+def _restore_contact_heuristic(heuristic: CalculixContactConvergenceHeuristic, snapshot: list[Any]) -> None:
+    heuristic.history = list(snapshot)
 
 
 def _rigid_plane_master_surface(model: DropModel) -> tuple[np.ndarray, np.ndarray]:
