@@ -316,6 +316,11 @@ def _sfc_history_row(
     centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
     generated_count = _generated_contact_count(contact)
     cnum_equivalent = _calculix_equivalent_contact_count(contact)
+    acceptance = _last_newton_acceptance_metric(diagnostics)
+    metrics = getattr(diagnostics, "newton_acceptance_metrics", [])
+    max_contact_change = max((int(metric.contact_element_change) for metric in metrics), default="")
+    any_energy_stabilization = any(bool(metric.energy_stabilization) for metric in metrics)
+    any_calculix_style_rejection = any(not bool(metric.accepted_by_calculix_style) for metric in metrics)
     return {
         "case": model.case,
         "resolution": model.resolution,
@@ -348,10 +353,31 @@ def _sfc_history_row(
         "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, diagnostics.internal.von_mises),
         "newton_iterations": diagnostics.newton_iterations,
         "newton_residual_norm": diagnostics.newton_residual_norm,
+        "newton_acceptance_policy": diagnostics.newton_acceptance_policy,
+        "newton_acceptance_reason": diagnostics.newton_acceptance_reason,
+        "newton_ram": "" if acceptance is None else acceptance.ram,
+        "newton_qam": "" if acceptance is None else acceptance.qam,
+        "newton_cam": "" if acceptance is None else acceptance.cam,
+        "newton_uam": "" if acceptance is None else acceptance.uam,
+        "newton_residual_ratio": "" if acceptance is None else acceptance.residual_ratio,
+        "newton_correction_ratio": "" if acceptance is None else acceptance.correction_ratio,
+        "newton_contact_element_change": "" if acceptance is None else acceptance.contact_element_change,
+        "newton_max_contact_element_change": max_contact_change,
+        "newton_energy_residual": "" if acceptance is None else acceptance.energy_residual,
+        "newton_energy_stabilization": "" if acceptance is None else str(acceptance.energy_stabilization).lower(),
+        "newton_any_energy_stabilization": "" if not metrics else str(any_energy_stabilization).lower(),
+        "newton_calculix_style_accepted": "" if acceptance is None else str(acceptance.accepted_by_calculix_style).lower(),
+        "newton_any_calculix_style_rejection": "" if not metrics else str(any_calculix_style_rejection).lower(),
+        "newton_calculix_style_reason": "" if acceptance is None else acceptance.reason,
         "contact_cutback_recommended": str(convergence_record.recommended_cutback).lower(),
         "contact_convergence_reason": convergence_record.reason,
         "details": details,
     }
+
+
+def _last_newton_acceptance_metric(diagnostics: StepDiagnostics) -> Any | None:
+    metrics = getattr(diagnostics, "newton_acceptance_metrics", [])
+    return metrics[-1] if metrics else None
 
 
 def contact_replay_metrics(model: DropModel, x_current: np.ndarray, *, plane_z: float | None = None) -> Row:
@@ -633,6 +659,27 @@ def mechanics_increment_acceptance_diagnostics(
     beta, gamma = hht_newmark_parameters(model.hht_alpha)
     sfc_iterations = [int(row.get("newton_iterations", 0)) for row in sfc_rows if float(row.get("accepted_dt", 0.0)) > 0.0]
     sfc_residuals = [float(row.get("newton_residual_norm", 0.0)) for row in sfc_rows if float(row.get("accepted_dt", 0.0)) > 0.0]
+    sfc_residual_ratios = _row_float_values(sfc_rows, "newton_residual_ratio")
+    sfc_correction_ratios = _row_float_values(sfc_rows, "newton_correction_ratio")
+    sfc_contact_changes = _row_float_values(sfc_rows, "newton_max_contact_element_change")
+    sfc_energy_stabilization_count = sum(
+        1 for row in sfc_rows if str(row.get("newton_any_energy_stabilization", "")).lower() == "true"
+    )
+    sfc_steps_with_contact_change = sum(
+        1 for value in sfc_contact_changes if float(value) > 0.0
+    )
+    sfc_steps_with_rejected_iteration = sum(
+        1
+        for row in sfc_rows
+        if float(row.get("accepted_dt", 0.0)) > 0.0
+        and str(row.get("newton_any_calculix_style_rejection", "")).lower() == "true"
+    )
+    sfc_final_rejected_count = sum(
+        1
+        for row in sfc_rows
+        if float(row.get("accepted_dt", 0.0)) > 0.0
+        and str(row.get("newton_calculix_style_accepted", "")).lower() == "false"
+    )
     calculix_available = bool(stdout_path is not None and stdout_path.exists())
     direct_fixed = (
         step_options.get("calculix_dynamic_direct") == "true"
@@ -672,6 +719,13 @@ def mechanics_increment_acceptance_diagnostics(
         "sfc_max_newton_iterations": max(sfc_iterations) if sfc_iterations else "",
         "sfc_mean_newton_iterations": _mean_or_blank([float(value) for value in sfc_iterations]),
         "sfc_max_newton_residual_norm": max(sfc_residuals) if sfc_residuals else "",
+        "sfc_max_newton_residual_ratio_ram_over_qam": _max_or_blank(sfc_residual_ratios),
+        "sfc_max_newton_correction_ratio_cam_over_uam": _max_or_blank(sfc_correction_ratios),
+        "sfc_max_contact_element_change": _max_or_blank(sfc_contact_changes),
+        "sfc_steps_with_contact_element_change": sfc_steps_with_contact_change,
+        "sfc_energy_stabilization_count": sfc_energy_stabilization_count,
+        "sfc_steps_with_rejected_multicriteria_iteration": sfc_steps_with_rejected_iteration,
+        "sfc_final_calculix_style_rejected_step_count": sfc_final_rejected_count,
         "sfc_rows_reaching_iteration_limit_12": sum(1 for value in sfc_iterations if value >= 12),
         "direct_fixed_increment_no_retry_observed": str(bool(direct_fixed)).lower() if calculix_available else "",
         "calculix_converged_each_increment": str(bool(convergence_per_increment)).lower() if calculix_available else "",
@@ -1012,6 +1066,10 @@ def _series_values(rows: list[Row], key: str) -> list[float]:
         if value is not None:
             values.append(float(value))
     return values
+
+
+def _row_float_values(rows: list[Row], key: str) -> list[float]:
+    return _series_values(rows, key)
 
 
 def _sequence_string(values: list[float]) -> str:
@@ -1838,8 +1896,8 @@ def _write_markdown(
             "",
             "## Mechanics And Increment Acceptance Diagnostics",
             "",
-            "| Resolution | Diagnosis | Direct | CalculiX inc. | CalculiX max iter/inc. | SFC max iter | no convergence lines | cutback attempts | SFC max residual |",
-            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Resolution | Diagnosis | Direct | CalculiX inc. | CalculiX max iter/inc. | SFC max iter | max ram/qam | max cam/uam | max contact change | steps w/change | energy stab. | final rejected |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in mechanics_rows:
@@ -1848,9 +1906,12 @@ def _write_markdown(
             f"{_fmt(row['calculix_stdout_increment_count'])} | "
             f"{_fmt(row['calculix_stdout_max_iterations_per_increment'])} | "
             f"{_fmt(row['sfc_max_newton_iterations'])} | "
-            f"{_fmt(row['calculix_stdout_no_convergence_count'])} | "
-            f"{_fmt(row['calculix_stdout_cutback_attempt_count'])} | "
-            f"{_fmt(row['sfc_max_newton_residual_norm'])} |"
+            f"{_fmt(row.get('sfc_max_newton_residual_ratio_ram_over_qam', ''))} | "
+            f"{_fmt(row.get('sfc_max_newton_correction_ratio_cam_over_uam', ''))} | "
+            f"{_fmt(row.get('sfc_max_contact_element_change', ''))} | "
+            f"{_fmt(row.get('sfc_steps_with_contact_element_change', ''))} | "
+            f"{_fmt(row.get('sfc_energy_stabilization_count', ''))} | "
+            f"{_fmt(row.get('sfc_final_calculix_style_rejected_step_count', ''))} |"
         )
     lines.extend(
         [

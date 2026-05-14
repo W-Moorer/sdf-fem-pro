@@ -17,7 +17,7 @@ CalculiX-compatible modeling choices where practical:
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -173,6 +173,27 @@ class ContactResponse:
     energy: float
 
 
+@dataclass(frozen=True, slots=True)
+class NewtonAcceptanceMetrics:
+    """Clean-room CalculiX-style Newton acceptance metrics for one iteration."""
+
+    iteration: int
+    ram: float
+    qam: float
+    cam: float
+    uam: float
+    residual_ratio: float
+    correction_ratio: float
+    active_contact_count: int
+    contact_element_change: int
+    contact_energy: float
+    total_energy: float
+    energy_residual: float
+    energy_stabilization: bool
+    accepted_by_calculix_style: bool
+    reason: str
+
+
 @dataclass(slots=True)
 class StepDiagnostics:
     """Combined mechanics/contact diagnostics for one state."""
@@ -184,6 +205,9 @@ class StepDiagnostics:
     total_energy: float
     newton_iterations: int = 0
     newton_residual_norm: float = 0.0
+    newton_acceptance_policy: str = "relative_correction"
+    newton_acceptance_reason: str = ""
+    newton_acceptance_metrics: list[NewtonAcceptanceMetrics] = field(default_factory=list)
 
 
 def hht_newmark_parameters(alpha: float) -> tuple[float, float]:
@@ -410,9 +434,12 @@ def hht_step(
     alpha: float = -0.05,
     max_iterations: int = 12,
     tolerance: float = 1.0e-10,
+    acceptance_policy: str = "relative_correction",
 ) -> tuple[MechanicsState, np.ndarray, StepDiagnostics]:
     """Advance one implicit HHT/Newmark step using Newton iterations."""
 
+    if acceptance_policy not in {"relative_correction", "calculix_multicriteria"}:
+        raise ValueError("acceptance_policy must be 'relative_correction' or 'calculix_multicriteria'")
     beta, gamma = hht_newmark_parameters(alpha)
     c0 = 1.0 / (beta * dt * dt)
     u = (state.x - model.X).reshape(-1)
@@ -424,6 +451,11 @@ def hht_step(
     static_residual = previous_static_residual
     residual_norm = np.inf
     iteration_count = 0
+    acceptance_reason = "iteration_limit"
+    acceptance_metrics: list[NewtonAcceptanceMetrics] = []
+    previous_energy = evaluate_state(model, state, contact_geometry, gravity=gravity, assemble_tangent=False).total_energy
+    previous_ram: float | None = None
+    previous_active_count: int | None = None
     for iteration in range(max(1, int(max_iterations))):
         x_guess = model.X + u_guess.reshape((-1, 3))
         static_residual, static_tangent = static_residual_and_tangent(model, x_guess, contact_geometry, gravity=gravity)
@@ -434,7 +466,36 @@ def hht_step(
         correction = np.asarray(spsolve(tangent, -dynamic_residual), dtype=float)
         u_guess += correction
         iteration_count = iteration + 1
-        if np.linalg.norm(correction) <= tolerance * max(1.0, np.linalg.norm(u_guess)):
+        a_iter = c0 * (u_guess - u_pred)
+        v_iter = v_pred + gamma * dt * a_iter
+        trial_state = MechanicsState(
+            model.X + u_guess.reshape((-1, 3)),
+            v_iter.reshape((-1, 3)),
+            a_iter.reshape((-1, 3)),
+            time=state.time + float(dt),
+        )
+        trial_diagnostics = evaluate_state(model, trial_state, contact_geometry, gravity=gravity, assemble_tangent=False)
+        metric = _newton_acceptance_metrics(
+            model,
+            dynamic_residual,
+            correction,
+            u_guess - u,
+            trial_diagnostics,
+            previous_energy=previous_energy,
+            previous_ram=previous_ram,
+            previous_active_count=previous_active_count,
+            iteration=iteration_count,
+            gravity=gravity,
+        )
+        acceptance_metrics.append(metric)
+        previous_ram = metric.ram
+        previous_active_count = metric.active_contact_count
+        relative_correction_accept = np.linalg.norm(correction) <= tolerance * max(1.0, np.linalg.norm(u_guess))
+        if acceptance_policy == "relative_correction" and relative_correction_accept:
+            acceptance_reason = "relative_correction"
+            break
+        if acceptance_policy == "calculix_multicriteria" and metric.accepted_by_calculix_style:
+            acceptance_reason = metric.reason
             break
     a_new = c0 * (u_guess - u_pred)
     v_new = v_pred + gamma * dt * a_new
@@ -447,7 +508,98 @@ def hht_step(
     diagnostics = evaluate_state(model, next_state, contact_geometry, gravity=gravity, assemble_tangent=True)
     diagnostics.newton_iterations = iteration_count
     diagnostics.newton_residual_norm = residual_norm
+    diagnostics.newton_acceptance_policy = acceptance_policy
+    diagnostics.newton_acceptance_reason = acceptance_reason
+    diagnostics.newton_acceptance_metrics = acceptance_metrics
     return next_state, static_residual, diagnostics
+
+
+def _newton_acceptance_metrics(
+    model: MechanicsModel,
+    residual: np.ndarray,
+    correction: np.ndarray,
+    increment: np.ndarray,
+    diagnostics: StepDiagnostics,
+    *,
+    previous_energy: float,
+    previous_ram: float | None,
+    previous_active_count: int | None,
+    iteration: int,
+    gravity: float,
+) -> NewtonAcceptanceMetrics:
+    """Return clean-room proxies for CalculiX `ram/qam/cam/uam` checks."""
+
+    ram = float(np.max(np.abs(residual))) if residual.size else 0.0
+    qam = _force_reference_scale(model, diagnostics, gravity)
+    cam = float(np.max(np.abs(correction))) if correction.size else 0.0
+    uam = float(np.max(np.abs(increment))) if increment.size else 0.0
+    residual_ratio = ram / max(qam, 1.0e-30)
+    correction_ratio = cam / max(uam, 1.0e-30)
+    previous_active = diagnostics.contact.active_count if previous_active_count is None else int(previous_active_count)
+    contact_change = abs(int(diagnostics.contact.active_count) - previous_active)
+    energy_residual = float(diagnostics.total_energy - previous_energy)
+    energy_scale = max(abs(float(previous_energy)), abs(float(diagnostics.total_energy)), 1.0)
+    energy_stabilization = bool(diagnostics.contact.active_count > 0 and abs(energy_residual) > 5.0e-2 * energy_scale)
+
+    residual_ok = residual_ratio <= 5.0e-3
+    correction_ok = correction_ratio <= 1.0e-2
+    relaxed_ok = (
+        previous_ram is not None
+        and previous_ram > 0.0
+        and ram * cam <= 1.0e-2 * max(uam, 1.0e-30) * previous_ram
+    )
+    loose_residual_ok = residual_ratio <= 2.0e-2
+    contact_stable = contact_change == 0
+    accepted = bool(
+        iteration > 1
+        and residual_ok
+        and contact_stable
+        and not energy_stabilization
+        and (correction_ok or relaxed_ok or loose_residual_ok or cam < 1.0e-8)
+    )
+    if accepted:
+        reason = "calculix_multicriteria"
+    elif iteration <= 1:
+        reason = "need_second_iteration"
+    elif not residual_ok:
+        reason = "residual_ratio"
+    elif not contact_stable:
+        reason = "contact_element_change"
+    elif energy_stabilization:
+        reason = "energy_contact_stabilization"
+    else:
+        reason = "correction_ratio"
+    return NewtonAcceptanceMetrics(
+        iteration=int(iteration),
+        ram=ram,
+        qam=qam,
+        cam=cam,
+        uam=uam,
+        residual_ratio=float(residual_ratio),
+        correction_ratio=float(correction_ratio),
+        active_contact_count=int(diagnostics.contact.active_count),
+        contact_element_change=int(contact_change),
+        contact_energy=float(diagnostics.contact.energy),
+        total_energy=float(diagnostics.total_energy),
+        energy_residual=energy_residual,
+        energy_stabilization=energy_stabilization,
+        accepted_by_calculix_style=accepted,
+        reason=reason,
+    )
+
+
+def _force_reference_scale(model: MechanicsModel, diagnostics: StepDiagnostics, gravity: float) -> float:
+    gravity_load = _nodal_gravity_loads(model, gravity)
+    parts = [
+        np.abs(gravity_load),
+        np.abs(diagnostics.internal.force.reshape(-1)),
+        np.abs(diagnostics.contact.force.reshape(-1)),
+    ]
+    values = np.concatenate([part.ravel() for part in parts])
+    positive = values[values > 0.0]
+    if positive.size == 0:
+        return 1.0
+    return max(float(np.mean(positive)), 1.0e-12)
 
 
 def von_mises(stress: np.ndarray) -> float:

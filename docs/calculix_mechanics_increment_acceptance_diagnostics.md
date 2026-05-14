@@ -52,6 +52,9 @@ The file records:
 - CalculiX `*DYNAMIC, DIRECT` and `NLGEOM` flags parsed from the generated input.
 - CalculiX alpha plus derived HHT beta/gamma.
 - SFC alpha plus derived HHT beta/gamma.
+- SFC clean-room `ram/qam/cam/uam` proxies at the accepted iteration.
+- SFC contact element changes between Newton iterations.
+- SFC contact/energy stabilization flags.
 - CalculiX increment count, convergence count, total Newton iterations, maximum
   iterations per increment, and mean iterations per increment from stdout.
 - CalculiX cutback attempts and forced-increment-size messages.
@@ -68,7 +71,12 @@ class is mechanics/increment acceptance:
 
 - CalculiX uses a multi-criterion `checkconvergence.c` acceptance rule.
 - SFC currently accepts Newton iterations by relative correction tolerance or
-  reaching its configured iteration loop.
+  reaching its configured iteration loop by default.
+- `src/sfc/fem/calculix_aligned.py` also supports an optional clean-room
+  `acceptance_policy="calculix_multicriteria"` mode.  It uses the recorded
+  `ram/qam/cam/uam` proxies, contact element change, and a contact-energy
+  stabilization flag.  This is an independently written diagnostic/strategy,
+  not copied CalculiX source.
 - CalculiX stdout should be interpreted as accepted fixed increments if
   `convergence_count == increment_count`, `max_attempt == 1`, and cutback count
   is zero.

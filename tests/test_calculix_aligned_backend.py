@@ -107,5 +107,34 @@ def test_hht_step_keeps_contact_geometry_swappable() -> None:
     assert np.mean(next_state.x[:, 2]) < np.mean(state.x[:, 2])
     assert next_previous.shape == previous.shape
     assert diagnostics.newton_iterations > 0
+    assert diagnostics.newton_acceptance_policy == "relative_correction"
+    assert diagnostics.newton_acceptance_reason
+    assert diagnostics.newton_acceptance_metrics
+    last = diagnostics.newton_acceptance_metrics[-1]
+    assert last.qam > 0.0
+    assert last.uam >= 0.0
+    assert last.reason
     residual, _ = static_residual_and_tangent(model, next_state.x, EmptyContactGeometry(), gravity=9.81)
     assert residual.shape == previous.shape
+
+
+def test_hht_step_supports_clean_room_calculix_multicriteria_acceptance() -> None:
+    model = _unit_tet_model()
+    state, previous = initial_state(model, EmptyContactGeometry(), gravity=9.81)
+    _, _, diagnostics = hht_step(
+        model,
+        state,
+        previous,
+        EmptyContactGeometry(),
+        dt=0.001,
+        gravity=9.81,
+        alpha=-0.05,
+        max_iterations=8,
+        acceptance_policy="calculix_multicriteria",
+    )
+
+    assert diagnostics.newton_acceptance_policy == "calculix_multicriteria"
+    assert diagnostics.newton_acceptance_metrics
+    assert diagnostics.newton_iterations <= 8
+    assert diagnostics.newton_acceptance_metrics[-1].ram >= 0.0
+    assert diagnostics.newton_acceptance_metrics[-1].cam >= 0.0
