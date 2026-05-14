@@ -41,6 +41,7 @@ def test_geometric_nonlinear_vtk_frames_are_consecutive(tmp_path: Path) -> None:
 
     text = (vtk_dir / "frame_0001.vtk").read_text(encoding="ascii")
     assert "DATASET UNSTRUCTURED_GRID" in text
+    assert "SCALARS object_id int 1" in text
     assert "VECTORS displacement float" in text
     assert "SCALARS von_mises float 1" in text
     assert "TENSORS green_lagrange_strain float" in text
@@ -72,3 +73,15 @@ def test_geometric_nonlinear_history_contains_energy_and_contact_fields(tmp_path
     assert required <= set(rows[0])
     assert all(np.isfinite(float(row["total_energy"])) for row in rows)
     assert max(float(row["max_von_mises"]) for row in rows) >= 0.0
+
+
+def test_sphere_drop_initial_frame_has_visible_plane_separation(tmp_path: Path) -> None:
+    outputs = run_simulation(tmp_path, case="sphere_drop", resolution=1, duration=0.01, dt=0.001, frame_stride=5, initial_gap=0.08)
+
+    with outputs["history"].open(newline="", encoding="utf-8") as f:
+        first_row = next(csv.DictReader(f))
+    assert float(first_row["min_gap"]) > 0.0
+
+    text = (outputs["vtk_dir"] / "frame_0000.vtk").read_text(encoding="ascii")
+    assert "CELL_TYPES" in text
+    assert "\n9\n" in text

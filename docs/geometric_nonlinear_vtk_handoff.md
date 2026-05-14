@@ -4,7 +4,9 @@
 
 This handoff adds a validation-only geometric nonlinear TET4 visualization
 runner. It is intended to inspect stress/strain evolution in ParaView and to
-separate center-of-mass motion from internal deformation modes.
+separate center-of-mass motion from internal deformation modes. The default
+case is now a sphere-like deformable body dropped above a visible rigid plane,
+so the initial separation is directly visible in `frame_0000.vtk`.
 
 This does not replace the current core linear SFC solver. The implementation is
 an explicit total-Lagrangian diagnostic exporter.
@@ -18,22 +20,24 @@ an explicit total-Lagrangian diagnostic exporter.
 - von Mises stress per element.
 - Conservative rigid-plane penalty contact.
 - Velocity-Verlet time integration for an undamped diagnostic run.
+- Mixed-cell VTK output containing the deformable TET4 body and a rigid plane
+  quad. The deformable body has `object_id=1`; the plane has `object_id=0`.
 
 ## Command
 
 ```bash
-python validation/run_geometric_nonlinear_vtk.py --resolution 2 --duration 0.5 --dt 0.00025 --frame-stride 20 --out-dir results/geometric_nonlinear_vtk
+python validation/run_geometric_nonlinear_vtk.py --case sphere_drop --resolution 2 --duration 0.5 --dt 0.00025 --frame-stride 20 --initial-gap 0.08 --out-dir results/drop_sphere_geometric_nonlinear_vtk
 ```
 
 ## Outputs
 
-- `results/geometric_nonlinear_vtk/vtk/frame_0000.vtk`
-- `results/geometric_nonlinear_vtk/vtk/frame_0001.vtk`
+- `results/drop_sphere_geometric_nonlinear_vtk/vtk/frame_0000.vtk`
+- `results/drop_sphere_geometric_nonlinear_vtk/vtk/frame_0001.vtk`
 - ...
-- `results/geometric_nonlinear_vtk/vtk/frame_0100.vtk`
-- `results/geometric_nonlinear_vtk/geometric_nonlinear_history.csv`
-- `results/geometric_nonlinear_vtk/geometric_nonlinear_frames.csv`
-- `results/geometric_nonlinear_vtk/geometric_nonlinear_summary.md`
+- `results/drop_sphere_geometric_nonlinear_vtk/vtk/frame_0100.vtk`
+- `results/drop_sphere_geometric_nonlinear_vtk/geometric_nonlinear_history.csv`
+- `results/drop_sphere_geometric_nonlinear_vtk/geometric_nonlinear_frames.csv`
+- `results/drop_sphere_geometric_nonlinear_vtk/geometric_nonlinear_summary.md`
 
 The VTK frame suffixes are continuous and zero padded. ParaView should load
 them as a time series when opening `frame_0000.vtk`.
@@ -47,6 +51,7 @@ Point data:
 
 Cell data:
 
+- `object_id`
 - `von_mises`
 - `green_lagrange_strain_norm`
 - `green_lagrange_strain`
@@ -60,10 +65,12 @@ Cell data:
 | first frame | `frame_0000.vtk` |
 | last frame | `frame_0100.vtk` |
 | history rows | 2001 |
-| minimum gap | `-8.458748e-03` |
-| maximum penetration | `8.458748e-03` |
-| maximum von Mises stress | `4.358995e+01` |
-| relative energy drift range | `-4.476440e-06` to `1.306697e-03` |
+| initial visible gap | `8.000000e-02` |
+| initial contact-quadrature gap | `8.520833e-02` |
+| minimum gap | `-3.232956e-02` |
+| maximum penetration | `3.232956e-02` |
+| maximum von Mises stress | `7.921129e+01` |
+| relative energy drift range | `-4.540185e-04` to `6.647661e-06` |
 
 ## Interpretation
 
@@ -76,6 +83,8 @@ it can be stored in Green-Lagrange strain energy and internal vibration.
 
 - This is not yet a production nonlinear implicit SFC solver.
 - The contact target is a rigid horizontal plane only.
+- The sphere is a deterministic sphere-like Delaunay TET4 mesh for visualization
+  and diagnostics, not a high-quality production meshing workflow.
 - The material is St. Venant-Kirchhoff, which is a simple geometric nonlinear
   diagnostic model, not a robust large-strain hyperelastic material for all
   deformations.
