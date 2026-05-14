@@ -59,6 +59,11 @@ The controlled contact-query equivalence run is documented in
 provider and dynamic-SDF plane provider match to roundoff with maximum field
 absolute error `3.659295e-13`.
 
+The prescribed deforming-master SDF reference run is documented in
+`docs/deforming_master_sdf_reference_handoff.md`. In the latest full run,
+spatial-hash dynamic SDF matched all-face projection with zero reported gap and
+force errors and maximum normal angle error `2.980232e-08`.
+
 ## Current Full Contact Comparison
 
 | Resolution | activation C/SFC | max pen. C | max pen. SFC | peak force C | peak force SFC | status |

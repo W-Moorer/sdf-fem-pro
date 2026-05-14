@@ -66,3 +66,6 @@ plane gap with the dynamic SDF query in this controlled geometry.
   geometry.
 - It does not claim equivalence to CalculiX surface-to-surface active contact
   generation.
+
+The next deforming-master reference step is documented in
+`docs/deforming_master_sdf_reference_handoff.md`.
