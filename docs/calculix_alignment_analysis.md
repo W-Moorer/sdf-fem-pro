@@ -56,7 +56,7 @@ force distribution.
 ### 3. Contact Count Is Not A Comparable Physical Quantity
 
 CalculiX reports contact elements/integration output. The SFC runner reports
-active face-centroid quadrature points. These counts are diagnostic only and
+active triangle quadrature points. These counts are diagnostic only and
 should not be used as a paper-level matching metric.
 
 ### 4. Strong Impact Is Still A Bad Reference Case
@@ -71,8 +71,8 @@ nonlinear contact convergence rather than by the SFC dynamic SDF formulation.
 - Added explicit constants for the CalculiX shell thickness and `SPOS` contact
   plane.
 - Changed gap and penetration diagnostics to use `floor_z + 0.005`.
-- Changed the SFC validation contact from nodal area weighting to one
-  centroid integration point per boundary triangle.
+- Changed the SFC validation contact from nodal area weighting to three
+  quadrature points per boundary triangle.
 - Scaled contact force and tangent by current triangle area.
 - Distributed the face quadrature force to the three slave face nodes with
   linear triangle weights.
@@ -115,9 +115,10 @@ contact-dynamics setup rather than evidence for the method.
 
 - CalculiX uses its full nonlinear contact search, contact element generation,
   and solver convergence logic. The SFC validation runner uses a simplified
-  face-centroid plane contact approximation.
+  three-point triangle quadrature plane contact approximation.
 - CalculiX and SFC still have different active contact counts because the
-  reported quantities are not the same.
+  reported quantities are not the same, even after SFC was moved to three-point
+  triangle quadrature.
 - HHT-alpha dynamics is numerically dissipative and should not be described as
   energy-conserving contact dynamics.
 - The strong impact case remains unsupported until a more robust external

@@ -293,10 +293,10 @@ closely without copying GPL source code:
 - the SFC alignment mode uses a consistent mass matrix, not the earlier lumped
   mass matrix;
 - face-based slave surface instead of only a slave node set;
-- one centroid integration point per boundary triangle, area-scaled force, and
+- three quadrature points per boundary triangle, area-scaled force, and
   shape-function distribution to slave face nodes, matching the structure of
-  CalculiX `springforc_f2f.f` more closely than the previous nodal-area
-  approximation;
+  CalculiX `springforc_f2f.f` more closely than the previous nodal-area or
+  face-centroid approximation;
 - CalculiX-unavailable contact outputs are left blank and excluded from force
   or energy comparisons instead of being replaced by zero-valued proxy curves;
 - smooth overclosure activation inspired by CalculiX's linear

@@ -55,6 +55,15 @@ CALCULIX_MASTER_SURFACE_OFFSET = 0.5 * FLOOR_SHELL_THICKNESS
 CONTACT_SMOOTHING_EPSILON = 2.5e-3
 CALCULIX_DEFAULT_HHT_ALPHA = -0.05
 REBOUND_HEIGHT_TOLERANCE = 1.0e-6
+TRIANGLE_QUADRATURE_BARYCENTRIC = np.asarray(
+    [
+        [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
+        [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+        [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
+    ],
+    dtype=float,
+)
+TRIANGLE_QUADRATURE_WEIGHTS = np.full(3, 1.0 / 3.0, dtype=float)
 
 C3D4_FACE_LABELS = {
     (0, 1, 2): "S1",
@@ -312,6 +321,7 @@ def build_drop_model(
     initial_velocity_z: float | None = None,
     gravity: float | None = None,
     contact_stiffness_override: float | None = None,
+    hht_alpha: float | None = None,
 ) -> DropModel:
     """Build the shared CalculiX/SFC drop-impact model."""
 
@@ -346,6 +356,8 @@ def build_drop_model(
     velocity_value = -2.0 if initial_velocity_z is None else float(initial_velocity_z)
     gravity_value = 9.81 if gravity is None else float(gravity)
     contact_stiffness_value = float(contact_stiffness) if contact_stiffness_override is None else float(contact_stiffness_override)
+    hht_alpha_value = CALCULIX_DEFAULT_HHT_ALPHA if hht_alpha is None else float(hht_alpha)
+    _hht_newmark_parameters(hht_alpha_value)
 
     return DropModel(
         case=case,
@@ -372,7 +384,7 @@ def build_drop_model(
         direct_dynamic=bool(direct_dynamic),
         sfc_substeps=2 if quick else 4,
         contact_smoothing_epsilon=CONTACT_SMOOTHING_EPSILON,
-        hht_alpha=CALCULIX_DEFAULT_HHT_ALPHA,
+        hht_alpha=hht_alpha_value,
         model_source=model_source,
     )
 
@@ -389,6 +401,7 @@ def build_model_suite(
     initial_velocity_z: float | None = None,
     gravity: float | None = None,
     contact_stiffness_override: float | None = None,
+    hht_alpha: float | None = None,
 ) -> list[DropModel]:
     """Return the model suite for quick or paper-scale external comparison."""
 
@@ -411,6 +424,7 @@ def build_model_suite(
                     initial_velocity_z=initial_velocity_z,
                     gravity=gravity,
                     contact_stiffness_override=contact_stiffness_override,
+                    hht_alpha=hht_alpha,
                 )
             )
     return models
@@ -848,19 +862,24 @@ def _calculix_aligned_plane_contact(
 
     CalculiX face-to-face contact evaluates clearance at slave-face integration
     points and scales the linear overclosure pressure by spring area.  This
-    validation approximation uses one centroid integration point per boundary
-    triangle and distributes the normal force back to the TET4 face nodes.
+    validation approximation uses three triangle quadrature points per boundary
+    face and distributes each quadrature force back to the TET4 face nodes.
     """
 
     n_dofs = 3 * x_current.shape[0]
     faces = model.surface_faces
-    centroids, areas = _surface_face_geometry(x_current, faces)
-    gaps = centroids[:, 2] - _contact_plane_z(model)
+    face_nodes = x_current[faces]
+    _, areas = _surface_face_geometry(x_current, faces)
+    bary = TRIANGLE_QUADRATURE_BARYCENTRIC
+    q_weights = TRIANGLE_QUADRATURE_WEIGHTS
+    q_points = np.einsum("qn,fnc->fqc", bary, face_nodes)
+    gaps = q_points[:, :, 2] - _contact_plane_z(model)
     overclosure = -gaps
-    face_stiffness = model.contact_stiffness * areas
+    q_areas = areas[:, None] * q_weights[None, :]
+    q_stiffness = model.contact_stiffness * q_areas
     lambdas, tangents, energies = _smooth_overclosure_response(
         overclosure,
-        stiffness=face_stiffness,
+        stiffness=q_stiffness,
         epsilon=model.contact_smoothing_epsilon,
     )
 
@@ -868,17 +887,17 @@ def _calculix_aligned_plane_contact(
     rows: list[int] = []
     cols: list[int] = []
     data: list[float] = []
-    weights = np.full(3, 1.0 / 3.0, dtype=float)
-    for face, lam, tangent in zip(faces, lambdas, tangents, strict=True):
+    for face, face_lambdas, face_tangents in zip(faces, lambdas, tangents, strict=True):
         z_dofs = [3 * int(node) + 2 for node in face]
-        for dof, weight in zip(z_dofs, weights, strict=True):
-            force[dof] += float(weight * lam)
-        if tangent > 0.0:
-            for row_dof, row_weight in zip(z_dofs, weights, strict=True):
-                for col_dof, col_weight in zip(z_dofs, weights, strict=True):
-                    rows.append(row_dof)
-                    cols.append(col_dof)
-                    data.append(float(row_weight * col_weight * tangent))
+        for shape_weights, lam, tangent in zip(bary, face_lambdas, face_tangents, strict=True):
+            for dof, weight in zip(z_dofs, shape_weights, strict=True):
+                force[dof] += float(weight * lam)
+            if tangent > 0.0:
+                for row_dof, row_weight in zip(z_dofs, shape_weights, strict=True):
+                    for col_dof, col_weight in zip(z_dofs, shape_weights, strict=True):
+                        rows.append(row_dof)
+                        cols.append(col_dof)
+                        data.append(float(row_weight * col_weight * tangent))
 
     Kc = coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()
     physical_penetration = np.maximum(-gaps, 0.0)
@@ -974,7 +993,7 @@ def run_sfc_drop_history(model: DropModel) -> list[Row]:
                 "total_mechanical_energy_proxy": total_energy,
                 "details": (
                     "CalculiX-aligned C3D4/TET4 linear dynamics with consistent mass, "
-                    f"HHT alpha={alpha:g}, tangent contact, area weighting, and {substeps} substeps"
+                    f"HHT alpha={alpha:g}, three-point triangle quadrature contact, area weighting, tangent contact, and {substeps} substeps"
                 ),
             }
         )
@@ -1402,6 +1421,8 @@ def write_markdown(
         default_stiffness = 2.0e5 if models[0].case == "sphere_like_drop" else 2.0e4
         if models[0].contact_stiffness != default_stiffness:
             reproduce_parts.extend(["--contact-stiffness", f"{models[0].contact_stiffness:g}"])
+    if models and len({round(float(model.hht_alpha), 12) for model in models}) == 1 and models[0].hht_alpha != CALCULIX_DEFAULT_HHT_ALPHA:
+        reproduce_parts.extend(["--hht-alpha", f"{models[0].hht_alpha:g}"])
     if models and not models[0].direct_dynamic:
         reproduce_parts.append("--calculix-auto-step")
     reproduce_parts.extend(["--out-dir", path.parent.as_posix()])
@@ -1445,24 +1466,24 @@ def write_markdown(
             f"- CalculiX output frequency: {models[0].output_frequency}",
             "- CalculiX slave surfaces are face-based element surfaces; SFC uses matching boundary-face area weights.",
             "- SFC dynamics uses the same generated C3D4/TET4 mesh, isotropic linear elastic constants, consistent mass, gravity, initial velocity, and HHT-alpha parameters as the CalculiX input.",
-            "- SFC contact uses a CalculiX-aligned face-centroid pressure-overclosure law, area weighting, contact tangent, Newton iterations, and substepping.",
+            "- SFC contact uses a CalculiX-aligned three-point triangle quadrature pressure-overclosure law, area weighting, contact tangent, Newton iterations, and substepping.",
         ]
     )
     lines.extend(
         [
-        "",
-        "## Claim Gate",
-        "",
-        "| Claim | Status | Evidence | Gate |",
-        "| --- | --- | --- | --- |",
-        f"| external dynamic contact time-scale agreement | {'supported' if all_supported else 'not_supported'} | calculix_drop_metrics.csv::external_dynamic_contact_claim | {'all_supported' if all_supported else 'some_not_supported'} |",
-        f"| rebound height within ballistic energy bound | {'supported' if all_physical else 'not_supported'} | calculix_drop_metrics.csv::physical_rebound_height_claim | {'all_supported' if all_physical else 'some_not_supported'} |",
-        "<!-- evidence csv=calculix_drop_metrics.csv field=value -->",
-        "",
-        "## Metrics",
-        "",
-        "| Metric | Value | Status | Details |",
-        "| --- | ---: | --- | --- |",
+            "",
+            "## Claim Gate",
+            "",
+            "| Claim | Status | Evidence | Gate |",
+            "| --- | --- | --- | --- |",
+            f"| external dynamic contact time-scale agreement | {'supported' if all_supported else 'not_supported'} | calculix_drop_metrics.csv::external_dynamic_contact_claim | {'all_supported' if all_supported else 'some_not_supported'} |",
+            f"| rebound height within ballistic energy bound | {'supported' if all_physical else 'not_supported'} | calculix_drop_metrics.csv::physical_rebound_height_claim | {'all_supported' if all_physical else 'some_not_supported'} |",
+            "<!-- evidence csv=calculix_drop_metrics.csv field=value -->",
+            "",
+            "## Metrics",
+            "",
+            "| Metric | Value | Status | Details |",
+            "| --- | ---: | --- | --- |",
         ]
     )
     for row in metric_rows:
@@ -1502,6 +1523,7 @@ def run_comparison(
     gravity: float | None = None,
     contact_stiffness: float | None = None,
     calculix_timeout_seconds: int | None = None,
+    hht_alpha: float | None = None,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("calculix_drop_*"):
@@ -1521,6 +1543,7 @@ def run_comparison(
         initial_velocity_z=initial_velocity_z,
         gravity=gravity,
         contact_stiffness_override=contact_stiffness,
+        hht_alpha=hht_alpha,
     )
     history_rows: list[Row] = []
     metric_rows: list[Row] = []
@@ -1576,6 +1599,7 @@ def run_comparison(
             {"key": "gravity_override", "value": "" if gravity is None else gravity},
             {"key": "contact_stiffness_override", "value": "" if contact_stiffness is None else contact_stiffness},
             {"key": "calculix_timeout_seconds", "value": "" if calculix_timeout_seconds is None else calculix_timeout_seconds},
+            {"key": "hht_alpha_override", "value": "" if hht_alpha is None else hht_alpha},
             {"key": "calculix_direct_dynamic", "value": str(bool(direct_dynamic)).lower()},
             {"key": "calculix_dynamic_keyword", "value": _calculix_dynamic_keyword(models[0]) if models else "*DYNAMIC,DIRECT,ALPHA=-0.05"},
             {"key": "cases", "value": ",".join(f"{model.case}:r{model.resolution}" for model in models)},
@@ -1611,6 +1635,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gravity", type=float, default=None, help="Override gravitational acceleration magnitude.")
     parser.add_argument("--contact-stiffness", type=float, default=None, help="Override the pressure-overclosure stiffness.")
     parser.add_argument("--calculix-timeout-seconds", type=int, default=None, help="Override per-case CalculiX timeout.")
+    parser.add_argument("--hht-alpha", type=float, default=None, help="Override HHT alpha; use 0 for classical Newmark.")
     parser.add_argument(
         "--calculix-auto-step",
         action="store_true",
@@ -1634,6 +1659,7 @@ def main() -> None:
         gravity=args.gravity,
         contact_stiffness=args.contact_stiffness,
         calculix_timeout_seconds=args.calculix_timeout_seconds,
+        hht_alpha=args.hht_alpha,
     )
     print("CalculiX drop-impact comparison complete.")
     for name, path in outputs.items():

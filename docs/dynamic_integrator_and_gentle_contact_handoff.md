@@ -92,10 +92,10 @@ than the strong long drop-impact case. It is configured as a drop from rest
 under gravity so the conservative rebound-height gate is meaningful: after
 first contact the center-of-mass height must not exceed its starting height.
 
-The SFC validation runner now uses a face-centroid, area-scaled penalty contact
-approximation for this comparison, consistent with the CalculiX
-`springforc_f2f.f` structure where clearance is evaluated at slave-face
-integration points and scaled by spring area.
+The SFC validation runner now uses a three-point triangle quadrature,
+area-scaled penalty contact approximation for this comparison, consistent with
+the CalculiX `springforc_f2f.f` structure where clearance is evaluated at
+slave-face integration points and scaled by spring area.
 
 The strong sphere/block long diagnostic remains unsupported and should not
 be used for paper evidence.

@@ -224,10 +224,30 @@ def test_drop_contact_uses_calculix_spos_plane_and_face_integration() -> None:
 
     assert min_gap < 0.0
     assert max_penetration > 0.0
-    assert active_count > 0
+    assert active_count >= 6
     assert contact_energy > 0.0
     assert np.sum(force[2::3]) > 0.0
     assert stiffness.nnz > 0
+
+
+def test_drop_contact_uses_three_point_triangle_quadrature() -> None:
+    from validation.run_calculix_drop_impact_comparison import (
+        TRIANGLE_QUADRATURE_BARYCENTRIC,
+        TRIANGLE_QUADRATURE_WEIGHTS,
+        _calculix_aligned_plane_contact,
+        build_drop_model,
+    )
+
+    model = build_drop_model(quick=True, case="block_drop", resolution=1, gravity=0.0, initial_velocity_z=0.0)
+    x_current = model.nodes.copy()
+    x_current[:, 2] -= 0.046
+
+    assert TRIANGLE_QUADRATURE_BARYCENTRIC.shape == (3, 3)
+    assert np.allclose(TRIANGLE_QUADRATURE_BARYCENTRIC.sum(axis=1), 1.0)
+    assert np.sum(TRIANGLE_QUADRATURE_WEIGHTS) == pytest.approx(1.0)
+
+    _, _, _, active_count, _, _ = _calculix_aligned_plane_contact(model, x_current)
+    assert active_count == 6
 
 
 def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Path) -> None:
@@ -251,6 +271,18 @@ def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Pat
     assert "*element, type=c3d4" in text
     assert "*surface, name=ball, type=element" in text
     assert "*contact pair, interaction=contact,type=surface to surface" in text
+
+
+def test_calculix_drop_hht_alpha_override_writes_newmark(tmp_path: Path) -> None:
+    from validation.run_calculix_drop_impact_comparison import build_drop_model, write_calculix_input
+
+    model = build_drop_model(quick=True, case="block_drop", resolution=1, hht_alpha=0.0)
+    inp = tmp_path / "newmark.inp"
+    write_calculix_input(model, inp)
+    text = inp.read_text(encoding="utf-8").lower()
+
+    assert model.hht_alpha == pytest.approx(0.0)
+    assert "*dynamic, direct, alpha=0" in text
 
 
 def test_calculix_drop_long_diagnostic_options_are_written(tmp_path: Path) -> None:
