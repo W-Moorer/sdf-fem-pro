@@ -317,10 +317,12 @@ Not safe:
 
 ## Required Next Steps For Strict CalculiX-Except-SDF Alignment
 
-Implementation status: the first strict C3D4 F2F validation mode has now been
-added in `validation/calculix_f2f_contact.py` and wired into
+Implementation status: strict and persistent C3D4 F2F validation modes have now
+been added in `validation/calculix_f2f_contact.py` and wired into
 `validation/run_geometric_nonlinear_contact_validation.py` as
-`--contact-mode calculix_c3d4_f2f` and
+`--contact-mode persistent_calculix_c3d4_f2f`,
+`--contact-mode calculix_c3d4_f2f`,
+`--contact-mode persistent_dynamic_sdf_calculix_f2f`, and
 `--contact-mode dynamic_sdf_calculix_f2f`.
 
 1. Add a dedicated `calculix_c3d4_f2f` comparison mode:
@@ -339,22 +341,41 @@ added in `validation/calculix_f2f_contact.py` and wired into
      case;
    - report SFC contact count using a CalculiX-like contact-element definition.
 
-   Status: partially implemented as diagnostic `CalculixF2FContactSpring`
-   records. Full persistent active-set/cutback equivalence remains open.
+   Status: implemented as diagnostic `CalculixF2FContactSpring` records plus a
+   clean-room `CalculixF2FContactLifecycle`. The lifecycle stores generated
+   springs, reports generated spring count separately from negative-clearance
+   force samples, and supports generated/persisted/released event diagnostics.
+   This still does not claim source-level CalculiX branch equivalence.
 
-3. Split validation outputs:
+3. Add contact convergence/cutback diagnostics:
+   - track active contact count and residual trends;
+   - flag residual growth and active-set oscillation as cutback/retry
+     candidates.
+
+   Status: implemented as `CalculixContactConvergenceHeuristic` and reported by
+   the geometric nonlinear contact validation runner.
+
+4. Add deformable-deformable master DOF spring assembly:
+   - assemble `dg/dx_slave = N_slave n^T`;
+   - assemble `dg/dx_master = -N_master n^T`;
+   - assemble `f = J^T lambda` and `K ~= k area J^T J`.
+
+   Status: implemented as `assemble_deformable_f2f_contact_response` with
+   action-reaction tests. A full two-body dynamic runner remains a follow-up.
+
+5. Split validation outputs:
    - one strict CalculiX-discretization mode for external solver comparison;
    - one higher-order SFC quadrature mode for the proposed method's own accuracy
      study.
 
-4. Compare only fields with matching definitions:
+6. Compare only fields with matching definitions:
    - center-of-mass height and velocity;
    - geometry-based min gap and max penetration using the same sample points;
    - summed normal reaction using the same force sign and surface;
    - contact spring energy using the same sample/contact-element definition;
    - stress cloud at the same physical time and same color scale.
 
-5. Keep SDF as the isolated variable only after the enforcement mode is matched:
+7. Keep SDF as the isolated variable only after the enforcement mode is matched:
    - run analytic-plane contact and dynamic-SDF-plane contact through the same
      `calculix_c3d4_f2f` enforcement path;
    - then compare against CalculiX.

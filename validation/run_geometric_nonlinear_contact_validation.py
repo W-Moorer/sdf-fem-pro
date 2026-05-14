@@ -52,8 +52,11 @@ from validation.run_geometric_nonlinear_acceptance import (  # noqa: E402
     _voigt_von_mises,
 )
 from validation.calculix_f2f_contact import (  # noqa: E402
+    CalculixContactConvergenceHeuristic,
     CalculixC3D4FaceToFacePlaneContactGeometry,
     CalculixC3D4FaceToFaceSDFContactGeometry,
+    PersistentCalculixC3D4FaceToFacePlaneContactGeometry,
+    PersistentCalculixC3D4FaceToFaceSDFContactGeometry,
 )
 from sfc.contact import DynamicSurfaceSDFContactGeometry, UniformTriangleAABBHash  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
@@ -170,7 +173,7 @@ def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout
 def run_sfc_geometric_contact_history(
     model: DropModel,
     *,
-    contact_mode: str = "calculix_c3d4_f2f",
+    contact_mode: str = "persistent_calculix_c3d4_f2f",
     source: str = "sfc_geometric_nonlinear",
 ) -> tuple[list[Row], np.ndarray, NonlinearState]:
     """Run the clean-room CalculiX-aligned StVK contact backend."""
@@ -192,9 +195,16 @@ def run_sfc_geometric_contact_history(
     diagnostics = evaluate_state(mechanics, state, contact, gravity=model.gravity, assemble_tangent=True)
     times = np.arange(0.0, model.total_time + 0.5 * model.dt, model.dt)
     rows: list[Row] = []
+    contact_heuristic = CalculixContactConvergenceHeuristic()
     for step, time in enumerate(times):
         state.time = float(time)
         centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
+        generated_count = _generated_contact_count(contact)
+        convergence_record = contact_heuristic.update(
+            iteration=step,
+            active_count=int(generated_count) if generated_count != "" else int(diagnostics.contact.active_count),
+            residual_norm=float(diagnostics.newton_residual_norm),
+        )
         rows.append(
             {
                 "case": model.case,
@@ -208,6 +218,7 @@ def run_sfc_geometric_contact_history(
                 "quadrature_min_gap": diagnostics.contact.min_gap,
                 "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
                 "active_contact_count": diagnostics.contact.active_count,
+                "generated_contact_spring_count": generated_count,
                 "normal_force_proxy": diagnostics.contact.normal_force,
                 "normal_force_source": _normal_force_source(contact_mode),
                 "calculix_floor_rf_z": "",
@@ -220,6 +231,8 @@ def run_sfc_geometric_contact_history(
                 "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, diagnostics.internal.von_mises),
                 "newton_iterations": diagnostics.newton_iterations,
                 "newton_residual_norm": diagnostics.newton_residual_norm,
+                "contact_cutback_recommended": str(convergence_record.recommended_cutback).lower(),
+                "contact_convergence_reason": convergence_record.reason,
                 "details": details,
             }
         )
@@ -240,6 +253,15 @@ def run_sfc_geometric_contact_history(
 
 
 def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[ContactGeometry, str]:
+    if contact_mode == "persistent_calculix_c3d4_f2f":
+        return (
+            PersistentCalculixC3D4FaceToFacePlaneContactGeometry(
+                model.surface_faces,
+                plane_z=_contact_plane_z(model),
+                stiffness=model.contact_stiffness,
+            ),
+            "clean-room persistent CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; rigid plane query",
+        )
     if contact_mode == "calculix_c3d4_f2f":
         return (
             CalculixC3D4FaceToFacePlaneContactGeometry(
@@ -248,6 +270,25 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 stiffness=model.contact_stiffness,
             ),
             "clean-room CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; rigid plane query",
+        )
+    if contact_mode == "persistent_dynamic_sdf_calculix_f2f":
+        master_x, master_faces = _rigid_plane_master_surface(model)
+        delta_safe = _sdf_plane_padding(model)
+        broad_phase = UniformTriangleAABBHash.from_surface(
+            master_x,
+            master_faces,
+            delta_safe=delta_safe,
+            cell_size=max(0.25, delta_safe),
+        )
+        return (
+            PersistentCalculixC3D4FaceToFaceSDFContactGeometry(
+                model.surface_faces,
+                master_x,
+                master_faces,
+                candidate_provider=broad_phase.query_point,
+                stiffness=model.contact_stiffness,
+            ),
+            "clean-room persistent CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; dynamic FEM-SDF plane query",
         )
     if contact_mode == "dynamic_sdf_calculix_f2f":
         master_x, master_faces = _rigid_plane_master_surface(model)
@@ -296,15 +337,30 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
             ),
             "clean-room CalculiX-aligned StVK backend; dynamic FEM-SDF plane contact query",
         )
-    raise ValueError("contact_mode must be 'calculix_c3d4_f2f', 'dynamic_sdf_calculix_f2f', 'plane', or 'dynamic_sdf_plane'")
+    raise ValueError(
+        "contact_mode must be 'calculix_c3d4_f2f', 'persistent_calculix_c3d4_f2f', "
+        "'dynamic_sdf_calculix_f2f', 'persistent_dynamic_sdf_calculix_f2f', 'plane', or 'dynamic_sdf_plane'"
+    )
 
 
 def _normal_force_source(contact_mode: str) -> str:
-    if contact_mode in {"calculix_c3d4_f2f", "dynamic_sdf_calculix_f2f"}:
+    if contact_mode in {
+        "calculix_c3d4_f2f",
+        "persistent_calculix_c3d4_f2f",
+        "dynamic_sdf_calculix_f2f",
+        "persistent_dynamic_sdf_calculix_f2f",
+    }:
         return "calculix_c3d4_f2f_hard_linear"
     if contact_mode == "dynamic_sdf_plane":
         return "dynamic_sdf_three_point_penalty_tangent"
     return "three_point_penalty_tangent"
+
+
+def _generated_contact_count(contact: ContactGeometry) -> int | str:
+    value = getattr(contact, "generated_contact_count", None)
+    if value is None:
+        return ""
+    return int(value)
 
 
 def _rigid_plane_master_surface(model: DropModel) -> tuple[np.ndarray, np.ndarray]:
@@ -544,7 +600,7 @@ def _voigt_to_tensor(values: np.ndarray) -> np.ndarray:
     return tensors
 
 
-def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float, contact_mode: str = "calculix_c3d4_f2f") -> list[Row]:
+def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float, contact_mode: str = "persistent_calculix_c3d4_f2f") -> list[Row]:
     rows: list[Row] = []
     for resolution in resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
@@ -566,7 +622,7 @@ def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float, 
     return rows
 
 
-def sfc_timestep_convergence(dts: list[float], *, duration: float, contact_mode: str = "calculix_c3d4_f2f") -> list[Row]:
+def sfc_timestep_convergence(dts: list[float], *, duration: float, contact_mode: str = "persistent_calculix_c3d4_f2f") -> list[Row]:
     rows: list[Row] = []
     for dt in dts:
         model = _contact_model(resolution=1, duration=duration, dt=dt)
@@ -593,7 +649,7 @@ def run_validation(
     *,
     quick: bool = False,
     skip_calculix: bool = False,
-    contact_mode: str = "calculix_c3d4_f2f",
+    contact_mode: str = "persistent_calculix_c3d4_f2f",
 ) -> dict[str, Path]:
     """Run geometric nonlinear contact validation and write CSV/Markdown."""
 
@@ -763,8 +819,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-calculix", action="store_true")
     parser.add_argument(
         "--contact-mode",
-        choices=["calculix_c3d4_f2f", "dynamic_sdf_calculix_f2f", "plane", "dynamic_sdf_plane"],
-        default="calculix_c3d4_f2f",
+        choices=[
+            "calculix_c3d4_f2f",
+            "persistent_calculix_c3d4_f2f",
+            "dynamic_sdf_calculix_f2f",
+            "persistent_dynamic_sdf_calculix_f2f",
+            "plane",
+            "dynamic_sdf_plane",
+        ],
+        default="persistent_calculix_c3d4_f2f",
         help="SFC contact geometry/enforcement mode used for the validation run.",
     )
     return parser.parse_args()

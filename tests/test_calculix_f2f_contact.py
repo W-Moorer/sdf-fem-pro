@@ -13,8 +13,13 @@ if str(ROOT) not in sys.path:
 from sfc.fem.calculix_aligned import PlaneContactGeometry, assemble_contact_response
 from validation.calculix_f2f_contact import (
     C3D4_FACE_CENTROID_WEIGHTS,
+    CalculixContactConvergenceHeuristic,
     CalculixC3D4FaceToFacePlaneContactGeometry,
     CalculixC3D4FaceToFaceSDFContactGeometry,
+    CalculixF2FContactLifecycle,
+    CalculixF2FContactSpring,
+    PersistentCalculixC3D4FaceToFacePlaneContactGeometry,
+    assemble_deformable_f2f_contact_response,
 )
 
 
@@ -77,3 +82,93 @@ def test_calculix_c3d4_f2f_dynamic_sdf_plane_matches_analytic_plane() -> None:
     sdf_response = assemble_contact_response(sdf.samples(slave_x), 3)
     assert sdf_response.normal_force == pytest.approx(plane_response.normal_force)
     assert sdf_response.energy == pytest.approx(plane_response.energy)
+
+
+def test_persistent_lifecycle_generates_persists_and_releases_springs() -> None:
+    lifecycle = CalculixF2FContactLifecycle(release_tolerance=0.02)
+    penetrating = _spring(clearance=-0.01)
+    near_open = _spring(clearance=0.01)
+    far_open = _spring(clearance=0.03)
+
+    active = lifecycle.update([penetrating])
+    assert len(active) == 1
+    assert lifecycle.events[0].status == "generated"
+
+    active = lifecycle.update([near_open])
+    assert len(active) == 1
+    assert lifecycle.events[0].status == "persisted"
+    assert lifecycle.generated_count == 1
+    assert lifecycle.penetrating_count == 0
+
+    active = lifecycle.update([far_open])
+    assert active == []
+    assert lifecycle.events[0].status == "released"
+    assert lifecycle.generated_count == 0
+
+
+def test_persistent_plane_geometry_reports_generated_count_separately() -> None:
+    x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    geometry = PersistentCalculixC3D4FaceToFacePlaneContactGeometry(faces, plane_z=0.0, stiffness=100.0)
+
+    response = assemble_contact_response(geometry.samples(x), n_nodes=3)
+
+    assert geometry.generated_contact_count == 1
+    assert response.active_count == 1
+    assert response.normal_force == pytest.approx(5.0)
+
+
+def test_convergence_heuristic_recommends_cutback_on_oscillation() -> None:
+    heuristic = CalculixContactConvergenceHeuristic()
+    first = heuristic.update(iteration=1, active_count=2, residual_norm=10.0)
+    second = heuristic.update(iteration=2, active_count=0, residual_norm=9.0)
+    third = heuristic.update(iteration=3, active_count=2, residual_norm=9.5)
+
+    assert not first.recommended_cutback
+    assert not second.recommended_cutback
+    assert third.recommended_cutback
+    assert third.reason == "active_set_oscillation"
+
+
+def test_deformable_f2f_master_slave_response_is_action_reaction_balanced() -> None:
+    spring = _spring(
+        clearance=-0.1,
+        master_nodes=np.asarray([0, 1, 2], dtype=np.int64),
+        master_weights=np.asarray([0.2, 0.3, 0.5], dtype=float),
+    )
+
+    response = assemble_deformable_f2f_contact_response(
+        [spring],
+        stiffness=100.0,
+        n_slave_nodes=3,
+        n_master_nodes=3,
+    )
+
+    assert response.active_count == 1
+    assert response.generated_count == 1
+    assert response.normal_force == pytest.approx(5.0)
+    slave_force = response.force[:9].reshape(3, 3).sum(axis=0)
+    master_force = response.force[9:].reshape(3, 3).sum(axis=0)
+    assert slave_force == pytest.approx(np.asarray([0.0, 0.0, 5.0]))
+    assert master_force == pytest.approx(np.asarray([0.0, 0.0, -5.0]))
+    assert slave_force + master_force == pytest.approx(np.zeros(3))
+    assert response.stiffness.shape == (18, 18)
+
+
+def _spring(
+    *,
+    clearance: float,
+    master_nodes: np.ndarray | None = None,
+    master_weights: np.ndarray | None = None,
+) -> CalculixF2FContactSpring:
+    return CalculixF2FContactSpring(
+        slave_face_index=0,
+        slave_nodes=np.asarray([0, 1, 2], dtype=np.int64),
+        slave_weights=np.full(3, 1.0 / 3.0, dtype=float),
+        master_face_index=-1 if master_nodes is None else 0,
+        master_nodes=np.zeros(0, dtype=np.int64) if master_nodes is None else master_nodes,
+        master_weights=np.zeros(0, dtype=float) if master_weights is None else master_weights,
+        normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+        spring_area=0.5,
+        clearance=float(clearance),
+    )

@@ -35,8 +35,11 @@ def test_sfc_geometric_contact_history_activates_contact() -> None:
     rows, _, state = run_sfc_geometric_contact_history(model)
 
     assert any(int(row["active_contact_count"]) > 0 for row in rows)
-    assert {row["contact_mode"] for row in rows} == {"calculix_c3d4_f2f"}
+    assert {row["contact_mode"] for row in rows} == {"persistent_calculix_c3d4_f2f"}
     assert {row["normal_force_source"] for row in rows} == {"calculix_c3d4_f2f_hard_linear"}
+    assert any(row["generated_contact_spring_count"] != "" for row in rows)
+    assert all(row["contact_cutback_recommended"] in {"true", "false"} for row in rows)
+    assert all(row["contact_convergence_reason"] for row in rows)
     assert max(float(row["normal_force_proxy"]) for row in rows) > 0.0
     assert max(float(row["contact_energy_proxy"]) for row in rows) > 0.0
     assert max(int(row["newton_iterations"]) for row in rows) > 0
