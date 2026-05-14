@@ -70,6 +70,12 @@ run supports mass, StVK patch, tangent finite-difference, freefall dynamics,
 and no-contact Newton cantilever gates; the quick optional CalculiX cantilever
 comparison completed with tip-displacement relative error `3.251012e-08`.
 
+Contact enforcement diagnostics are documented in
+`docs/contact_enforcement_diagnostics_handoff.md`. They show that active-set
+counts, area weighting, and pressure-overclosure law definitions are separate
+sources of SFC/CalculiX contact-history differences, while the SFC contact
+tangent passes a finite-difference check with relative error `3.264947e-10`.
+
 ## Current Full Contact Comparison
 
 | Resolution | activation C/SFC | max pen. C | max pen. SFC | peak force C | peak force SFC | status |
