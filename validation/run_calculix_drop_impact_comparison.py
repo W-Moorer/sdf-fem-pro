@@ -850,7 +850,10 @@ def _smooth_overclosure_response(d: np.ndarray, *, stiffness: np.ndarray, epsilo
     active = raw_lambda > 0.0
     lambdas = np.where(active, raw_lambda, 0.0)
     tangents = np.where(active, np.maximum(raw_tangent, 0.0), 0.0)
-    energy = 0.5 * np.where(active, stiffness * d * d * smooth_heaviside, 0.0)
+    smooth_potential = eps * eps * (
+        0.25 * s * s + (((1.0 + s * s) * np.arctan(s) - s) / (2.0 * np.pi))
+    )
+    energy = np.where(active, stiffness * smooth_potential, 0.0)
     return lambdas, tangents, energy
 
 

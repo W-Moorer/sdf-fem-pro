@@ -250,6 +250,24 @@ def test_drop_contact_uses_three_point_triangle_quadrature() -> None:
     assert active_count == 6
 
 
+def test_smooth_overclosure_energy_matches_force_derivative() -> None:
+    from validation.run_calculix_drop_impact_comparison import _smooth_overclosure_response
+
+    stiffness = np.asarray([7.0], dtype=float)
+    epsilon = 0.08
+    h = 1.0e-6
+    d = np.asarray([0.037], dtype=float)
+
+    lam, tangent, _ = _smooth_overclosure_response(d, stiffness=stiffness, epsilon=epsilon)
+    lam_plus, _, energy_plus = _smooth_overclosure_response(d + h, stiffness=stiffness, epsilon=epsilon)
+    lam_minus, _, energy_minus = _smooth_overclosure_response(d - h, stiffness=stiffness, epsilon=epsilon)
+    force_from_energy = (energy_plus[0] - energy_minus[0]) / (2.0 * h)
+    tangent_from_force = (lam_plus[0] - lam_minus[0]) / (2.0 * h)
+
+    assert force_from_energy == pytest.approx(lam[0], rel=1.0e-8, abs=1.0e-10)
+    assert tangent_from_force == pytest.approx(tangent[0], rel=1.0e-8, abs=1.0e-10)
+
+
 def test_calculix_drop_input_and_sfc_mode_use_hht_direct_alignment(tmp_path: Path) -> None:
     from validation.run_calculix_drop_impact_comparison import (
         CALCULIX_DEFAULT_HHT_ALPHA,

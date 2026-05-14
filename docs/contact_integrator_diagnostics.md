@@ -4,8 +4,11 @@
 
 This note records the block/plane contact diagnostics after changing the SFC
 validation contact integration from one face centroid to three in-face triangle
-quadrature points. It also separates HHT-alpha dissipation from contact/time
-step effects by running `alpha=0` Newmark checks and reduced time increments.
+quadrature points. It also records the contact-energy audit fix: the smooth
+penalty contact energy is now the analytic potential whose derivative is the
+assembled contact force. The diagnostics separate HHT-alpha dissipation from
+contact/time-step effects by running `alpha=0` Newmark checks and reduced time
+increments.
 
 These diagnostics are validation-only. They do not modify the core `src/sfc`
 solver.
@@ -40,14 +43,14 @@ python validation/run_calculix_drop_impact_comparison.py --quick --case block_dr
 
 ## Summary Metrics
 
-| Run | CalculiX completed | first contact C/SFC | z rel. error | gap Linf error | C max force | SFC max force | C active | SFC active | SFC final energy drift | SFC final z |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| HHT dt=0.002 | true | 0.096 / 0.096 | 1.406341e-02 | 1.797834e-02 | 35.1383 | 32.5677 | 14 | 6 | -2.427503e-04 | 0.430159 |
-| HHT dt=0.001 | false | 0.096 / 0.096 | 2.332804e-04 | 2.531019e-03 | 24.1120 | 32.7795 | 14 | 6 | 3.112712e-04 | 0.429701 |
-| HHT dt=0.0005 | false | 0.096 / 0.096 | 2.092275e-04 | 2.556400e-03 | 23.8802 | 32.8253 | 14 | 6 | 3.474994e-04 | 0.429570 |
-| Newmark dt=0.002 | false | 0.096 / 0.096 | 2.571739e-04 | 2.495084e-03 | 24.5637 | 32.6222 | 14 | 6 | 4.593720e-05 | 0.430101 |
-| Newmark dt=0.001 | false | 0.096 / 0.096 | 2.336644e-04 | 2.533671e-03 | 24.0991 | 32.7861 | 14 | 6 | 3.428155e-04 | 0.429675 |
-| Newmark dt=0.0005 | false | 0.096 / 0.096 | 2.093221e-04 | 2.556940e-03 | 23.8777 | 32.8272 | 14 | 6 | 3.529187e-04 | 0.429564 |
+| Run | CalculiX completed | first contact C/SFC | z rel. error | gap Linf error | C max force | SFC max force | C active | SFC active | SFC final energy drift | SFC min/max energy drift | SFC final z |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| HHT dt=0.002 | true | 0.096 / 0.096 | 1.406341e-02 | 1.797834e-02 | 35.1383 | 32.5677 | 14 | 6 | -2.427503e-04 | -1.699789e-03 / 6.466428e-04 | 0.430159 |
+| HHT dt=0.001 | false | 0.096 / 0.096 | 2.332804e-04 | 2.531019e-03 | 24.1120 | 32.7795 | 14 | 6 | 3.112712e-04 | -1.030868e-03 / 7.295875e-04 | 0.429701 |
+| HHT dt=0.0005 | false | 0.096 / 0.096 | 2.092275e-04 | 2.556400e-03 | 23.8802 | 32.8253 | 14 | 6 | 3.474994e-04 | -9.308638e-04 / 7.596023e-04 | 0.429570 |
+| Newmark dt=0.002 | false | 0.096 / 0.096 | 2.571739e-04 | 2.495084e-03 | 24.5636 | 32.6222 | 14 | 6 | 4.593720e-05 | -1.487888e-03 / 6.701198e-04 | 0.430101 |
+| Newmark dt=0.001 | false | 0.096 / 0.096 | 2.336644e-04 | 2.533671e-03 | 24.0991 | 32.7861 | 14 | 6 | 3.428155e-04 | -9.898508e-04 / 7.349002e-04 | 0.429675 |
+| Newmark dt=0.0005 | false | 0.096 / 0.096 | 2.093221e-04 | 2.556940e-03 | 23.8777 | 32.8272 | 14 | 6 | 3.529187e-04 | -9.245802e-04 / 7.608757e-04 | 0.429564 |
 
 For the incomplete rows, the `z rel. error` and `gap Linf error` are computed
 only over the partial CalculiX output interval. Those rows should not be used
@@ -75,18 +78,27 @@ with return code `201` due to persistent-contact energy residual divergence.
 Therefore `alpha=0` is useful here as an SFC internal diagnostic, not as a full
 external CalculiX reference.
 
+The contact energy now uses the analytic integral of the smooth overclosure
+law, so the reported potential satisfies `dE/dd = lambda`. Before this fix, the
+diagnostic energy used `0.5 k d^2 H(d/eps)`, whose derivative is not the
+assembled smooth contact force. That inconsistency could falsely appear as
+contact energy loss or gain in the total-energy plot.
+
 The SFC Newmark time-step results are close across `dt=0.002`, `0.001`, and
 `0.0005`: final mass-center height changes from `0.430101` to `0.429564`, and
-the energy drift remains below `4e-4` relative. This suggests that the remaining
-SFC/CalculiX curve mismatch is dominated by contact formulation and external
-solver contact behavior rather than by SFC time-step error alone.
+the final relative energy drift remains below `4e-4`. The remaining energy
+error envelope is below about `1.5e-3` for these diagnostics. This suggests
+that the remaining SFC/CalculiX curve mismatch is dominated by contact
+formulation and external solver contact behavior rather than by SFC time-step
+error alone.
 
 ## Current Conclusion
 
 The updated SFC validation contact is more physically appropriate than the
 single-centroid approximation because it integrates pressure over multiple
-in-face points. It still does not reproduce CalculiX time histories exactly.
-The remaining mismatch is mainly attributable to different contact
-discretization, active contact generation, and CalculiX convergence behavior in
-persistent contact. The evidence supports contact timing and qualitative
-response checks, not a high-precision dynamic contact time-history claim.
+in-face points and reports a contact potential consistent with the assembled
+force. It still does not reproduce CalculiX time histories exactly. The
+remaining mismatch is mainly attributable to different contact discretization,
+active contact generation, and CalculiX convergence behavior in persistent
+contact. The evidence supports contact timing and qualitative response checks,
+not a high-precision dynamic contact time-history claim.
