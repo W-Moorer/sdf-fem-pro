@@ -67,9 +67,12 @@ from sfc.fem.calculix_aligned import (  # noqa: E402
     MechanicsState,
     PlaneContactGeometry,
     StepDiagnostics,
+    assemble_contact_response,
     evaluate_state,
+    hht_newmark_parameters,
     hht_step,
     initial_state,
+    static_residual_and_tangent,
 )
 from validation.run_geometric_nonlinear_vtk import (  # noqa: E402
     NonlinearState,
@@ -496,6 +499,8 @@ def _parse_calculix_stdout_diagnostics(path: Path | None) -> Row:
             "calculix_stdout_cutback_attempt_count": "",
             "calculix_stdout_no_convergence_count": "",
             "calculix_stdout_kscale_restore_count": "",
+            "calculix_stdout_contact_energy_stabilization_count": "",
+            "calculix_stdout_forced_increment_size_count": "",
             "calculix_stdout_max_contact_spring_elements": "",
         }
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -509,8 +514,266 @@ def _parse_calculix_stdout_diagnostics(path: Path | None) -> Row:
         "calculix_stdout_cutback_attempt_count": sum(1 for value in attempts if value > 1),
         "calculix_stdout_no_convergence_count": len(re.findall(r"\bno convergence\b", text)),
         "calculix_stdout_kscale_restore_count": len(re.findall(r"restoring the elastic contact stifnesses", text)),
+        "calculix_stdout_contact_energy_stabilization_count": len(
+            re.findall(r"Adaption of the (?:energy residual|max-decay boundary)", text)
+        ),
+        "calculix_stdout_forced_increment_size_count": len(re.findall(r"new increment size is forced", text)),
         "calculix_stdout_max_contact_spring_elements": max(contact_counts) if contact_counts else "",
     }
+
+
+def hht_residual_tangent_diagnostics(
+    model: DropModel,
+    *,
+    contact_mode: str = "calculix_c3d4_f2f",
+) -> list[Row]:
+    """Return HHT residual/tangent trajectory diagnostics for SFC contact.
+
+    The probe mirrors the CalculiX `calcresidual.c` sign convention by checking
+    the SFC residual form
+
+    `R = M a + (1 + alpha) R_static(u_{n+1}) - alpha R_static(u_n)`
+
+    against finite differences.  It uses a stateless contact geometry to keep
+    the active set deterministic during centered finite differences.
+    """
+
+    if contact_mode.startswith("persistent_"):
+        contact_mode = contact_mode.removeprefix("persistent_")
+    mechanics = MechanicsModel.from_tet4_mesh(
+        model.nodes,
+        model.tet_elements,
+        E=model.E,
+        nu=model.nu,
+        density=model.density,
+    )
+    contact, details = _make_contact_geometry(model, contact_mode)
+    state, previous_static = initial_state(
+        mechanics,
+        contact,
+        gravity=model.gravity,
+        initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+    )
+    rows: list[Row] = []
+    current_time = 0.0
+    step = 0
+    while current_time < float(model.total_time) - 1.0e-12:
+        dt = min(float(model.dt), float(model.total_time) - current_time)
+        state_n = MechanicsState(state.x.copy(), state.v.copy(), state.a.copy(), time=state.time)
+        previous_static_n = previous_static.copy()
+        state, previous_static, diagnostics = hht_step(
+            mechanics,
+            state,
+            previous_static,
+            contact,
+            dt=dt,
+            gravity=model.gravity,
+            alpha=model.hht_alpha,
+            max_iterations=12,
+            tolerance=1.0e-10,
+        )
+        current_time += dt
+        state.time = float(current_time)
+        step += 1
+        if diagnostics.contact.active_count <= 0:
+            continue
+        rows.append(
+            _hht_probe_row(
+                model,
+                mechanics,
+                contact,
+                state_n,
+                previous_static_n,
+                state,
+                previous_static,
+                diagnostics,
+                step=step,
+                dt=dt,
+                contact_mode=contact_mode,
+                details=details,
+            )
+        )
+        # The first active step is the most useful place to diagnose activation
+        # trajectory differences against CalculiX.
+        break
+    if rows:
+        return rows
+    return [
+        {
+            "case": model.case,
+            "resolution": model.resolution,
+            "contact_mode": contact_mode,
+            "time": "",
+            "dt": model.dt,
+            "alpha": model.hht_alpha,
+            "probe_step": "",
+            "active_contact_count": 0,
+            "max_penetration": 0.0,
+            "hht_dynamic_residual_norm": "",
+            "static_residual_norm_current": "",
+            "static_residual_norm_previous": float(np.linalg.norm(previous_static)),
+            "effective_tangent_directional_fd_rel_error": "",
+            "static_tangent_directional_fd_rel_error": "",
+            "contact_residual_tangent_directional_fd_rel_error": "",
+            "previous_static_residual_update_abs_error": "",
+            "previous_static_residual_update_rel_error": "",
+            "calculix_calcresidual_sign_convention": "not_probed_no_active_contact",
+            "details": details,
+        }
+    ]
+
+
+def _hht_probe_row(
+    model: DropModel,
+    mechanics: MechanicsModel,
+    contact: ContactGeometry,
+    state_n: MechanicsState,
+    previous_static_n: np.ndarray,
+    state_np1: MechanicsState,
+    accepted_static_residual: np.ndarray,
+    diagnostics: StepDiagnostics,
+    *,
+    step: int,
+    dt: float,
+    contact_mode: str,
+    details: str,
+) -> Row:
+    residual, tangent, static_residual, static_tangent = _hht_dynamic_residual_and_tangent(
+        mechanics,
+        contact,
+        state_n,
+        previous_static_n,
+        state_np1.x.reshape(-1),
+        dt=dt,
+        gravity=model.gravity,
+        alpha=model.hht_alpha,
+    )
+    direction = _contact_probe_direction(model, mechanics.n_dofs)
+    eps = 1.0e-7
+    r_plus, _, static_plus, _ = _hht_dynamic_residual_and_tangent(
+        mechanics,
+        contact,
+        state_n,
+        previous_static_n,
+        state_np1.x.reshape(-1) + eps * direction,
+        dt=dt,
+        gravity=model.gravity,
+        alpha=model.hht_alpha,
+    )
+    r_minus, _, static_minus, _ = _hht_dynamic_residual_and_tangent(
+        mechanics,
+        contact,
+        state_n,
+        previous_static_n,
+        state_np1.x.reshape(-1) - eps * direction,
+        dt=dt,
+        gravity=model.gravity,
+        alpha=model.hht_alpha,
+    )
+    dynamic_fd = (r_plus - r_minus) / (2.0 * eps)
+    static_fd = (static_plus - static_minus) / (2.0 * eps)
+    contact_tangent_error = _contact_residual_tangent_directional_error(
+        contact,
+        state_np1.x.reshape(-1),
+        direction,
+        n_nodes=mechanics.n_nodes,
+        eps=eps,
+    )
+    update_abs = float(np.linalg.norm(accepted_static_residual - static_residual))
+    update_rel = update_abs / max(float(np.linalg.norm(static_residual)), 1.0e-30)
+    return {
+        "case": model.case,
+        "resolution": model.resolution,
+        "contact_mode": contact_mode,
+        "time": float(state_np1.time),
+        "dt": float(dt),
+        "alpha": float(model.hht_alpha),
+        "probe_step": int(step),
+        "active_contact_count": int(diagnostics.contact.active_count),
+        "max_penetration": float(diagnostics.contact.max_penetration),
+        "hht_dynamic_residual_norm": float(np.linalg.norm(residual)),
+        "static_residual_norm_current": float(np.linalg.norm(static_residual)),
+        "static_residual_norm_previous": float(np.linalg.norm(previous_static_n)),
+        "effective_tangent_directional_fd_rel_error": _relative_vector_error(tangent @ direction, dynamic_fd),
+        "static_tangent_directional_fd_rel_error": _relative_vector_error(static_tangent @ direction, static_fd),
+        "contact_residual_tangent_directional_fd_rel_error": contact_tangent_error,
+        "previous_static_residual_update_abs_error": update_abs,
+        "previous_static_residual_update_rel_error": update_rel,
+        "calculix_calcresidual_sign_convention": "sfc_R_is_negative_of_CalculiX_rhs_b",
+        "details": details,
+    }
+
+
+def _hht_dynamic_residual_and_tangent(
+    mechanics: MechanicsModel,
+    contact: ContactGeometry,
+    state_n: MechanicsState,
+    previous_static_residual: np.ndarray,
+    x_flat: np.ndarray,
+    *,
+    dt: float,
+    gravity: float,
+    alpha: float,
+) -> tuple[np.ndarray, Any, np.ndarray, Any]:
+    beta, _gamma = hht_newmark_parameters(alpha)
+    c0 = 1.0 / (beta * float(dt) * float(dt))
+    u_n = (state_n.x - mechanics.X).reshape(-1)
+    v_n = state_n.v.reshape(-1)
+    a_n = state_n.a.reshape(-1)
+    u_pred = u_n + float(dt) * v_n + float(dt) * float(dt) * (0.5 - beta) * a_n
+    u = np.asarray(x_flat, dtype=float) - mechanics.X.reshape(-1)
+    a = c0 * (u - u_pred)
+    static_residual, static_tangent = static_residual_and_tangent(
+        mechanics,
+        np.asarray(x_flat, dtype=float).reshape((-1, 3)),
+        contact,
+        gravity=gravity,
+    )
+    residual = mechanics.mass_matrix @ a + (1.0 + float(alpha)) * static_residual - float(alpha) * previous_static_residual
+    tangent = (mechanics.mass_matrix * c0 + static_tangent * (1.0 + float(alpha))).tocsr()
+    return np.asarray(residual, dtype=float), tangent, static_residual, static_tangent
+
+
+def _contact_probe_direction(model: DropModel, n_dofs: int) -> np.ndarray:
+    direction = np.zeros(int(n_dofs), dtype=float)
+    nodes = np.unique(np.asarray(model.surface_faces, dtype=np.int64).ravel())
+    if nodes.size == 0:
+        direction[2::3] = -1.0
+    else:
+        for node in nodes:
+            direction[3 * int(node) + 2] = -1.0
+    norm = float(np.linalg.norm(direction))
+    if norm <= 0.0:
+        direction[:] = 1.0
+        norm = float(np.linalg.norm(direction))
+    return direction / norm
+
+
+def _contact_residual_tangent_directional_error(
+    contact: ContactGeometry,
+    x_flat: np.ndarray,
+    direction: np.ndarray,
+    *,
+    n_nodes: int,
+    eps: float,
+) -> float | str:
+    def contact_residual_and_tangent(x_value: np.ndarray) -> tuple[np.ndarray, Any]:
+        response = assemble_contact_response(contact.samples(x_value.reshape((-1, 3))), n_nodes)
+        return -response.force.reshape(-1), response.tangent
+
+    contact_residual, contact_tangent = contact_residual_and_tangent(np.asarray(x_flat, dtype=float))
+    if contact_tangent.nnz == 0 and np.linalg.norm(contact_residual) <= 0.0:
+        return ""
+    plus, _ = contact_residual_and_tangent(np.asarray(x_flat, dtype=float) + eps * direction)
+    minus, _ = contact_residual_and_tangent(np.asarray(x_flat, dtype=float) - eps * direction)
+    finite_difference = (plus - minus) / (2.0 * eps)
+    return _relative_vector_error(contact_tangent @ direction, finite_difference)
+
+
+def _relative_vector_error(actual: np.ndarray, expected: np.ndarray) -> float:
+    actual_arr = np.asarray(actual, dtype=float)
+    expected_arr = np.asarray(expected, dtype=float)
+    return float(np.linalg.norm(actual_arr - expected_arr) / max(np.linalg.norm(expected_arr), 1.0e-30))
 
 
 def _optional_float(value: Any) -> float | None:
@@ -1014,6 +1277,7 @@ def run_validation(
     history_rows: list[Row] = []
     comparison_rows: list[Row] = []
     alignment_rows: list[Row] = []
+    hht_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
@@ -1036,6 +1300,7 @@ def run_validation(
             history_rows.extend(calc_rows)
         comparison_rows.append(compare_contact_histories(model, calc_rows, sfc_rows, calc_stress, sfc_state))
         alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
+        hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
@@ -1052,11 +1317,12 @@ def run_validation(
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
-    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows, alignment_rows)
+    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows, alignment_rows, hht_rows)
     outputs = {
         "history": out_dir / "geometric_contact_history.csv",
         "comparison": out_dir / "geometric_contact_calculix_comparison.csv",
         "alignment": out_dir / "geometric_contact_alignment_diagnostics.csv",
+        "hht": out_dir / "geometric_contact_hht_residual_tangent.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
         "vtk": out_dir / "geometric_contact_stress_clouds.csv",
@@ -1067,6 +1333,7 @@ def run_validation(
     _write_csv(outputs["history"], history_rows)
     _write_csv(outputs["comparison"], comparison_rows)
     _write_csv(outputs["alignment"], alignment_rows)
+    _write_csv(outputs["hht"], hht_rows)
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
     _write_csv(outputs["vtk"], vtk_rows)
@@ -1080,6 +1347,7 @@ def run_validation(
         vtk_rows,
         claim_rows,
         alignment_rows,
+        hht_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
@@ -1092,11 +1360,21 @@ def _claim_rows(
     timestep_rows: list[Row],
     vtk_rows: list[Row],
     alignment_rows: list[Row],
+    hht_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
     accepted = any(row["acceptance_status"] == "passed_scoped_gate" for row in comparison_rows)
     replay_supported = bool(alignment_rows) and any(
         row.get("diagnosis") == "trajectory_difference_dominant" for row in alignment_rows
+    )
+    hht_supported = bool(hht_rows) and any(
+        row.get("effective_tangent_directional_fd_rel_error") not in {"", None}
+        and float(row["effective_tangent_directional_fd_rel_error"]) < 5.0e-5
+        and row.get("contact_residual_tangent_directional_fd_rel_error") not in {"", None}
+        and float(row["contact_residual_tangent_directional_fd_rel_error"]) < 5.0e-5
+        and row.get("previous_static_residual_update_rel_error") not in {"", None}
+        and float(row["previous_static_residual_update_rel_error"]) < 5.0e-8
+        for row in hht_rows
     )
     return [
         {
@@ -1116,6 +1394,12 @@ def _claim_rows(
             "supported": str(replay_supported).lower(),
             "evidence_csv": "geometric_contact_alignment_diagnostics.csv",
             "details": "Replays SFC hard-linear area-weighted contact law on CalculiX displacements to separate force-law/output differences from trajectory differences",
+        },
+        {
+            "claim": "hht_residual_tangent_trajectory_diagnostics_available",
+            "supported": str(hht_supported).lower(),
+            "evidence_csv": "geometric_contact_hht_residual_tangent.csv",
+            "details": "Checks the HHT residual evaluation point, previous static residual update, and contact residual tangent sign convention by finite differences",
         },
         {
             "claim": "contact_mesh_convergence_trend_available",
@@ -1146,6 +1430,7 @@ def _write_markdown(
     vtk_rows: list[Row],
     claim_rows: list[Row],
     alignment_rows: list[Row],
+    hht_rows: list[Row],
     *,
     contact_mode: str,
     cutback_policy: str,
@@ -1165,6 +1450,7 @@ def _write_markdown(
         "- `geometric_contact_history.csv`",
         "- `geometric_contact_calculix_comparison.csv`",
         "- `geometric_contact_alignment_diagnostics.csv`",
+        "- `geometric_contact_hht_residual_tangent.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
         "- `geometric_contact_stress_clouds.csv`",
@@ -1200,6 +1486,22 @@ def _write_markdown(
             f"{_fmt(row['calculix_stdout_kscale_restore_count'])} | "
             f"{_fmt(row['calculix_stdout_max_attempt'])} | {_fmt(row['calculix_stdout_min_increment_size'])} | "
             f"{_fmt(row['sfc_min_accepted_dt'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## HHT Residual/Tangent Diagnostics",
+            "",
+            "| Resolution | Contact mode | time | active | HHT tangent FD rel. | contact tangent FD rel. | previous-static update rel. |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in hht_rows:
+        lines.append(
+            f"| {row['resolution']} | {row['contact_mode']} | {_fmt(row['time'])} | "
+            f"{_fmt(row['active_contact_count'])} | {_fmt(row['effective_tangent_directional_fd_rel_error'])} | "
+            f"{_fmt(row['contact_residual_tangent_directional_fd_rel_error'])} | "
+            f"{_fmt(row['previous_static_residual_update_rel_error'])} |"
         )
     lines.extend(
         [

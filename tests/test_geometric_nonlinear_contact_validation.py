@@ -14,6 +14,7 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _contact_model,
     _parse_calculix_stdout_diagnostics,
     contact_replay_metrics,
+    hht_residual_tangent_diagnostics,
     run_sfc_geometric_contact_history,
     run_validation,
     write_calculix_contact_input_with_stress,
@@ -100,6 +101,8 @@ def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
                 "increment size= 1.000000e-03",
                 "Number of contact spring elements=12",
                 "restoring the elastic contact stifnesses to their original values",
+                "Adaption of the energy residual in persistent contact,",
+                "convergence; new increment size is forced to 1.000000e-03",
             ]
         ),
         encoding="utf-8",
@@ -113,6 +116,8 @@ def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
     assert row["calculix_stdout_cutback_attempt_count"] == 1
     assert row["calculix_stdout_no_convergence_count"] == 1
     assert row["calculix_stdout_kscale_restore_count"] == 1
+    assert row["calculix_stdout_contact_energy_stabilization_count"] == 1
+    assert row["calculix_stdout_forced_increment_size_count"] == 1
     assert row["calculix_stdout_max_contact_spring_elements"] == 14
 
 
@@ -136,6 +141,7 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["contact_timestep_convergence_trend_available"]["supported"] == "true"
     assert claims["paraview_stress_cloud_comparison_available"]["supported"] == "false"
     assert claims["calculix_contact_force_law_replay_diagnostics_available"]["supported"] == "false"
+    assert claims["hht_residual_tangent_trajectory_diagnostics_available"]["supported"] == "true"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
         alignment_rows = list(csv.DictReader(f))
@@ -149,3 +155,23 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     with outputs["timestep"].open(newline="", encoding="utf-8") as f:
         timestep_rows = list(csv.DictReader(f))
     assert len(timestep_rows) == 3
+
+    with outputs["hht"].open(newline="", encoding="utf-8") as f:
+        hht_rows = list(csv.DictReader(f))
+    assert hht_rows
+    assert float(hht_rows[0]["effective_tangent_directional_fd_rel_error"]) < 5.0e-5
+    assert float(hht_rows[0]["contact_residual_tangent_directional_fd_rel_error"]) < 5.0e-5
+
+
+def test_hht_residual_tangent_diagnostics_probe_contact_sign_convention() -> None:
+    model = _contact_model(resolution=1, duration=0.12, dt=0.004)
+    rows = hht_residual_tangent_diagnostics(model)
+
+    assert rows
+    row = rows[0]
+    assert row["calculix_calcresidual_sign_convention"] == "sfc_R_is_negative_of_CalculiX_rhs_b"
+    assert int(row["active_contact_count"]) > 0
+    assert float(row["effective_tangent_directional_fd_rel_error"]) < 5.0e-5
+    assert float(row["static_tangent_directional_fd_rel_error"]) < 5.0e-5
+    assert float(row["contact_residual_tangent_directional_fd_rel_error"]) < 5.0e-5
+    assert float(row["previous_static_residual_update_rel_error"]) < 5.0e-8
