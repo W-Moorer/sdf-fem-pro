@@ -51,7 +51,9 @@ from validation.run_geometric_nonlinear_acceptance import (  # noqa: E402
     _parse_final_stress_voigt,
     _voigt_von_mises,
 )
+from sfc.contact import DynamicSurfaceSDFContactGeometry, UniformTriangleAABBHash  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
+    ContactGeometry,
     MechanicsModel,
     MechanicsState,
     PlaneContactGeometry,
@@ -161,7 +163,12 @@ def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout
     return history, final_u, final_stress, command_row
 
 
-def run_sfc_geometric_contact_history(model: DropModel) -> tuple[list[Row], np.ndarray, NonlinearState]:
+def run_sfc_geometric_contact_history(
+    model: DropModel,
+    *,
+    contact_mode: str = "plane",
+    source: str = "sfc_geometric_nonlinear",
+) -> tuple[list[Row], np.ndarray, NonlinearState]:
     """Run the clean-room CalculiX-aligned StVK contact backend."""
 
     mechanics = MechanicsModel.from_tet4_mesh(
@@ -171,11 +178,7 @@ def run_sfc_geometric_contact_history(model: DropModel) -> tuple[list[Row], np.n
         nu=model.nu,
         density=model.density,
     )
-    contact = PlaneContactGeometry(
-        model.surface_faces,
-        plane_z=_contact_plane_z(model),
-        stiffness=model.contact_stiffness,
-    )
+    contact, details = _make_contact_geometry(model, contact_mode)
     state, previous_static_residual = initial_state(
         mechanics,
         contact,
@@ -192,7 +195,7 @@ def run_sfc_geometric_contact_history(model: DropModel) -> tuple[list[Row], np.n
             {
                 "case": model.case,
                 "resolution": model.resolution,
-                "source": "sfc_geometric_nonlinear",
+                "source": source,
                 "time": float(time),
                 "z_cm": _mass_weighted_center_z(model, state.x),
                 "v_cm_z": _mass_weighted_velocity_z(model, state.v.reshape(-1)),
@@ -212,7 +215,7 @@ def run_sfc_geometric_contact_history(model: DropModel) -> tuple[list[Row], np.n
                 "max_contact_zone_von_mises": _contact_zone_max_von_mises(model, diagnostics.internal.von_mises),
                 "newton_iterations": diagnostics.newton_iterations,
                 "newton_residual_norm": diagnostics.newton_residual_norm,
-                "details": "clean-room CalculiX-aligned StVK backend; contact geometry remains swappable",
+                "details": details,
             }
         )
         if step == len(times) - 1:
@@ -229,6 +232,62 @@ def run_sfc_geometric_contact_history(model: DropModel) -> tuple[list[Row], np.n
             tolerance=1.0e-10,
         )
     return rows, state.x, _vtk_state_from_backend(state, diagnostics)
+
+
+def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[ContactGeometry, str]:
+    if contact_mode == "plane":
+        return (
+            PlaneContactGeometry(
+                model.surface_faces,
+                plane_z=_contact_plane_z(model),
+                stiffness=model.contact_stiffness,
+            ),
+            "clean-room CalculiX-aligned StVK backend; rigid plane contact geometry",
+        )
+    if contact_mode == "dynamic_sdf_plane":
+        master_x, master_faces = _rigid_plane_master_surface(model)
+        delta_safe = _sdf_plane_padding(model)
+        broad_phase = UniformTriangleAABBHash.from_surface(
+            master_x,
+            master_faces,
+            delta_safe=delta_safe,
+            cell_size=max(0.25, delta_safe),
+        )
+        return (
+            DynamicSurfaceSDFContactGeometry(
+                model.surface_faces,
+                master_x,
+                master_faces,
+                candidate_provider=broad_phase.query_point,
+                stiffness=model.contact_stiffness,
+            ),
+            "clean-room CalculiX-aligned StVK backend; dynamic FEM-SDF plane contact query",
+        )
+    raise ValueError("contact_mode must be 'plane' or 'dynamic_sdf_plane'")
+
+
+def _rigid_plane_master_surface(model: DropModel) -> tuple[np.ndarray, np.ndarray]:
+    floor_coords = np.asarray(model.floor_nodes[:, 1:4], dtype=float)
+    half_width = float(np.max(np.abs(floor_coords[:, :2])))
+    z = _contact_plane_z(model)
+    master_x = np.asarray(
+        [
+            [-half_width, -half_width, z],
+            [half_width, -half_width, z],
+            [half_width, half_width, z],
+            [-half_width, half_width, z],
+        ],
+        dtype=float,
+    )
+    master_faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+    return master_x, master_faces
+
+
+def _sdf_plane_padding(model: DropModel) -> float:
+    height = float(np.max(model.nodes[:, 2]) - np.min(model.nodes[:, 2]))
+    travel = abs(float(model.initial_velocity_z)) * float(model.total_time)
+    travel += 0.5 * float(model.gravity) * float(model.total_time) ** 2
+    return max(0.25, 1.5 * height + travel + 0.05)
 
 
 def _vtk_state_from_backend(state: MechanicsState, diagnostics: StepDiagnostics) -> NonlinearState:

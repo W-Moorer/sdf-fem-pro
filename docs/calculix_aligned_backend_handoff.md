@@ -54,6 +54,11 @@ The geometric nonlinear contact validation runner now uses the aligned backend.
 The latest full external comparison is under
 `results/geometric_nonlinear_contact_validation_full/`.
 
+The controlled contact-query equivalence run is documented in
+`docs/contact_query_equivalence_handoff.md`. In quick mode, the analytic plane
+provider and dynamic-SDF plane provider match to roundoff with maximum field
+absolute error `3.659295e-13`.
+
 ## Current Full Contact Comparison
 
 | Resolution | activation C/SFC | max pen. C | max pen. SFC | peak force C | peak force SFC | status |
