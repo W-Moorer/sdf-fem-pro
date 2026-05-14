@@ -51,6 +51,10 @@ from validation.run_geometric_nonlinear_acceptance import (  # noqa: E402
     _parse_final_stress_voigt,
     _voigt_von_mises,
 )
+from validation.calculix_f2f_contact import (  # noqa: E402
+    CalculixC3D4FaceToFacePlaneContactGeometry,
+    CalculixC3D4FaceToFaceSDFContactGeometry,
+)
 from sfc.contact import DynamicSurfaceSDFContactGeometry, UniformTriangleAABBHash  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
     ContactGeometry,
@@ -166,7 +170,7 @@ def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout
 def run_sfc_geometric_contact_history(
     model: DropModel,
     *,
-    contact_mode: str = "plane",
+    contact_mode: str = "calculix_c3d4_f2f",
     source: str = "sfc_geometric_nonlinear",
 ) -> tuple[list[Row], np.ndarray, NonlinearState]:
     """Run the clean-room CalculiX-aligned StVK contact backend."""
@@ -196,6 +200,7 @@ def run_sfc_geometric_contact_history(
                 "case": model.case,
                 "resolution": model.resolution,
                 "source": source,
+                "contact_mode": contact_mode,
                 "time": float(time),
                 "z_cm": _mass_weighted_center_z(model, state.x),
                 "v_cm_z": _mass_weighted_velocity_z(model, state.v.reshape(-1)),
@@ -204,7 +209,7 @@ def run_sfc_geometric_contact_history(
                 "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
                 "active_contact_count": diagnostics.contact.active_count,
                 "normal_force_proxy": diagnostics.contact.normal_force,
-                "normal_force_source": "geometric_nonlinear_penalty_tangent",
+                "normal_force_source": _normal_force_source(contact_mode),
                 "calculix_floor_rf_z": "",
                 "calculix_contact_count": "",
                 "kinetic_energy_proxy": diagnostics.kinetic_energy,
@@ -235,6 +240,34 @@ def run_sfc_geometric_contact_history(
 
 
 def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[ContactGeometry, str]:
+    if contact_mode == "calculix_c3d4_f2f":
+        return (
+            CalculixC3D4FaceToFacePlaneContactGeometry(
+                model.surface_faces,
+                plane_z=_contact_plane_z(model),
+                stiffness=model.contact_stiffness,
+            ),
+            "clean-room CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; rigid plane query",
+        )
+    if contact_mode == "dynamic_sdf_calculix_f2f":
+        master_x, master_faces = _rigid_plane_master_surface(model)
+        delta_safe = _sdf_plane_padding(model)
+        broad_phase = UniformTriangleAABBHash.from_surface(
+            master_x,
+            master_faces,
+            delta_safe=delta_safe,
+            cell_size=max(0.25, delta_safe),
+        )
+        return (
+            CalculixC3D4FaceToFaceSDFContactGeometry(
+                model.surface_faces,
+                master_x,
+                master_faces,
+                candidate_provider=broad_phase.query_point,
+                stiffness=model.contact_stiffness,
+            ),
+            "clean-room CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; dynamic FEM-SDF plane query",
+        )
     if contact_mode == "plane":
         return (
             PlaneContactGeometry(
@@ -263,7 +296,15 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
             ),
             "clean-room CalculiX-aligned StVK backend; dynamic FEM-SDF plane contact query",
         )
-    raise ValueError("contact_mode must be 'plane' or 'dynamic_sdf_plane'")
+    raise ValueError("contact_mode must be 'calculix_c3d4_f2f', 'dynamic_sdf_calculix_f2f', 'plane', or 'dynamic_sdf_plane'")
+
+
+def _normal_force_source(contact_mode: str) -> str:
+    if contact_mode in {"calculix_c3d4_f2f", "dynamic_sdf_calculix_f2f"}:
+        return "calculix_c3d4_f2f_hard_linear"
+    if contact_mode == "dynamic_sdf_plane":
+        return "dynamic_sdf_three_point_penalty_tangent"
+    return "three_point_penalty_tangent"
 
 
 def _rigid_plane_master_surface(model: DropModel) -> tuple[np.ndarray, np.ndarray]:
@@ -388,6 +429,7 @@ def compare_contact_histories(
     row: Row = {
         "case": model.case,
         "resolution": model.resolution,
+        "contact_mode": sfc_rows[0].get("contact_mode", "") if sfc_rows else "",
         "dt": model.dt,
         "duration": model.total_time,
         "calculix_completed": str(bool(calculix_rows)).lower(),
@@ -502,15 +544,16 @@ def _voigt_to_tensor(values: np.ndarray) -> np.ndarray:
     return tensors
 
 
-def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float) -> list[Row]:
+def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float, contact_mode: str = "calculix_c3d4_f2f") -> list[Row]:
     rows: list[Row] = []
     for resolution in resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
-        history, _, state = run_sfc_geometric_contact_history(model)
+        history, _, state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode)
         rows.append(
             {
                 "case": "block_drop_contact_mesh",
                 "resolution": resolution,
+                "contact_mode": contact_mode,
                 "nodes": model.nodes.shape[0],
                 "elements": model.tet_elements.shape[0],
                 "max_penetration": _max_float(history, "max_penetration"),
@@ -523,15 +566,16 @@ def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float) 
     return rows
 
 
-def sfc_timestep_convergence(dts: list[float], *, duration: float) -> list[Row]:
+def sfc_timestep_convergence(dts: list[float], *, duration: float, contact_mode: str = "calculix_c3d4_f2f") -> list[Row]:
     rows: list[Row] = []
     for dt in dts:
         model = _contact_model(resolution=1, duration=duration, dt=dt)
-        history, _, state = run_sfc_geometric_contact_history(model)
+        history, _, state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode)
         rows.append(
             {
                 "case": "block_drop_contact_timestep",
                 "dt": dt,
+                "contact_mode": contact_mode,
                 "duration": duration,
                 "max_penetration": _max_float(history, "max_penetration"),
                 "peak_normal_force": _max_float(history, "normal_force_proxy"),
@@ -544,7 +588,13 @@ def sfc_timestep_convergence(dts: list[float], *, duration: float) -> list[Row]:
     return rows
 
 
-def run_validation(out_dir: Path, *, quick: bool = False, skip_calculix: bool = False) -> dict[str, Path]:
+def run_validation(
+    out_dir: Path,
+    *,
+    quick: bool = False,
+    skip_calculix: bool = False,
+    contact_mode: str = "calculix_c3d4_f2f",
+) -> dict[str, Path]:
     """Run geometric nonlinear contact validation and write CSV/Markdown."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -557,7 +607,7 @@ def run_validation(out_dir: Path, *, quick: bool = False, skip_calculix: bool = 
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
-        sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(model)
+        sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode)
         history_rows.extend(sfc_rows)
         if skip_calculix:
             calc_rows: list[Row] = []
@@ -572,8 +622,12 @@ def run_validation(out_dir: Path, *, quick: bool = False, skip_calculix: bool = 
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
-    mesh_rows = sfc_mesh_convergence([1, 2, 3], duration=duration, dt=dt)
-    timestep_rows = sfc_timestep_convergence([0.004, 0.002, 0.001] if quick else [0.002, 0.001, 0.0005], duration=duration)
+    mesh_rows = sfc_mesh_convergence([1, 2, 3], duration=duration, dt=dt, contact_mode=contact_mode)
+    timestep_rows = sfc_timestep_convergence(
+        [0.004, 0.002, 0.001] if quick else [0.002, 0.001, 0.0005],
+        duration=duration,
+        contact_mode=contact_mode,
+    )
     claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows)
     outputs = {
         "history": out_dir / "geometric_contact_history.csv",
@@ -592,7 +646,7 @@ def run_validation(out_dir: Path, *, quick: bool = False, skip_calculix: bool = 
     _write_csv(outputs["vtk"], vtk_rows)
     _write_csv(outputs["commands"], command_rows)
     _write_csv(outputs["claims"], claim_rows)
-    _write_markdown(outputs["summary"], comparison_rows, mesh_rows, timestep_rows, vtk_rows, claim_rows)
+    _write_markdown(outputs["summary"], comparison_rows, mesh_rows, timestep_rows, vtk_rows, claim_rows, contact_mode=contact_mode)
     return outputs
 
 
@@ -640,11 +694,17 @@ def _write_markdown(
     timestep_rows: list[Row],
     vtk_rows: list[Row],
     claim_rows: list[Row],
+    *,
+    contact_mode: str,
 ) -> None:
     lines = [
         "# Geometric Nonlinear Contact Validation",
         "",
         "This validation compares the clean-room CalculiX-aligned SFC StVK geometric nonlinear block-plane contact path against CalculiX dynamic contact output.",
+        "",
+        f"SFC contact mode: `{contact_mode}`.",
+        "",
+        "The default `calculix_c3d4_f2f` mode uses one slave-face centroid spring per C3D4 boundary triangle and a hard linear pressure-overclosure law for stricter CalculiX-style validation. The older `plane` and `dynamic_sdf_plane` modes use three triangle quadrature samples and are not strict CalculiX C3D4 contact discretizations.",
         "",
         "## Outputs",
         "",
@@ -681,6 +741,7 @@ def _write_markdown(
             "",
             "- This validates the diagnostic clean-room StVK TET4 contact path, not a copied CalculiX implementation.",
             "- The mechanics backend is swappable with SFC dynamic-SDF contact geometry; this runner uses rigid-plane contact for external alignment.",
+            "- The strict mode still does not copy CalculiX source and does not reproduce every persistent active-set/cutback branch of CalculiX.",
             "- Passing the scoped gate is not a source-level CalculiX contact equivalence claim.",
             "- If CalculiX does not export RF/contact-energy data, the affected force/energy comparison fields remain blank.",
             "- Mesh/time-step trend files do not claim theoretical convergence order.",
@@ -700,12 +761,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "geometric_nonlinear_contact_validation")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--skip-calculix", action="store_true")
+    parser.add_argument(
+        "--contact-mode",
+        choices=["calculix_c3d4_f2f", "dynamic_sdf_calculix_f2f", "plane", "dynamic_sdf_plane"],
+        default="calculix_c3d4_f2f",
+        help="SFC contact geometry/enforcement mode used for the validation run.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    outputs = run_validation(args.out_dir, quick=args.quick, skip_calculix=args.skip_calculix)
+    outputs = run_validation(args.out_dir, quick=args.quick, skip_calculix=args.skip_calculix, contact_mode=args.contact_mode)
     print("Geometric nonlinear contact validation complete.")
     for name, path in outputs.items():
         print(f"{name}: {path}")

@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E402
+    _make_contact_geometry,
     _contact_model,
     run_sfc_geometric_contact_history,
     run_validation,
@@ -34,10 +35,21 @@ def test_sfc_geometric_contact_history_activates_contact() -> None:
     rows, _, state = run_sfc_geometric_contact_history(model)
 
     assert any(int(row["active_contact_count"]) > 0 for row in rows)
+    assert {row["contact_mode"] for row in rows} == {"calculix_c3d4_f2f"}
+    assert {row["normal_force_source"] for row in rows} == {"calculix_c3d4_f2f_hard_linear"}
     assert max(float(row["normal_force_proxy"]) for row in rows) > 0.0
     assert max(float(row["contact_energy_proxy"]) for row in rows) > 0.0
     assert max(int(row["newton_iterations"]) for row in rows) > 0
     assert state.von_mises.shape[0] == model.tet_elements.shape[0]
+
+
+def test_contact_geometry_modes_expose_strict_and_three_point_discretizations() -> None:
+    model = _contact_model(resolution=1, duration=0.02, dt=0.004)
+    strict, _ = _make_contact_geometry(model, "calculix_c3d4_f2f")
+    three_point, _ = _make_contact_geometry(model, "plane")
+
+    assert len(list(strict.samples(model.nodes))) == model.surface_faces.shape[0]
+    assert len(list(three_point.samples(model.nodes))) == 3 * model.surface_faces.shape[0]
 
 
 def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:

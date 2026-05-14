@@ -317,11 +317,20 @@ Not safe:
 
 ## Required Next Steps For Strict CalculiX-Except-SDF Alignment
 
+Implementation status: the first strict C3D4 F2F validation mode has now been
+added in `validation/calculix_f2f_contact.py` and wired into
+`validation/run_geometric_nonlinear_contact_validation.py` as
+`--contact-mode calculix_c3d4_f2f` and
+`--contact-mode dynamic_sdf_calculix_f2f`.
+
 1. Add a dedicated `calculix_c3d4_f2f` comparison mode:
    - one integration point per C3D4 triangular face, matching
      `gencontelem_f2f.f:219-222`;
    - hard linear overclosure, matching `springforc_f2f.f:191-200`;
    - CalculiX SPOS contact plane offset preserved for shell master surfaces.
+
+   Status: implemented for rigid-plane and dynamic-SDF plane validation
+   queries.
 
 2. Reproduce contact spring-element state for the comparison runner:
    - store master face id, master local coordinates, master normal, slave face
@@ -329,6 +338,9 @@ Not safe:
    - update/drop contacts with the same positive-clearance rule for the dynamic
      case;
    - report SFC contact count using a CalculiX-like contact-element definition.
+
+   Status: partially implemented as diagnostic `CalculixF2FContactSpring`
+   records. Full persistent active-set/cutback equivalence remains open.
 
 3. Split validation outputs:
    - one strict CalculiX-discretization mode for external solver comparison;
