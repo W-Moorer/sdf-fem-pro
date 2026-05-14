@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from validation.run_geometric_nonlinear_vtk import (
     _internal_response,
+    _internal_response_with_tangent,
     _structured_block_mesh,
     _tet_reference_data,
     run_simulation,
@@ -30,6 +31,36 @@ def test_total_lagrangian_undeformed_state_has_zero_stress() -> None:
     assert np.linalg.norm(stress) == pytest.approx(0.0, abs=1.0e-10)
     assert np.max(vm) == pytest.approx(0.0, abs=1.0e-10)
     assert energy == pytest.approx(0.0, abs=1.0e-12)
+
+
+def test_stvk_internal_tangent_matches_finite_difference() -> None:
+    X, elements = _structured_block_mesh(1, size=(0.8, 0.8, 0.8), bottom_z=0.2)
+    volumes, grads = _tet_reference_data(X, elements)
+    x = X.copy()
+    x[:, 0] += 0.04 * X[:, 2]
+    x[:, 2] += 0.02 * X[:, 0]
+    direction = np.linspace(-0.3, 0.4, x.size).reshape(x.shape)
+    direction /= np.linalg.norm(direction)
+
+    force, _, _, _, _, material, geometric, tangent = _internal_response_with_tangent(
+        X,
+        elements,
+        volumes,
+        grads,
+        x,
+        E=1000.0,
+        nu=0.3,
+        assemble_tangent=True,
+    )
+    h = 1.0e-6
+    force_plus, *_ = _internal_response(X, elements, volumes, grads, x + h * direction, E=1000.0, nu=0.3)
+    force_minus, *_ = _internal_response(X, elements, volumes, grads, x - h * direction, E=1000.0, nu=0.3)
+    finite_difference = ((force_plus - force_minus) / (2.0 * h)).reshape(-1)
+
+    assert np.linalg.norm(material.data) > 0.0
+    assert np.linalg.norm(geometric.data) > 0.0
+    assert np.linalg.norm(force) > 0.0
+    assert tangent @ direction.reshape(-1) == pytest.approx(finite_difference, rel=1.0e-5, abs=1.0e-6)
 
 
 def test_geometric_nonlinear_vtk_frames_are_consecutive(tmp_path: Path) -> None:
@@ -69,10 +100,16 @@ def test_geometric_nonlinear_history_contains_energy_and_contact_fields(tmp_path
         "contact_energy",
         "total_energy",
         "max_von_mises",
+        "material_tangent_norm",
+        "geometric_tangent_norm",
+        "contact_tangent_norm",
+        "newton_iterations",
+        "newton_residual_norm",
     }
     assert required <= set(rows[0])
     assert all(np.isfinite(float(row["total_energy"])) for row in rows)
     assert max(float(row["max_von_mises"]) for row in rows) >= 0.0
+    assert max(int(row["newton_iterations"]) for row in rows) > 0
 
 
 def test_sphere_drop_initial_frame_has_visible_plane_separation(tmp_path: Path) -> None:

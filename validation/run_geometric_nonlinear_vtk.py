@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
 from scipy.spatial import Delaunay
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +57,11 @@ class NonlinearState:
     gravitational_energy: float
     contact_energy: float
     total_energy: float
+    material_tangent_norm: float = 0.0
+    geometric_tangent_norm: float = 0.0
+    contact_tangent_norm: float = 0.0
+    newton_iterations: int = 0
+    newton_residual_norm: float = 0.0
 
 
 def _structured_block_mesh(resolution: int, *, size: tuple[float, float, float], bottom_z: float) -> tuple[np.ndarray, np.ndarray]:
@@ -235,6 +242,38 @@ def _internal_response(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
     """Return total-Lagrangian internal force, strain, stress, vm, and energy."""
 
+    force, strains, stresses, vm, energy, _, _, _ = _internal_response_with_tangent(
+        X,
+        elements,
+        volumes,
+        grads,
+        x,
+        E=E,
+        nu=nu,
+        assemble_tangent=False,
+    )
+    return force, strains, stresses, vm, energy
+
+
+def _internal_response_with_tangent(
+    X: np.ndarray,
+    elements: np.ndarray,
+    volumes: np.ndarray,
+    grads: np.ndarray,
+    x: np.ndarray,
+    *,
+    E: float,
+    nu: float,
+    assemble_tangent: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, csr_matrix, csr_matrix, csr_matrix]:
+    """Return StVK force plus analytic material and geometric tangents.
+
+    The element tangent follows a total-Lagrangian St. Venant-Kirchhoff TET4
+    linearization.  The stress-dependent part is reported separately as the
+    geometric tangent so the diagnostic can distinguish material stiffness from
+    initial-stress stiffness.
+    """
+
     lam, mu = _lame_parameters(E, nu)
     force = np.zeros_like(x)
     strains = np.zeros((elements.shape[0], 3, 3), dtype=float)
@@ -242,6 +281,13 @@ def _internal_response(
     vm = np.zeros(elements.shape[0], dtype=float)
     energy = 0.0
     identity = np.eye(3)
+    n_dofs = 3 * x.shape[0]
+    mat_rows: list[int] = []
+    mat_cols: list[int] = []
+    mat_data: list[float] = []
+    geo_rows: list[int] = []
+    geo_cols: list[int] = []
+    geo_data: list[float] = []
     for e, element in enumerate(elements):
         xe = x[element]
         grad = grads[e]
@@ -251,6 +297,30 @@ def _internal_response(
         first_piola = F @ second_piola
         for a in range(4):
             force[int(element[a])] += volumes[e] * (first_piola @ grad[a])
+        if assemble_tangent:
+            fft = F @ F.T
+            for a in range(4):
+                ga = grad[a]
+                Fga = F @ ga
+                for b in range(4):
+                    gb = grad[b]
+                    Fgb = F @ gb
+                    material_block = volumes[e] * (
+                        lam * np.outer(Fga, Fgb)
+                        + mu * np.outer(Fgb, Fga)
+                        + mu * float(ga @ gb) * fft
+                    )
+                    geometric_block = volumes[e] * float(gb @ second_piola @ ga) * identity
+                    for i in range(3):
+                        row = 3 * int(element[a]) + i
+                        for j in range(3):
+                            col = 3 * int(element[b]) + j
+                            mat_rows.append(row)
+                            mat_cols.append(col)
+                            mat_data.append(float(material_block[i, j]))
+                            geo_rows.append(row)
+                            geo_cols.append(col)
+                            geo_data.append(float(geometric_block[i, j]))
         J = max(float(np.linalg.det(F)), 1.0e-12)
         cauchy = (first_piola @ F.T) / J
         strains[e] = green
@@ -258,7 +328,9 @@ def _internal_response(
         vm[e] = _von_mises(cauchy)
         energy_density = 0.5 * float(_voigt_strain(green) @ _voigt_stress(second_piola))
         energy += volumes[e] * energy_density
-    return force, strains, stresses, vm, float(energy)
+    material = coo_matrix((mat_data, (mat_rows, mat_cols)), shape=(n_dofs, n_dofs)).tocsr()
+    geometric = coo_matrix((geo_data, (geo_rows, geo_cols)), shape=(n_dofs, n_dofs)).tocsr()
+    return force, strains, stresses, vm, float(energy), material, geometric, (material + geometric).tocsr()
 
 
 def _voigt_stress(tensor: np.ndarray) -> np.ndarray:
@@ -274,7 +346,35 @@ def _contact_response(
 ) -> tuple[np.ndarray, float, int, float, float]:
     """Return conservative plane-contact force and energy."""
 
+    force, _, min_gap, active_count, max_penetration, energy = _contact_response_with_tangent(
+        x,
+        boundary_faces,
+        plane_z=plane_z,
+        stiffness=stiffness,
+        assemble_tangent=False,
+    )
+    return force, min_gap, active_count, max_penetration, energy
+
+
+def _contact_response_with_tangent(
+    x: np.ndarray,
+    boundary_faces: np.ndarray,
+    *,
+    plane_z: float,
+    stiffness: float,
+    assemble_tangent: bool = True,
+) -> tuple[np.ndarray, csr_matrix, float, int, float, float]:
+    """Return plane-contact force and positive residual tangent.
+
+    The returned sparse tangent is ``-df_contact/dx`` so it can be added to the
+    Newton tangent of ``f_int - f_ext - f_contact``.
+    """
+
     force = np.zeros_like(x)
+    n_dofs = 3 * x.shape[0]
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
     min_gap = np.inf
     max_penetration = 0.0
     active_count = 0
@@ -300,9 +400,19 @@ def _contact_response(
             energy += 0.5 * stiffness * penetration * penetration * q_area
             for local, node in enumerate(face):
                 force[int(node), 2] += shape[local] * normal_force
+            if assemble_tangent:
+                tangent = stiffness * q_area
+                for row_local, row_node in enumerate(face):
+                    row = 3 * int(row_node) + 2
+                    for col_local, col_node in enumerate(face):
+                        col = 3 * int(col_node) + 2
+                        rows.append(row)
+                        cols.append(col)
+                        data.append(float(shape[row_local] * shape[col_local] * tangent))
     if not np.isfinite(min_gap):
         min_gap = float(np.min(x[:, 2] - plane_z))
-    return force, float(min_gap), active_count, float(max_penetration), float(energy)
+    tangent_matrix = coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()
+    return force, tangent_matrix, float(min_gap), active_count, float(max_penetration), float(energy)
 
 
 def _lumped_mass(n_nodes: int, elements: np.ndarray, volumes: np.ndarray, density: float) -> np.ndarray:
@@ -428,14 +538,39 @@ def _compute_state(
     gravity: float,
     plane_z: float,
     contact_stiffness: float,
-) -> tuple[NonlinearState, np.ndarray]:
-    fint, strain, stress, vm, strain_energy = _internal_response(X, elements, volumes, grads, x, E=E, nu=nu)
-    fcontact, min_gap, active_count, max_pen, contact_energy = _contact_response(
-        x,
-        boundary_faces,
-        plane_z=plane_z,
-        stiffness=contact_stiffness,
-    )
+    assemble_tangent: bool = False,
+) -> tuple[NonlinearState, np.ndarray, csr_matrix]:
+    if assemble_tangent:
+        fint, strain, stress, vm, strain_energy, material_tangent, geometric_tangent, internal_tangent = _internal_response_with_tangent(
+            X,
+            elements,
+            volumes,
+            grads,
+            x,
+            E=E,
+            nu=nu,
+            assemble_tangent=True,
+        )
+        fcontact, contact_tangent, min_gap, active_count, max_pen, contact_energy = _contact_response_with_tangent(
+            x,
+            boundary_faces,
+            plane_z=plane_z,
+            stiffness=contact_stiffness,
+            assemble_tangent=True,
+        )
+    else:
+        fint, strain, stress, vm, strain_energy = _internal_response(X, elements, volumes, grads, x, E=E, nu=nu)
+        fcontact, min_gap, active_count, max_pen, contact_energy = _contact_response(
+            x,
+            boundary_faces,
+            plane_z=plane_z,
+            stiffness=contact_stiffness,
+        )
+        n_dofs = 3 * x.shape[0]
+        material_tangent = csr_matrix((n_dofs, n_dofs), dtype=float)
+        geometric_tangent = csr_matrix((n_dofs, n_dofs), dtype=float)
+        internal_tangent = csr_matrix((n_dofs, n_dofs), dtype=float)
+        contact_tangent = csr_matrix((n_dofs, n_dofs), dtype=float)
     fext = np.zeros_like(x)
     fext[:, 2] = -mass * gravity
     force = fext + fcontact - fint
@@ -458,8 +593,162 @@ def _compute_state(
         gravitational_energy=gravitational,
         contact_energy=contact_energy,
         total_energy=total,
+        material_tangent_norm=float(np.linalg.norm(material_tangent.data)) if material_tangent.nnz else 0.0,
+        geometric_tangent_norm=float(np.linalg.norm(geometric_tangent.data)) if geometric_tangent.nnz else 0.0,
+        contact_tangent_norm=float(np.linalg.norm(contact_tangent.data)) if contact_tangent.nnz else 0.0,
     )
-    return state, acceleration
+    return state, acceleration, (internal_tangent + contact_tangent).tocsr()
+
+
+def _hht_newmark_parameters(alpha: float) -> tuple[float, float]:
+    """Return HHT/Newmark parameters following the CalculiX direct dynamics form."""
+
+    if not (-1.0 / 3.0 <= float(alpha) <= 0.0):
+        raise ValueError("HHT alpha must lie in [-1/3, 0]")
+    gamma = 0.5 - float(alpha)
+    beta = 0.25 * (1.0 - float(alpha)) ** 2
+    return beta, gamma
+
+
+def _constant_external_force(mass: np.ndarray, gravity: float) -> np.ndarray:
+    fext = np.zeros((mass.shape[0], 3), dtype=float)
+    fext[:, 2] = -mass * gravity
+    return fext
+
+
+def _static_residual_and_tangent(
+    X: np.ndarray,
+    elements: np.ndarray,
+    volumes: np.ndarray,
+    grads: np.ndarray,
+    boundary_faces: np.ndarray,
+    x: np.ndarray,
+    mass: np.ndarray,
+    *,
+    E: float,
+    nu: float,
+    gravity: float,
+    plane_z: float,
+    contact_stiffness: float,
+) -> tuple[np.ndarray, csr_matrix, NonlinearState]:
+    fint, strain, stress, vm, strain_energy, material_tangent, geometric_tangent, internal_tangent = _internal_response_with_tangent(
+        X,
+        elements,
+        volumes,
+        grads,
+        x,
+        E=E,
+        nu=nu,
+        assemble_tangent=True,
+    )
+    fcontact, contact_tangent, min_gap, active_count, max_pen, contact_energy = _contact_response_with_tangent(
+        x,
+        boundary_faces,
+        plane_z=plane_z,
+        stiffness=contact_stiffness,
+        assemble_tangent=True,
+    )
+    fext = _constant_external_force(mass, gravity)
+    residual = fint - fext - fcontact
+    state = NonlinearState(
+        time=0.0,
+        x=x.copy(),
+        v=np.zeros_like(x),
+        element_strain=strain,
+        element_stress=stress,
+        von_mises=vm,
+        min_gap=min_gap,
+        max_penetration=max_pen,
+        active_contact_count=active_count,
+        kinetic_energy=0.0,
+        strain_energy=strain_energy,
+        gravitational_energy=float(np.sum(mass * gravity * x[:, 2])),
+        contact_energy=contact_energy,
+        total_energy=0.0,
+        material_tangent_norm=float(np.linalg.norm(material_tangent.data)) if material_tangent.nnz else 0.0,
+        geometric_tangent_norm=float(np.linalg.norm(geometric_tangent.data)) if geometric_tangent.nnz else 0.0,
+        contact_tangent_norm=float(np.linalg.norm(contact_tangent.data)) if contact_tangent.nnz else 0.0,
+    )
+    return residual.reshape(-1), (internal_tangent + contact_tangent).tocsr(), state
+
+
+def _implicit_hht_step(
+    X: np.ndarray,
+    elements: np.ndarray,
+    volumes: np.ndarray,
+    grads: np.ndarray,
+    boundary_faces: np.ndarray,
+    x: np.ndarray,
+    v: np.ndarray,
+    a: np.ndarray,
+    mass: np.ndarray,
+    previous_static_residual: np.ndarray,
+    *,
+    dt: float,
+    E: float,
+    nu: float,
+    gravity: float,
+    plane_z: float,
+    contact_stiffness: float,
+    alpha: float,
+    max_iterations: int,
+    tolerance: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, NonlinearState, np.ndarray]:
+    """Advance one geometrically nonlinear HHT/Newmark step with Newton."""
+
+    beta, gamma = _hht_newmark_parameters(alpha)
+    c0 = 1.0 / (beta * dt * dt)
+    u = (x - X).reshape(-1)
+    velocity = v.reshape(-1)
+    acceleration = a.reshape(-1)
+    u_pred = u + dt * velocity + dt * dt * (0.5 - beta) * acceleration
+    v_pred = velocity + dt * (1.0 - gamma) * acceleration
+    u_guess = u_pred.copy()
+    mass_diag = np.repeat(mass, 3)
+    iteration_count = 0
+    residual_norm = np.inf
+    state: NonlinearState | None = None
+    static_residual = previous_static_residual
+
+    for iteration in range(max(1, int(max_iterations))):
+        x_guess = X + u_guess.reshape((-1, 3))
+        static_residual, static_tangent, state = _static_residual_and_tangent(
+            X,
+            elements,
+            volumes,
+            grads,
+            boundary_faces,
+            x_guess,
+            mass,
+            E=E,
+            nu=nu,
+            gravity=gravity,
+            plane_z=plane_z,
+            contact_stiffness=contact_stiffness,
+        )
+        a_guess = c0 * (u_guess - u_pred)
+        dynamic_residual = mass_diag * a_guess + (1.0 + alpha) * static_residual - alpha * previous_static_residual
+        residual_norm = float(np.linalg.norm(dynamic_residual))
+        tangent = static_tangent.multiply(1.0 + alpha).tolil()
+        tangent.setdiag(tangent.diagonal() + mass_diag * c0)
+        correction = np.asarray(spsolve(tangent.tocsc(), -dynamic_residual), dtype=float)
+        u_guess += correction
+        iteration_count = iteration + 1
+        if np.linalg.norm(correction) <= tolerance * max(1.0, np.linalg.norm(u_guess)):
+            break
+
+    if state is None:
+        raise RuntimeError("implicit HHT Newton failed before evaluating residual")
+    a_new = c0 * (u_guess - u_pred)
+    v_new = v_pred + gamma * dt * a_new
+    x_new = X + u_guess.reshape((-1, 3))
+    state.x = x_new.copy()
+    state.v = v_new.reshape((-1, 3)).copy()
+    state.kinetic_energy = 0.5 * float(np.sum(mass_diag * v_new * v_new))
+    state.total_energy = state.kinetic_energy + state.strain_energy + state.gravitational_energy + state.contact_energy
+    state.newton_iterations = iteration_count
+    state.newton_residual_norm = residual_norm
+    return x_new, state.v, a_new.reshape((-1, 3)), state, static_residual
 
 
 def run_simulation(
@@ -477,6 +766,10 @@ def run_simulation(
     contact_stiffness: float = 5000.0,
     initial_gap: float = 0.08,
     initial_velocity_z: float = 0.0,
+    integrator: str = "implicit_hht",
+    hht_alpha: float = 0.0,
+    newton_max_iterations: int = 12,
+    newton_tolerance: float = 1.0e-10,
 ) -> dict[str, Path]:
     """Run a nonlinear contact diagnostic and write VTK frames plus CSV summary."""
 
@@ -510,7 +803,7 @@ def run_simulation(
     frame_rows: list[Row] = []
     frame_index = 0
 
-    state, acceleration = _compute_state(
+    state, acceleration, _ = _compute_state(
         X,
         elements,
         volumes,
@@ -525,8 +818,22 @@ def run_simulation(
         gravity=gravity,
         plane_z=plane_z,
         contact_stiffness=contact_stiffness,
+        assemble_tangent=(integrator == "implicit_hht"),
     )
-
+    previous_static_residual, _, _ = _static_residual_and_tangent(
+        X,
+        elements,
+        volumes,
+        grads,
+        boundary_faces,
+        x,
+        mass,
+        E=E,
+        nu=nu,
+        gravity=gravity,
+        plane_z=plane_z,
+        contact_stiffness=contact_stiffness,
+    )
     for step in range(steps + 1):
         time = min(step * dt, duration)
         state.time = float(time)
@@ -551,35 +858,80 @@ def run_simulation(
                 "total_energy": state.total_energy,
                 "max_von_mises": float(np.max(state.von_mises)),
                 "mean_von_mises": float(np.mean(state.von_mises)),
+                "material_tangent_norm": state.material_tangent_norm,
+                "geometric_tangent_norm": state.geometric_tangent_norm,
+                "contact_tangent_norm": state.contact_tangent_norm,
+                "newton_iterations": state.newton_iterations,
+                "newton_residual_norm": state.newton_residual_norm,
             }
         )
         if step == steps:
             break
 
-        v_half = v + 0.5 * dt * acceleration
-        x_new = x + dt * v_half
-        next_state, next_acceleration = _compute_state(
-            X,
-            elements,
-            volumes,
-            grads,
-            boundary_faces,
-            x_new,
-            v_half,
-            mass,
-            E=E,
-            nu=nu,
-            density=density,
-            gravity=gravity,
-            plane_z=plane_z,
-            contact_stiffness=contact_stiffness,
-        )
-        v_new = v_half + 0.5 * dt * next_acceleration
-        next_state.v = v_new.copy()
-        kinetic = 0.5 * float(np.sum(mass[:, None] * v_new * v_new))
-        next_state.kinetic_energy = kinetic
-        next_state.total_energy = kinetic + next_state.strain_energy + next_state.gravitational_energy + next_state.contact_energy
-        x, v, acceleration, state = x_new, v_new, next_acceleration, next_state
+        if integrator == "explicit_verlet":
+            v_half = v + 0.5 * dt * acceleration
+            x_new = x + dt * v_half
+            next_state, next_acceleration, _ = _compute_state(
+                X,
+                elements,
+                volumes,
+                grads,
+                boundary_faces,
+                x_new,
+                v_half,
+                mass,
+                E=E,
+                nu=nu,
+                density=density,
+                gravity=gravity,
+                plane_z=plane_z,
+                contact_stiffness=contact_stiffness,
+                assemble_tangent=False,
+            )
+            v_new = v_half + 0.5 * dt * next_acceleration
+            next_state.v = v_new.copy()
+            kinetic = 0.5 * float(np.sum(mass[:, None] * v_new * v_new))
+            next_state.kinetic_energy = kinetic
+            next_state.total_energy = kinetic + next_state.strain_energy + next_state.gravitational_energy + next_state.contact_energy
+            x, v, acceleration, state = x_new, v_new, next_acceleration, next_state
+            previous_static_residual, _, _ = _static_residual_and_tangent(
+                X,
+                elements,
+                volumes,
+                grads,
+                boundary_faces,
+                x,
+                mass,
+                E=E,
+                nu=nu,
+                gravity=gravity,
+                plane_z=plane_z,
+                contact_stiffness=contact_stiffness,
+            )
+        elif integrator == "implicit_hht":
+            x, v, acceleration, state, previous_static_residual = _implicit_hht_step(
+                X,
+                elements,
+                volumes,
+                grads,
+                boundary_faces,
+                x,
+                v,
+                acceleration,
+                mass,
+                previous_static_residual,
+                dt=dt,
+                E=E,
+                nu=nu,
+                gravity=gravity,
+                plane_z=plane_z,
+                contact_stiffness=contact_stiffness,
+                alpha=hht_alpha,
+                max_iterations=newton_max_iterations,
+                tolerance=newton_tolerance,
+            )
+        else:
+            raise ValueError(f"unknown integrator: {integrator!r}")
 
     history_csv = out_dir / "geometric_nonlinear_history.csv"
     frames_csv = out_dir / "geometric_nonlinear_frames.csv"
@@ -595,6 +947,10 @@ def run_simulation(
         dt=dt,
         frame_stride=frame_stride,
         case=case,
+        integrator=integrator,
+        hht_alpha=hht_alpha,
+        newton_max_iterations=newton_max_iterations,
+        newton_tolerance=newton_tolerance,
         E=E,
         nu=nu,
         density=density,
@@ -626,6 +982,10 @@ def _write_summary(
     dt: float,
     frame_stride: int,
     case: str,
+    integrator: str,
+    hht_alpha: float,
+    newton_max_iterations: int,
+    newton_tolerance: float,
     E: float,
     nu: float,
     density: float,
@@ -646,7 +1006,7 @@ def _write_summary(
         "## Reproduce",
         "",
         "```bash",
-        f"python validation/run_geometric_nonlinear_vtk.py --case {case} --resolution {resolution} --duration {duration:g} --dt {dt:g} --frame-stride {frame_stride} --out-dir {path.parent.as_posix()}",
+        f"python validation/run_geometric_nonlinear_vtk.py --case {case} --integrator {integrator} --hht-alpha {hht_alpha:g} --resolution {resolution} --duration {duration:g} --dt {dt:g} --frame-stride {frame_stride} --out-dir {path.parent.as_posix()}",
         "```",
         "",
         "## Outputs",
@@ -669,6 +1029,10 @@ def _write_summary(
         "## Parameters",
         "",
         f"- case: `{case}`",
+        f"- integrator: `{integrator}`",
+        f"- HHT alpha: `{hht_alpha:g}`",
+        f"- Newton max iterations: `{newton_max_iterations}`",
+        f"- Newton tolerance: `{newton_tolerance:g}`",
         f"- resolution: `{resolution}`",
         f"- duration: `{duration:g}`",
         f"- dt: `{dt:g}`",
@@ -688,6 +1052,8 @@ def _write_summary(
         f"- minimum gap: `{min(float(row['min_gap']) for row in rows):.6e}`",
         f"- maximum penetration: `{max(float(row['max_penetration']) for row in rows):.6e}`",
         f"- maximum von Mises stress: `{max(float(row['max_von_mises']) for row in rows):.6e}`",
+        f"- maximum Newton iterations: `{max(int(row['newton_iterations']) for row in rows)}`",
+        f"- maximum Newton residual norm: `{max(float(row['newton_residual_norm']) for row in rows):.6e}`",
         f"- relative energy drift range: `{rel_min:.6e}` to `{rel_max:.6e}`",
         "",
         "## Limitations",
@@ -705,6 +1071,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=0.5)
     parser.add_argument("--dt", type=float, default=2.5e-4)
     parser.add_argument("--frame-stride", type=int, default=20)
+    parser.add_argument("--integrator", choices=("implicit_hht", "explicit_verlet"), default="implicit_hht")
+    parser.add_argument("--hht-alpha", type=float, default=0.0)
+    parser.add_argument("--newton-max-iterations", type=int, default=12)
+    parser.add_argument("--newton-tolerance", type=float, default=1.0e-10)
     parser.add_argument("--E", type=float, default=1000.0)
     parser.add_argument("--nu", type=float, default=0.3)
     parser.add_argument("--density", type=float, default=1.0)
@@ -734,6 +1104,10 @@ def main() -> None:
         contact_stiffness=args.contact_stiffness,
         initial_gap=args.initial_gap,
         initial_velocity_z=args.initial_velocity_z,
+        integrator=args.integrator,
+        hht_alpha=args.hht_alpha,
+        newton_max_iterations=args.newton_max_iterations,
+        newton_tolerance=args.newton_tolerance,
     )
     print("Geometric nonlinear VTK diagnostic complete.")
     for name, path in outputs.items():
