@@ -490,6 +490,101 @@ def contact_alignment_diagnostics(
     return base
 
 
+def contact_lifecycle_output_diagnostics(
+    model: DropModel,
+    calculix_rows: list[Row],
+    sfc_rows: list[Row],
+) -> Row:
+    """Return contact lifecycle and RF/CELS/CNUM output-definition diagnostics."""
+
+    base: Row = {
+        "case": model.case,
+        "resolution": model.resolution,
+        "contact_mode": sfc_rows[0].get("contact_mode", "") if sfc_rows else "",
+        "calculix_completed": str(bool(calculix_rows)).lower(),
+        "rf_output_definition": "CalculiX fixed-floor RF total; SFC assembled penalty normal force",
+        "cels_output_definition": "CalculiX printout total contact spring energy; SFC sample-integrated penalty energy",
+        "cnum_output_definition": "CalculiX generated contact spring element count; SFC reports CNUM-equivalent generated spring count when available",
+        "clearance_update_definition": "CalculiX F2F stores master xi/eta and normal after contact generation; clearance is recomputed from current nodal positions plus clearini*ramp",
+    }
+    if not calculix_rows or not sfc_rows:
+        base.update(
+            {
+                "calculix_cnum_sequence": "",
+                "sfc_cnum_sequence": _sequence_string(_series_values(sfc_rows, "calculix_equivalent_contact_count")),
+                "calculix_cnum_transition_count": "",
+                "sfc_cnum_transition_count": _transition_count(_series_values(sfc_rows, "calculix_equivalent_contact_count")),
+                "cnum_first_mismatch_time": "",
+                "cnum_max_abs_error": "",
+                "calculix_release_or_reactivation_observed": "",
+                "force_peak_time_calculix": "",
+                "force_peak_time_sfc": _peak_time(sfc_rows, "normal_force_proxy"),
+                "force_peak_time_abs_error": "",
+                "energy_peak_time_calculix": "",
+                "energy_peak_time_sfc": _peak_time(sfc_rows, "contact_energy_proxy"),
+                "energy_peak_time_abs_error": "",
+                "diagnosis": "external_unavailable",
+            }
+        )
+        return base
+
+    calc_cnum = _series_values(calculix_rows, "calculix_contact_count")
+    sfc_cnum = _series_values(sfc_rows, "calculix_equivalent_contact_count")
+    cnum_errors: list[float] = []
+    mismatch_time: float | str = ""
+    for calc_row in calculix_rows:
+        time = float(calc_row["time"])
+        calc_value = _optional_float(calc_row.get("calculix_contact_count", ""))
+        sfc_row = _nearest_row(sfc_rows, time)
+        sfc_value = _optional_float(sfc_row.get("calculix_equivalent_contact_count", "")) if sfc_row else None
+        if calc_value is None or sfc_value is None:
+            continue
+        err = abs(float(sfc_value) - float(calc_value))
+        cnum_errors.append(err)
+        if err > 0.0 and mismatch_time == "":
+            mismatch_time = time
+
+    calc_force_peak = _peak_time(calculix_rows, "normal_force_proxy")
+    sfc_force_peak = _peak_time(sfc_rows, "normal_force_proxy")
+    calc_energy_peak = _peak_time(calculix_rows, "contact_energy_proxy")
+    sfc_energy_peak = _peak_time(sfc_rows, "contact_energy_proxy")
+    calc_transitions = _transition_count(calc_cnum)
+    sfc_transitions = _transition_count(sfc_cnum)
+    cnum_mismatch = bool(cnum_errors and max(cnum_errors) > 0.0)
+    release_or_reactivation = bool(calc_transitions > 1 and len({value for value in calc_cnum if value > 0.0}) > 1)
+    peak_time_shift = (
+        calc_force_peak != ""
+        and sfc_force_peak != ""
+        and abs(float(calc_force_peak) - float(sfc_force_peak)) > 0.5 * float(model.dt)
+    )
+    if cnum_mismatch or release_or_reactivation:
+        diagnosis = "contact_lifecycle_trajectory_difference_observed"
+    elif peak_time_shift:
+        diagnosis = "output_peak_timing_difference_observed"
+    else:
+        diagnosis = "lifecycle_output_definitions_aligned_for_sampled_rows"
+
+    base.update(
+        {
+            "calculix_cnum_sequence": _sequence_string(calc_cnum),
+            "sfc_cnum_sequence": _sequence_string(sfc_cnum),
+            "calculix_cnum_transition_count": calc_transitions,
+            "sfc_cnum_transition_count": sfc_transitions,
+            "cnum_first_mismatch_time": mismatch_time,
+            "cnum_max_abs_error": _max_or_blank(cnum_errors),
+            "calculix_release_or_reactivation_observed": str(release_or_reactivation).lower(),
+            "force_peak_time_calculix": calc_force_peak,
+            "force_peak_time_sfc": sfc_force_peak,
+            "force_peak_time_abs_error": _abs_or_blank(calc_force_peak, sfc_force_peak),
+            "energy_peak_time_calculix": calc_energy_peak,
+            "energy_peak_time_sfc": sfc_energy_peak,
+            "energy_peak_time_abs_error": _abs_or_blank(calc_energy_peak, sfc_energy_peak),
+            "diagnosis": diagnosis,
+        }
+    )
+    return base
+
+
 def _parse_calculix_stdout_diagnostics(path: Path | None) -> Row:
     if path is None or not path.exists():
         return {
@@ -783,6 +878,57 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _series_values(rows: list[Row], key: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _optional_float(row.get(key, ""))
+        if value is not None:
+            values.append(float(value))
+    return values
+
+
+def _sequence_string(values: list[float]) -> str:
+    if not values:
+        return ""
+    sequence: list[int | float] = []
+    for value in values:
+        scalar: int | float = int(round(value)) if abs(value - round(value)) < 1.0e-12 else float(value)
+        if not sequence or sequence[-1] != scalar:
+            sequence.append(scalar)
+    return "->".join(str(value) for value in sequence)
+
+
+def _transition_count(values: list[float]) -> int:
+    if not values:
+        return 0
+    return sum(1 for previous, current in zip(values, values[1:], strict=False) if abs(current - previous) > 1.0e-12)
+
+
+def _nearest_row(rows: list[Row], time: float) -> Row | None:
+    if not rows:
+        return None
+    return min(rows, key=lambda row: abs(float(row.get("time", 0.0)) - float(time)))
+
+
+def _peak_time(rows: list[Row], key: str) -> float | str:
+    best_time: float | None = None
+    best_value: float | None = None
+    for row in rows:
+        value = _optional_float(row.get(key, ""))
+        if value is None:
+            continue
+        if best_value is None or value > best_value:
+            best_value = float(value)
+            best_time = float(row["time"])
+    return "" if best_time is None else best_time
+
+
+def _abs_or_blank(a: Any, b: Any) -> float | str:
+    if a == "" or b == "" or a is None or b is None:
+        return ""
+    return abs(float(a) - float(b))
 
 
 def _mean_or_blank(values: list[float]) -> float | str:
@@ -1278,6 +1424,7 @@ def run_validation(
     comparison_rows: list[Row] = []
     alignment_rows: list[Row] = []
     hht_rows: list[Row] = []
+    lifecycle_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
@@ -1301,6 +1448,7 @@ def run_validation(
         comparison_rows.append(compare_contact_histories(model, calc_rows, sfc_rows, calc_stress, sfc_state))
         alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
         hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
+        lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows))
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
@@ -1317,12 +1465,13 @@ def run_validation(
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
-    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows, alignment_rows, hht_rows)
+    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows, alignment_rows, hht_rows, lifecycle_rows)
     outputs = {
         "history": out_dir / "geometric_contact_history.csv",
         "comparison": out_dir / "geometric_contact_calculix_comparison.csv",
         "alignment": out_dir / "geometric_contact_alignment_diagnostics.csv",
         "hht": out_dir / "geometric_contact_hht_residual_tangent.csv",
+        "lifecycle": out_dir / "geometric_contact_lifecycle_output_diagnostics.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
         "vtk": out_dir / "geometric_contact_stress_clouds.csv",
@@ -1334,6 +1483,7 @@ def run_validation(
     _write_csv(outputs["comparison"], comparison_rows)
     _write_csv(outputs["alignment"], alignment_rows)
     _write_csv(outputs["hht"], hht_rows)
+    _write_csv(outputs["lifecycle"], lifecycle_rows)
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
     _write_csv(outputs["vtk"], vtk_rows)
@@ -1348,6 +1498,7 @@ def run_validation(
         claim_rows,
         alignment_rows,
         hht_rows,
+        lifecycle_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
@@ -1361,6 +1512,7 @@ def _claim_rows(
     vtk_rows: list[Row],
     alignment_rows: list[Row],
     hht_rows: list[Row],
+    lifecycle_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
     accepted = any(row["acceptance_status"] == "passed_scoped_gate" for row in comparison_rows)
@@ -1375,6 +1527,9 @@ def _claim_rows(
         and row.get("previous_static_residual_update_rel_error") not in {"", None}
         and float(row["previous_static_residual_update_rel_error"]) < 5.0e-8
         for row in hht_rows
+    )
+    lifecycle_supported = bool(lifecycle_rows) and any(
+        row.get("diagnosis") not in {"", None, "external_unavailable"} for row in lifecycle_rows
     )
     return [
         {
@@ -1400,6 +1555,12 @@ def _claim_rows(
             "supported": str(hht_supported).lower(),
             "evidence_csv": "geometric_contact_hht_residual_tangent.csv",
             "details": "Checks the HHT residual evaluation point, previous static residual update, and contact residual tangent sign convention by finite differences",
+        },
+        {
+            "claim": "calculix_contact_lifecycle_output_diagnostics_available",
+            "supported": str(lifecycle_supported).lower(),
+            "evidence_csv": "geometric_contact_lifecycle_output_diagnostics.csv",
+            "details": "Tracks CNUM lifecycle transitions, RF/CELS peak timing, and source-level output definitions for CalculiX/SFC contact comparison",
         },
         {
             "claim": "contact_mesh_convergence_trend_available",
@@ -1431,6 +1592,7 @@ def _write_markdown(
     claim_rows: list[Row],
     alignment_rows: list[Row],
     hht_rows: list[Row],
+    lifecycle_rows: list[Row],
     *,
     contact_mode: str,
     cutback_policy: str,
@@ -1451,6 +1613,7 @@ def _write_markdown(
         "- `geometric_contact_calculix_comparison.csv`",
         "- `geometric_contact_alignment_diagnostics.csv`",
         "- `geometric_contact_hht_residual_tangent.csv`",
+        "- `geometric_contact_lifecycle_output_diagnostics.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
         "- `geometric_contact_stress_clouds.csv`",
@@ -1502,6 +1665,21 @@ def _write_markdown(
             f"{_fmt(row['active_contact_count'])} | {_fmt(row['effective_tangent_directional_fd_rel_error'])} | "
             f"{_fmt(row['contact_residual_tangent_directional_fd_rel_error'])} | "
             f"{_fmt(row['previous_static_residual_update_rel_error'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Lifecycle And Output Diagnostics",
+            "",
+            "| Resolution | Diagnosis | CalculiX CNUM sequence | SFC CNUM sequence | CNUM max abs. | RF peak time error | CELS peak time error |",
+            "| ---: | --- | --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in lifecycle_rows:
+        lines.append(
+            f"| {row['resolution']} | {row['diagnosis']} | `{row['calculix_cnum_sequence']}` | "
+            f"`{row['sfc_cnum_sequence']}` | {_fmt(row['cnum_max_abs_error'])} | "
+            f"{_fmt(row['force_peak_time_abs_error'])} | {_fmt(row['energy_peak_time_abs_error'])} |"
         )
     lines.extend(
         [

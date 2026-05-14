@@ -13,6 +13,7 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _make_contact_geometry,
     _contact_model,
     _parse_calculix_stdout_diagnostics,
+    contact_lifecycle_output_diagnostics,
     contact_replay_metrics,
     hht_residual_tangent_diagnostics,
     run_sfc_geometric_contact_history,
@@ -121,6 +122,33 @@ def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
     assert row["calculix_stdout_max_contact_spring_elements"] == 14
 
 
+def test_contact_lifecycle_output_diagnostics_detects_cnum_trajectory_difference() -> None:
+    model = _contact_model(resolution=1, duration=0.12, dt=0.002)
+    calculix_rows = [
+        {"time": 0.0, "calculix_contact_count": 0, "normal_force_proxy": 0.0, "contact_energy_proxy": 0.0},
+        {"time": 0.096, "calculix_contact_count": 14, "normal_force_proxy": 1.0, "contact_energy_proxy": 0.1},
+        {"time": 0.104, "calculix_contact_count": 12, "normal_force_proxy": 3.0, "contact_energy_proxy": 0.3},
+        {"time": 0.108, "calculix_contact_count": 14, "normal_force_proxy": 2.0, "contact_energy_proxy": 0.2},
+    ]
+    sfc_rows = [
+        {"time": 0.0, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 0, "normal_force_proxy": 0.0, "contact_energy_proxy": 0.0},
+        {"time": 0.096, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 14, "normal_force_proxy": 1.0, "contact_energy_proxy": 0.1},
+        {"time": 0.104, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 14, "normal_force_proxy": 2.0, "contact_energy_proxy": 0.2},
+        {"time": 0.108, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 14, "normal_force_proxy": 4.0, "contact_energy_proxy": 0.4},
+    ]
+
+    row = contact_lifecycle_output_diagnostics(model, calculix_rows, sfc_rows)
+
+    assert row["calculix_cnum_sequence"] == "0->14->12->14"
+    assert row["sfc_cnum_sequence"] == "0->14"
+    assert row["cnum_first_mismatch_time"] == 0.104
+    assert row["cnum_max_abs_error"] == 2.0
+    assert row["calculix_release_or_reactivation_observed"] == "true"
+    assert abs(float(row["force_peak_time_abs_error"]) - 0.004) < 1.0e-12
+    assert abs(float(row["energy_peak_time_abs_error"]) - 0.004) < 1.0e-12
+    assert row["diagnosis"] == "contact_lifecycle_trajectory_difference_observed"
+
+
 def test_calculix_direct_cutback_policy_disables_sfc_retry() -> None:
     assert _contact_cutback_enabled("persistent_calculix_c3d4_f2f", "active_retry")
     assert not _contact_cutback_enabled("persistent_calculix_c3d4_f2f", "calculix_direct")
@@ -142,11 +170,18 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["paraview_stress_cloud_comparison_available"]["supported"] == "false"
     assert claims["calculix_contact_force_law_replay_diagnostics_available"]["supported"] == "false"
     assert claims["hht_residual_tangent_trajectory_diagnostics_available"]["supported"] == "true"
+    assert claims["calculix_contact_lifecycle_output_diagnostics_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
         alignment_rows = list(csv.DictReader(f))
     assert alignment_rows
     assert alignment_rows[0]["diagnosis"] == "external_unavailable"
+
+    with outputs["lifecycle"].open(newline="", encoding="utf-8") as f:
+        lifecycle_rows = list(csv.DictReader(f))
+    assert lifecycle_rows
+    assert lifecycle_rows[0]["diagnosis"] == "external_unavailable"
+    assert lifecycle_rows[0]["sfc_cnum_sequence"]
 
     with outputs["mesh"].open(newline="", encoding="utf-8") as f:
         mesh_rows = list(csv.DictReader(f))
