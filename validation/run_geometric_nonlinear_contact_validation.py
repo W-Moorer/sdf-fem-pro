@@ -57,6 +57,7 @@ from validation.calculix_f2f_contact import (  # noqa: E402
     CalculixC3D4FaceToFaceSDFContactGeometry,
     PersistentCalculixC3D4FaceToFacePlaneContactGeometry,
     PersistentCalculixC3D4FaceToFaceSDFContactGeometry,
+    calculix_equivalent_contact_element_count,
 )
 from sfc.contact import DynamicSurfaceSDFContactGeometry, UniformTriangleAABBHash  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
@@ -301,6 +302,7 @@ def _sfc_history_row(
 ) -> Row:
     centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
     generated_count = _generated_contact_count(contact)
+    cnum_equivalent = _calculix_equivalent_contact_count(contact)
     return {
         "case": model.case,
         "resolution": model.resolution,
@@ -318,7 +320,9 @@ def _sfc_history_row(
         "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
         "active_contact_count": diagnostics.contact.active_count,
         "generated_contact_spring_count": generated_count,
+        "calculix_equivalent_contact_count": cnum_equivalent,
         "normal_force_proxy": diagnostics.contact.normal_force,
+        "sfc_floor_rf_z_equivalent": diagnostics.contact.normal_force,
         "normal_force_source": _normal_force_source(contact_mode),
         "calculix_floor_rf_z": "",
         "calculix_contact_count": "",
@@ -371,6 +375,7 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 master_faces,
                 candidate_provider=broad_phase.query_point,
                 stiffness=model.contact_stiffness,
+                master_element_node_count=4,
             ),
             "clean-room persistent CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; dynamic FEM-SDF plane query",
         )
@@ -390,6 +395,7 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 master_faces,
                 candidate_provider=broad_phase.query_point,
                 stiffness=model.contact_stiffness,
+                master_element_node_count=4,
             ),
             "clean-room CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; dynamic FEM-SDF plane query",
         )
@@ -443,6 +449,13 @@ def _normal_force_source(contact_mode: str) -> str:
 def _generated_contact_count(contact: ContactGeometry) -> int | str:
     value = getattr(contact, "generated_contact_count", None)
     if value is None:
+        return ""
+    return int(value)
+
+
+def _calculix_equivalent_contact_count(contact: ContactGeometry) -> int | str:
+    value = calculix_equivalent_contact_element_count(contact)
+    if value < 0:
         return ""
     return int(value)
 
@@ -608,6 +621,8 @@ def compare_contact_histories(
     sfc_peak_energy = _max_float(sfc_rows, "contact_energy_proxy")
     cx_max_pen = _max_float(calculix_rows, "max_penetration")
     sfc_max_pen = _max_float(sfc_rows, "max_penetration")
+    cx_max_cnum = _max_float(calculix_rows, "calculix_contact_count")
+    sfc_max_cnum = _max_float(sfc_rows, "calculix_equivalent_contact_count")
     row: Row = {
         "case": model.case,
         "resolution": model.resolution,
@@ -627,6 +642,9 @@ def compare_contact_histories(
         "peak_contact_energy_calculix": "" if cx_peak_energy is None else cx_peak_energy,
         "peak_contact_energy_sfc": "" if sfc_peak_energy is None else sfc_peak_energy,
         "peak_contact_energy_rel_error": _rel_or_blank(sfc_peak_energy, cx_peak_energy),
+        "max_cnum_calculix": "" if cx_max_cnum is None else cx_max_cnum,
+        "max_cnum_equivalent_sfc": "" if sfc_max_cnum is None else sfc_max_cnum,
+        "max_cnum_abs_error": "" if cx_max_cnum is None or sfc_max_cnum is None else abs(sfc_max_cnum - cx_max_cnum),
         "z_cm_l2_rel_error": _time_series_l2_relative(calculix_rows, sfc_rows, "z_cm"),
         "min_gap_l2_rel_error": _time_series_l2_relative(calculix_rows, sfc_rows, "min_gap"),
         "rebound_height_calculix": cx_rebound.get("max_rebound_z", ""),
@@ -904,11 +922,12 @@ def _write_markdown(
     ]
     for row in claim_rows:
         lines.append(f"| {row['claim']} | {row['supported']} | `{row['evidence_csv']}` |")
-    lines.extend(["", "## Contact Comparison", "", "| Resolution | Status | z_cm L2 rel. | max pen. rel. | peak force rel. | contact-zone VM rel. |", "| ---: | --- | ---: | ---: | ---: | ---: |"])
+    lines.extend(["", "## Contact Comparison", "", "| Resolution | Status | z_cm L2 rel. | max pen. rel. | peak force rel. | CNUM abs. | contact-zone VM rel. |", "| ---: | --- | ---: | ---: | ---: | ---: | ---: |"])
     for row in comparison_rows:
         lines.append(
             f"| {row['resolution']} | {row['acceptance_status']} | {_fmt(row['z_cm_l2_rel_error'])} | "
-            f"{_fmt(row['max_penetration_rel_error'])} | {_fmt(row['peak_normal_force_rel_error'])} | {_fmt(row['contact_zone_max_vm_rel_error'])} |"
+            f"{_fmt(row['max_penetration_rel_error'])} | {_fmt(row['peak_normal_force_rel_error'])} | "
+            f"{_fmt(row['max_cnum_abs_error'])} | {_fmt(row['contact_zone_max_vm_rel_error'])} |"
         )
     lines.extend(
         [

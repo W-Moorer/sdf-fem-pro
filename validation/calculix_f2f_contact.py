@@ -43,12 +43,32 @@ class CalculixF2FContactSpring:
     normal: np.ndarray
     spring_area: float
     clearance: float
+    master_element_node_count: int | None = None
 
     @property
     def active(self) -> bool:
         """Return whether the dynamic contact criterion creates the spring."""
 
         return self.clearance <= 0.0
+
+    @property
+    def calculix_cnum_weight(self) -> int:
+        """Return the CalculiX ``CNUM`` contribution for this spring record.
+
+        CalculiX reports ``CNUM`` from its generated contact-element storage,
+        not from the number of force-producing integration points.  For the
+        scoped C3D4 slave face against an S4 rigid-plane master used in the
+        validation input, one force-producing record contributes
+        ``nopes + nopem = 3 + 4`` to the printed contact-element count.
+        """
+
+        slave_count = int(np.asarray(self.slave_nodes, dtype=np.int64).size)
+        if self.master_element_node_count is not None:
+            master_count = int(self.master_element_node_count)
+        else:
+            master_nodes = np.asarray(self.master_nodes, dtype=np.int64)
+            master_count = int(master_nodes.size) if master_nodes.size else 4
+        return slave_count + master_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,9 +189,15 @@ class CalculixF2FContactLifecycle:
 
     @property
     def generated_count(self) -> int:
-        """Return number of currently generated contact spring elements."""
+        """Return number of currently generated force spring records."""
 
         return len(self.active_springs or {})
+
+    @property
+    def calculix_contact_element_count(self) -> int:
+        """Return the CalculiX ``CNUM``-equivalent generated count."""
+
+        return int(sum(spring.calculix_cnum_weight for spring in (self.active_springs or {}).values()))
 
     @property
     def penetrating_count(self) -> int:
@@ -264,6 +290,7 @@ class CalculixC3D4FaceToFacePlaneContactGeometry:
                     normal=normal.copy(),
                     spring_area=area,
                     clearance=clearance,
+                    master_element_node_count=4,
                 )
             )
         return springs
@@ -295,6 +322,12 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
         """Return CalculiX-style generated contact spring count."""
 
         return int(self.lifecycle.generated_count if self.lifecycle is not None else 0)
+
+    @property
+    def calculix_contact_element_count(self) -> int:
+        """Return the ``CNUM``-equivalent generated contact-element count."""
+
+        return int(self.lifecycle.calculix_contact_element_count if self.lifecycle is not None else 0)
 
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Update lifecycle and return generated springs."""
@@ -329,6 +362,7 @@ class CalculixC3D4FaceToFaceSDFContactGeometry:
     master_faces: np.ndarray
     candidate_provider: CandidateProvider
     stiffness: float
+    master_element_node_count: int | None = None
 
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Return current spring diagnostics using SDF closest-point queries."""
@@ -357,6 +391,7 @@ class CalculixC3D4FaceToFaceSDFContactGeometry:
                     normal=_unit_normal(np.asarray(result.n, dtype=float)),
                     spring_area=area,
                     clearance=float(result.g),
+                    master_element_node_count=self.master_element_node_count,
                 )
             )
         return springs
@@ -377,6 +412,7 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
     master_faces: np.ndarray
     candidate_provider: CandidateProvider
     stiffness: float
+    master_element_node_count: int | None = None
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
 
@@ -390,6 +426,12 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
 
         return int(self.lifecycle.generated_count if self.lifecycle is not None else 0)
 
+    @property
+    def calculix_contact_element_count(self) -> int:
+        """Return the ``CNUM``-equivalent generated contact-element count."""
+
+        return int(self.lifecycle.calculix_contact_element_count if self.lifecycle is not None else 0)
+
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Update lifecycle and return generated springs."""
 
@@ -399,6 +441,7 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
             self.master_faces,
             self.candidate_provider,
             self.stiffness,
+            self.master_element_node_count,
         )
         assert self.lifecycle is not None
         return self.lifecycle.update(stateless.contact_springs(x_current), cutback=self.cutback_retry)
@@ -513,6 +556,17 @@ def generated_contact_spring_count(geometry: object, x_current: np.ndarray | Non
     if x_current is None or not hasattr(geometry, "contact_springs"):
         return -1
     return len(getattr(geometry, "contact_springs")(x_current))
+
+
+def calculix_equivalent_contact_element_count(geometry: object, x_current: np.ndarray | None = None) -> int:
+    """Return a ``CNUM``-equivalent count for validation diagnostics."""
+
+    if hasattr(geometry, "calculix_contact_element_count"):
+        return int(getattr(geometry, "calculix_contact_element_count"))
+    if x_current is None or not hasattr(geometry, "contact_springs"):
+        return -1
+    springs = getattr(geometry, "contact_springs")(x_current)
+    return int(sum(spring.calculix_cnum_weight for spring in springs if spring.active))
 
 
 def _sample_from_spring(spring: CalculixF2FContactSpring, stiffness: float) -> ContactSample:

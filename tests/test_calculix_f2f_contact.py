@@ -20,6 +20,7 @@ from validation.calculix_f2f_contact import (
     CalculixF2FContactSpring,
     PersistentCalculixC3D4FaceToFacePlaneContactGeometry,
     assemble_deformable_f2f_contact_response,
+    calculix_equivalent_contact_element_count,
 )
 
 
@@ -129,6 +130,29 @@ def test_persistent_plane_geometry_reports_generated_count_separately() -> None:
     assert geometry.generated_contact_count == 1
     assert response.active_count == 1
     assert response.normal_force == pytest.approx(5.0)
+
+
+def test_calculix_equivalent_cnum_counts_slave_and_master_nodes() -> None:
+    x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    geometry = PersistentCalculixC3D4FaceToFacePlaneContactGeometry(faces, plane_z=0.0, stiffness=100.0)
+
+    _ = list(geometry.samples(x))
+
+    assert geometry.generated_contact_count == 1
+    assert geometry.calculix_contact_element_count == 7
+    assert calculix_equivalent_contact_element_count(geometry) == 7
+
+
+def test_calculix_c3d4_f2f_area_uses_current_face_area() -> None:
+    x = np.asarray([[0.0, 0.0, -0.1], [2.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    geometry = CalculixC3D4FaceToFacePlaneContactGeometry(faces, plane_z=0.0, stiffness=100.0)
+
+    spring = geometry.contact_springs(x)[0]
+
+    assert spring.spring_area == pytest.approx(1.0)
+    assert assemble_contact_response(geometry.samples(x), 3).normal_force == pytest.approx(10.0)
 
 
 def test_convergence_heuristic_recommends_cutback_on_oscillation() -> None:

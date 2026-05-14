@@ -38,6 +38,10 @@ def test_sfc_geometric_contact_history_activates_contact() -> None:
     assert {row["contact_mode"] for row in rows} == {"persistent_calculix_c3d4_f2f"}
     assert {row["normal_force_source"] for row in rows} == {"calculix_c3d4_f2f_hard_linear"}
     assert any(row["generated_contact_spring_count"] != "" for row in rows)
+    active_rows = [row for row in rows if int(row["active_contact_count"]) > 0]
+    assert active_rows
+    assert max(int(row["generated_contact_spring_count"]) for row in active_rows) == 2
+    assert max(int(row["calculix_equivalent_contact_count"]) for row in active_rows) == 14
     assert all(row["contact_cutback_recommended"] in {"true", "false"} for row in rows)
     assert all(row["contact_convergence_reason"] for row in rows)
     assert any(int(row["cutback_retry_count"]) > 0 for row in rows)
