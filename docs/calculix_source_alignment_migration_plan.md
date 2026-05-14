@@ -26,6 +26,7 @@ license-coupled derivative work.  The migration path used here is therefore:
 | `springstiff_f2f.f` | Uses the same clearance and normal to assemble contact tangent. | Contact tangent sign convention is finite-difference checked in `geometric_contact_hht_residual_tangent.csv`. |
 | `printout.f` / `printoutelem.f` | `CELS` is total contact spring energy; `CNUM` is generated contact element count. | Output-definition diagnostics are implemented in `geometric_contact_lifecycle_output_diagnostics.csv`. |
 | `printoutcontact.f` | `CF/CFN/CFS` are surface-force totals using stored normals, contact pressure, and spring area. | Current comparison uses floor `RF` and SFC normal-force proxy; the definitions are documented as comparable but not source-identical. |
+| `nonlingeo.c`, `prediction.c`, `calcresidual.c`, `checkconvergence.c` | Defines HHT beta/gamma, dynamic predictor, residual assembly, and increment acceptance with residual/correction/contact/energy criteria. | HHT residual/tangent is finite-difference checked; mechanics/increment acceptance diagnostics are written to `geometric_contact_mechanics_increment_acceptance.csv`. |
 
 ## Current Alignment Result
 
@@ -34,6 +35,7 @@ The latest quick diagnostic writes:
 - `results/geometric_contact_lifecycle_output_check/geometric_contact_lifecycle_output_diagnostics.csv`
 - `results/geometric_contact_lifecycle_output_check/geometric_contact_alignment_diagnostics.csv`
 - `results/geometric_contact_lifecycle_output_check/geometric_contact_hht_residual_tangent.csv`
+- `results/geometric_contact_lifecycle_output_check/geometric_contact_mechanics_increment_acceptance.csv`
 
 The important interpretation is:
 
@@ -59,6 +61,10 @@ The next clean-room implementation steps, in priority order, are:
 4. Only after those gates pass, compare native SFC and CalculiX trajectories
    again.  If they still diverge, inspect mechanics/increment acceptance rather
    than contact-query definitions.
+5. If mechanics remains dominant, migrate a clean-room analogue of CalculiX's
+   multi-criterion acceptance (`ram/qam/cam/uam`, contact element change, and
+   energy/contact stabilization diagnostics) instead of using only SFC's
+   relative correction norm.
 
 ## Claim Boundary
 

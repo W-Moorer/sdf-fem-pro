@@ -616,12 +616,80 @@ def contact_lifecycle_output_diagnostics(
     return base
 
 
+def mechanics_increment_acceptance_diagnostics(
+    model: DropModel,
+    sfc_rows: list[Row],
+    command_row: Row,
+    out_dir: Path,
+) -> Row:
+    """Return CalculiX/SFC mechanics and increment-acceptance diagnostics."""
+
+    stdout_rel = str(command_row.get("stdout_log", ""))
+    stdout_path = out_dir / stdout_rel if stdout_rel else None
+    input_rel = str(command_row.get("input_file", ""))
+    input_path = out_dir / input_rel if input_rel else None
+    stdout = _parse_calculix_stdout_diagnostics(stdout_path)
+    step_options = _parse_calculix_dynamic_step_options(input_path)
+    beta, gamma = hht_newmark_parameters(model.hht_alpha)
+    sfc_iterations = [int(row.get("newton_iterations", 0)) for row in sfc_rows if float(row.get("accepted_dt", 0.0)) > 0.0]
+    sfc_residuals = [float(row.get("newton_residual_norm", 0.0)) for row in sfc_rows if float(row.get("accepted_dt", 0.0)) > 0.0]
+    calculix_available = bool(stdout_path is not None and stdout_path.exists())
+    direct_fixed = (
+        step_options.get("calculix_dynamic_direct") == "true"
+        and stdout.get("calculix_stdout_max_attempt") not in {"", None}
+        and int(stdout["calculix_stdout_max_attempt"]) == 1
+        and int(stdout.get("calculix_stdout_cutback_attempt_count") or 0) == 0
+    )
+    convergence_per_increment = (
+        stdout.get("calculix_stdout_increment_count") not in {"", None}
+        and stdout.get("calculix_stdout_convergence_count") not in {"", None}
+        and int(stdout["calculix_stdout_increment_count"]) == int(stdout["calculix_stdout_convergence_count"])
+    )
+    if not calculix_available:
+        diagnosis = "external_unavailable"
+    elif direct_fixed and convergence_per_increment:
+        diagnosis = "direct_fixed_increment_accepted_after_internal_newton"
+    elif direct_fixed:
+        diagnosis = "direct_fixed_increment_with_incomplete_stdout_convergence_evidence"
+    else:
+        diagnosis = "automatic_or_cutback_increment_acceptance_not_aligned"
+    return {
+        "case": model.case,
+        "resolution": model.resolution,
+        "calculix_completed": str(bool(calculix_available)).lower(),
+        "mechanics_source_definition": "CalculiX calcresidual uses b=(1+alpha)(fext-fint)-alpha(fext_n-fint_n)-M*a with convergence checked by checkconvergence residual/correction/contact criteria",
+        "sfc_source_definition": "SFC hht_step uses the same residual sign after negation, but accepts Newton by relative correction tolerance or max iteration count",
+        "calculix_dynamic_direct": step_options.get("calculix_dynamic_direct", ""),
+        "calculix_nlgeom": step_options.get("calculix_nlgeom", ""),
+        "calculix_alpha": step_options.get("calculix_alpha", ""),
+        "sfc_alpha": model.hht_alpha,
+        "calculix_hht_beta": "" if step_options.get("calculix_alpha", "") == "" else hht_newmark_parameters(float(step_options["calculix_alpha"]))[0],
+        "calculix_hht_gamma": "" if step_options.get("calculix_alpha", "") == "" else hht_newmark_parameters(float(step_options["calculix_alpha"]))[1],
+        "sfc_hht_beta": beta,
+        "sfc_hht_gamma": gamma,
+        **stdout,
+        "sfc_accepted_step_count": len(sfc_iterations),
+        "sfc_max_newton_iterations": max(sfc_iterations) if sfc_iterations else "",
+        "sfc_mean_newton_iterations": _mean_or_blank([float(value) for value in sfc_iterations]),
+        "sfc_max_newton_residual_norm": max(sfc_residuals) if sfc_residuals else "",
+        "sfc_rows_reaching_iteration_limit_12": sum(1 for value in sfc_iterations if value >= 12),
+        "direct_fixed_increment_no_retry_observed": str(bool(direct_fixed)).lower() if calculix_available else "",
+        "calculix_converged_each_increment": str(bool(convergence_per_increment)).lower() if calculix_available else "",
+        "acceptance_criteria_source_equivalent": "false",
+        "diagnosis": diagnosis,
+    }
+
+
 def _parse_calculix_stdout_diagnostics(path: Path | None) -> Row:
     if path is None or not path.exists():
         return {
             "calculix_stdout_increment_count": "",
             "calculix_stdout_max_attempt": "",
             "calculix_stdout_min_increment_size": "",
+            "calculix_stdout_convergence_count": "",
+            "calculix_stdout_total_newton_iterations": "",
+            "calculix_stdout_max_iterations_per_increment": "",
+            "calculix_stdout_mean_iterations_per_increment": "",
             "calculix_stdout_cutback_attempt_count": "",
             "calculix_stdout_no_convergence_count": "",
             "calculix_stdout_kscale_restore_count": "",
@@ -633,18 +701,44 @@ def _parse_calculix_stdout_diagnostics(path: Path | None) -> Row:
     attempts = [int(value) for value in re.findall(r"increment\s+\d+\s+attempt\s+(\d+)", text)]
     sizes = [float(value) for value in re.findall(r"increment size=\s*([0-9.Ee+-]+)", text)]
     contact_counts = [int(value) for value in re.findall(r"Number of contact spring elements=(\d+)", text)]
+    iterations_per_increment = _calculix_iterations_per_increment(text)
     return {
         "calculix_stdout_increment_count": len(attempts),
         "calculix_stdout_max_attempt": max(attempts) if attempts else "",
         "calculix_stdout_min_increment_size": min(sizes) if sizes else "",
+        "calculix_stdout_convergence_count": len(re.findall(r"(?m)^\s+convergence(?:;|\s*$)", text)),
+        "calculix_stdout_total_newton_iterations": sum(iterations_per_increment),
+        "calculix_stdout_max_iterations_per_increment": max(iterations_per_increment) if iterations_per_increment else "",
+        "calculix_stdout_mean_iterations_per_increment": _mean_or_blank(
+            [float(value) for value in iterations_per_increment]
+        ),
         "calculix_stdout_cutback_attempt_count": sum(1 for value in attempts if value > 1),
-        "calculix_stdout_no_convergence_count": len(re.findall(r"\bno convergence\b", text)),
+        "calculix_stdout_no_convergence_count": len(re.findall(r"(?m)^\s*no convergence\s*$", text)),
         "calculix_stdout_kscale_restore_count": len(re.findall(r"restoring the elastic contact stifnesses", text)),
         "calculix_stdout_contact_energy_stabilization_count": len(
             re.findall(r"Adaption of the (?:energy residual|max-decay boundary)", text)
         ),
         "calculix_stdout_forced_increment_size_count": len(re.findall(r"new increment size is forced", text)),
         "calculix_stdout_max_contact_spring_elements": max(contact_counts) if contact_counts else "",
+    }
+
+
+def _calculix_iterations_per_increment(stdout_text: str) -> list[int]:
+    blocks = re.split(r"(?m)^\s*increment\s+\d+\s+attempt\s+\d+\s*$", stdout_text)[1:]
+    return [len(re.findall(r"(?m)^\s*iteration\s+\d+\s*$", block)) for block in blocks]
+
+
+def _parse_calculix_dynamic_step_options(path: Path | None) -> Row:
+    if path is None or not path.exists():
+        return {"calculix_dynamic_direct": "", "calculix_nlgeom": "", "calculix_alpha": ""}
+    text = path.read_text(encoding="utf-8", errors="replace").lower()
+    dynamic_line = next((line for line in text.splitlines() if line.strip().startswith("*dynamic")), "")
+    step_line = next((line for line in text.splitlines() if line.strip().startswith("*step")), "")
+    alpha_match = re.search(r"alpha\s*=\s*([0-9.eE+-]+)", dynamic_line, flags=re.IGNORECASE)
+    return {
+        "calculix_dynamic_direct": str("direct" in dynamic_line).lower(),
+        "calculix_nlgeom": str("nlgeom" in step_line).lower(),
+        "calculix_alpha": "" if alpha_match is None else float(alpha_match.group(1)),
     }
 
 
@@ -1456,6 +1550,7 @@ def run_validation(
     alignment_rows: list[Row] = []
     hht_rows: list[Row] = []
     lifecycle_rows: list[Row] = []
+    mechanics_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
@@ -1480,6 +1575,7 @@ def run_validation(
         alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
         hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
         lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
+        mechanics_rows.append(mechanics_increment_acceptance_diagnostics(model, sfc_rows, command_rows[-1], out_dir))
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
@@ -1496,13 +1592,23 @@ def run_validation(
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
-    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows, alignment_rows, hht_rows, lifecycle_rows)
+    claim_rows = _claim_rows(
+        comparison_rows,
+        mesh_rows,
+        timestep_rows,
+        vtk_rows,
+        alignment_rows,
+        hht_rows,
+        lifecycle_rows,
+        mechanics_rows,
+    )
     outputs = {
         "history": out_dir / "geometric_contact_history.csv",
         "comparison": out_dir / "geometric_contact_calculix_comparison.csv",
         "alignment": out_dir / "geometric_contact_alignment_diagnostics.csv",
         "hht": out_dir / "geometric_contact_hht_residual_tangent.csv",
         "lifecycle": out_dir / "geometric_contact_lifecycle_output_diagnostics.csv",
+        "mechanics": out_dir / "geometric_contact_mechanics_increment_acceptance.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
         "vtk": out_dir / "geometric_contact_stress_clouds.csv",
@@ -1515,6 +1621,7 @@ def run_validation(
     _write_csv(outputs["alignment"], alignment_rows)
     _write_csv(outputs["hht"], hht_rows)
     _write_csv(outputs["lifecycle"], lifecycle_rows)
+    _write_csv(outputs["mechanics"], mechanics_rows)
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
     _write_csv(outputs["vtk"], vtk_rows)
@@ -1530,6 +1637,7 @@ def run_validation(
         alignment_rows,
         hht_rows,
         lifecycle_rows,
+        mechanics_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
@@ -1544,6 +1652,7 @@ def _claim_rows(
     alignment_rows: list[Row],
     hht_rows: list[Row],
     lifecycle_rows: list[Row],
+    mechanics_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
     accepted = any(row["acceptance_status"] == "passed_scoped_gate" for row in comparison_rows)
@@ -1561,6 +1670,9 @@ def _claim_rows(
     )
     lifecycle_supported = bool(lifecycle_rows) and any(
         row.get("diagnosis") not in {"", None, "external_unavailable"} for row in lifecycle_rows
+    )
+    mechanics_supported = bool(mechanics_rows) and any(
+        row.get("diagnosis") not in {"", None, "external_unavailable"} for row in mechanics_rows
     )
     return [
         {
@@ -1594,6 +1706,12 @@ def _claim_rows(
             "details": "Tracks CNUM lifecycle transitions, RF/CELS peak timing, and source-level output definitions for CalculiX/SFC contact comparison",
         },
         {
+            "claim": "calculix_mechanics_increment_acceptance_diagnostics_available",
+            "supported": str(mechanics_supported).lower(),
+            "evidence_csv": "geometric_contact_mechanics_increment_acceptance.csv",
+            "details": "Tracks CalculiX DIRECT increment attempts, Newton iterations, convergence messages, HHT alpha/beta/gamma, and SFC Newton acceptance diagnostics",
+        },
+        {
             "claim": "contact_mesh_convergence_trend_available",
             "supported": str(len({int(row['resolution']) for row in mesh_rows}) >= 3).lower(),
             "evidence_csv": "geometric_contact_mesh_convergence.csv",
@@ -1624,6 +1742,7 @@ def _write_markdown(
     alignment_rows: list[Row],
     hht_rows: list[Row],
     lifecycle_rows: list[Row],
+    mechanics_rows: list[Row],
     *,
     contact_mode: str,
     cutback_policy: str,
@@ -1645,6 +1764,7 @@ def _write_markdown(
         "- `geometric_contact_alignment_diagnostics.csv`",
         "- `geometric_contact_hht_residual_tangent.csv`",
         "- `geometric_contact_lifecycle_output_diagnostics.csv`",
+        "- `geometric_contact_mechanics_increment_acceptance.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
         "- `geometric_contact_stress_clouds.csv`",
@@ -1712,6 +1832,25 @@ def _write_markdown(
             f"`{row['sfc_cnum_sequence']}` | `{row.get('calculix_displacement_replay_cnum_sequence', '')}` | "
             f"{_fmt(row['cnum_max_abs_error'])} | {_fmt(row.get('calculix_displacement_replay_cnum_max_abs_error', ''))} | "
             f"{_fmt(row['force_peak_time_abs_error'])} | {_fmt(row['energy_peak_time_abs_error'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Mechanics And Increment Acceptance Diagnostics",
+            "",
+            "| Resolution | Diagnosis | Direct | CalculiX inc. | CalculiX max iter/inc. | SFC max iter | no convergence lines | cutback attempts | SFC max residual |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in mechanics_rows:
+        lines.append(
+            f"| {row['resolution']} | {row['diagnosis']} | {row['calculix_dynamic_direct']} | "
+            f"{_fmt(row['calculix_stdout_increment_count'])} | "
+            f"{_fmt(row['calculix_stdout_max_iterations_per_increment'])} | "
+            f"{_fmt(row['sfc_max_newton_iterations'])} | "
+            f"{_fmt(row['calculix_stdout_no_convergence_count'])} | "
+            f"{_fmt(row['calculix_stdout_cutback_attempt_count'])} | "
+            f"{_fmt(row['sfc_max_newton_residual_norm'])} |"
         )
     lines.extend(
         [

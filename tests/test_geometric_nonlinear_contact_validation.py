@@ -14,6 +14,8 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _contact_cutback_enabled,
     _make_contact_geometry,
     _contact_model,
+    _calculix_iterations_per_increment,
+    _parse_calculix_dynamic_step_options,
     _parse_calculix_stdout_diagnostics,
     contact_lifecycle_output_diagnostics,
     contact_replay_metrics,
@@ -99,10 +101,15 @@ def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
                 "increment 1 attempt 1",
                 "increment size= 2.000000e-03",
                 "Number of contact spring elements=14",
+                " iteration 1",
                 "no convergence",
+                " iteration 2",
+                " convergence",
                 "increment 1 attempt 2",
                 "increment size= 1.000000e-03",
                 "Number of contact spring elements=12",
+                " iteration 1",
+                " convergence",
                 "restoring the elastic contact stifnesses to their original values",
                 "Adaption of the energy residual in persistent contact,",
                 "convergence; new increment size is forced to 1.000000e-03",
@@ -116,12 +123,44 @@ def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
     assert row["calculix_stdout_increment_count"] == 2
     assert row["calculix_stdout_max_attempt"] == 2
     assert row["calculix_stdout_min_increment_size"] == 0.001
+    assert row["calculix_stdout_convergence_count"] == 2
+    assert row["calculix_stdout_total_newton_iterations"] == 3
+    assert row["calculix_stdout_max_iterations_per_increment"] == 2
+    assert row["calculix_stdout_mean_iterations_per_increment"] == 1.5
     assert row["calculix_stdout_cutback_attempt_count"] == 1
     assert row["calculix_stdout_no_convergence_count"] == 1
     assert row["calculix_stdout_kscale_restore_count"] == 1
     assert row["calculix_stdout_contact_energy_stabilization_count"] == 1
     assert row["calculix_stdout_forced_increment_size_count"] == 1
     assert row["calculix_stdout_max_contact_spring_elements"] == 14
+
+
+def test_parse_calculix_dynamic_step_options(tmp_path: Path) -> None:
+    inp = tmp_path / "case.inp"
+    inp.write_text("*step, nlgeom, inc=100\n*dynamic, direct, alpha=-0.05\n", encoding="utf-8")
+
+    row = _parse_calculix_dynamic_step_options(inp)
+
+    assert row["calculix_dynamic_direct"] == "true"
+    assert row["calculix_nlgeom"] == "true"
+    assert row["calculix_alpha"] == -0.05
+
+
+def test_calculix_iterations_per_increment_counts_blocks() -> None:
+    text = "\n".join(
+        [
+            "increment 1 attempt 1 ",
+            " iteration 1",
+            " no convergence",
+            " iteration 2",
+            " convergence",
+            "increment 2 attempt 1 ",
+            " iteration 1",
+            " convergence",
+        ]
+    )
+
+    assert _calculix_iterations_per_increment(text) == [2, 1]
 
 
 def test_contact_lifecycle_output_diagnostics_detects_cnum_trajectory_difference() -> None:
@@ -184,6 +223,7 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["calculix_contact_force_law_replay_diagnostics_available"]["supported"] == "false"
     assert claims["hht_residual_tangent_trajectory_diagnostics_available"]["supported"] == "true"
     assert claims["calculix_contact_lifecycle_output_diagnostics_available"]["supported"] == "false"
+    assert claims["calculix_mechanics_increment_acceptance_diagnostics_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
         alignment_rows = list(csv.DictReader(f))
@@ -195,6 +235,11 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert lifecycle_rows
     assert lifecycle_rows[0]["diagnosis"] == "external_unavailable"
     assert lifecycle_rows[0]["sfc_cnum_sequence"]
+
+    with outputs["mechanics"].open(newline="", encoding="utf-8") as f:
+        mechanics_rows = list(csv.DictReader(f))
+    assert mechanics_rows
+    assert mechanics_rows[0]["diagnosis"] == "external_unavailable"
 
     with outputs["mesh"].open(newline="", encoding="utf-8") as f:
         mesh_rows = list(csv.DictReader(f))
