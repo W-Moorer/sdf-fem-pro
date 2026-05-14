@@ -494,6 +494,7 @@ def contact_lifecycle_output_diagnostics(
     model: DropModel,
     calculix_rows: list[Row],
     sfc_rows: list[Row],
+    calculix_displacements: dict[float, np.ndarray] | None = None,
 ) -> Row:
     """Return contact lifecycle and RF/CELS/CNUM output-definition diagnostics."""
 
@@ -516,6 +517,10 @@ def contact_lifecycle_output_diagnostics(
                 "sfc_cnum_transition_count": _transition_count(_series_values(sfc_rows, "calculix_equivalent_contact_count")),
                 "cnum_first_mismatch_time": "",
                 "cnum_max_abs_error": "",
+                "calculix_displacement_replay_cnum_sequence": "",
+                "calculix_displacement_replay_cnum_max_abs_error": "",
+                "sfc_trajectory_cnum_max_abs_error": "",
+                "trajectory_difference_explains_cnum_gap": "",
                 "calculix_release_or_reactivation_observed": "",
                 "force_peak_time_calculix": "",
                 "force_peak_time_sfc": _peak_time(sfc_rows, "normal_force_proxy"),
@@ -544,6 +549,19 @@ def contact_lifecycle_output_diagnostics(
         if err > 0.0 and mismatch_time == "":
             mismatch_time = time
 
+    replay_cnum: list[float] = []
+    replay_errors: list[float] = []
+    if calculix_displacements:
+        for calc_row in calculix_rows:
+            time = float(calc_row["time"])
+            disp_time = min(calculix_displacements, key=lambda value: abs(float(value) - time))
+            replay = contact_replay_metrics(model, model.nodes + calculix_displacements[disp_time])
+            replay_value = float(replay["cnum_equivalent"])
+            replay_cnum.append(replay_value)
+            calc_value = _optional_float(calc_row.get("calculix_contact_count", ""))
+            if calc_value is not None:
+                replay_errors.append(abs(replay_value - float(calc_value)))
+
     calc_force_peak = _peak_time(calculix_rows, "normal_force_proxy")
     sfc_force_peak = _peak_time(sfc_rows, "normal_force_proxy")
     calc_energy_peak = _peak_time(calculix_rows, "contact_energy_proxy")
@@ -551,6 +569,13 @@ def contact_lifecycle_output_diagnostics(
     calc_transitions = _transition_count(calc_cnum)
     sfc_transitions = _transition_count(sfc_cnum)
     cnum_mismatch = bool(cnum_errors and max(cnum_errors) > 0.0)
+    replay_max_error = _max_or_blank(replay_errors)
+    sfc_max_error = _max_or_blank(cnum_errors)
+    trajectory_explains_gap = (
+        replay_max_error != ""
+        and sfc_max_error != ""
+        and float(replay_max_error) < float(sfc_max_error)
+    )
     release_or_reactivation = bool(calc_transitions > 1 and len({value for value in calc_cnum if value > 0.0}) > 1)
     peak_time_shift = (
         calc_force_peak != ""
@@ -571,7 +596,13 @@ def contact_lifecycle_output_diagnostics(
             "calculix_cnum_transition_count": calc_transitions,
             "sfc_cnum_transition_count": sfc_transitions,
             "cnum_first_mismatch_time": mismatch_time,
-            "cnum_max_abs_error": _max_or_blank(cnum_errors),
+            "cnum_max_abs_error": sfc_max_error,
+            "calculix_displacement_replay_cnum_sequence": _sequence_string(replay_cnum),
+            "calculix_displacement_replay_cnum_max_abs_error": replay_max_error,
+            "sfc_trajectory_cnum_max_abs_error": sfc_max_error,
+            "trajectory_difference_explains_cnum_gap": str(bool(trajectory_explains_gap)).lower()
+            if replay_max_error != "" and sfc_max_error != ""
+            else "",
             "calculix_release_or_reactivation_observed": str(release_or_reactivation).lower(),
             "force_peak_time_calculix": calc_force_peak,
             "force_peak_time_sfc": sfc_force_peak,
@@ -1448,7 +1479,7 @@ def run_validation(
         comparison_rows.append(compare_contact_histories(model, calc_rows, sfc_rows, calc_stress, sfc_state))
         alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
         hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
-        lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows))
+        lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
@@ -1671,14 +1702,15 @@ def _write_markdown(
             "",
             "## Lifecycle And Output Diagnostics",
             "",
-            "| Resolution | Diagnosis | CalculiX CNUM sequence | SFC CNUM sequence | CNUM max abs. | RF peak time error | CELS peak time error |",
-            "| ---: | --- | --- | --- | ---: | ---: | ---: |",
+            "| Resolution | Diagnosis | CalculiX CNUM sequence | SFC CNUM sequence | Replay-on-CalculiX CNUM sequence | SFC CNUM max abs. | Replay CNUM max abs. | RF peak time error | CELS peak time error |",
+            "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in lifecycle_rows:
         lines.append(
             f"| {row['resolution']} | {row['diagnosis']} | `{row['calculix_cnum_sequence']}` | "
-            f"`{row['sfc_cnum_sequence']}` | {_fmt(row['cnum_max_abs_error'])} | "
+            f"`{row['sfc_cnum_sequence']}` | `{row.get('calculix_displacement_replay_cnum_sequence', '')}` | "
+            f"{_fmt(row['cnum_max_abs_error'])} | {_fmt(row.get('calculix_displacement_replay_cnum_max_abs_error', ''))} | "
             f"{_fmt(row['force_peak_time_abs_error'])} | {_fmt(row['energy_peak_time_abs_error'])} |"
         )
     lines.extend(

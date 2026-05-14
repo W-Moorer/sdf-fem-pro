@@ -4,6 +4,8 @@ import csv
 import sys
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -133,16 +135,27 @@ def test_contact_lifecycle_output_diagnostics_detects_cnum_trajectory_difference
     sfc_rows = [
         {"time": 0.0, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 0, "normal_force_proxy": 0.0, "contact_energy_proxy": 0.0},
         {"time": 0.096, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 14, "normal_force_proxy": 1.0, "contact_energy_proxy": 0.1},
-        {"time": 0.104, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 14, "normal_force_proxy": 2.0, "contact_energy_proxy": 0.2},
+        {"time": 0.104, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 0, "normal_force_proxy": 2.0, "contact_energy_proxy": 0.2},
         {"time": 0.108, "contact_mode": "persistent_calculix_c3d4_f2f", "calculix_equivalent_contact_count": 14, "normal_force_proxy": 4.0, "contact_energy_proxy": 0.4},
     ]
+    contact_disp = np.zeros_like(model.nodes)
+    contact_disp[:, 2] -= 0.0505
+    calculix_displacements = {
+        0.0: np.zeros_like(model.nodes),
+        0.096: contact_disp,
+        0.104: contact_disp,
+        0.108: contact_disp,
+    }
 
-    row = contact_lifecycle_output_diagnostics(model, calculix_rows, sfc_rows)
+    row = contact_lifecycle_output_diagnostics(model, calculix_rows, sfc_rows, calculix_displacements)
 
     assert row["calculix_cnum_sequence"] == "0->14->12->14"
-    assert row["sfc_cnum_sequence"] == "0->14"
+    assert row["sfc_cnum_sequence"] == "0->14->0->14"
+    assert row["calculix_displacement_replay_cnum_sequence"] == "0->14"
     assert row["cnum_first_mismatch_time"] == 0.104
-    assert row["cnum_max_abs_error"] == 2.0
+    assert row["cnum_max_abs_error"] == 12.0
+    assert row["calculix_displacement_replay_cnum_max_abs_error"] == 2.0
+    assert row["trajectory_difference_explains_cnum_gap"] == "true"
     assert row["calculix_release_or_reactivation_observed"] == "true"
     assert abs(float(row["force_peak_time_abs_error"]) - 0.004) < 1.0e-12
     assert abs(float(row["energy_peak_time_abs_error"]) - 0.004) < 1.0e-12

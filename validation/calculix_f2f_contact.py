@@ -443,8 +443,27 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
             self.stiffness,
             self.master_element_node_count,
         )
+        candidates = stateless.contact_springs(x_current)
         assert self.lifecycle is not None
-        return self.lifecycle.update(stateless.contact_springs(x_current), cutback=self.cutback_retry)
+        previous = self.lifecycle.active_springs or {}
+        if previous:
+            candidate_by_face = {int(spring.slave_face_index): spring for spring in candidates}
+            stored_candidates: list[CalculixF2FContactSpring] = []
+            for face_index, spring in candidate_by_face.items():
+                previous_spring = previous.get(face_index)
+                if previous_spring is None or previous_spring.master_face_index < 0:
+                    stored_candidates.append(spring)
+                else:
+                    stored_candidates.append(
+                        _sdf_spring_from_stored_master_projection(
+                            previous_spring,
+                            x_current,
+                            self.slave_faces,
+                            self.master_x_current,
+                        )
+                    )
+            candidates = stored_candidates
+        return self.lifecycle.update(candidates, cutback=self.cutback_retry)
 
     def set_cutback_retry(self, value: bool) -> None:
         """Set whether this evaluation is part of a cutback retry."""
@@ -603,6 +622,50 @@ def _spring_jacobian_entries(
                 cols.append(base + component)
                 vals.append(-float(weight) * normal[component])
     return np.asarray(cols, dtype=np.int64), np.asarray(vals, dtype=float)
+
+
+def _sdf_spring_from_stored_master_projection(
+    previous: CalculixF2FContactSpring,
+    x_current: np.ndarray,
+    slave_faces: np.ndarray,
+    master_x_current: np.ndarray,
+) -> CalculixF2FContactSpring:
+    """Update a persistent SDF spring using CalculiX-style stored projection data.
+
+    CalculiX F2F contact stores the master local coordinates and normal when a
+    contact spring is generated, then recomputes clearance from current nodal
+    coordinates.  This helper mirrors that behavior for the validation-only
+    dynamic-SDF F2F mode: the stored master face/weights/normal are kept, while
+    the slave centroid and master projection positions are updated from the
+    current coordinates.
+    """
+
+    slave_x = _validate_points(x_current)
+    faces = _validate_faces(slave_faces, slave_x.shape[0])
+    master_x = _validate_points(master_x_current)
+    face = faces[int(previous.slave_face_index)]
+    tri = slave_x[face]
+    area = _triangle_area(tri)
+    point = C3D4_FACE_CENTROID_WEIGHTS @ tri
+    master_nodes = np.asarray(previous.master_nodes, dtype=np.int64)
+    master_weights = np.asarray(previous.master_weights, dtype=float)
+    if master_nodes.size == 0 or master_weights.size == 0:
+        projection = point.copy()
+    else:
+        projection = master_weights @ master_x[master_nodes]
+    normal = _unit_normal(np.asarray(previous.normal, dtype=float))
+    return CalculixF2FContactSpring(
+        slave_face_index=int(previous.slave_face_index),
+        slave_nodes=np.asarray(face, dtype=np.int64),
+        slave_weights=C3D4_FACE_CENTROID_WEIGHTS.copy(),
+        master_face_index=int(previous.master_face_index),
+        master_nodes=master_nodes.copy(),
+        master_weights=master_weights.copy(),
+        normal=normal,
+        spring_area=float(area),
+        clearance=float((point - projection) @ normal),
+        master_element_node_count=previous.master_element_node_count,
+    )
 
 
 def _validate_points(points: np.ndarray) -> np.ndarray:

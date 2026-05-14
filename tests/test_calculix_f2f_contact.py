@@ -19,6 +19,7 @@ from validation.calculix_f2f_contact import (
     CalculixF2FContactLifecycle,
     CalculixF2FContactSpring,
     PersistentCalculixC3D4FaceToFacePlaneContactGeometry,
+    PersistentCalculixC3D4FaceToFaceSDFContactGeometry,
     assemble_deformable_f2f_contact_response,
     calculix_equivalent_contact_element_count,
 )
@@ -130,6 +131,46 @@ def test_persistent_plane_geometry_reports_generated_count_separately() -> None:
     assert geometry.generated_contact_count == 1
     assert response.active_count == 1
     assert response.normal_force == pytest.approx(5.0)
+
+
+def test_persistent_sdf_geometry_reuses_stored_master_projection() -> None:
+    slave_x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    slave_faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    master_x = np.asarray(
+        [
+            [-2.0, -2.0, 0.0],
+            [2.0, -2.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [-2.0, -2.0, -0.5],
+            [2.0, -2.0, -0.5],
+            [2.0, 2.0, -0.5],
+        ],
+        dtype=float,
+    )
+    master_faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+    candidate = {"face": 0}
+
+    def candidates(_point: np.ndarray) -> np.ndarray:
+        return np.asarray([candidate["face"]], dtype=np.int64)
+
+    geometry = PersistentCalculixC3D4FaceToFaceSDFContactGeometry(
+        slave_faces,
+        master_x,
+        master_faces,
+        candidates,
+        stiffness=100.0,
+    )
+
+    first = geometry.contact_springs(slave_x)[0]
+    candidate["face"] = 1
+    second = geometry.contact_springs(slave_x)[0]
+
+    assert first.master_face_index == 0
+    assert second.master_face_index == 0
+    assert np.array_equal(second.master_nodes, first.master_nodes)
+    assert second.master_weights == pytest.approx(first.master_weights)
+    assert second.normal == pytest.approx(first.normal)
+    assert second.clearance == pytest.approx(first.clearance)
 
 
 def test_calculix_equivalent_cnum_counts_slave_and_master_nodes() -> None:

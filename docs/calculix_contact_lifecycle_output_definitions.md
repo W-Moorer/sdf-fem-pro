@@ -84,6 +84,8 @@ The lifecycle CSV records:
 
 - CalculiX `CNUM` sequence.
 - SFC CalculiX-equivalent `CNUM` sequence.
+- A replay `CNUM` sequence computed by applying the clean-room force law to
+  the CalculiX displacement trajectory.
 - First mismatch time.
 - Maximum absolute `CNUM` mismatch.
 - Whether CalculiX release/reactivation was observed.
@@ -92,10 +94,20 @@ The lifecycle CSV records:
   lifecycle/output-trajectory differences.
 
 The current key finding is that the remaining RF/CELS/max-penetration
-differences are consistent with contact spring lifecycle and output-definition
-differences.  Earlier HHT residual/tangent diagnostics show that the SFC
-effective tangent, contact tangent sign convention, and previous-static
-residual update are finite-difference consistent for the sampled trajectory.
+differences are consistent with contact spring lifecycle, trajectory, and
+output-definition differences.  The replay sequence is important: if the
+clean-room contact law replayed on the CalculiX displacement trajectory matches
+CalculiX substantially better than the native SFC trajectory, the mismatch is
+trajectory-dominated rather than a pure contact-output-definition error.
+Earlier HHT residual/tangent diagnostics show that the SFC effective tangent,
+contact tangent sign convention, and previous-static residual update are
+finite-difference consistent for the sampled trajectory.
+
+The validation-only persistent dynamic-SDF F2F mode also now preserves the
+generated master face, barycentric weights, and normal for an existing spring,
+then recomputes clearance from current nodal coordinates.  This mirrors the
+CalculiX `pmastsurf` usage for the portion of the lifecycle that is safe to
+clean-room migrate without copying source.
 
 ## Consequence For Method Claims
 
