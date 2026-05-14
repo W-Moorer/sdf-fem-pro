@@ -64,6 +64,12 @@ The prescribed deforming-master SDF reference run is documented in
 spatial-hash dynamic SDF matched all-face projection with zero reported gap and
 force errors and maximum normal angle error `2.980232e-08`.
 
+Backend mechanics checks are documented in
+`docs/calculix_aligned_backend_validation_handoff.md`. The latest full internal
+run supports mass, StVK patch, tangent finite-difference, freefall dynamics,
+and no-contact Newton cantilever gates; the quick optional CalculiX cantilever
+comparison completed with tip-displacement relative error `3.251012e-08`.
+
 ## Current Full Contact Comparison
 
 | Resolution | activation C/SFC | max pen. C | max pen. SFC | peak force C | peak force SFC | status |
