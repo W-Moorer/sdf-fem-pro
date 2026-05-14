@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -120,7 +121,12 @@ def write_calculix_contact_input_with_stress(model: DropModel, path: Path) -> No
     path.write_text(text, encoding="utf-8")
 
 
-def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout: int = 300) -> tuple[list[Row], np.ndarray, np.ndarray, Row]:
+def run_calculix_contact_with_stress(
+    model: DropModel,
+    out_dir: Path,
+    *,
+    timeout: int = 300,
+) -> tuple[list[Row], np.ndarray, np.ndarray, Row, dict[float, np.ndarray]]:
     """Run CalculiX contact and return history, final displacement, stress, command."""
 
     if not calculix_available():
@@ -130,7 +136,7 @@ def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout
             "completed": "false",
             "return_code": "not_available",
             "command": "",
-        }
+        }, {}
     run_dir = out_dir / "calculix_runs" / f"{model.case}_r{model.resolution}_dt{model.dt:g}".replace(".", "p")
     run_dir.mkdir(parents=True, exist_ok=True)
     case_name = f"{model.case}_r{model.resolution}"
@@ -162,19 +168,20 @@ def run_calculix_contact_with_stress(model: DropModel, out_dir: Path, *, timeout
         "completed": str(proc.returncode == 0 and dat.exists()).lower(),
     }
     if not dat.exists():
-        return [], np.zeros_like(model.nodes), np.zeros((model.tet_elements.shape[0], 6), dtype=float), command_row
+        return [], np.zeros_like(model.nodes), np.zeros((model.tet_elements.shape[0], 6), dtype=float), command_row, {}
     displacements = _parse_calculix_dat_displacements_strict(dat, model.node_ids)
     contact_totals = _parse_calculix_dat_contact_totals(dat)
     history = _history_from_displacements("calculix", model, displacements, contact_totals)
     final_u = displacements[max(displacements)]
     final_stress = _parse_final_stress_voigt(dat, model.tet_elements.shape[0])
-    return history, final_u, final_stress, command_row
+    return history, final_u, final_stress, command_row, displacements
 
 
 def run_sfc_geometric_contact_history(
     model: DropModel,
     *,
     contact_mode: str = "persistent_calculix_c3d4_f2f",
+    cutback_policy: str = "calculix_direct",
     source: str = "sfc_geometric_nonlinear",
 ) -> tuple[list[Row], np.ndarray, NonlinearState]:
     """Run the clean-room CalculiX-aligned StVK contact backend."""
@@ -215,6 +222,7 @@ def run_sfc_geometric_contact_history(
             accepted_dt=0.0,
             cutback_retry_count=0,
             cutback_limited=False,
+            cutback_policy=cutback_policy,
         )
     )
     current_time = 0.0
@@ -248,7 +256,7 @@ def run_sfc_geometric_contact_history(
                 residual_norm=float(trial_diagnostics.newton_residual_norm),
             )
             should_retry = (
-                _contact_cutback_enabled(contact_mode)
+                _contact_cutback_enabled(contact_mode, cutback_policy)
                 and record.recommended_cutback
                 and retry_count < max_retries
                 and trial_dt > min_dt * 1.000001
@@ -280,6 +288,7 @@ def run_sfc_geometric_contact_history(
                     accepted_dt=trial_dt,
                     cutback_retry_count=retry_count,
                     cutback_limited=cutback_limited,
+                    cutback_policy=cutback_policy,
                 )
             )
             break
@@ -299,6 +308,7 @@ def _sfc_history_row(
     accepted_dt: float,
     cutback_retry_count: int,
     cutback_limited: bool,
+    cutback_policy: str,
 ) -> Row:
     centroid_gaps = _surface_face_gaps_to_contact_plane(model, state.x)
     generated_count = _generated_contact_count(contact)
@@ -311,6 +321,7 @@ def _sfc_history_row(
         "time": float(state.time),
         "accepted_dt": float(accepted_dt),
         "nominal_dt": float(model.dt),
+        "cutback_policy": cutback_policy,
         "cutback_retry_count": int(cutback_retry_count),
         "cutback_limited": str(bool(cutback_limited)).lower(),
         "z_cm": _mass_weighted_center_z(model, state.x),
@@ -338,6 +349,185 @@ def _sfc_history_row(
         "contact_convergence_reason": convergence_record.reason,
         "details": details,
     }
+
+
+def contact_replay_metrics(model: DropModel, x_current: np.ndarray, *, plane_z: float | None = None) -> Row:
+    """Return hard-linear contact metrics replayed on a current geometry."""
+
+    z = _contact_plane_z(model) if plane_z is None else float(plane_z)
+    tri = np.asarray(x_current, dtype=float)[model.surface_faces]
+    areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    gaps = np.mean(tri, axis=1)[:, 2] - z
+    penetration = np.maximum(-gaps, 0.0)
+    active = int(np.count_nonzero(penetration > 0.0))
+    force = float(model.contact_stiffness * np.sum(areas * penetration))
+    energy = float(0.5 * model.contact_stiffness * np.sum(areas * penetration * penetration))
+    return {
+        "min_gap": float(np.min(gaps)) if gaps.size else 0.0,
+        "max_penetration": float(np.max(penetration)) if penetration.size else 0.0,
+        "active_force_spring_count": active,
+        "cnum_equivalent": active * 7,
+        "normal_force": force,
+        "contact_energy": energy,
+    }
+
+
+def contact_alignment_diagnostics(
+    model: DropModel,
+    calculix_rows: list[Row],
+    sfc_rows: list[Row],
+    calculix_displacements: dict[float, np.ndarray],
+    command_row: Row,
+    out_dir: Path,
+) -> Row:
+    """Diagnose whether RF/CELS differences are force-law or trajectory driven."""
+
+    stdout_rel = str(command_row.get("stdout_log", ""))
+    stdout_path = out_dir / stdout_rel if stdout_rel else None
+    stdout = _parse_calculix_stdout_diagnostics(stdout_path)
+    base: Row = {
+        "case": model.case,
+        "resolution": model.resolution,
+        "contact_mode": sfc_rows[0].get("contact_mode", "") if sfc_rows else "",
+        "calculix_completed": str(bool(calculix_rows and calculix_displacements)).lower(),
+        "shell_master_offset": CALCULIX_MASTER_SURFACE_OFFSET,
+        "contact_stiffness": model.contact_stiffness,
+        **stdout,
+    }
+    if not calculix_rows or not calculix_displacements:
+        base.update(
+            {
+                "force_law_mean_rel_error": "",
+                "force_law_max_rel_error": "",
+                "energy_law_mean_rel_error": "",
+                "energy_law_max_rel_error": "",
+                "cnum_equivalent_max_abs_error": "",
+                "peak_rf_force_replay_rel_error": "",
+                "peak_cels_energy_replay_rel_error": "",
+                "peak_midplane_force_fraction": "",
+                "sfc_min_accepted_dt": _min_float(sfc_rows, "accepted_dt") or "",
+                "sfc_rows_with_retry": sum(1 for row in sfc_rows if int(row.get("cutback_retry_count", 0)) > 0),
+                "sfc_max_retry_count": max((int(row.get("cutback_retry_count", 0)) for row in sfc_rows), default=0),
+                "diagnosis": "external_unavailable",
+            }
+        )
+        return base
+
+    force_errors: list[float] = []
+    energy_errors: list[float] = []
+    cnum_errors: list[float] = []
+    peak_rf_tuple: tuple[float, float] | None = None
+    peak_cels_tuple: tuple[float, float] | None = None
+    peak_offset_force = 0.0
+    peak_midplane_force = 0.0
+    for row in calculix_rows:
+        time = float(row["time"])
+        disp_time = min(calculix_displacements, key=lambda value: abs(value - time))
+        x_current = model.nodes + calculix_displacements[disp_time]
+        replay = contact_replay_metrics(model, x_current)
+        midplane = contact_replay_metrics(model, x_current, plane_z=model.floor_z)
+        rf = _optional_float(row.get("normal_force_proxy", ""))
+        cels = _optional_float(row.get("contact_energy_proxy", ""))
+        cnum = _optional_float(row.get("calculix_contact_count", ""))
+        if rf is not None and abs(rf) > 1.0e-12:
+            force_errors.append(abs(float(replay["normal_force"]) - rf) / max(abs(rf), 1.0e-30))
+            if peak_rf_tuple is None or rf > peak_rf_tuple[0]:
+                peak_rf_tuple = (rf, float(replay["normal_force"]))
+            if float(replay["normal_force"]) > peak_offset_force:
+                peak_offset_force = float(replay["normal_force"])
+                peak_midplane_force = float(midplane["normal_force"])
+        if cels is not None and abs(cels) > 1.0e-12:
+            energy_errors.append(abs(float(replay["contact_energy"]) - cels) / max(abs(cels), 1.0e-30))
+            if peak_cels_tuple is None or cels > peak_cels_tuple[0]:
+                peak_cels_tuple = (cels, float(replay["contact_energy"]))
+        if cnum is not None:
+            cnum_errors.append(abs(float(replay["cnum_equivalent"]) - cnum))
+
+    peak_force_error = (
+        None
+        if peak_rf_tuple is None
+        else abs(peak_rf_tuple[1] - peak_rf_tuple[0]) / max(abs(peak_rf_tuple[0]), 1.0e-30)
+    )
+    peak_energy_error = (
+        None
+        if peak_cels_tuple is None
+        else abs(peak_cels_tuple[1] - peak_cels_tuple[0]) / max(abs(peak_cels_tuple[0]), 1.0e-30)
+    )
+    force_mean_error = _mean_or_blank(force_errors)
+    energy_mean_error = _mean_or_blank(energy_errors)
+    force_law_aligned = (
+        peak_force_error is not None
+        and peak_force_error < 0.02
+        and peak_energy_error is not None
+        and peak_energy_error < 0.02
+        and force_mean_error != ""
+        and float(force_mean_error) < 0.02
+        and energy_mean_error != ""
+        and float(energy_mean_error) < 0.15
+    )
+    sfc_min_dt = _min_float([row for row in sfc_rows if float(row.get("accepted_dt", 0.0)) > 0.0], "accepted_dt")
+    base.update(
+        {
+            "force_law_mean_rel_error": force_mean_error,
+            "force_law_max_rel_error": _max_or_blank(force_errors),
+            "energy_law_mean_rel_error": energy_mean_error,
+            "energy_law_max_rel_error": _max_or_blank(energy_errors),
+            "cnum_equivalent_max_abs_error": _max_or_blank(cnum_errors),
+            "peak_rf_force_replay_rel_error": "" if peak_force_error is None else peak_force_error,
+            "peak_cels_energy_replay_rel_error": "" if peak_energy_error is None else peak_energy_error,
+            "peak_midplane_force_fraction": ""
+            if peak_offset_force <= 0.0
+            else peak_midplane_force / peak_offset_force,
+            "sfc_min_accepted_dt": "" if sfc_min_dt is None else sfc_min_dt,
+            "sfc_rows_with_retry": sum(1 for row in sfc_rows if int(row.get("cutback_retry_count", 0)) > 0),
+            "sfc_max_retry_count": max((int(row.get("cutback_retry_count", 0)) for row in sfc_rows), default=0),
+            "diagnosis": "trajectory_difference_dominant" if force_law_aligned else "force_law_or_output_difference_remains",
+        }
+    )
+    return base
+
+
+def _parse_calculix_stdout_diagnostics(path: Path | None) -> Row:
+    if path is None or not path.exists():
+        return {
+            "calculix_stdout_increment_count": "",
+            "calculix_stdout_max_attempt": "",
+            "calculix_stdout_min_increment_size": "",
+            "calculix_stdout_cutback_attempt_count": "",
+            "calculix_stdout_no_convergence_count": "",
+            "calculix_stdout_kscale_restore_count": "",
+            "calculix_stdout_max_contact_spring_elements": "",
+        }
+    text = path.read_text(encoding="utf-8", errors="replace")
+    attempts = [int(value) for value in re.findall(r"increment\s+\d+\s+attempt\s+(\d+)", text)]
+    sizes = [float(value) for value in re.findall(r"increment size=\s*([0-9.Ee+-]+)", text)]
+    contact_counts = [int(value) for value in re.findall(r"Number of contact spring elements=(\d+)", text)]
+    return {
+        "calculix_stdout_increment_count": len(attempts),
+        "calculix_stdout_max_attempt": max(attempts) if attempts else "",
+        "calculix_stdout_min_increment_size": min(sizes) if sizes else "",
+        "calculix_stdout_cutback_attempt_count": sum(1 for value in attempts if value > 1),
+        "calculix_stdout_no_convergence_count": len(re.findall(r"\bno convergence\b", text)),
+        "calculix_stdout_kscale_restore_count": len(re.findall(r"restoring the elastic contact stifnesses", text)),
+        "calculix_stdout_max_contact_spring_elements": max(contact_counts) if contact_counts else "",
+    }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value == "" or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mean_or_blank(values: list[float]) -> float | str:
+    return "" if not values else float(np.mean(values))
+
+
+def _max_or_blank(values: list[float]) -> float | str:
+    return "" if not values else float(np.max(values))
 
 
 def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[ContactGeometry, str]:
@@ -467,7 +657,11 @@ def _contact_count_for_heuristic(contact: ContactGeometry, diagnostics: StepDiag
     return int(diagnostics.contact.active_count)
 
 
-def _contact_cutback_enabled(contact_mode: str) -> bool:
+def _contact_cutback_enabled(contact_mode: str, cutback_policy: str = "active_retry") -> bool:
+    if cutback_policy == "calculix_direct":
+        return False
+    if cutback_policy != "active_retry":
+        raise ValueError("cutback_policy must be 'active_retry' or 'calculix_direct'")
     return contact_mode.startswith("persistent_")
 
 
@@ -744,16 +938,24 @@ def _voigt_to_tensor(values: np.ndarray) -> np.ndarray:
     return tensors
 
 
-def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float, contact_mode: str = "persistent_calculix_c3d4_f2f") -> list[Row]:
+def sfc_mesh_convergence(
+    resolutions: list[int],
+    *,
+    duration: float,
+    dt: float,
+    contact_mode: str = "persistent_calculix_c3d4_f2f",
+    cutback_policy: str = "calculix_direct",
+) -> list[Row]:
     rows: list[Row] = []
     for resolution in resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
-        history, _, state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode)
+        history, _, state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode, cutback_policy=cutback_policy)
         rows.append(
             {
                 "case": "block_drop_contact_mesh",
                 "resolution": resolution,
                 "contact_mode": contact_mode,
+                "cutback_policy": cutback_policy,
                 "nodes": model.nodes.shape[0],
                 "elements": model.tet_elements.shape[0],
                 "max_penetration": _max_float(history, "max_penetration"),
@@ -766,16 +968,23 @@ def sfc_mesh_convergence(resolutions: list[int], *, duration: float, dt: float, 
     return rows
 
 
-def sfc_timestep_convergence(dts: list[float], *, duration: float, contact_mode: str = "persistent_calculix_c3d4_f2f") -> list[Row]:
+def sfc_timestep_convergence(
+    dts: list[float],
+    *,
+    duration: float,
+    contact_mode: str = "persistent_calculix_c3d4_f2f",
+    cutback_policy: str = "calculix_direct",
+) -> list[Row]:
     rows: list[Row] = []
     for dt in dts:
         model = _contact_model(resolution=1, duration=duration, dt=dt)
-        history, _, state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode)
+        history, _, state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode, cutback_policy=cutback_policy)
         rows.append(
             {
                 "case": "block_drop_contact_timestep",
                 "dt": dt,
                 "contact_mode": contact_mode,
+                "cutback_policy": cutback_policy,
                 "duration": duration,
                 "max_penetration": _max_float(history, "max_penetration"),
                 "peak_normal_force": _max_float(history, "normal_force_proxy"),
@@ -794,6 +1003,7 @@ def run_validation(
     quick: bool = False,
     skip_calculix: bool = False,
     contact_mode: str = "persistent_calculix_c3d4_f2f",
+    cutback_policy: str = "calculix_direct",
 ) -> dict[str, Path]:
     """Run geometric nonlinear contact validation and write CSV/Markdown."""
 
@@ -803,35 +1013,50 @@ def run_validation(
     comparison_resolutions = [1] if quick else [1, 2, 3]
     history_rows: list[Row] = []
     comparison_rows: list[Row] = []
+    alignment_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
-        sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(model, contact_mode=contact_mode)
+        sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(
+            model,
+            contact_mode=contact_mode,
+            cutback_policy=cutback_policy,
+        )
         history_rows.extend(sfc_rows)
         if skip_calculix:
             calc_rows: list[Row] = []
             calc_u = np.zeros_like(model.nodes)
             calc_stress = np.zeros((model.tet_elements.shape[0], 6), dtype=float)
+            calc_displacements: dict[float, np.ndarray] = {}
             command_rows.append({"case": model.case, "resolution": resolution, "completed": "false", "return_code": "skipped", "command": ""})
         else:
-            calc_rows, calc_u, calc_stress, command = run_calculix_contact_with_stress(model, out_dir)
+            calc_rows, calc_u, calc_stress, command, calc_displacements = run_calculix_contact_with_stress(model, out_dir)
             command_rows.append(command)
             history_rows.extend(calc_rows)
         comparison_rows.append(compare_contact_histories(model, calc_rows, sfc_rows, calc_stress, sfc_state))
+        alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
-    mesh_rows = sfc_mesh_convergence([1, 2, 3], duration=duration, dt=dt, contact_mode=contact_mode)
+    mesh_rows = sfc_mesh_convergence(
+        [1, 2, 3],
+        duration=duration,
+        dt=dt,
+        contact_mode=contact_mode,
+        cutback_policy=cutback_policy,
+    )
     timestep_rows = sfc_timestep_convergence(
         [0.004, 0.002, 0.001] if quick else [0.002, 0.001, 0.0005],
         duration=duration,
         contact_mode=contact_mode,
+        cutback_policy=cutback_policy,
     )
-    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows)
+    claim_rows = _claim_rows(comparison_rows, mesh_rows, timestep_rows, vtk_rows, alignment_rows)
     outputs = {
         "history": out_dir / "geometric_contact_history.csv",
         "comparison": out_dir / "geometric_contact_calculix_comparison.csv",
+        "alignment": out_dir / "geometric_contact_alignment_diagnostics.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
         "vtk": out_dir / "geometric_contact_stress_clouds.csv",
@@ -841,18 +1066,38 @@ def run_validation(
     }
     _write_csv(outputs["history"], history_rows)
     _write_csv(outputs["comparison"], comparison_rows)
+    _write_csv(outputs["alignment"], alignment_rows)
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
     _write_csv(outputs["vtk"], vtk_rows)
     _write_csv(outputs["commands"], command_rows)
     _write_csv(outputs["claims"], claim_rows)
-    _write_markdown(outputs["summary"], comparison_rows, mesh_rows, timestep_rows, vtk_rows, claim_rows, contact_mode=contact_mode)
+    _write_markdown(
+        outputs["summary"],
+        comparison_rows,
+        mesh_rows,
+        timestep_rows,
+        vtk_rows,
+        claim_rows,
+        alignment_rows,
+        contact_mode=contact_mode,
+        cutback_policy=cutback_policy,
+    )
     return outputs
 
 
-def _claim_rows(comparison_rows: list[Row], mesh_rows: list[Row], timestep_rows: list[Row], vtk_rows: list[Row]) -> list[Row]:
+def _claim_rows(
+    comparison_rows: list[Row],
+    mesh_rows: list[Row],
+    timestep_rows: list[Row],
+    vtk_rows: list[Row],
+    alignment_rows: list[Row],
+) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
     accepted = any(row["acceptance_status"] == "passed_scoped_gate" for row in comparison_rows)
+    replay_supported = bool(alignment_rows) and any(
+        row.get("diagnosis") == "trajectory_difference_dominant" for row in alignment_rows
+    )
     return [
         {
             "claim": "block_plane_geometric_contact_calculix_comparison_available",
@@ -865,6 +1110,12 @@ def _claim_rows(comparison_rows: list[Row], mesh_rows: list[Row], timestep_rows:
             "supported": str(accepted).lower(),
             "evidence_csv": "geometric_contact_calculix_comparison.csv",
             "details": "Uses loose diagnostic thresholds; false means evidence exists but external contact agreement is not accepted",
+        },
+        {
+            "claim": "calculix_contact_force_law_replay_diagnostics_available",
+            "supported": str(replay_supported).lower(),
+            "evidence_csv": "geometric_contact_alignment_diagnostics.csv",
+            "details": "Replays SFC hard-linear area-weighted contact law on CalculiX displacements to separate force-law/output differences from trajectory differences",
         },
         {
             "claim": "contact_mesh_convergence_trend_available",
@@ -894,8 +1145,10 @@ def _write_markdown(
     timestep_rows: list[Row],
     vtk_rows: list[Row],
     claim_rows: list[Row],
+    alignment_rows: list[Row],
     *,
     contact_mode: str,
+    cutback_policy: str,
 ) -> None:
     lines = [
         "# Geometric Nonlinear Contact Validation",
@@ -903,6 +1156,7 @@ def _write_markdown(
         "This validation compares the clean-room CalculiX-aligned SFC StVK geometric nonlinear block-plane contact path against CalculiX dynamic contact output.",
         "",
         f"SFC contact mode: `{contact_mode}`.",
+        f"SFC cutback policy: `{cutback_policy}`.",
         "",
         "The default `calculix_c3d4_f2f` mode uses one slave-face centroid spring per C3D4 boundary triangle and a hard linear pressure-overclosure law for stricter CalculiX-style validation. The older `plane` and `dynamic_sdf_plane` modes use three triangle quadrature samples and are not strict CalculiX C3D4 contact discretizations.",
         "",
@@ -910,6 +1164,7 @@ def _write_markdown(
         "",
         "- `geometric_contact_history.csv`",
         "- `geometric_contact_calculix_comparison.csv`",
+        "- `geometric_contact_alignment_diagnostics.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
         "- `geometric_contact_stress_clouds.csv`",
@@ -928,6 +1183,23 @@ def _write_markdown(
             f"| {row['resolution']} | {row['acceptance_status']} | {_fmt(row['z_cm_l2_rel_error'])} | "
             f"{_fmt(row['max_penetration_rel_error'])} | {_fmt(row['peak_normal_force_rel_error'])} | "
             f"{_fmt(row['max_cnum_abs_error'])} | {_fmt(row['contact_zone_max_vm_rel_error'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Alignment Diagnostics",
+            "",
+            "| Resolution | Diagnosis | peak RF replay rel. | peak CELS replay rel. | force-law max rel. | kscale restores | max attempt | min CalculiX dt | min SFC dt |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in alignment_rows:
+        lines.append(
+            f"| {row['resolution']} | {row['diagnosis']} | {_fmt(row['peak_rf_force_replay_rel_error'])} | "
+            f"{_fmt(row['peak_cels_energy_replay_rel_error'])} | {_fmt(row['force_law_max_rel_error'])} | "
+            f"{_fmt(row['calculix_stdout_kscale_restore_count'])} | "
+            f"{_fmt(row['calculix_stdout_max_attempt'])} | {_fmt(row['calculix_stdout_min_increment_size'])} | "
+            f"{_fmt(row['sfc_min_accepted_dt'])} |"
         )
     lines.extend(
         [
@@ -975,12 +1247,24 @@ def parse_args() -> argparse.Namespace:
         default="persistent_calculix_c3d4_f2f",
         help="SFC contact geometry/enforcement mode used for the validation run.",
     )
+    parser.add_argument(
+        "--cutback-policy",
+        choices=["active_retry", "calculix_direct"],
+        default="calculix_direct",
+        help="SFC trial-step retry policy. 'calculix_direct' keeps fixed direct increments to match the generated CalculiX input.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    outputs = run_validation(args.out_dir, quick=args.quick, skip_calculix=args.skip_calculix, contact_mode=args.contact_mode)
+    outputs = run_validation(
+        args.out_dir,
+        quick=args.quick,
+        skip_calculix=args.skip_calculix,
+        contact_mode=args.contact_mode,
+        cutback_policy=args.cutback_policy,
+    )
     print("Geometric nonlinear contact validation complete.")
     for name, path in outputs.items():
         print(f"{name}: {path}")
