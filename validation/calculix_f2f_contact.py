@@ -126,6 +126,17 @@ class ContactConvergenceRecord:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class CalculixHardLinearSpringLaw:
+    """Hard-linear face-to-face spring-law values for one contact spring."""
+
+    active: bool
+    penetration: float
+    force_magnitude: float
+    tangent_scale: float
+    energy: float
+
+
 @dataclass(slots=True)
 class CalculixF2FContactLifecycle:
     """Clean-room persistent contact spring lifecycle for validation.
@@ -305,6 +316,39 @@ def _triangle_contact_rule(name: str) -> tuple[np.ndarray, np.ndarray]:
     if name == "calculix_7":
         return CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC.copy(), CALCULIX_TRIANGLE_CONTACT_WEIGHTS.copy()
     raise ValueError("quadrature must be 'centroid' or 'calculix_7'")
+
+
+def calculix_hard_linear_spring_law(
+    *,
+    clearance: float,
+    spring_area: float,
+    pressure_stiffness: float,
+    kscale: float = 1.0,
+) -> CalculixHardLinearSpringLaw:
+    """Return CalculiX-style hard-linear overclosure law values.
+
+    This clean-room helper mirrors the scoped linear branch used by the
+    validation contact inputs: no tensile force for positive clearance, and a
+    compressive spring force proportional to area, pressure stiffness, and
+    overclosure.  ``force_magnitude`` is positive in compression.
+    """
+
+    area = float(spring_area)
+    stiffness = float(pressure_stiffness)
+    scale = float(kscale)
+    if area < 0.0:
+        raise ValueError("spring_area must be nonnegative")
+    if stiffness <= 0.0:
+        raise ValueError("pressure_stiffness must be positive")
+    if scale <= 0.0:
+        raise ValueError("kscale must be positive")
+    tangent = area * stiffness / scale
+    penetration = max(-float(clearance), 0.0)
+    if penetration <= 0.0:
+        return CalculixHardLinearSpringLaw(False, 0.0, 0.0, 0.0, 0.0)
+    force = tangent * penetration
+    energy = 0.5 * tangent * penetration * penetration
+    return CalculixHardLinearSpringLaw(True, float(penetration), float(force), float(tangent), float(energy))
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,26 +657,28 @@ def assemble_deformable_f2f_contact_response(
 
     for spring in springs:
         generated_count += 1
-        penetration = max(-float(spring.clearance), 0.0)
-        if penetration <= 0.0:
+        law = calculix_hard_linear_spring_law(
+            clearance=float(spring.clearance),
+            spring_area=float(spring.spring_area),
+            pressure_stiffness=k,
+        )
+        if not law.active:
             continue
         cols_i, vals_i = _spring_jacobian_entries(
             spring,
             slave_dof_offset=slave_offset,
             master_dof_offset=master_offset,
         )
-        lam = k * float(spring.spring_area) * penetration
-        tangent = k * float(spring.spring_area)
         active_count += 1
-        normal_force += lam
-        energy += 0.5 * tangent * penetration * penetration
-        max_pen = max(max_pen, penetration)
-        force[cols_i] += vals_i * lam
+        normal_force += law.force_magnitude
+        energy += law.energy
+        max_pen = max(max_pen, law.penetration)
+        force[cols_i] += vals_i * law.force_magnitude
         for row_col, row_val in zip(cols_i, vals_i, strict=True):
             for col_col, col_val in zip(cols_i, vals_i, strict=True):
                 rows.append(int(row_col))
                 cols.append(int(col_col))
-                data.append(float(tangent * row_val * col_val))
+                data.append(float(law.tangent_scale * row_val * col_val))
 
     K = coo_matrix((data, (rows, cols)), shape=(n_total, n_total)).tocsr()
     return DeformableF2FContactResponse(

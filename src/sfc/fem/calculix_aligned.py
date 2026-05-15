@@ -241,6 +241,95 @@ def hht_newmark_parameters(alpha: float) -> tuple[float, float]:
     return 0.25 * (1.0 - alpha_value) ** 2, 0.5 - alpha_value
 
 
+def calculix_dynamic_predictor(
+    displacement: np.ndarray,
+    velocity: np.ndarray,
+    acceleration: np.ndarray,
+    *,
+    dt: float,
+    beta: float,
+    gamma: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return CalculiX-style dynamic predictor state.
+
+    This is a clean-room behavioral counterpart to the implicit-dynamics branch
+    of CalculiX ``prediction.c``: predict displacement and velocity from the
+    previous accepted acceleration, then reset the acceleration accumulator that
+    Newton iterations will refill with acceleration increments.
+    """
+
+    u = np.asarray(displacement, dtype=float)
+    v = np.asarray(velocity, dtype=float)
+    a = np.asarray(acceleration, dtype=float)
+    dt_value = float(dt)
+    predicted_u = u + dt_value * v + dt_value * dt_value * (0.5 - float(beta)) * a
+    predicted_v = v + dt_value * (1.0 - float(gamma)) * a
+    reset_acceleration = np.zeros_like(a)
+    return predicted_u, predicted_v, reset_acceleration
+
+
+def calculix_apply_acceleration_increment(
+    displacement: np.ndarray,
+    velocity: np.ndarray,
+    acceleration: np.ndarray,
+    acceleration_increment: np.ndarray,
+    *,
+    dt: float,
+    beta: float,
+    gamma: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply a CalculiX-style Newton acceleration increment.
+
+    In CalculiX ``iniparll.c`` the Newton solution vector for implicit dynamics
+    is accumulated as an acceleration increment.  Displacement and velocity are
+    updated by ``beta * dt**2`` and ``gamma * dt`` multiples of that increment.
+    """
+
+    bnac = np.asarray(acceleration_increment, dtype=float)
+    dt_value = float(dt)
+    return (
+        np.asarray(displacement, dtype=float) + float(beta) * dt_value * dt_value * bnac,
+        np.asarray(velocity, dtype=float) + float(gamma) * dt_value * bnac,
+        np.asarray(acceleration, dtype=float) + bnac,
+    )
+
+
+def calculix_hht_effective_residual(
+    mass_times_acceleration: np.ndarray,
+    current_rhs_balance: np.ndarray,
+    previous_rhs_balance: np.ndarray,
+    *,
+    alpha: float,
+) -> np.ndarray:
+    """Return the SFC residual sign equivalent to CalculiX ``calcresidual.c``.
+
+    CalculiX assembles the right-hand side
+    ``b = (1 + alpha) B - alpha B_ini - M a`` with
+    ``B = f_ext - f_int``.  SFC solves the negative residual
+    ``R = M a - (1 + alpha) B + alpha B_ini``.
+    """
+
+    return (
+        np.asarray(mass_times_acceleration, dtype=float)
+        - (1.0 + float(alpha)) * np.asarray(current_rhs_balance, dtype=float)
+        + float(alpha) * np.asarray(previous_rhs_balance, dtype=float)
+    )
+
+
+def calculix_hht_effective_tangent(
+    mass_matrix: csr_matrix,
+    static_tangent: csr_matrix,
+    *,
+    dt: float,
+    beta: float,
+    alpha: float,
+) -> csr_matrix:
+    """Return the clean-room CalculiX-style implicit dynamic tangent."""
+
+    c0 = 1.0 / (float(beta) * float(dt) * float(dt))
+    return (mass_matrix * c0 + static_tangent * (1.0 + float(alpha))).tocsr()
+
+
 def tet4_reference_data(X: np.ndarray, elements: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return positive TET4 volumes and reference shape gradients."""
 
@@ -504,8 +593,7 @@ def hht_step(
     u = (state.x - model.X).reshape(-1)
     v = state.v.reshape(-1)
     a = state.a.reshape(-1)
-    u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
-    v_pred = v + dt * (1.0 - gamma) * a
+    u_pred, v_pred, _accold_after_prediction = calculix_dynamic_predictor(u, v, a, dt=dt, beta=beta, gamma=gamma)
     u_guess = u_pred.copy()
     previous_rhs_balance = np.asarray(previous_static_residual, dtype=float)
     residual_norm = np.inf
@@ -519,13 +607,14 @@ def hht_step(
         x_guess = model.X + u_guess.reshape((-1, 3))
         static_state = static_force_state(model, x_guess, contact_geometry, gravity=gravity)
         a_guess = c0 * (u_guess - u_pred)
-        dynamic_residual = (
-            model.mass_matrix @ a_guess
-            - (1.0 + float(alpha)) * static_state.calculix_rhs_balance
-            + float(alpha) * previous_rhs_balance
+        dynamic_residual = calculix_hht_effective_residual(
+            model.mass_matrix @ a_guess,
+            static_state.calculix_rhs_balance,
+            previous_rhs_balance,
+            alpha=alpha,
         )
         residual_norm = float(np.linalg.norm(dynamic_residual))
-        tangent = (model.mass_matrix * c0 + static_state.tangent * (1.0 + float(alpha))).tocsc()
+        tangent = calculix_hht_effective_tangent(model.mass_matrix, static_state.tangent, dt=dt, beta=beta, alpha=alpha).tocsc()
         correction = np.asarray(spsolve(tangent, -dynamic_residual), dtype=float)
         u_guess += correction
         iteration_count = iteration + 1

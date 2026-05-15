@@ -22,6 +22,7 @@ from validation.calculix_f2f_contact import (
     PersistentCalculixC3D4FaceToFaceSDFContactGeometry,
     assemble_deformable_f2f_contact_response,
     calculix_equivalent_contact_element_count,
+    calculix_hard_linear_spring_law,
 )
 
 
@@ -194,6 +195,27 @@ def test_calculix_c3d4_f2f_area_uses_current_face_area() -> None:
 
     assert spring.spring_area == pytest.approx(1.0)
     assert assemble_contact_response(geometry.samples(x), 3).normal_force == pytest.approx(10.0)
+
+
+def test_calculix_hard_linear_spring_law_has_no_tension_and_area_weighted_compression() -> None:
+    open_law = calculix_hard_linear_spring_law(clearance=0.01, spring_area=0.5, pressure_stiffness=100.0)
+    closed_law = calculix_hard_linear_spring_law(clearance=-0.02, spring_area=0.5, pressure_stiffness=100.0)
+    scaled_law = calculix_hard_linear_spring_law(
+        clearance=-0.02,
+        spring_area=0.5,
+        pressure_stiffness=100.0,
+        kscale=2.0,
+    )
+
+    assert not open_law.active
+    assert open_law.force_magnitude == pytest.approx(0.0)
+    assert closed_law.active
+    assert closed_law.penetration == pytest.approx(0.02)
+    assert closed_law.tangent_scale == pytest.approx(50.0)
+    assert closed_law.force_magnitude == pytest.approx(1.0)
+    assert closed_law.energy == pytest.approx(0.5 * 50.0 * 0.02 * 0.02)
+    assert scaled_law.tangent_scale == pytest.approx(25.0)
+    assert scaled_law.force_magnitude == pytest.approx(0.5)
 
 
 def test_convergence_heuristic_recommends_cutback_on_oscillation() -> None:

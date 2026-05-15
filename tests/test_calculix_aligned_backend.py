@@ -10,6 +10,10 @@ from sfc.fem.calculix_aligned import (
     MechanicsModel,
     PlaneContactGeometry,
     assemble_contact_response,
+    calculix_apply_acceleration_increment,
+    calculix_dynamic_predictor,
+    calculix_hht_effective_residual,
+    calculix_hht_effective_tangent,
     hht_newmark_parameters,
     hht_step,
     initial_state,
@@ -43,6 +47,52 @@ def test_hht_parameters_match_calculix_alpha_convention() -> None:
 
     assert beta == pytest.approx(0.25 * 1.05**2)
     assert gamma == pytest.approx(0.55)
+
+
+def test_calculix_dynamic_predictor_matches_prediction_state_update() -> None:
+    beta, gamma = hht_newmark_parameters(-0.05)
+    u = np.asarray([0.1, -0.2, 0.3], dtype=float)
+    v = np.asarray([1.0, 2.0, -3.0], dtype=float)
+    a = np.asarray([4.0, -5.0, 6.0], dtype=float)
+    dt = 0.02
+
+    u_pred, v_pred, accold = calculix_dynamic_predictor(u, v, a, dt=dt, beta=beta, gamma=gamma)
+
+    assert u_pred == pytest.approx(u + dt * v + dt * dt * (0.5 - beta) * a)
+    assert v_pred == pytest.approx(v + dt * (1.0 - gamma) * a)
+    assert accold == pytest.approx(np.zeros_like(a))
+
+
+def test_calculix_acceleration_increment_updates_displacement_velocity_acceleration() -> None:
+    beta, gamma = hht_newmark_parameters(-0.05)
+    u = np.asarray([0.1, -0.2, 0.3], dtype=float)
+    v = np.asarray([1.0, 2.0, -3.0], dtype=float)
+    a = np.asarray([0.0, 0.0, 0.0], dtype=float)
+    bnac = np.asarray([4.0, -5.0, 6.0], dtype=float)
+    dt = 0.02
+
+    u_new, v_new, a_new = calculix_apply_acceleration_increment(u, v, a, bnac, dt=dt, beta=beta, gamma=gamma)
+
+    assert u_new == pytest.approx(u + beta * dt * dt * bnac)
+    assert v_new == pytest.approx(v + gamma * dt * bnac)
+    assert a_new == pytest.approx(a + bnac)
+
+
+def test_calculix_hht_residual_and_tangent_helpers_match_solver_form() -> None:
+    model = _unit_tet_model()
+    mass_a = np.linspace(-0.2, 0.3, model.n_dofs)
+    current_balance = np.linspace(1.0, 2.0, model.n_dofs)
+    previous_balance = np.linspace(-0.5, 0.5, model.n_dofs)
+    alpha = -0.05
+    beta, _gamma = hht_newmark_parameters(alpha)
+    tangent = model.mass_matrix.copy()
+
+    residual = calculix_hht_effective_residual(mass_a, current_balance, previous_balance, alpha=alpha)
+    effective = calculix_hht_effective_tangent(model.mass_matrix, tangent, dt=0.01, beta=beta, alpha=alpha)
+
+    assert residual == pytest.approx(mass_a - (1.0 + alpha) * current_balance + alpha * previous_balance)
+    assert effective.shape == model.mass_matrix.shape
+    assert effective.nnz > 0
 
 
 def test_consistent_mass_has_correct_total_translational_mass() -> None:
