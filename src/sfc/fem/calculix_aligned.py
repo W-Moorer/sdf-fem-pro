@@ -548,6 +548,23 @@ def static_force_state(
 
     internal = stvk_internal_response(model, x_current, assemble_tangent=True)
     contact = assemble_contact_response(contact_geometry.samples(x_current), model.n_nodes)
+    return _static_force_state_from_responses(model, internal, contact, gravity=gravity)
+
+
+def _static_force_state_from_responses(
+    model: MechanicsModel,
+    internal: InternalResponse,
+    contact: ContactResponse,
+    *,
+    gravity: float,
+) -> StaticForceState:
+    """Build CalculiX-style ``fextini - fini`` bookkeeping from one evaluation.
+
+    Accepted-step history must be saved from the already converged force state.
+    For stateful contact validation geometries, rebuilding the history by
+    sampling contact again can advance the contact lifecycle a second time.
+    """
+
     external = _nodal_gravity_loads(model, gravity)
     contact_force = contact.force.reshape(-1)
     contact_internal = -contact_force
@@ -660,12 +677,17 @@ def hht_step(
         time=state.time + float(dt),
     )
     diagnostics = evaluate_state(model, next_state, contact_geometry, gravity=gravity, assemble_tangent=True)
-    accepted_static_state = static_force_state(model, next_state.x, contact_geometry, gravity=gravity)
     diagnostics.newton_iterations = iteration_count
     diagnostics.newton_residual_norm = residual_norm
     diagnostics.newton_acceptance_policy = acceptance_policy
     diagnostics.newton_acceptance_reason = acceptance_reason
     diagnostics.newton_acceptance_metrics = acceptance_metrics
+    accepted_static_state = _static_force_state_from_responses(
+        model,
+        diagnostics.internal,
+        diagnostics.contact,
+        gravity=gravity,
+    )
     return next_state, accepted_static_state.calculix_rhs_balance, diagnostics
 
 

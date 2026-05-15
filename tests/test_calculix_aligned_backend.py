@@ -9,6 +9,7 @@ from sfc.fem.calculix_aligned import (
     ContactSample,
     MechanicsModel,
     PlaneContactGeometry,
+    _nodal_gravity_loads,
     _restore_contact_state,
     _snapshot_contact_state,
     assemble_contact_response,
@@ -57,6 +58,24 @@ class _StatefulEmptyContactGeometry:
         self.lifecycle.active_springs["calls"] = calls + 1
         self.lifecycle.events.append("sampled")
         return []
+
+
+class _ChangingContactGeometry:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
+        self.calls += 1
+        return [
+            ContactSample(
+                node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+                shape_weights=np.full(3, 1.0 / 3.0, dtype=float),
+                gap=-1.0e-4 * float(self.calls),
+                normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+                area=0.5,
+                stiffness=1.0,
+            )
+        ]
 
 
 def _unit_tet_model() -> MechanicsModel:
@@ -245,6 +264,28 @@ def test_hht_step_saves_accepted_contact_internal_force_history() -> None:
     assert np.linalg.norm(static_state.contact_internal_force) > 0.0
     assert next_previous == pytest.approx(static_state.calculix_rhs_balance)
     assert next_previous == pytest.approx(-static_state.residual)
+
+
+def test_hht_step_saves_history_from_accepted_contact_evaluation_without_resampling() -> None:
+    model = _unit_tet_model()
+    contact = _ChangingContactGeometry()
+    state, previous = initial_state(model, contact, gravity=0.0)
+
+    _next_state, next_previous, diagnostics = hht_step(
+        model,
+        state,
+        previous,
+        contact,
+        dt=0.001,
+        gravity=0.0,
+        alpha=-0.05,
+        max_iterations=1,
+    )
+
+    external = _nodal_gravity_loads(model, 0.0)
+    accepted_internal = diagnostics.internal.force.reshape(-1) - diagnostics.contact.force.reshape(-1)
+
+    assert next_previous == pytest.approx(external - accepted_internal)
 
 
 def test_hht_step_supports_clean_room_calculix_multicriteria_acceptance() -> None:
