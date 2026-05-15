@@ -65,7 +65,7 @@ def test_parse_calculix_dat_per_contact_cdis_cstr_cels(tmp_path: Path) -> None:
 
     parsed = _parse_calculix_dat_contact_elements(dat)
 
-    row = parsed[0.1][(4, 1)]
+    row = parsed[0.1][(4, 1, 0)]
     assert row["calculix_clearance_normal"] == -1.25e-3
     assert row["calculix_clearance_tangential_1"] == 2.0e-4
     assert row["calculix_stress_normal"] == 25.0
@@ -89,7 +89,7 @@ def test_contact_element_audit_compares_calculix_native_and_replay() -> None:
     displacement[:, 2] -= 0.0505
     parsed = {
         0.004: {
-            (int(element_id), face_number_int): {
+            (int(element_id), face_number_int, 0): {
                 "calculix_clearance_normal": -5.0e-4,
                 "calculix_stress_normal": 10.0,
                 "calculix_contact_energy": 1.0e-6,
@@ -120,7 +120,7 @@ def test_sfc_geometric_contact_history_activates_contact() -> None:
     assert any(row["generated_contact_spring_count"] != "" for row in rows)
     active_rows = [row for row in rows if int(row["active_contact_count"]) > 0]
     assert active_rows
-    assert max(int(row["generated_contact_spring_count"]) for row in active_rows) == 2
+    assert max(int(row["generated_contact_spring_count"]) for row in active_rows) == 14
     assert max(int(row["calculix_equivalent_contact_count"]) for row in active_rows) == 14
     assert all(row["contact_cutback_recommended"] in {"true", "false"} for row in rows)
     assert all(row["contact_convergence_reason"] for row in rows)
@@ -146,7 +146,7 @@ def test_contact_geometry_modes_expose_strict_and_three_point_discretizations() 
     strict, _ = _make_contact_geometry(model, "calculix_c3d4_f2f")
     three_point, _ = _make_contact_geometry(model, "plane")
 
-    assert len(list(strict.samples(model.nodes))) == model.surface_faces.shape[0]
+    assert len(list(strict.samples(model.nodes))) == 7 * model.surface_faces.shape[0]
     assert len(list(three_point.samples(model.nodes))) == 3 * model.surface_faces.shape[0]
 
 
@@ -158,7 +158,7 @@ def test_contact_replay_metrics_uses_calculix_shell_offset_and_cnum_weight() -> 
     offset_metrics = contact_replay_metrics(model, x)
     midplane_metrics = contact_replay_metrics(model, x, plane_z=model.floor_z)
 
-    assert offset_metrics["active_force_spring_count"] == 2
+    assert offset_metrics["active_force_spring_count"] == 14
     assert offset_metrics["cnum_equivalent"] == 14
     assert offset_metrics["normal_force"] > midplane_metrics["normal_force"]
     assert offset_metrics["contact_energy"] > midplane_metrics["contact_energy"]

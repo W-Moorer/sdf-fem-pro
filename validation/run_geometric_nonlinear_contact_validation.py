@@ -53,6 +53,8 @@ from validation.run_geometric_nonlinear_acceptance import (  # noqa: E402
     _voigt_von_mises,
 )
 from validation.calculix_f2f_contact import (  # noqa: E402
+    CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC,
+    CALCULIX_TRIANGLE_CONTACT_WEIGHTS,
     CalculixContactConvergenceHeuristic,
     CalculixC3D4FaceToFacePlaneContactGeometry,
     CalculixC3D4FaceToFaceSDFContactGeometry,
@@ -443,22 +445,24 @@ def contact_replay_metrics(model: DropModel, x_current: np.ndarray, *, plane_z: 
     z = _contact_plane_z(model) if plane_z is None else float(plane_z)
     tri = np.asarray(x_current, dtype=float)[model.surface_faces]
     areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
-    gaps = np.mean(tri, axis=1)[:, 2] - z
+    q_points = np.einsum("qn,fnc->fqc", CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC, tri)
+    gaps = q_points[:, :, 2] - z
     penetration = np.maximum(-gaps, 0.0)
     active = int(np.count_nonzero(penetration > 0.0))
-    force = float(model.contact_stiffness * np.sum(areas * penetration))
-    energy = float(0.5 * model.contact_stiffness * np.sum(areas * penetration * penetration))
+    q_areas = areas[:, None] * CALCULIX_TRIANGLE_CONTACT_WEIGHTS[None, :]
+    force = float(model.contact_stiffness * np.sum(q_areas * penetration))
+    energy = float(0.5 * model.contact_stiffness * np.sum(q_areas * penetration * penetration))
     return {
         "min_gap": float(np.min(gaps)) if gaps.size else 0.0,
         "max_penetration": float(np.max(penetration)) if penetration.size else 0.0,
         "active_force_spring_count": active,
-        "cnum_equivalent": active * 7,
+        "cnum_equivalent": active,
         "normal_force": force,
         "contact_energy": energy,
     }
 
 
-def _parse_calculix_dat_contact_elements(path: Path) -> dict[float, dict[tuple[int, int], Row]]:
+def _parse_calculix_dat_contact_elements(path: Path) -> dict[float, dict[tuple[int, int, int], Row]]:
     """Parse per-contact-element CDIS/CSTR/CELS blocks from a CalculiX ``.dat`` file.
 
     CalculiX writes face-to-face contact rows as ``slave element, slave face``
@@ -474,9 +478,10 @@ def _parse_calculix_dat_contact_elements(path: Path) -> dict[float, dict[tuple[i
     }
     vector_row = re.compile(r"^\s*(\d+)\s+(\d+)\s+" + number + r"\s+" + number + r"\s+" + number + r"\s*$")
     scalar_row = re.compile(r"^\s*(\d+)\s+(\d+)\s+" + number + r"\s*$")
-    parsed: dict[float, dict[tuple[int, int], Row]] = {}
+    parsed: dict[float, dict[tuple[int, int, int], Row]] = {}
     current_kind: str | None = None
     current_time: float | None = None
+    occurrence_counts: dict[tuple[str, float, int, int], int] = {}
 
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         header_matched = False
@@ -504,8 +509,12 @@ def _parse_calculix_dat_contact_elements(path: Path) -> dict[float, dict[tuple[i
                 continue
             element = int(match.group(1))
             face = int(match.group(2))
+            occurrence_key = (current_kind, float(current_time), element, face)
+            occurrence_index = occurrence_counts.get(occurrence_key, 0)
+            occurrence_counts[occurrence_key] = occurrence_index + 1
             values = [float(match.group(i)) for i in range(3, 6)]
-            row = parsed.setdefault(current_time, {}).setdefault((element, face), {})
+            row = parsed.setdefault(current_time, {}).setdefault((element, face, occurrence_index), {})
+            row["contact_element_index"] = occurrence_index
             prefix = "calculix_clearance" if current_kind == "cdis" else "calculix_stress"
             row[f"{prefix}_normal"] = values[0]
             row[f"{prefix}_tangential_1"] = values[1]
@@ -519,8 +528,12 @@ def _parse_calculix_dat_contact_elements(path: Path) -> dict[float, dict[tuple[i
                 continue
             element = int(match.group(1))
             face = int(match.group(2))
+            occurrence_key = (current_kind, float(current_time), element, face)
+            occurrence_index = occurrence_counts.get(occurrence_key, 0)
+            occurrence_counts[occurrence_key] = occurrence_index + 1
             energy = float(match.group(3))
-            row = parsed.setdefault(current_time, {}).setdefault((element, face), {})
+            row = parsed.setdefault(current_time, {}).setdefault((element, face, occurrence_index), {})
+            row["contact_element_index"] = occurrence_index
             row["calculix_contact_energy"] = energy
     return dict(sorted(parsed.items()))
 
@@ -537,14 +550,24 @@ def _face_ref_index(model: DropModel) -> dict[tuple[int, int], int]:
     return {_face_ref_key(model, i): i for i in range(len(model.slave_face_refs))}
 
 
-def _contact_springs_by_face(contact: ContactGeometry, x_current: np.ndarray) -> dict[int, Any]:
+def _contact_springs_by_contact_element(contact: ContactGeometry, x_current: np.ndarray) -> dict[tuple[int, int], Any]:
     lifecycle = getattr(contact, "lifecycle", None)
     active_springs = getattr(lifecycle, "active_springs", None)
     if isinstance(active_springs, dict):
-        return {int(key): spring for key, spring in active_springs.items()}
+        indexed: dict[tuple[int, int], Any] = {}
+        for key, spring in active_springs.items():
+            if isinstance(key, tuple):
+                indexed[(int(key[0]), int(key[1]))] = spring
+            else:
+                indexed[(int(key), 0)] = spring
+        return indexed
     if hasattr(contact, "contact_springs"):
         springs = getattr(contact, "contact_springs")(x_current)
-        return {int(spring.slave_face_index): spring for spring in springs if bool(getattr(spring, "active", False))}
+        return {
+            (int(spring.slave_face_index), int(getattr(spring, "slave_quadrature_index", 0))): spring
+            for spring in springs
+            if bool(getattr(spring, "active", False))
+        }
     return {}
 
 
@@ -554,47 +577,50 @@ def _per_face_plane_contact_rows(
     *,
     time: float,
     source: str,
-    generated_springs: dict[int, Any] | None = None,
+    generated_springs: dict[tuple[int, int], Any] | None = None,
 ) -> list[Row]:
-    """Return per-slave-face clearance, force, and energy rows for a plane replay."""
+    """Return per-contact-element clearance, force, and energy rows for a plane replay."""
 
     x = np.asarray(x_current, dtype=float)
     tri = x[model.surface_faces]
     areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
-    centroid_gaps = np.mean(tri, axis=1)[:, 2] - _contact_plane_z(model)
+    q_points = np.einsum("qn,fnc->fqc", CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC, tri)
+    q_gaps = q_points[:, :, 2] - _contact_plane_z(model)
     generated = {} if generated_springs is None else generated_springs
     rows: list[Row] = []
-    for face_index, (area, gap) in enumerate(zip(areas, centroid_gaps, strict=True)):
-        spring = generated.get(int(face_index))
-        if spring is not None:
-            clearance = float(spring.clearance)
-            spring_area = float(spring.spring_area)
-            generated_flag = True
-        else:
-            clearance = float(gap)
-            spring_area = float(area)
-            generated_flag = bool(max(-clearance, 0.0) > 0.0) if source == "calculix_displacement_replay" else False
-        penetration = max(-clearance, 0.0)
-        force = model.contact_stiffness * spring_area * penetration if generated_flag or penetration > 0.0 else 0.0
-        energy = 0.5 * model.contact_stiffness * spring_area * penetration * penetration if generated_flag or penetration > 0.0 else 0.0
+    for face_index, area in enumerate(areas):
         element_id, face_number = _face_ref_key(model, face_index)
-        rows.append(
-            {
-                "case": model.case,
-                "resolution": model.resolution,
-                "source": source,
-                "time": float(time),
-                "surface_face_index": int(face_index),
-                "slave_element": int(element_id),
-                "slave_face": int(face_number),
-                "slave_face_label": f"S{face_number}",
-                "face_area": float(spring_area),
-                "clearance": float(clearance),
-                "active_spring": str(bool(generated_flag)).lower(),
-                "force": float(force),
-                "energy": float(energy),
-            }
-        )
+        for q_index, q_weight in enumerate(CALCULIX_TRIANGLE_CONTACT_WEIGHTS):
+            spring = generated.get((int(face_index), int(q_index)))
+            if spring is not None:
+                clearance = float(spring.clearance)
+                spring_area = float(spring.spring_area)
+                generated_flag = True
+            else:
+                clearance = float(q_gaps[face_index, q_index])
+                spring_area = float(area * q_weight)
+                generated_flag = bool(max(-clearance, 0.0) > 0.0) if source == "calculix_displacement_replay" else False
+            penetration = max(-clearance, 0.0)
+            force = model.contact_stiffness * spring_area * penetration if generated_flag or penetration > 0.0 else 0.0
+            energy = 0.5 * model.contact_stiffness * spring_area * penetration * penetration if generated_flag or penetration > 0.0 else 0.0
+            rows.append(
+                {
+                    "case": model.case,
+                    "resolution": model.resolution,
+                    "source": source,
+                    "time": float(time),
+                    "surface_face_index": int(face_index),
+                    "contact_element_index": int(q_index),
+                    "slave_element": int(element_id),
+                    "slave_face": int(face_number),
+                    "slave_face_label": f"S{face_number}",
+                    "face_area": float(spring_area),
+                    "clearance": float(clearance),
+                    "active_spring": str(bool(generated_flag)).lower(),
+                    "force": float(force),
+                    "energy": float(energy),
+                }
+            )
     return rows
 
 
@@ -614,7 +640,7 @@ def _append_sfc_contact_element_audit_rows(
             state.x,
             time=float(state.time),
             source=source,
-            generated_springs=_contact_springs_by_face(contact, state.x),
+            generated_springs=_contact_springs_by_contact_element(contact, state.x),
         )
     )
 
@@ -623,33 +649,42 @@ def _time_key(value: float) -> float:
     return round(float(value), 12)
 
 
-def _index_contact_rows(rows: list[Row]) -> dict[float, dict[tuple[int, int], Row]]:
-    indexed: dict[float, dict[tuple[int, int], Row]] = {}
+def _index_contact_rows(rows: list[Row]) -> dict[float, dict[tuple[int, int, int], Row]]:
+    indexed: dict[float, dict[tuple[int, int, int], Row]] = {}
     for row in rows:
         time = _time_key(float(row["time"]))
-        key = (int(row["slave_element"]), int(row["slave_face"]))
+        key = (
+            int(row["slave_element"]),
+            int(row["slave_face"]),
+            int(row.get("contact_element_index", 0)),
+        )
         indexed.setdefault(time, {})[key] = row
     return indexed
 
 
 def _calculix_contact_rows_from_dat(
     model: DropModel,
-    parsed: dict[float, dict[tuple[int, int], Row]],
-    replay_by_time: dict[float, dict[tuple[int, int], Row]],
+    parsed: dict[float, dict[tuple[int, int, int], Row]],
+    replay_by_time: dict[float, dict[tuple[int, int, int], Row]],
 ) -> list[Row]:
     rows: list[Row] = []
     face_lookup = _face_ref_index(model)
     for time, records in parsed.items():
         time_key = _time_key(time)
         replay = replay_by_time.get(time_key, {})
-        for (element_id, face_number), values in records.items():
+        for (element_id, face_number, contact_element_index), values in records.items():
             face_index = face_lookup.get((int(element_id), int(face_number)), -1)
             area = ""
-            if (int(element_id), int(face_number)) in replay:
-                area = replay[(int(element_id), int(face_number))]["face_area"]
+            replay_key = (int(element_id), int(face_number), int(contact_element_index))
+            if replay_key in replay:
+                area = replay[replay_key]["face_area"]
             elif face_index >= 0:
                 tri = model.nodes[model.surface_faces[face_index]]
-                area = 0.5 * float(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+                area = (
+                    0.5
+                    * float(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+                    * float(CALCULIX_TRIANGLE_CONTACT_WEIGHTS[int(contact_element_index) % CALCULIX_TRIANGLE_CONTACT_WEIGHTS.size])
+                )
             normal_pressure = _optional_float(values.get("calculix_stress_normal", ""))
             force = "" if normal_pressure is None or area == "" else abs(normal_pressure) * float(area)
             cels_energy = values.get("calculix_contact_energy", "")
@@ -671,6 +706,7 @@ def _calculix_contact_rows_from_dat(
                     "source": "calculix_dat",
                     "time": float(time),
                     "surface_face_index": int(face_index),
+                    "contact_element_index": int(contact_element_index),
                     "slave_element": int(element_id),
                     "slave_face": int(face_number),
                     "slave_face_label": f"S{int(face_number)}",
@@ -694,7 +730,7 @@ def _calculix_contact_rows_from_dat(
 def contact_element_clearance_lifecycle_audit(
     model: DropModel,
     *,
-    calculix_dat_contact: dict[float, dict[tuple[int, int], Row]],
+    calculix_dat_contact: dict[float, dict[tuple[int, int, int], Row]],
     sfc_native_rows: list[Row],
     calculix_displacements: dict[float, np.ndarray],
 ) -> tuple[list[Row], list[Row]]:
@@ -716,7 +752,11 @@ def contact_element_clearance_lifecycle_audit(
     calc_by_time = _index_contact_rows(calc_rows)
     native_by_time = _index_contact_rows(sfc_native_rows)
     times = sorted(set(calc_by_time) | set(native_by_time) | set(replay_by_time))
-    face_keys = sorted(_face_ref_index(model))
+    face_keys = sorted(
+        (element_id, face_number, q_index)
+        for element_id, face_number in _face_ref_index(model)
+        for q_index in range(CALCULIX_TRIANGLE_CONTACT_WEIGHTS.size)
+    )
     audit_rows: list[Row] = []
     summary_rows: list[Row] = []
 
@@ -728,10 +768,11 @@ def contact_element_clearance_lifecycle_audit(
         clearance_errors: list[float] = []
         force_errors: list[float] = []
         energy_errors: list[float] = []
-        for element_id, face_number in keys:
-            calc_row = calc.get((element_id, face_number), {})
-            native_row = native.get((element_id, face_number), {})
-            replay_row = replay.get((element_id, face_number), {})
+        for element_id, face_number, contact_element_index in keys:
+            key = (element_id, face_number, contact_element_index)
+            calc_row = calc.get(key, {})
+            native_row = native.get(key, {})
+            replay_row = replay.get(key, {})
             face_index = native_row.get("surface_face_index", replay_row.get("surface_face_index", calc_row.get("surface_face_index", "")))
             area = native_row.get("face_area", replay_row.get("face_area", calc_row.get("face_area", "")))
             calc_clearance = calc_row.get("clearance", "")
@@ -749,6 +790,7 @@ def contact_element_clearance_lifecycle_audit(
                     "resolution": model.resolution,
                     "time": float(time),
                     "surface_face_index": face_index,
+                    "contact_element_index": int(contact_element_index),
                     "slave_element": int(element_id),
                     "slave_face": int(face_number),
                     "slave_face_label": f"S{int(face_number)}",
@@ -1558,8 +1600,11 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 model.surface_faces,
                 plane_z=_contact_plane_z(model),
                 stiffness=model.contact_stiffness,
+                quadrature="calculix_7",
+                release_tolerance_scale=1.0e-3,
+                contact_element_weight=1,
             ),
-            "clean-room persistent CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; rigid plane query",
+            "clean-room persistent CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; stored projection/normal clearance; hard linear overclosure; rigid plane query",
         )
     if contact_mode == "calculix_c3d4_f2f":
         return (
@@ -1567,8 +1612,10 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 model.surface_faces,
                 plane_z=_contact_plane_z(model),
                 stiffness=model.contact_stiffness,
+                quadrature="calculix_7",
+                contact_element_weight=1,
             ),
-            "clean-room CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; rigid plane query",
+            "clean-room CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; hard linear overclosure; rigid plane query",
         )
     if contact_mode == "persistent_dynamic_sdf_calculix_f2f":
         master_x, master_faces = _rigid_plane_master_surface(model)
@@ -1587,8 +1634,11 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 candidate_provider=broad_phase.query_point,
                 stiffness=model.contact_stiffness,
                 master_element_node_count=4,
+                quadrature="calculix_7",
+                release_tolerance_scale=1.0e-3,
+                contact_element_weight=1,
             ),
-            "clean-room persistent CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; dynamic FEM-SDF plane query",
+            "clean-room persistent CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; stored projection/normal clearance; hard linear overclosure; dynamic FEM-SDF plane query",
         )
     if contact_mode == "dynamic_sdf_calculix_f2f":
         master_x, master_faces = _rigid_plane_master_surface(model)
@@ -1607,8 +1657,10 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 candidate_provider=broad_phase.query_point,
                 stiffness=model.contact_stiffness,
                 master_element_node_count=4,
+                quadrature="calculix_7",
+                contact_element_weight=1,
             ),
-            "clean-room CalculiX-style C3D4 face-to-face mode; one slave-face centroid spring; hard linear overclosure; dynamic FEM-SDF plane query",
+            "clean-room CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; hard linear overclosure; dynamic FEM-SDF plane query",
         )
     if contact_mode == "plane":
         return (
@@ -2279,7 +2331,7 @@ def _write_markdown(
         f"SFC contact mode: `{contact_mode}`.",
         f"SFC cutback policy: `{cutback_policy}`.",
         "",
-        "The default `calculix_c3d4_f2f` mode uses one slave-face centroid spring per C3D4 boundary triangle and a hard linear pressure-overclosure law for stricter CalculiX-style validation. The older `plane` and `dynamic_sdf_plane` modes use three triangle quadrature samples and are not strict CalculiX C3D4 contact discretizations.",
+        "The strict `calculix_c3d4_f2f` modes use seven slave-face integration springs per C3D4 boundary triangle, stored master projection/normal clearance, and a hard linear pressure-overclosure law for CalculiX-style validation. The older `plane` and `dynamic_sdf_plane` modes use three triangle quadrature samples and are not strict CalculiX C3D4 contact discretizations.",
         "",
         "## Outputs",
         "",

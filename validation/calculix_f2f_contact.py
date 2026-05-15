@@ -2,12 +2,15 @@
 
 This module is a clean-room alignment layer for external comparisons.  It does
 not copy or import CalculiX code.  The goal is to match the scoped C3D4
-face-to-face discretization choices observed in the local CalculiX source:
+face-to-face discretization choices observed in the local CalculiX source and
+per-contact output:
 
-- one integration point at the centroid of each linear triangular slave face;
+- a seven-point triangular rule for the strict CalculiX-aligned validation
+  modes, with the centroid mode retained as a small diagnostic variant;
 - current slave-face area as the spring area;
 - hard linear pressure-overclosure response;
-- a contact-spring-element style diagnostic record.
+- a contact-spring-element style diagnostic record with persistent stored
+  master projection and normal.
 
 The mechanics backend still consumes generic ``ContactSample`` objects, so the
 same enforcement path can be driven by an analytic plane query or by the SFC
@@ -28,6 +31,30 @@ from sfc.sdf.dynamic_surface_sdf import dynamic_surface_sdf
 CandidateProvider = Callable[[np.ndarray], np.ndarray]
 
 C3D4_FACE_CENTROID_WEIGHTS = np.full(3, 1.0 / 3.0, dtype=float)
+CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC = np.asarray(
+    [
+        [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+        [0.059715871789770, 0.470142064105115, 0.470142064105115],
+        [0.470142064105115, 0.059715871789770, 0.470142064105115],
+        [0.470142064105115, 0.470142064105115, 0.059715871789770],
+        [0.797426985353087, 0.101286507323456, 0.101286507323456],
+        [0.101286507323456, 0.797426985353087, 0.101286507323456],
+        [0.101286507323456, 0.101286507323456, 0.797426985353087],
+    ],
+    dtype=float,
+)
+CALCULIX_TRIANGLE_CONTACT_WEIGHTS = np.asarray(
+    [
+        0.225000000000000,
+        0.132394152788506,
+        0.132394152788506,
+        0.132394152788506,
+        0.125939180544827,
+        0.125939180544827,
+        0.125939180544827,
+    ],
+    dtype=float,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +70,10 @@ class CalculixF2FContactSpring:
     normal: np.ndarray
     spring_area: float
     clearance: float
+    slave_quadrature_index: int = 0
     master_element_node_count: int | None = None
+    master_projection: np.ndarray | None = None
+    contact_element_weight: int | None = None
 
     @property
     def active(self) -> bool:
@@ -62,6 +92,8 @@ class CalculixF2FContactSpring:
         ``nopes + nopem = 3 + 4`` to the printed contact-element count.
         """
 
+        if self.contact_element_weight is not None:
+            return int(self.contact_element_weight)
         slave_count = int(np.asarray(self.slave_nodes, dtype=np.int64).size)
         if self.master_element_node_count is not None:
             master_count = int(self.master_element_node_count)
@@ -76,6 +108,7 @@ class CalculixF2FLifecycleEvent:
     """One spring lifecycle event for diagnostics."""
 
     slave_face_index: int
+    slave_quadrature_index: int
     status: str
     clearance: float
     was_active: bool
@@ -106,8 +139,9 @@ class CalculixF2FContactLifecycle:
 
     activation_tolerance: float = 0.0
     release_tolerance: float = 0.0
+    release_tolerance_scale: float = 0.0
     keep_previous_on_cutback: bool = True
-    active_springs: dict[int, CalculixF2FContactSpring] | None = None
+    active_springs: dict[tuple[int, int], CalculixF2FContactSpring] | None = None
     events: list[CalculixF2FLifecycleEvent] | None = None
 
     def __post_init__(self) -> None:
@@ -125,15 +159,19 @@ class CalculixF2FContactLifecycle:
         """Update generated contact springs and return current generated set."""
 
         previous = dict(self.active_springs or {})
-        next_active: dict[int, CalculixF2FContactSpring] = {}
-        seen: set[int] = set()
+        next_active: dict[tuple[int, int], CalculixF2FContactSpring] = {}
+        seen: set[tuple[int, int]] = set()
         events: list[CalculixF2FLifecycleEvent] = []
         for spring in candidates:
-            key = int(spring.slave_face_index)
+            key = _spring_lifecycle_key(spring)
             seen.add(key)
             was_active = key in previous
             penetrates = spring.clearance <= float(self.activation_tolerance)
-            persists = was_active and spring.clearance <= float(self.release_tolerance)
+            release_tolerance = max(
+                float(self.release_tolerance),
+                float(self.release_tolerance_scale) * float(np.sqrt(max(float(spring.spring_area), 0.0))),
+            )
+            persists = was_active and spring.clearance <= release_tolerance
             cutback_persists = bool(cutback and self.keep_previous_on_cutback and was_active)
             is_active = bool(penetrates or persists or cutback_persists)
             if is_active:
@@ -150,7 +188,8 @@ class CalculixF2FContactLifecycle:
                 status = "released" if was_active else "inactive"
             events.append(
                 CalculixF2FLifecycleEvent(
-                    slave_face_index=key,
+                    slave_face_index=int(spring.slave_face_index),
+                    slave_quadrature_index=int(spring.slave_quadrature_index),
                     status=status,
                     clearance=float(spring.clearance),
                     was_active=was_active,
@@ -163,7 +202,8 @@ class CalculixF2FContactLifecycle:
                 continue
             events.append(
                 CalculixF2FLifecycleEvent(
-                    slave_face_index=key,
+                    slave_face_index=int(spring.slave_face_index),
+                    slave_quadrature_index=int(spring.slave_quadrature_index),
                     status="lost_candidate_released",
                     clearance=float(spring.clearance),
                     was_active=True,
@@ -175,12 +215,12 @@ class CalculixF2FContactLifecycle:
         self.events = events
         return list(next_active.values())
 
-    def snapshot(self) -> tuple[dict[int, CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]:
+    def snapshot(self) -> tuple[dict[tuple[int, int], CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]:
         """Return a rollback snapshot of generated springs and events."""
 
         return dict(self.active_springs or {}), list(self.events or [])
 
-    def restore(self, snapshot: tuple[dict[int, CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]) -> None:
+    def restore(self, snapshot: tuple[dict[tuple[int, int], CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]) -> None:
         """Restore a rollback snapshot."""
 
         springs, events = snapshot
@@ -255,14 +295,28 @@ class CalculixContactConvergenceHeuristic:
         return record
 
 
+def _spring_lifecycle_key(spring: CalculixF2FContactSpring) -> tuple[int, int]:
+    return int(spring.slave_face_index), int(spring.slave_quadrature_index)
+
+
+def _triangle_contact_rule(name: str) -> tuple[np.ndarray, np.ndarray]:
+    if name == "centroid":
+        return C3D4_FACE_CENTROID_WEIGHTS.reshape(1, 3), np.ones(1, dtype=float)
+    if name == "calculix_7":
+        return CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC.copy(), CALCULIX_TRIANGLE_CONTACT_WEIGHTS.copy()
+    raise ValueError("quadrature must be 'centroid' or 'calculix_7'")
+
+
 @dataclass(frozen=True, slots=True)
 class CalculixC3D4FaceToFacePlaneContactGeometry:
-    """Rigid-plane C3D4 face-to-face contact with one point per slave face."""
+    """Rigid-plane C3D4 face-to-face contact with configurable slave face rule."""
 
     faces: np.ndarray
     plane_z: float
     stiffness: float
     normal: np.ndarray | None = None
+    quadrature: str = "centroid"
+    contact_element_weight: int | None = None
 
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Return the current CalculiX-style spring diagnostics."""
@@ -271,32 +325,38 @@ class CalculixC3D4FaceToFacePlaneContactGeometry:
         faces = _validate_faces(self.faces, x.shape[0])
         normal = _unit_normal(np.asarray([0.0, 0.0, 1.0] if self.normal is None else self.normal, dtype=float))
         plane_point = np.asarray([0.0, 0.0, float(self.plane_z)], dtype=float)
+        barycentric, weights = _triangle_contact_rule(self.quadrature)
         springs: list[CalculixF2FContactSpring] = []
         for face_index, face in enumerate(faces):
             tri = x[face]
             area = _triangle_area(tri)
             if area <= 0.0:
                 continue
-            point = C3D4_FACE_CENTROID_WEIGHTS @ tri
-            clearance = float((point - plane_point) @ normal)
-            springs.append(
-                CalculixF2FContactSpring(
-                    slave_face_index=face_index,
-                    slave_nodes=np.asarray(face, dtype=np.int64),
-                    slave_weights=C3D4_FACE_CENTROID_WEIGHTS.copy(),
-                    master_face_index=-1,
-                    master_nodes=np.zeros(0, dtype=np.int64),
-                    master_weights=np.zeros(0, dtype=float),
-                    normal=normal.copy(),
-                    spring_area=area,
-                    clearance=clearance,
-                    master_element_node_count=4,
+            for quadrature_index, (shape_weights, area_weight) in enumerate(zip(barycentric, weights, strict=True)):
+                point = shape_weights @ tri
+                clearance = float((point - plane_point) @ normal)
+                projection = point - clearance * normal
+                springs.append(
+                    CalculixF2FContactSpring(
+                        slave_face_index=face_index,
+                        slave_nodes=np.asarray(face, dtype=np.int64),
+                        slave_weights=np.asarray(shape_weights, dtype=float).copy(),
+                        master_face_index=-1,
+                        master_nodes=np.zeros(0, dtype=np.int64),
+                        master_weights=np.zeros(0, dtype=float),
+                        normal=normal.copy(),
+                        spring_area=float(area * area_weight),
+                        clearance=clearance,
+                        slave_quadrature_index=int(quadrature_index),
+                        master_element_node_count=4,
+                        master_projection=projection,
+                        contact_element_weight=self.contact_element_weight,
+                    )
                 )
-            )
         return springs
 
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
-        """Yield one hard-linear penalty sample per slave face centroid."""
+        """Yield hard-linear penalty samples on slave faces."""
 
         for spring in self.contact_springs(x_current):
             yield _sample_from_spring(spring, self.stiffness)
@@ -310,12 +370,15 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
     plane_z: float
     stiffness: float
     normal: np.ndarray | None = None
+    quadrature: str = "centroid"
+    release_tolerance_scale: float = 0.0
+    contact_element_weight: int | None = None
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
-            self.lifecycle = CalculixF2FContactLifecycle()
+            self.lifecycle = CalculixF2FContactLifecycle(release_tolerance_scale=float(self.release_tolerance_scale))
 
     @property
     def generated_contact_count(self) -> int:
@@ -337,9 +400,22 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
             self.plane_z,
             self.stiffness,
             self.normal,
+            self.quadrature,
+            self.contact_element_weight,
         )
         assert self.lifecycle is not None
-        return self.lifecycle.update(stateless.contact_springs(x_current), cutback=self.cutback_retry)
+        candidates = stateless.contact_springs(x_current)
+        previous = self.lifecycle.active_springs or {}
+        if previous:
+            stored_candidates: list[CalculixF2FContactSpring] = []
+            for spring in candidates:
+                previous_spring = previous.get(_spring_lifecycle_key(spring))
+                if previous_spring is None:
+                    stored_candidates.append(spring)
+                else:
+                    stored_candidates.append(_plane_spring_from_stored_projection(previous_spring, x_current, self.faces))
+            candidates = stored_candidates
+        return self.lifecycle.update(candidates, cutback=self.cutback_retry)
 
     def set_cutback_retry(self, value: bool) -> None:
         """Set whether this evaluation is part of a cutback retry."""
@@ -363,6 +439,8 @@ class CalculixC3D4FaceToFaceSDFContactGeometry:
     candidate_provider: CandidateProvider
     stiffness: float
     master_element_node_count: int | None = None
+    quadrature: str = "centroid"
+    contact_element_weight: int | None = None
 
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Return current spring diagnostics using SDF closest-point queries."""
@@ -371,33 +449,38 @@ class CalculixC3D4FaceToFaceSDFContactGeometry:
         slave_faces = _validate_faces(self.slave_faces, slave_x.shape[0])
         master_x = _validate_points(self.master_x_current)
         master_faces = _validate_faces(self.master_faces, master_x.shape[0])
+        barycentric, weights = _triangle_contact_rule(self.quadrature)
         springs: list[CalculixF2FContactSpring] = []
         for face_index, face in enumerate(slave_faces):
             tri = slave_x[face]
             area = _triangle_area(tri)
             if area <= 0.0:
                 continue
-            point = C3D4_FACE_CENTROID_WEIGHTS @ tri
-            candidates = np.asarray(self.candidate_provider(point), dtype=np.int64).ravel()
-            result = dynamic_surface_sdf(point, master_x, master_faces, candidates)
-            springs.append(
-                CalculixF2FContactSpring(
-                    slave_face_index=face_index,
-                    slave_nodes=np.asarray(face, dtype=np.int64),
-                    slave_weights=C3D4_FACE_CENTROID_WEIGHTS.copy(),
-                    master_face_index=int(result.face_id),
-                    master_nodes=np.asarray(master_faces[int(result.face_id)], dtype=np.int64),
-                    master_weights=np.asarray(result.w, dtype=float),
-                    normal=_unit_normal(np.asarray(result.n, dtype=float)),
-                    spring_area=area,
-                    clearance=float(result.g),
-                    master_element_node_count=self.master_element_node_count,
+            for quadrature_index, (shape_weights, area_weight) in enumerate(zip(barycentric, weights, strict=True)):
+                point = shape_weights @ tri
+                candidates = np.asarray(self.candidate_provider(point), dtype=np.int64).ravel()
+                result = dynamic_surface_sdf(point, master_x, master_faces, candidates)
+                springs.append(
+                    CalculixF2FContactSpring(
+                        slave_face_index=face_index,
+                        slave_nodes=np.asarray(face, dtype=np.int64),
+                        slave_weights=np.asarray(shape_weights, dtype=float).copy(),
+                        master_face_index=int(result.face_id),
+                        master_nodes=np.asarray(master_faces[int(result.face_id)], dtype=np.int64),
+                        master_weights=np.asarray(result.w, dtype=float),
+                        normal=_unit_normal(np.asarray(result.n, dtype=float)),
+                        spring_area=float(area * area_weight),
+                        clearance=float(result.g),
+                        slave_quadrature_index=int(quadrature_index),
+                        master_element_node_count=self.master_element_node_count,
+                        master_projection=np.asarray(result.p, dtype=float),
+                        contact_element_weight=self.contact_element_weight,
+                    )
                 )
-            )
         return springs
 
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
-        """Yield one hard-linear penalty sample per slave face centroid."""
+        """Yield hard-linear penalty samples on slave faces."""
 
         for spring in self.contact_springs(x_current):
             yield _sample_from_spring(spring, self.stiffness)
@@ -413,12 +496,15 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
     candidate_provider: CandidateProvider
     stiffness: float
     master_element_node_count: int | None = None
+    quadrature: str = "centroid"
+    release_tolerance_scale: float = 0.0
+    contact_element_weight: int | None = None
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
-            self.lifecycle = CalculixF2FContactLifecycle()
+            self.lifecycle = CalculixF2FContactLifecycle(release_tolerance_scale=float(self.release_tolerance_scale))
 
     @property
     def generated_contact_count(self) -> int:
@@ -442,15 +528,17 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
             self.candidate_provider,
             self.stiffness,
             self.master_element_node_count,
+            self.quadrature,
+            self.contact_element_weight,
         )
         candidates = stateless.contact_springs(x_current)
         assert self.lifecycle is not None
         previous = self.lifecycle.active_springs or {}
         if previous:
-            candidate_by_face = {int(spring.slave_face_index): spring for spring in candidates}
+            candidate_by_key = {_spring_lifecycle_key(spring): spring for spring in candidates}
             stored_candidates: list[CalculixF2FContactSpring] = []
-            for face_index, spring in candidate_by_face.items():
-                previous_spring = previous.get(face_index)
+            for key, spring in candidate_by_key.items():
+                previous_spring = previous.get(key)
                 if previous_spring is None or previous_spring.master_face_index < 0:
                     stored_candidates.append(spring)
                 else:
@@ -624,6 +712,44 @@ def _spring_jacobian_entries(
     return np.asarray(cols, dtype=np.int64), np.asarray(vals, dtype=float)
 
 
+def _plane_spring_from_stored_projection(
+    previous: CalculixF2FContactSpring,
+    x_current: np.ndarray,
+    faces: np.ndarray,
+) -> CalculixF2FContactSpring:
+    """Update a rigid-plane spring using stored projection and normal data."""
+
+    slave_x = _validate_points(x_current)
+    face_array = _validate_faces(faces, slave_x.shape[0])
+    face = face_array[int(previous.slave_face_index)]
+    tri = slave_x[face]
+    area = _triangle_area(tri)
+    point = np.asarray(previous.slave_weights, dtype=float) @ tri
+    projection = previous.master_projection
+    if projection is None:
+        normal = _unit_normal(np.asarray(previous.normal, dtype=float))
+        projection = point - float(previous.clearance) * normal
+    else:
+        normal = _unit_normal(np.asarray(previous.normal, dtype=float))
+        projection = np.asarray(projection, dtype=float)
+    area_weight = _stored_quadrature_area_weight(previous)
+    return CalculixF2FContactSpring(
+        slave_face_index=int(previous.slave_face_index),
+        slave_nodes=np.asarray(face, dtype=np.int64),
+        slave_weights=np.asarray(previous.slave_weights, dtype=float).copy(),
+        master_face_index=int(previous.master_face_index),
+        master_nodes=np.asarray(previous.master_nodes, dtype=np.int64).copy(),
+        master_weights=np.asarray(previous.master_weights, dtype=float).copy(),
+        normal=normal,
+        spring_area=float(area * area_weight),
+        clearance=float((point - projection) @ normal),
+        slave_quadrature_index=int(previous.slave_quadrature_index),
+        master_element_node_count=previous.master_element_node_count,
+        master_projection=projection.copy(),
+        contact_element_weight=previous.contact_element_weight,
+    )
+
+
 def _sdf_spring_from_stored_master_projection(
     previous: CalculixF2FContactSpring,
     x_current: np.ndarray,
@@ -646,7 +772,7 @@ def _sdf_spring_from_stored_master_projection(
     face = faces[int(previous.slave_face_index)]
     tri = slave_x[face]
     area = _triangle_area(tri)
-    point = C3D4_FACE_CENTROID_WEIGHTS @ tri
+    point = np.asarray(previous.slave_weights, dtype=float) @ tri
     master_nodes = np.asarray(previous.master_nodes, dtype=np.int64)
     master_weights = np.asarray(previous.master_weights, dtype=float)
     if master_nodes.size == 0 or master_weights.size == 0:
@@ -657,15 +783,25 @@ def _sdf_spring_from_stored_master_projection(
     return CalculixF2FContactSpring(
         slave_face_index=int(previous.slave_face_index),
         slave_nodes=np.asarray(face, dtype=np.int64),
-        slave_weights=C3D4_FACE_CENTROID_WEIGHTS.copy(),
+        slave_weights=np.asarray(previous.slave_weights, dtype=float).copy(),
         master_face_index=int(previous.master_face_index),
         master_nodes=master_nodes.copy(),
         master_weights=master_weights.copy(),
         normal=normal,
-        spring_area=float(area),
+        spring_area=float(area * _stored_quadrature_area_weight(previous)),
         clearance=float((point - projection) @ normal),
+        slave_quadrature_index=int(previous.slave_quadrature_index),
         master_element_node_count=previous.master_element_node_count,
+        master_projection=projection.copy(),
+        contact_element_weight=previous.contact_element_weight,
     )
+
+
+def _stored_quadrature_area_weight(spring: CalculixF2FContactSpring) -> float:
+    q = int(spring.slave_quadrature_index)
+    if spring.contact_element_weight == 1 and 0 <= q < CALCULIX_TRIANGLE_CONTACT_WEIGHTS.size:
+        return float(CALCULIX_TRIANGLE_CONTACT_WEIGHTS[q])
+    return 1.0
 
 
 def _validate_points(points: np.ndarray) -> np.ndarray:

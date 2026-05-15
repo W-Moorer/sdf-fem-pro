@@ -18,12 +18,14 @@ reference and is not imported by the core `src/sfc` package.
 
 ## Lifecycle Interpretation
 
-For the C3D4 face-to-face case, CalculiX does not simply evaluate an independent
-penalty sample at every time row.  It generates contact spring elements:
+For the C3D4 face-to-face case, CalculiX does not simply evaluate one
+independent penalty sample per slave face at every time row.  It generates
+contact spring elements:
 
 - The generated element type is `ESPRNGC`.
-- A linear TET4 slave face uses one slave face integration point in the current
-  strict validation setup.
+- A linear TET4 slave face can emit multiple contact rows in `.dat`; in the
+  current block-plane run the two bottom slave faces produce `14` rows while
+  fully active and `12` rows when two contact rows are released.
 - The generated contact element stores slave nodes, master nodes, slave face
   identity, and the slave integration point identity.
 - During the initial contact search, CalculiX stores the master local projection
@@ -59,10 +61,10 @@ barycentric coordinates, and normal may change continuously.
 The external comparison now treats these outputs as definition-sensitive:
 
 - `CNUM` is the number of generated CalculiX contact spring elements printed by
-  the contact output path.  It is not the same thing as the number of currently
-  force-producing SFC samples.  The validation runner therefore records an SFC
-  `calculix_equivalent_contact_count` when the validation-only F2F mode can
-  map a generated spring to CalculiX CNUM units.
+  the contact output path.  It is not the same thing as the number of slave
+  faces.  The validation runner therefore records an SFC
+  `calculix_equivalent_contact_count` by using the same seven-point triangular
+  slave-face integration rows in the validation-only F2F mode.
 - `CELS` is CalculiX total contact spring energy printed by `printout.f`.  SFC
   reports the corresponding penalty spring energy assembled over its generated
   validation springs.  Differences can remain if the generated spring lifecycle
@@ -97,11 +99,13 @@ The lifecycle CSV records:
 
 The per-contact-element audit is more granular.  The generated CalculiX input
 requests non-totals `CDIS`, `CSTR`, and `CELS` contact print blocks and keeps
-totals-only `CNUM` for the existing aggregate contact-count comparison.  The parser maps
-each CalculiX row by `slave element + slave face` and writes, per time step:
+totals-only `CNUM` for the existing aggregate contact-count comparison.  The
+parser preserves duplicate rows for the same `slave element + slave face` by
+adding a `contact_element_index`, then writes, per time step:
 
 - CalculiX active contact elements from `.dat` `CDIS/CSTR/CELS` rows.
-- SFC native generated springs on the same slave element+face keys.
+- SFC native generated springs on the same
+  `slave element + slave face + contact_element_index` keys.
 - CalculiX-displacement replay springs using the same SFC hard-linear
   area-weighted force law on CalculiX nodal displacements.
 - Per-face clearance, normal pressure/force proxy, and contact energy.
@@ -113,12 +117,12 @@ each CalculiX row by `slave element + slave face` and writes, per time step:
 - Linf replay errors for clearance, force, and energy where CalculiX per-face
   output exists.
 
-The current key finding is that the remaining RF/CELS/max-penetration
-differences are consistent with contact spring lifecycle, trajectory, and
-output-definition differences.  The replay sequence is important: if the
-clean-room contact law replayed on the CalculiX displacement trajectory matches
-CalculiX substantially better than the native SFC trajectory, the mismatch is
-trajectory-dominated rather than a pure contact-output-definition error.
+The current key finding is that the CalculiX-displacement replay now reproduces
+the CalculiX `CNUM` sequence `0->14->12->14->12`, while the native SFC
+trajectory can still diverge after contact.  This means the remaining
+RF/CELS/max-penetration differences are dominated by the coupled trajectory
+after contact, not by a broad-phase/SDF miss or by collapsing multiple
+CalculiX contact rows into a single face row.
 Earlier HHT residual/tangent diagnostics show that the SFC effective tangent,
 contact tangent sign convention, and previous-static residual update are
 finite-difference consistent for the sampled trajectory.
