@@ -85,6 +85,8 @@ from validation.run_geometric_nonlinear_vtk import (  # noqa: E402
 
 Row = dict[str, Any]
 
+CALCULIX_CONTACT_PRINT_TO_QUADRATURE_INDEX = (0, 2, 3, 1, 6, 4, 5)
+
 
 def _write_csv(path: Path, rows: list[Row]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -839,6 +841,20 @@ def _index_contact_rows(rows: list[Row]) -> dict[float, dict[tuple[int, int, int
     return indexed
 
 
+def _calculix_contact_print_quadrature_index(raw_contact_element_index: int) -> int:
+    """Map CalculiX CONTACT PRINT occurrence order to slave quadrature order.
+
+    CalculiX stores slave integration coordinates through the clipped slave
+    face in ``treatmasterface.f``.  For triangular C3D4 faces this preserves the
+    seven generated contact elements, but the printed occurrence order is not
+    the canonical ``gauss2d6`` order used by local replay arrays.
+    """
+
+    return CALCULIX_CONTACT_PRINT_TO_QUADRATURE_INDEX[
+        int(raw_contact_element_index) % len(CALCULIX_CONTACT_PRINT_TO_QUADRATURE_INDEX)
+    ]
+
+
 def _calculix_contact_rows_from_dat(
     model: DropModel,
     parsed: dict[float, dict[tuple[int, int, int], Row]],
@@ -852,7 +868,9 @@ def _calculix_contact_rows_from_dat(
         for (element_id, face_number, contact_element_index), values in records.items():
             face_index = face_lookup.get((int(element_id), int(face_number)), -1)
             area = ""
-            replay_key = (int(element_id), int(face_number), int(contact_element_index))
+            raw_contact_element_index = int(contact_element_index)
+            quadrature_index = _calculix_contact_print_quadrature_index(raw_contact_element_index)
+            replay_key = (int(element_id), int(face_number), quadrature_index)
             if replay_key in replay:
                 area = replay[replay_key]["face_area"]
             elif face_index >= 0:
@@ -860,7 +878,7 @@ def _calculix_contact_rows_from_dat(
                 area = (
                     0.5
                     * float(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
-                    * float(CALCULIX_TRIANGLE_CONTACT_WEIGHTS[int(contact_element_index) % CALCULIX_TRIANGLE_CONTACT_WEIGHTS.size])
+                    * float(CALCULIX_TRIANGLE_CONTACT_WEIGHTS[quadrature_index])
                 )
             normal_pressure = _optional_float(values.get("calculix_stress_normal", ""))
             force = "" if normal_pressure is None or area == "" else abs(normal_pressure) * float(area)
@@ -883,7 +901,8 @@ def _calculix_contact_rows_from_dat(
                     "source": "calculix_dat",
                     "time": float(time),
                     "surface_face_index": int(face_index),
-                    "contact_element_index": int(contact_element_index),
+                    "contact_element_index": int(quadrature_index),
+                    "calculix_raw_contact_element_index": int(raw_contact_element_index),
                     "slave_element": int(element_id),
                     "slave_face": int(face_number),
                     "slave_face_label": f"S{int(face_number)}",
@@ -1367,9 +1386,11 @@ def first_contact_spring_comparison(
         time=float(time),
         source="calculix_displacement_replay",
     )
-    replay = _index_contact_rows(replay_rows).get(_time_key(time), {})
+    replay_by_time = _index_contact_rows(replay_rows)
+    replay = replay_by_time.get(_time_key(time), {})
     native = _index_contact_rows(sfc_native_rows).get(_time_key(time), {})
-    calc = calculix_dat_contact.get(time, {})
+    calc_rows = _calculix_contact_rows_from_dat(model, {time: calculix_dat_contact.get(time, {})}, replay_by_time)
+    calc = _index_contact_rows(calc_rows).get(_time_key(time), {})
     face_lookup = _face_ref_index(model)
     keys = sorted(set(calc) | set(replay) | set(native))
     rows: list[Row] = []
@@ -1382,6 +1403,8 @@ def first_contact_spring_comparison(
         pressure = _optional_float(calc_row.get("calculix_stress_normal", ""))
         calc_force = "" if pressure is None or spring_area == "" else abs(float(pressure)) * float(spring_area)
         weights = CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC[int(q_index) % CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC.shape[0]]
+        calc_clearance = calc_row.get("clearance", calc_row.get("calculix_clearance_normal", ""))
+        calc_energy = calc_row.get("energy", calc_row.get("calculix_contact_energy", ""))
         rows.append(
             {
                 "case": model.case,
@@ -1392,6 +1415,7 @@ def first_contact_spring_comparison(
                 "slave_element": int(element_id),
                 "slave_face": int(face_number),
                 "contact_element_index": int(q_index),
+                "calculix_raw_contact_element_index": calc_row.get("calculix_raw_contact_element_index", ""),
                 "surface_face_index": face_index,
                 "slave_weight_0": float(weights[0]),
                 "slave_weight_1": float(weights[1]),
@@ -1400,21 +1424,21 @@ def first_contact_spring_comparison(
                 "normal_y": 0.0,
                 "normal_z": 1.0,
                 "spring_area": spring_area,
-                "calculix_clearance": calc_row.get("calculix_clearance_normal", ""),
+                "calculix_clearance": calc_clearance,
                 "calculix_tangential_clearance_1": calc_row.get("calculix_clearance_tangential_1", ""),
                 "calculix_tangential_clearance_2": calc_row.get("calculix_clearance_tangential_2", ""),
                 "calculix_normal_pressure": calc_row.get("calculix_stress_normal", ""),
                 "calculix_force_from_cstr_area": calc_force,
-                "calculix_contact_energy": calc_row.get("calculix_contact_energy", ""),
+                "calculix_contact_energy": calc_energy,
                 "replay_clearance": replay_row.get("clearance", ""),
                 "replay_force": replay_row.get("force", ""),
                 "replay_energy": replay_row.get("energy", ""),
                 "sfc_native_clearance": native_row.get("clearance", ""),
                 "sfc_native_force": native_row.get("force", ""),
                 "sfc_native_energy": native_row.get("energy", ""),
-                "clearance_replay_abs_error": _abs_or_blank(calc_row.get("calculix_clearance_normal", ""), replay_row.get("clearance", "")),
+                "clearance_replay_abs_error": _abs_or_blank(calc_clearance, replay_row.get("clearance", "")),
                 "force_replay_abs_error": _abs_or_blank(calc_force, replay_row.get("force", "")),
-                "energy_replay_abs_error": _abs_or_blank(calc_row.get("calculix_contact_energy", ""), replay_row.get("energy", "")),
+                "energy_replay_abs_error": _abs_or_blank(calc_energy, replay_row.get("energy", "")),
                 "diagnosis": "first_contact_spring_row",
             }
         )

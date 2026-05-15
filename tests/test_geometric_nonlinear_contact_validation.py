@@ -15,6 +15,9 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _make_contact_geometry,
     _contact_model,
     _calculix_iterations_per_increment,
+    _calculix_contact_print_quadrature_index,
+    _calculix_contact_rows_from_dat,
+    _per_face_plane_contact_rows,
     _parse_calculix_dat_contact_elements,
     _parse_calculix_dat_contact_print_raw_rows,
     _parse_calculix_dat_nodal_vectors,
@@ -188,6 +191,35 @@ def test_contact_element_audit_compares_calculix_native_and_replay() -> None:
     assert any(row["calculix_present"] == "true" for row in rows)
     assert any(row["calculix_displacement_replay_active_spring"] == "true" for row in rows)
     assert any(row["calculix_per_contact_output_available"] == "true" for row in summary)
+
+
+def test_calculix_contact_print_rows_are_mapped_to_quadrature_order() -> None:
+    model = _contact_model(resolution=1, duration=0.02, dt=0.004)
+    element_id, face_number = model.slave_face_refs[0]
+    face_number_int = int(face_number[1:])
+    displacement = np.zeros_like(model.nodes)
+    replay_rows = _per_face_plane_contact_rows(
+        model,
+        model.nodes + displacement,
+        time=0.004,
+        source="calculix_displacement_replay",
+    )
+    replay = {0.004: {(int(row["slave_element"]), int(row["slave_face"]), int(row["contact_element_index"])): row for row in replay_rows}}
+    parsed = {
+        0.004: {
+            (int(element_id), face_number_int, 1): {
+                "calculix_clearance_normal": -1.0e-4,
+                "calculix_stress_normal": 2.0,
+            }
+        }
+    }
+
+    rows = _calculix_contact_rows_from_dat(model, parsed, replay)
+
+    assert _calculix_contact_print_quadrature_index(1) == 2
+    assert rows[0]["contact_element_index"] == 2
+    assert rows[0]["calculix_raw_contact_element_index"] == 1
+    assert rows[0]["face_area"] == replay[0.004][(int(element_id), face_number_int, 2)]["face_area"]
 
 
 def test_sfc_geometric_contact_history_activates_contact() -> None:
