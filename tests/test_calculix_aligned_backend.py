@@ -9,6 +9,8 @@ from sfc.fem.calculix_aligned import (
     ContactSample,
     MechanicsModel,
     PlaneContactGeometry,
+    _restore_contact_state,
+    _snapshot_contact_state,
     assemble_contact_response,
     calculix_apply_acceleration_increment,
     calculix_dynamic_predictor,
@@ -25,6 +27,35 @@ from sfc.fem.calculix_aligned import (
 
 class EmptyContactGeometry:
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
+        return []
+
+
+class _DummyLifecycle:
+    def __init__(self) -> None:
+        self.active_springs: dict[str, int] = {}
+        self.events: list[str] = []
+
+    def snapshot(self) -> tuple[dict[str, int], list[str]]:
+        return dict(self.active_springs), list(self.events)
+
+    def restore(self, snapshot: tuple[dict[str, int], list[str]]) -> None:
+        active_springs, events = snapshot
+        self.active_springs = dict(active_springs)
+        self.events = list(events)
+
+
+class _StatefulEmptyContactGeometry:
+    def __init__(self) -> None:
+        self.lifecycle = _DummyLifecycle()
+        self.cutback_retry = False
+
+    def set_cutback_retry(self, value: bool) -> None:
+        self.cutback_retry = bool(value)
+
+    def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
+        calls = self.lifecycle.active_springs.get("calls", 0)
+        self.lifecycle.active_springs["calls"] = calls + 1
+        self.lifecycle.events.append("sampled")
         return []
 
 
@@ -93,6 +124,20 @@ def test_calculix_hht_residual_and_tangent_helpers_match_solver_form() -> None:
     assert residual == pytest.approx(mass_a - (1.0 + alpha) * current_balance + alpha * previous_balance)
     assert effective.shape == model.mass_matrix.shape
     assert effective.nnz > 0
+
+
+def test_contact_state_snapshot_restores_lifecycle_and_cutback_flag() -> None:
+    contact = _StatefulEmptyContactGeometry()
+    contact.cutback_retry = True
+    snapshot = _snapshot_contact_state(contact)
+
+    list(contact.samples(np.zeros((1, 3))))
+    contact.set_cutback_retry(False)
+    _restore_contact_state(contact, snapshot)
+
+    assert contact.lifecycle.active_springs == {}
+    assert contact.lifecycle.events == []
+    assert contact.cutback_retry
 
 
 def test_consistent_mass_has_correct_total_translational_mass() -> None:

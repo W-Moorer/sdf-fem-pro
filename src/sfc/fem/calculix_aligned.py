@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
@@ -600,7 +600,9 @@ def hht_step(
     iteration_count = 0
     acceptance_reason = "iteration_limit"
     acceptance_metrics: list[NewtonAcceptanceMetrics] = []
+    previous_contact_snapshot = _snapshot_contact_state(contact_geometry)
     previous_energy = evaluate_state(model, state, contact_geometry, gravity=gravity, assemble_tangent=False).total_energy
+    _restore_contact_state(contact_geometry, previous_contact_snapshot)
     previous_ram: float | None = None
     previous_active_count: int | None = None
     for iteration in range(max(1, int(max_iterations))):
@@ -665,6 +667,35 @@ def hht_step(
     diagnostics.newton_acceptance_reason = acceptance_reason
     diagnostics.newton_acceptance_metrics = acceptance_metrics
     return next_state, accepted_static_state.calculix_rhs_balance, diagnostics
+
+
+def _snapshot_contact_state(contact_geometry: ContactGeometry) -> Any:
+    """Return a rollback snapshot for stateful validation contact geometry."""
+
+    lifecycle = getattr(contact_geometry, "lifecycle", None)
+    lifecycle_snapshot = lifecycle.snapshot() if lifecycle is not None and hasattr(lifecycle, "snapshot") else None
+    has_cutback = hasattr(contact_geometry, "cutback_retry")
+    cutback_retry = bool(getattr(contact_geometry, "cutback_retry")) if has_cutback else None
+    if lifecycle_snapshot is None and cutback_retry is None:
+        return None
+    return lifecycle_snapshot, cutback_retry
+
+
+def _restore_contact_state(contact_geometry: ContactGeometry, snapshot: Any) -> None:
+    """Restore a rollback snapshot for stateful validation contact geometry."""
+
+    if snapshot is None:
+        return
+    lifecycle_snapshot, cutback_retry = snapshot
+    lifecycle = getattr(contact_geometry, "lifecycle", None)
+    if lifecycle_snapshot is not None and lifecycle is not None and hasattr(lifecycle, "restore"):
+        lifecycle.restore(lifecycle_snapshot)
+    if cutback_retry is not None:
+        setter = getattr(contact_geometry, "set_cutback_retry", None)
+        if callable(setter):
+            setter(bool(cutback_retry))
+        elif hasattr(contact_geometry, "cutback_retry"):
+            setattr(contact_geometry, "cutback_retry", bool(cutback_retry))
 
 
 def _newton_acceptance_metrics(
