@@ -214,6 +214,7 @@ def test_hht_state_definition_diagnostics_reports_precision_and_initial_state() 
     assert float(row["sfc_beta"]) > 0.0
     assert float(row["sfc_gamma"]) > 0.0
     assert float(row["mass_rel_error"]) < 1.0e-12
+    assert float(row["initial_acceleration_regularized_rel_diff"]) < 1.0e-8
     assert float(row["dat_precision_acceleration_uncertainty_estimate"]) >= 0.0
     assert row["diagnosis"] in {
         "precontact_hht_state_mismatch",

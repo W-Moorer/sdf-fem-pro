@@ -1346,7 +1346,7 @@ def hht_state_definition_diagnostics(
     dt_regularized = float(model.dt) / 10.0
     regularized = mechanics.mass_matrix + static_tangent0 * (beta * dt_regularized * dt_regularized * (1.0 + float(model.hht_alpha)))
     regularized_acceleration = np.asarray(
-        np.linalg.solve(regularized.toarray(), -static0),
+        np.linalg.solve(regularized.toarray(), static0),
         dtype=float,
     )
     pure_acceleration = state0.a.reshape(-1)
