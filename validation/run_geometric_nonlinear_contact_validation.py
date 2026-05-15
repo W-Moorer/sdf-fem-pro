@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.sparse.linalg import spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -1156,6 +1157,11 @@ def _one_step_row(
     contact_pred = pred_diag.contact.force.reshape(-1)
     static_calc = internal_calc - _nodal_gravity_like(model, mechanics) - contact_calc
     static_pred = internal_pred - _nodal_gravity_like(model, mechanics) - contact_pred
+    hht_required_mass_term = (
+        (1.0 + float(model.hht_alpha)) * (-static_calc)
+        - float(model.hht_alpha) * np.asarray(previous_static_n, dtype=float)
+    )
+    force_balance_acceleration = np.asarray(spsolve(mechanics.mass_matrix.tocsc(), hht_required_mass_term), dtype=float)
     calc_row = _nearest_row(calculix_rows, float(calc_state.time)) if calculix_rows else None
     calc_rf = _optional_float(calc_row.get("normal_force_proxy", "")) if calc_row else None
     calc_cnum = _optional_float(calc_row.get("calculix_contact_count", "")) if calc_row else None
@@ -1207,6 +1213,13 @@ def _one_step_row(
         "sfc_predicted_contact_force_norm": _vector_norm(contact_pred),
         "sfc_on_calculix_mass_term_norm": _vector_norm(mass_calc),
         "sfc_predicted_mass_term_norm": _vector_norm(mass_pred),
+        "sfc_hht_required_mass_term_norm_at_calculix_state": _vector_norm(hht_required_mass_term),
+        "sfc_hht_required_mass_term_rel_to_reconstructed": _relative_vector_error(hht_required_mass_term, mass_calc),
+        "sfc_hht_force_balance_acceleration_norm_at_calculix_state": _vector_norm(force_balance_acceleration),
+        "sfc_hht_force_balance_vs_reconstructed_acceleration_rel": _relative_vector_error(
+            force_balance_acceleration,
+            calc_state.a.reshape(-1),
+        ),
         "sfc_on_calculix_static_residual_norm": _vector_norm(static_calc),
         "sfc_predicted_static_residual_norm": _vector_norm(static_pred),
         "sfc_hht_effective_residual_norm_at_calculix_state": _vector_norm(calc_residual),
@@ -1256,6 +1269,10 @@ def _one_step_unavailable_row(model: DropModel, contact_mode: str, diagnosis: st
         "sfc_predicted_contact_force_norm": "",
         "sfc_on_calculix_mass_term_norm": "",
         "sfc_predicted_mass_term_norm": "",
+        "sfc_hht_required_mass_term_norm_at_calculix_state": "",
+        "sfc_hht_required_mass_term_rel_to_reconstructed": "",
+        "sfc_hht_force_balance_acceleration_norm_at_calculix_state": "",
+        "sfc_hht_force_balance_vs_reconstructed_acceleration_rel": "",
         "sfc_on_calculix_static_residual_norm": "",
         "sfc_predicted_static_residual_norm": "",
         "sfc_hht_effective_residual_norm_at_calculix_state": "",
@@ -2952,8 +2969,8 @@ def _write_markdown(
             "",
             "This table starts SFC from CalculiX displacement states. CalculiX does not print full global internal force vectors or tangent matrices in the parsed `.dat`, so the internal-force and tangent entries are SFC decompositions evaluated on CalculiX kinematics rather than direct CalculiX vectors.",
             "",
-            "| Resolution | time n+1 | Diagnosis | Dominant term | disp. rel. | accel. rel. | residual rel. | CalculiX RF | SFC-on-CalculiX force | SFC predicted force |",
-            "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Resolution | time n+1 | Diagnosis | Dominant term | disp. rel. | accel. rel. | force-balance accel rel. | residual rel. | CalculiX RF | SFC-on-CalculiX force | SFC predicted force |",
+            "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in _representative_one_step_rows(one_step_rows):
@@ -2962,6 +2979,7 @@ def _write_markdown(
             f"{row.get('dominant_one_step_difference_source', '')} | "
             f"{_fmt(row.get('sfc_predicted_vs_calculix_displacement_rel', ''))} | "
             f"{_fmt(row.get('sfc_predicted_vs_calculix_acceleration_rel', ''))} | "
+            f"{_fmt(row.get('sfc_hht_force_balance_vs_reconstructed_acceleration_rel', ''))} | "
             f"{_fmt(row.get('sfc_hht_effective_residual_relative_at_calculix_state', ''))} | "
             f"{_fmt(row.get('calculix_rf_z', ''))} | "
             f"{_fmt(row.get('sfc_on_calculix_contact_force_z', ''))} | "

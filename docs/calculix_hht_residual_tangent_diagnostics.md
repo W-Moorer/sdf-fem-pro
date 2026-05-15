@@ -107,6 +107,11 @@ further:
   roughly machine precision in the quick block-plane run.
 - At contact activation, the SFC contact force evaluated on the CalculiX
   displacement state agrees with CalculiX RF within about one percent.
+- The one-step CSV now also reports the HHT force-balance acceleration required
+  by the SFC internal/contact forces at the CalculiX displacement state.  In the
+  latest quick diagnostic, this required acceleration differs from the
+  displacement-reconstructed CalculiX acceleration by roughly order one during
+  active contact, while the RF-level contact force remains close.
 - The effective HHT residual evaluated on the CalculiX contact states becomes
   large, and the one-step update mismatch is dominated by the reconstructed
   acceleration/mass term.

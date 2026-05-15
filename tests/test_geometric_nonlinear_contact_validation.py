@@ -194,6 +194,9 @@ def test_one_step_calculix_state_diagnostics_decomposes_terms() -> None:
     }
     assert float(rows[-1]["sfc_on_calculix_internal_force_norm"]) >= 0.0
     assert float(rows[-1]["sfc_hht_effective_residual_norm_at_calculix_state"]) >= 0.0
+    assert float(rows[-1]["sfc_hht_required_mass_term_norm_at_calculix_state"]) >= 0.0
+    assert float(rows[-1]["sfc_hht_force_balance_acceleration_norm_at_calculix_state"]) >= 0.0
+    assert float(rows[-1]["sfc_hht_force_balance_vs_reconstructed_acceleration_rel"]) >= 0.0
 
 
 def test_hht_state_definition_diagnostics_reports_precision_and_initial_state() -> None:
