@@ -21,6 +21,7 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     contact_lifecycle_output_diagnostics,
     contact_element_clearance_lifecycle_audit,
     contact_replay_metrics,
+    hht_state_definition_diagnostics,
     hht_residual_tangent_diagnostics,
     one_step_calculix_state_diagnostics,
     run_sfc_geometric_contact_history,
@@ -195,6 +196,33 @@ def test_one_step_calculix_state_diagnostics_decomposes_terms() -> None:
     assert float(rows[-1]["sfc_hht_effective_residual_norm_at_calculix_state"]) >= 0.0
 
 
+def test_hht_state_definition_diagnostics_reports_precision_and_initial_state() -> None:
+    model = _contact_model(resolution=1, duration=0.008, dt=0.004)
+    u1 = np.zeros_like(model.nodes)
+    u2 = np.zeros_like(model.nodes)
+    u2[:, 2] -= 0.0505
+    one_step = one_step_calculix_state_diagnostics(
+        model,
+        [{"time": 0.004, "normal_force_proxy": 0.0}, {"time": 0.008, "normal_force_proxy": 1.0}],
+        {0.004: u1, 0.008: u2},
+    )
+
+    row = hht_state_definition_diagnostics(model, {0.004: u1, 0.008: u2}, one_step)
+
+    assert row["calculix_completed"] == "true"
+    assert row["source_beta_formula"] == "nonlingeo.c uses beta=(1-alpha)^2/4"
+    assert float(row["sfc_beta"]) > 0.0
+    assert float(row["sfc_gamma"]) > 0.0
+    assert float(row["mass_rel_error"]) < 1.0e-12
+    assert float(row["dat_precision_acceleration_uncertainty_estimate"]) >= 0.0
+    assert row["diagnosis"] in {
+        "precontact_hht_state_mismatch",
+        "dat_displacement_precision_can_affect_reconstructed_acceleration",
+        "contact_phase_effective_residual_mismatch_not_explained_by_dat_precision",
+        "hht_state_definitions_consistent_for_sampled_rows",
+    }
+
+
 def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
     log = tmp_path / "ccx.log"
     log.write_text(
@@ -327,6 +355,7 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["calculix_contact_lifecycle_output_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_mechanics_increment_acceptance_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_state_one_step_mechanics_diagnostics_available"]["supported"] == "false"
+    assert claims["hht_newmark_state_definition_precision_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_per_contact_element_clearance_lifecycle_audit_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
@@ -349,6 +378,11 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
         one_step_rows = list(csv.DictReader(f))
     assert one_step_rows
     assert one_step_rows[0]["diagnosis"] == "external_unavailable"
+
+    with outputs["hht_state"].open(newline="", encoding="utf-8") as f:
+        hht_state_rows = list(csv.DictReader(f))
+    assert hht_state_rows
+    assert hht_state_rows[0]["diagnosis"] == "external_unavailable"
 
     with outputs["mesh"].open(newline="", encoding="utf-8") as f:
         mesh_rows = list(csv.DictReader(f))

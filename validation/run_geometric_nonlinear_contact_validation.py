@@ -1312,6 +1312,134 @@ def _sparse_data_norm(matrix: Any) -> float:
     return float(np.linalg.norm(np.asarray(data, dtype=float))) if len(data) else 0.0
 
 
+def hht_state_definition_diagnostics(
+    model: DropModel,
+    calculix_displacements: dict[float, np.ndarray],
+    one_step_rows: list[Row],
+    *,
+    contact_mode: str = "persistent_calculix_c3d4_f2f",
+) -> Row:
+    """Summarize HHT/Newmark state-definition and precision checks."""
+
+    mechanics = MechanicsModel.from_tet4_mesh(
+        model.nodes,
+        model.tet_elements,
+        E=model.E,
+        nu=model.nu,
+        density=model.density,
+    )
+    contact, _details = _make_contact_geometry(model, contact_mode)
+    beta, gamma = hht_newmark_parameters(model.hht_alpha)
+    state0, static0 = initial_state(
+        mechanics,
+        contact,
+        gravity=model.gravity,
+        initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+    )
+    _static_residual0, static_tangent0 = static_residual_and_tangent(
+        mechanics,
+        state0.x,
+        contact,
+        gravity=model.gravity,
+    )
+    dt_regularized = float(model.dt) / 10.0
+    regularized = mechanics.mass_matrix + static_tangent0 * (beta * dt_regularized * dt_regularized * (1.0 + float(model.hht_alpha)))
+    regularized_acceleration = np.asarray(
+        np.linalg.solve(regularized.toarray(), -static0),
+        dtype=float,
+    )
+    pure_acceleration = state0.a.reshape(-1)
+    initial_accel_rel = _relative_vector_error(regularized_acceleration, pure_acceleration)
+    mass_from_matrix = _mass_from_consistent_matrix(mechanics)
+    mass_reference = _total_mass(model)
+    precision_abs = _max_dat_displacement_abs_precision(calculix_displacements)
+    precision_accel = precision_abs / max(beta * float(model.dt) * float(model.dt), 1.0e-30)
+    active_rows = [
+        row
+        for row in one_step_rows
+        if _optional_float(row.get("sfc_on_calculix_max_penetration", "")) not in {None, 0.0}
+        or _optional_float(row.get("sfc_predicted_max_penetration", "")) not in {None, 0.0}
+    ]
+    precontact_rows = [
+        row
+        for row in one_step_rows
+        if _optional_float(row.get("sfc_on_calculix_max_penetration", "")) == 0.0
+        and _optional_float(row.get("sfc_predicted_max_penetration", "")) == 0.0
+    ]
+    max_active_residual_rel = _max_optional_row_float(active_rows, "sfc_hht_effective_residual_relative_at_calculix_state")
+    max_precontact_residual_rel = _max_optional_row_float(precontact_rows, "sfc_hht_effective_residual_relative_at_calculix_state")
+    max_accel_diff = _max_optional_row_float(one_step_rows, "acceleration_diff_norm")
+    precision_fraction = (
+        ""
+        if max_accel_diff in {"", None} or float(max_accel_diff) <= 0.0
+        else float(precision_accel) / max(float(max_accel_diff), 1.0e-30)
+    )
+    if not calculix_displacements:
+        diagnosis = "external_unavailable"
+    elif max_precontact_residual_rel not in {"", None} and float(max_precontact_residual_rel) > 1.0e-6:
+        diagnosis = "precontact_hht_state_mismatch"
+    elif precision_fraction != "" and float(precision_fraction) > 1.0e-2:
+        diagnosis = "dat_displacement_precision_can_affect_reconstructed_acceleration"
+    elif max_active_residual_rel not in {"", None} and float(max_active_residual_rel) > 1.0e-2:
+        diagnosis = "contact_phase_effective_residual_mismatch_not_explained_by_dat_precision"
+    else:
+        diagnosis = "hht_state_definitions_consistent_for_sampled_rows"
+    return {
+        "case": model.case,
+        "resolution": model.resolution,
+        "contact_mode": contact_mode,
+        "calculix_completed": str(bool(calculix_displacements)).lower(),
+        "source_beta_formula": "nonlingeo.c uses beta=(1-alpha)^2/4",
+        "source_gamma_formula": "nonlingeo.c uses gamma=0.5-alpha",
+        "source_prediction_summary": "prediction.c predicts displacement and velocity from veold/accold, then resets accold before Newton correction",
+        "source_update_summary": "resultsini/iniparll treats the Newton solution vector as acceleration increment: dx=beta*dt^2*da, dv=gamma*dt*da, accold+=da",
+        "source_residual_summary": "calcresidual.c forms RHS=(1+alpha)*(fext-fint)-alpha*(fextini-fini)-M*a for implicit dynamics",
+        "sfc_alpha": float(model.hht_alpha),
+        "sfc_beta": float(beta),
+        "sfc_gamma": float(gamma),
+        "initial_static_residual_norm": _vector_norm(static0),
+        "initial_acceleration_pure_mass_norm": _vector_norm(pure_acceleration),
+        "initial_acceleration_calculix_regularized_norm": _vector_norm(regularized_acceleration),
+        "initial_acceleration_regularized_rel_diff": initial_accel_rel,
+        "initial_regularized_dt": dt_regularized,
+        "mass_from_consistent_matrix": mass_from_matrix,
+        "mass_reference": mass_reference,
+        "mass_rel_error": abs(mass_from_matrix - mass_reference) / max(abs(mass_reference), 1.0e-30),
+        "dat_displacement_max_abs_precision_estimate": precision_abs,
+        "dat_precision_acceleration_uncertainty_estimate": precision_accel,
+        "dat_precision_fraction_of_observed_acceleration_diff": precision_fraction,
+        "max_precontact_hht_residual_relative_at_calculix_state": max_precontact_residual_rel,
+        "max_active_hht_residual_relative_at_calculix_state": max_active_residual_rel,
+        "max_observed_acceleration_diff_norm": max_accel_diff,
+        "diagnosis": diagnosis,
+    }
+
+
+def _mass_from_consistent_matrix(mechanics: MechanicsModel) -> float:
+    z_dofs = np.arange(2, mechanics.n_dofs, 3, dtype=np.int64)
+    return float(np.sum(mechanics.mass_matrix[z_dofs][:, z_dofs]))
+
+
+def _max_dat_displacement_abs_precision(displacements: dict[float, np.ndarray]) -> float:
+    max_precision = 0.0
+    for values in displacements.values():
+        arr = np.abs(np.asarray(values, dtype=float).ravel())
+        nonzero = arr[arr > 0.0]
+        if nonzero.size == 0:
+            continue
+        exponents = np.floor(np.log10(nonzero))
+        # CalculiX .dat prints nodal displacements in E format with six digits
+        # after the decimal in the current output path.
+        max_precision = max(max_precision, float(np.max(0.5 * np.power(10.0, exponents - 6.0))))
+    return max_precision
+
+
+def _max_optional_row_float(rows: list[Row], key: str) -> float | str:
+    values = [_optional_float(row.get(key, "")) for row in rows]
+    numeric = [float(value) for value in values if value is not None]
+    return _max_or_blank(numeric)
+
+
 def contact_lifecycle_output_diagnostics(
     model: DropModel,
     calculix_rows: list[Row],
@@ -2416,6 +2544,7 @@ def run_validation(
     lifecycle_rows: list[Row] = []
     mechanics_rows: list[Row] = []
     one_step_rows: list[Row] = []
+    hht_state_rows: list[Row] = []
     contact_element_audit_rows: list[Row] = []
     contact_element_audit_summary_rows: list[Row] = []
     command_rows: list[Row] = []
@@ -2453,11 +2582,18 @@ def run_validation(
         hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
         lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
         mechanics_rows.append(mechanics_increment_acceptance_diagnostics(model, sfc_rows, command_rows[-1], out_dir))
-        one_step_rows.extend(
-            one_step_calculix_state_diagnostics(
+        one_step_resolution_rows = one_step_calculix_state_diagnostics(
+            model,
+            calc_rows,
+            calc_displacements,
+            contact_mode=contact_mode,
+        )
+        one_step_rows.extend(one_step_resolution_rows)
+        hht_state_rows.append(
+            hht_state_definition_diagnostics(
                 model,
-                calc_rows,
                 calc_displacements,
+                one_step_resolution_rows,
                 contact_mode=contact_mode,
             )
         )
@@ -2495,6 +2631,7 @@ def run_validation(
         lifecycle_rows,
         mechanics_rows,
         one_step_rows,
+        hht_state_rows,
         contact_element_audit_summary_rows,
     )
     outputs = {
@@ -2505,6 +2642,7 @@ def run_validation(
         "lifecycle": out_dir / "geometric_contact_lifecycle_output_diagnostics.csv",
         "mechanics": out_dir / "geometric_contact_mechanics_increment_acceptance.csv",
         "one_step": out_dir / "geometric_contact_one_step_state_diagnostics.csv",
+        "hht_state": out_dir / "geometric_contact_hht_state_definition_diagnostics.csv",
         "contact_element_audit": out_dir / "geometric_contact_element_clearance_lifecycle_audit.csv",
         "contact_element_audit_summary": out_dir / "geometric_contact_element_clearance_lifecycle_audit_summary.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
@@ -2521,6 +2659,7 @@ def run_validation(
     _write_csv(outputs["lifecycle"], lifecycle_rows)
     _write_csv(outputs["mechanics"], mechanics_rows)
     _write_csv(outputs["one_step"], one_step_rows)
+    _write_csv(outputs["hht_state"], hht_state_rows)
     _write_csv(outputs["contact_element_audit"], contact_element_audit_rows)
     _write_csv(outputs["contact_element_audit_summary"], contact_element_audit_summary_rows)
     _write_csv(outputs["mesh"], mesh_rows)
@@ -2540,6 +2679,7 @@ def run_validation(
         lifecycle_rows,
         mechanics_rows,
         one_step_rows,
+        hht_state_rows,
         contact_element_audit_summary_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
@@ -2557,6 +2697,7 @@ def _claim_rows(
     lifecycle_rows: list[Row],
     mechanics_rows: list[Row],
     one_step_rows: list[Row],
+    hht_state_rows: list[Row],
     contact_element_audit_summary_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
@@ -2582,6 +2723,9 @@ def _claim_rows(
     one_step_supported = bool(one_step_rows) and any(
         row.get("diagnosis") not in {"", None, "external_unavailable", "insufficient_calculix_time_states"}
         for row in one_step_rows
+    )
+    hht_state_supported = bool(hht_state_rows) and any(
+        row.get("diagnosis") not in {"", None, "external_unavailable"} for row in hht_state_rows
     )
     contact_element_audit_supported = bool(contact_element_audit_summary_rows) and any(
         row.get("calculix_per_contact_output_available") == "true" for row in contact_element_audit_summary_rows
@@ -2630,6 +2774,12 @@ def _claim_rows(
             "details": "Starts SFC from each CalculiX displacement state and decomposes internal force, contact force, mass term, HHT residual, tangent norms, and Newmark update error",
         },
         {
+            "claim": "hht_newmark_state_definition_precision_diagnostics_available",
+            "supported": str(hht_state_supported).lower(),
+            "evidence_csv": "geometric_contact_hht_state_definition_diagnostics.csv",
+            "details": "Checks CalculiX beta/gamma, prediction/update/residual state definitions, initial acceleration regularization, mass scale, and .dat displacement precision amplification",
+        },
+        {
             "claim": "calculix_per_contact_element_clearance_lifecycle_audit_available",
             "supported": str(contact_element_audit_supported).lower(),
             "evidence_csv": "geometric_contact_element_clearance_lifecycle_audit_summary.csv",
@@ -2668,6 +2818,7 @@ def _write_markdown(
     lifecycle_rows: list[Row],
     mechanics_rows: list[Row],
     one_step_rows: list[Row],
+    hht_state_rows: list[Row],
     contact_element_audit_summary_rows: list[Row],
     *,
     contact_mode: str,
@@ -2692,6 +2843,7 @@ def _write_markdown(
         "- `geometric_contact_lifecycle_output_diagnostics.csv`",
         "- `geometric_contact_mechanics_increment_acceptance.csv`",
         "- `geometric_contact_one_step_state_diagnostics.csv`",
+        "- `geometric_contact_hht_state_definition_diagnostics.csv`",
         "- `geometric_contact_element_clearance_lifecycle_audit.csv`",
         "- `geometric_contact_element_clearance_lifecycle_audit_summary.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
@@ -2805,6 +2957,26 @@ def _write_markdown(
             f"{_fmt(row.get('calculix_rf_z', ''))} | "
             f"{_fmt(row.get('sfc_on_calculix_contact_force_z', ''))} | "
             f"{_fmt(row.get('sfc_predicted_contact_force_z', ''))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## HHT/Newmark State Definition Diagnostics",
+            "",
+            "| Resolution | Diagnosis | beta | gamma | initial accel rel. | mass rel. | .dat accel uncertainty | precision/diff | precontact residual rel. | active residual rel. |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in hht_state_rows:
+        lines.append(
+            f"| {row['resolution']} | {row['diagnosis']} | {_fmt(row.get('sfc_beta', ''))} | "
+            f"{_fmt(row.get('sfc_gamma', ''))} | "
+            f"{_fmt(row.get('initial_acceleration_regularized_rel_diff', ''))} | "
+            f"{_fmt(row.get('mass_rel_error', ''))} | "
+            f"{_fmt(row.get('dat_precision_acceleration_uncertainty_estimate', ''))} | "
+            f"{_fmt(row.get('dat_precision_fraction_of_observed_acceleration_diff', ''))} | "
+            f"{_fmt(row.get('max_precontact_hht_residual_relative_at_calculix_state', ''))} | "
+            f"{_fmt(row.get('max_active_hht_residual_relative_at_calculix_state', ''))} |"
         )
     lines.extend(
         [

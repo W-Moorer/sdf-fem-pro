@@ -45,6 +45,8 @@ The relevant local CalculiX source files are under `/tmp/sfc_calculix_source/src
 The geometric nonlinear contact runner now writes:
 
 - `geometric_contact_hht_residual_tangent.csv`
+- `geometric_contact_one_step_state_diagnostics.csv`
+- `geometric_contact_hht_state_definition_diagnostics.csv`
 
 The CSV checks:
 
@@ -56,18 +58,31 @@ The CSV checks:
 - Absolute and relative error between the accepted `previous_static_residual`
   and a recomputed static residual at the accepted state.
 
+The one-step/state-definition CSV files additionally check:
+
+- SFC internal force, contact force, mass term, effective residual, and tangent
+  norms evaluated on CalculiX displacement states.
+- One SFC Newmark/HHT step launched from the same CalculiX state and compared
+  with the next CalculiX displacement state.
+- CalculiX source-level state definitions for `beta`, `gamma`, prediction,
+  acceleration update, and residual assembly.
+- The initial acceleration regularization used by CalculiX at the start of a
+  dynamic step.
+- Whether six-decimal `.dat` displacement output can plausibly explain the
+  acceleration/residual mismatch after reconstruction.
+
 The quick external run was:
 
 ```bash
 python validation/run_geometric_nonlinear_contact_validation.py --quick --out-dir results/geometric_contact_residual_tangent_check
 ```
 
-Key row:
+Key residual/tangent row:
 
 | Quantity | Value |
 | --- | ---: |
 | Probe time | `9.600000e-02` |
-| Active contact count | `2` |
+| Active contact count | `14` |
 | Max penetration | `1.823857e-04` |
 | HHT dynamic residual norm | `3.988149e-12` |
 | Effective tangent FD relative error | `5.985430e-10` |
@@ -81,6 +96,22 @@ The SFC nonlinear dynamic residual/tangent is internally consistent for the
 tested active-contact state.  The finite-difference errors are far below the
 validation threshold, and the previous static residual update matches the
 accepted end-of-step static residual.
+
+The new CalculiX-state one-step diagnostics narrow the trajectory mismatch
+further:
+
+- Pre-contact CalculiX displacement states satisfy the SFC HHT residual to
+  roughly machine precision in the quick block-plane run.
+- At contact activation, the SFC contact force evaluated on the CalculiX
+  displacement state agrees with CalculiX RF within about one percent.
+- The effective HHT residual evaluated on the CalculiX contact states becomes
+  large, and the one-step update mismatch is dominated by the reconstructed
+  acceleration/mass term.
+- The `.dat` displacement precision estimate is far too small to explain the
+  observed acceleration difference in the current quick run.
+- The initial acceleration regularization difference between SFC's pure-mass
+  initialization and CalculiX's small stiffness-regularized solve is negligible
+  for the checked free-fall start.
 
 The quick CalculiX run reports:
 
@@ -97,12 +128,12 @@ The quick CalculiX run reports:
 
 Therefore, for this run, the remaining RF/CELS/max-penetration differences are
 not explained by an SFC HHT sign error, contact tangent sign error, stale
-previous static residual, active retry/cutback, or a visible CalculiX
-stabilization branch.  The remaining difference is more likely in the exact
-trajectory-level contact-element lifecycle and output-definition details:
-generated versus force-producing contact records, contact element persistence,
-clearance evaluation at the beginning of the increment, and CalculiX internal
-contact element state updates.
+previous static residual, active retry/cutback, visible CalculiX stabilization
+branch, initial acceleration initialization, mass scaling, or `.dat`
+displacement print precision.  The strongest current evidence points to a
+contact-phase effective residual/acceleration mismatch after activation: the
+same current geometry gives a similar normal contact force, but the coupled
+Newmark/HHT state no longer satisfies both solvers' effective dynamic balance.
 
 ## Commands
 
