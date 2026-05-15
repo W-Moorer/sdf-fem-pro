@@ -12,6 +12,7 @@ from sfc.fem.calculix_aligned import (
     _nodal_gravity_loads,
     _restore_contact_state,
     _snapshot_contact_state,
+    assemble_calculix_c3d4_mass,
     assemble_contact_response,
     calculix_apply_acceleration_increment,
     calculix_dynamic_predictor,
@@ -92,6 +93,33 @@ def _unit_tet_model() -> MechanicsModel:
     return MechanicsModel.from_tet4_mesh(X, elements, E=1000.0, nu=0.3, density=2.0)
 
 
+def _block_model() -> MechanicsModel:
+    X = np.asarray(
+        [
+            [-0.5, -0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [-0.5, 0.5, 0.0],
+            [0.5, 0.5, 0.0],
+            [-0.5, -0.5, 1.0],
+            [0.5, -0.5, 1.0],
+            [-0.5, 0.5, 1.0],
+            [0.5, 0.5, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray(
+        [
+            [0, 1, 2, 4],
+            [1, 3, 2, 7],
+            [1, 2, 4, 7],
+            [2, 6, 4, 7],
+            [1, 4, 5, 7],
+        ],
+        dtype=np.int64,
+    )
+    return MechanicsModel.from_tet4_mesh(X, elements, E=1000.0, nu=0.3, density=2.0)
+
+
 def test_hht_parameters_match_calculix_alpha_convention() -> None:
     beta, gamma = hht_newmark_parameters(-0.05)
 
@@ -159,13 +187,24 @@ def test_contact_state_snapshot_restores_lifecycle_and_cutback_flag() -> None:
     assert contact.cutback_retry
 
 
-def test_consistent_mass_has_correct_total_translational_mass() -> None:
+def test_calculix_c3d4_mass_has_correct_total_translational_mass() -> None:
     model = _unit_tet_model()
     total_mass = model.density * np.sum(model.volumes)
     ones_x = np.zeros(model.n_dofs)
     ones_x[0::3] = 1.0
 
     assert ones_x @ (model.mass_matrix @ ones_x) == pytest.approx(total_mass)
+    scalar = model.density * float(model.volumes[0]) / 16.0
+    assert model.mass_matrix[0, 0] == pytest.approx(scalar)
+    assert model.mass_matrix[0, 3] == pytest.approx(scalar)
+    assert model.mass_matrix[0, 1] == pytest.approx(0.0)
+
+
+def test_calculix_c3d4_mass_matches_public_assembler() -> None:
+    model = _unit_tet_model()
+    assembled = assemble_calculix_c3d4_mass(model.n_nodes, model.elements, model.volumes, model.density)
+
+    assert (assembled - model.mass_matrix).nnz == 0
 
 
 def test_stvk_tangent_matches_directional_finite_difference() -> None:
@@ -207,8 +246,8 @@ def test_plane_contact_response_uses_area_weighted_pressure_overclosure() -> Non
 
 
 def test_hht_step_keeps_contact_geometry_swappable() -> None:
-    model = _unit_tet_model()
-    state, previous = initial_state(model, EmptyContactGeometry(), gravity=9.81)
+    model = _block_model()
+    state, previous = initial_state(model, EmptyContactGeometry(), gravity=9.81, dt=0.001, alpha=0.0)
     next_state, next_previous, diagnostics = hht_step(
         model,
         state,
@@ -234,10 +273,10 @@ def test_hht_step_keeps_contact_geometry_swappable() -> None:
 
 
 def test_initial_state_returns_calculix_fextini_minus_fini_history() -> None:
-    model = _unit_tet_model()
+    model = _block_model()
     contact = EmptyContactGeometry()
 
-    state, previous = initial_state(model, contact, gravity=9.81)
+    state, previous = initial_state(model, contact, gravity=9.81, dt=0.001, alpha=-0.05)
     static_state = static_force_state(model, state.x, contact, gravity=9.81)
 
     assert previous == pytest.approx(static_state.calculix_rhs_balance)
@@ -245,9 +284,9 @@ def test_initial_state_returns_calculix_fextini_minus_fini_history() -> None:
 
 
 def test_hht_step_saves_accepted_contact_internal_force_history() -> None:
-    model = _unit_tet_model()
-    contact = PlaneContactGeometry(np.asarray([[0, 2, 1]], dtype=np.int64), plane_z=0.05, stiffness=100.0)
-    state, previous = initial_state(model, contact, gravity=9.81)
+    model = _block_model()
+    contact = PlaneContactGeometry(np.asarray([[0, 2, 1], [1, 2, 3]], dtype=np.int64), plane_z=0.05, stiffness=100.0)
+    state, previous = initial_state(model, contact, gravity=9.81, dt=0.001, alpha=-0.05)
 
     next_state, next_previous, diagnostics = hht_step(
         model,
@@ -267,9 +306,9 @@ def test_hht_step_saves_accepted_contact_internal_force_history() -> None:
 
 
 def test_hht_step_saves_history_from_accepted_contact_evaluation_without_resampling() -> None:
-    model = _unit_tet_model()
+    model = _block_model()
     contact = _ChangingContactGeometry()
-    state, previous = initial_state(model, contact, gravity=0.0)
+    state, previous = initial_state(model, contact, gravity=0.0, dt=0.001, alpha=-0.05)
 
     _next_state, next_previous, diagnostics = hht_step(
         model,
@@ -289,8 +328,8 @@ def test_hht_step_saves_history_from_accepted_contact_evaluation_without_resampl
 
 
 def test_hht_step_supports_clean_room_calculix_multicriteria_acceptance() -> None:
-    model = _unit_tet_model()
-    state, previous = initial_state(model, EmptyContactGeometry(), gravity=9.81)
+    model = _block_model()
+    state, previous = initial_state(model, EmptyContactGeometry(), gravity=9.81, dt=0.001, alpha=-0.05)
     _, _, diagnostics = hht_step(
         model,
         state,

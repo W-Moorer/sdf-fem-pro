@@ -243,6 +243,18 @@ def run_calculix_contact_with_stress(
     per_contact = _parse_calculix_dat_contact_elements(dat)
     face_lookup = _face_ref_index(model)
     for time, records in per_contact.items():
+        cdis_values = [
+            float(row["calculix_clearance_normal"])
+            for row in records.values()
+            if row.get("calculix_clearance_normal", "") not in {"", None}
+        ]
+        if cdis_values:
+            contact_totals.setdefault(float(time), {}).update(
+                {
+                    "min_gap_from_cdis": float(np.min(cdis_values)),
+                    "max_penetration_from_cdis": float(np.max(np.maximum(-np.asarray(cdis_values), 0.0))),
+                }
+            )
         disp_time = min(displacements, key=lambda value: abs(float(value) - float(time))) if displacements else None
         current_areas: np.ndarray | None = None
         if disp_time is not None:
@@ -266,6 +278,15 @@ def run_calculix_contact_with_stress(
         if (energy_values or derived_energy_values) and "calculix_contact_energy" not in contact_totals.setdefault(float(time), {}):
             contact_totals[float(time)]["calculix_contact_energy"] = float(np.sum(energy_values or derived_energy_values))
     history = _history_from_displacements("calculix", model, displacements, contact_totals)
+    for row in history:
+        totals = contact_totals.get(float(row["time"]), {})
+        if "min_gap_from_cdis" in totals and "max_penetration_from_cdis" in totals:
+            row["surface_centroid_min_gap"] = row["min_gap"]
+            row["surface_centroid_max_penetration"] = row["max_penetration"]
+            row["min_gap"] = float(totals["min_gap_from_cdis"])
+            row["max_penetration"] = float(totals["max_penetration_from_cdis"])
+            row["quadrature_min_gap"] = row["min_gap"]
+            row["quadrature_max_penetration"] = row["max_penetration"]
     final_u = displacements[max(displacements)]
     final_stress = _parse_final_stress_voigt(dat, model.tet_elements.shape[0])
     return history, final_u, final_stress, command_row, displacements
@@ -295,6 +316,8 @@ def run_sfc_geometric_contact_history(
         contact,
         gravity=model.gravity,
         initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+        dt=model.dt,
+        alpha=model.hht_alpha,
     )
     diagnostics = evaluate_state(mechanics, state, contact, gravity=model.gravity, assemble_tangent=True)
     rows: list[Row] = []
@@ -430,6 +453,8 @@ def _sfc_history_row(
     max_contact_change = max((int(metric.contact_element_change) for metric in metrics), default="")
     any_energy_stabilization = any(bool(metric.energy_stabilization) for metric in metrics)
     any_calculix_style_rejection = any(not bool(metric.accepted_by_calculix_style) for metric in metrics)
+    centroid_min_gap = float(np.min(centroid_gaps))
+    centroid_max_penetration = float(np.max(np.maximum(-centroid_gaps, 0.0)))
     return {
         "case": model.case,
         "resolution": model.resolution,
@@ -443,9 +468,12 @@ def _sfc_history_row(
         "cutback_limited": str(bool(cutback_limited)).lower(),
         "z_cm": _mass_weighted_center_z(model, state.x),
         "v_cm_z": _mass_weighted_velocity_z(model, state.v.reshape(-1)),
-        "min_gap": float(np.min(centroid_gaps)),
+        "min_gap": diagnostics.contact.min_gap,
         "quadrature_min_gap": diagnostics.contact.min_gap,
-        "max_penetration": max(float(diagnostics.contact.max_penetration), float(np.max(np.maximum(-centroid_gaps, 0.0)))),
+        "max_penetration": float(diagnostics.contact.max_penetration),
+        "quadrature_max_penetration": float(diagnostics.contact.max_penetration),
+        "surface_centroid_min_gap": centroid_min_gap,
+        "surface_centroid_max_penetration": centroid_max_penetration,
         "active_contact_count": diagnostics.contact.active_count,
         "generated_contact_spring_count": generated_count,
         "calculix_equivalent_contact_count": cnum_equivalent,
@@ -741,12 +769,18 @@ def _per_face_plane_contact_rows(
     time: float,
     source: str,
     generated_springs: dict[tuple[int, int], Any] | None = None,
+    spring_area_x: np.ndarray | None = None,
 ) -> list[Row]:
     """Return per-contact-element clearance, force, and energy rows for a plane replay."""
 
     x = np.asarray(x_current, dtype=float)
+    area_x = x if spring_area_x is None else np.asarray(spring_area_x, dtype=float)
     tri = x[model.surface_faces]
-    areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    area_tri = area_x[model.surface_faces]
+    areas = 0.5 * np.linalg.norm(
+        np.cross(area_tri[:, 1] - area_tri[:, 0], area_tri[:, 2] - area_tri[:, 0]),
+        axis=1,
+    )
     q_points = np.einsum("qn,fnc->fqc", CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC, tri)
     q_gaps = q_points[:, :, 2] - _contact_plane_z(model)
     generated = {} if generated_springs is None else generated_springs
@@ -841,18 +875,28 @@ def _index_contact_rows(rows: list[Row]) -> dict[float, dict[tuple[int, int, int
     return indexed
 
 
-def _calculix_contact_print_quadrature_index(raw_contact_element_index: int) -> int:
+def _calculix_contact_print_quadrature_index(
+    raw_contact_element_index: int,
+    active_quadrature_indices: set[int] | None = None,
+) -> int:
     """Map CalculiX CONTACT PRINT occurrence order to slave quadrature order.
 
     CalculiX stores slave integration coordinates through the clipped slave
     face in ``treatmasterface.f``.  For triangular C3D4 faces this preserves the
     seven generated contact elements, but the printed occurrence order is not
-    the canonical ``gauss2d6`` order used by local replay arrays.
+    the canonical ``gauss2d6`` order used by local replay arrays.  After a
+    contact spring is released, CONTACT PRINT compacts the output rows; in that
+    case the raw row index is mapped through the still-active subset in
+    CalculiX print order.
     """
 
-    return CALCULIX_CONTACT_PRINT_TO_QUADRATURE_INDEX[
-        int(raw_contact_element_index) % len(CALCULIX_CONTACT_PRINT_TO_QUADRATURE_INDEX)
-    ]
+    print_order = list(CALCULIX_CONTACT_PRINT_TO_QUADRATURE_INDEX)
+    if active_quadrature_indices is not None:
+        active_set = {int(q) for q in active_quadrature_indices}
+        filtered = [q for q in print_order if q in active_set]
+        if filtered:
+            print_order = filtered
+    return print_order[int(raw_contact_element_index) % len(print_order)]
 
 
 def _calculix_contact_rows_from_dat(
@@ -869,7 +913,17 @@ def _calculix_contact_rows_from_dat(
             face_index = face_lookup.get((int(element_id), int(face_number)), -1)
             area = ""
             raw_contact_element_index = int(contact_element_index)
-            quadrature_index = _calculix_contact_print_quadrature_index(raw_contact_element_index)
+            active_quadrature_indices = {
+                int(q)
+                for (replay_element, replay_face, q), replay_row in replay.items()
+                if int(replay_element) == int(element_id)
+                and int(replay_face) == int(face_number)
+                and replay_row.get("active_spring") == "true"
+            }
+            quadrature_index = _calculix_contact_print_quadrature_index(
+                raw_contact_element_index,
+                active_quadrature_indices,
+            )
             replay_key = (int(element_id), int(face_number), quadrature_index)
             if replay_key in replay:
                 area = replay[replay_key]["face_area"]
@@ -933,15 +987,19 @@ def contact_element_clearance_lifecycle_audit(
     """Return per-contact-element and per-step lifecycle audit rows."""
 
     replay_rows: list[Row] = []
+    previous_x = model.nodes.copy()
     for time, displacement in sorted(calculix_displacements.items()):
+        current_x = model.nodes + displacement
         replay_rows.extend(
             _per_face_plane_contact_rows(
                 model,
-                model.nodes + displacement,
+                current_x,
                 time=float(time),
                 source="calculix_displacement_replay",
+                spring_area_x=previous_x,
             )
         )
+        previous_x = current_x
 
     replay_by_time = _index_contact_rows(replay_rows)
     calc_rows = _calculix_contact_rows_from_dat(model, calculix_dat_contact, replay_by_time)
@@ -1172,6 +1230,8 @@ def nodal_state_output_diagnostics(
         contact,
         gravity=model.gravity,
         initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+        dt=model.dt,
+        alpha=model.hht_alpha,
     )
     ordered = _ordered_calculix_displacements(model, calculix_displacements)
     rows: list[Row] = []
@@ -1195,6 +1255,7 @@ def nodal_state_output_diagnostics(
         calc_velocity = np.asarray(velocity, dtype=float) if velocity_available else reconstructed.v
         calc_acceleration = np.asarray(acceleration, dtype=float) if acceleration_available else reconstructed.a
 
+        _begin_contact_increment_for_validation(contact, state.x)
         force_state = static_force_state(
             mechanics,
             mechanics.X + np.asarray(next_u, dtype=float),
@@ -1205,10 +1266,11 @@ def nodal_state_output_diagnostics(
             (1.0 + float(model.hht_alpha)) * force_state.calculix_rhs_balance
             - float(model.hht_alpha) * np.asarray(previous_static, dtype=float)
         )
-        force_balance_acceleration = np.asarray(
-            spsolve(mechanics.mass_matrix.tocsc(), required_mass),
-            dtype=float,
-        ).reshape((-1, 3))
+        force_balance_acceleration, mass_rank, mass_rank_deficient = _minimum_norm_mass_acceleration(
+            mechanics.mass_matrix,
+            required_mass,
+        )
+        force_balance_acceleration = force_balance_acceleration.reshape((-1, 3))
         residual_using_dat_acceleration = mechanics.mass_matrix @ calc_acceleration.reshape(-1) - required_mass
         residual_using_reconstructed = mechanics.mass_matrix @ reconstructed.a.reshape(-1) - required_mass
         residual_scale = max(
@@ -1252,6 +1314,12 @@ def nodal_state_output_diagnostics(
                 "acceleration_dat_time": "" if acceleration_time is None else float(acceleration_time),
                 "velocity_dat_vs_newmark_rel": vel_rel,
                 "acceleration_dat_vs_newmark_rel": accel_rel,
+                "mass_matrix_rank": mass_rank,
+                "mass_matrix_dof_count": mechanics.n_dofs,
+                "mass_matrix_rank_deficient": str(bool(mass_rank_deficient)).lower(),
+                "force_balance_acceleration_definition": "minimum_norm_least_squares_for_rank_deficient_calculix_c3d4_mass"
+                if mass_rank_deficient
+                else "direct_mass_balance",
                 "sfc_hht_force_balance_acceleration_norm": _vector_norm(force_balance_acceleration),
                 "calculix_dat_acceleration_norm": "" if not acceleration_available else _vector_norm(calc_acceleration),
                 "newmark_reconstructed_acceleration_norm": _vector_norm(reconstructed.a),
@@ -1674,6 +1742,8 @@ def one_step_calculix_state_diagnostics(
         contact,
         gravity=model.gravity,
         initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+        dt=model.dt,
+        alpha=model.hht_alpha,
     )
     state.time = float(ordered[0][0])
     rows: list[Row] = []
@@ -1707,6 +1777,7 @@ def one_step_calculix_state_diagnostics(
             beta=beta,
             gamma=gamma,
         )
+        _begin_contact_increment_for_validation(contact, state_n.x)
         calc_residual, calc_tangent, calc_static, _calc_static_tangent = _hht_dynamic_residual_and_tangent(
             mechanics,
             contact,
@@ -1809,7 +1880,10 @@ def _one_step_row(
         (1.0 + float(model.hht_alpha)) * (-static_calc)
         - float(model.hht_alpha) * np.asarray(previous_static_n, dtype=float)
     )
-    force_balance_acceleration = np.asarray(spsolve(mechanics.mass_matrix.tocsc(), hht_required_mass_term), dtype=float)
+    force_balance_acceleration, mass_rank, mass_rank_deficient = _minimum_norm_mass_acceleration(
+        mechanics.mass_matrix,
+        hht_required_mass_term,
+    )
     calc_row = _nearest_row(calculix_rows, float(calc_state.time)) if calculix_rows else None
     calc_rf = _optional_float(calc_row.get("normal_force_proxy", "")) if calc_row else None
     calc_cnum = _optional_float(calc_row.get("calculix_contact_count", "")) if calc_row else None
@@ -1820,7 +1894,13 @@ def _one_step_row(
         "contact_force": _vector_norm(contact_pred - contact_calc),
         "acceleration": _vector_norm(pred_state.a.reshape(-1) - calc_state.a.reshape(-1)),
     }
-    dominant = max(component_diffs, key=component_diffs.get)
+    raw_dominant = max(component_diffs, key=component_diffs.get)
+    meaningful_component_diffs = (
+        {key: value for key, value in component_diffs.items() if key != "acceleration"}
+        if mass_rank_deficient
+        else component_diffs
+    )
+    dominant = max(meaningful_component_diffs, key=meaningful_component_diffs.get)
     displacement_error = _vector_norm((pred_state.x - calc_state.x).reshape(-1))
     displacement_scale = max(_vector_norm((calc_state.x - state_n.x).reshape(-1)), 1.0e-30)
     acceleration_error = _relative_vector_error(pred_state.a.reshape(-1), calc_state.a.reshape(-1))
@@ -1863,6 +1943,12 @@ def _one_step_row(
         "sfc_predicted_mass_term_norm": _vector_norm(mass_pred),
         "sfc_hht_required_mass_term_norm_at_calculix_state": _vector_norm(hht_required_mass_term),
         "sfc_hht_required_mass_term_rel_to_reconstructed": _relative_vector_error(hht_required_mass_term, mass_calc),
+        "mass_matrix_rank": mass_rank,
+        "mass_matrix_dof_count": mechanics.n_dofs,
+        "mass_matrix_rank_deficient": str(bool(mass_rank_deficient)).lower(),
+        "force_balance_acceleration_definition": "minimum_norm_least_squares_for_rank_deficient_calculix_c3d4_mass"
+        if mass_rank_deficient
+        else "direct_mass_balance",
         "sfc_hht_force_balance_acceleration_norm_at_calculix_state": _vector_norm(force_balance_acceleration),
         "sfc_hht_force_balance_vs_reconstructed_acceleration_rel": _relative_vector_error(
             force_balance_acceleration,
@@ -1879,6 +1965,10 @@ def _one_step_row(
         "sfc_predicted_vs_calculix_displacement_norm": displacement_error,
         "sfc_predicted_vs_calculix_displacement_rel": displacement_error / displacement_scale,
         "sfc_predicted_vs_calculix_acceleration_rel": acceleration_error,
+        "raw_dominant_one_step_difference_source": raw_dominant,
+        "acceleration_difference_interpretation": "rank_deficient_mass_nullspace_not_a_unique_balance_variable"
+        if mass_rank_deficient
+        else "full_rank_mass_acceleration_difference",
         "mass_term_diff_norm": component_diffs["mass_term"],
         "static_residual_diff_norm": component_diffs["static_residual"],
         "internal_force_diff_norm": component_diffs["internal_force"],
@@ -1919,6 +2009,10 @@ def _one_step_unavailable_row(model: DropModel, contact_mode: str, diagnosis: st
         "sfc_predicted_mass_term_norm": "",
         "sfc_hht_required_mass_term_norm_at_calculix_state": "",
         "sfc_hht_required_mass_term_rel_to_reconstructed": "",
+        "mass_matrix_rank": "",
+        "mass_matrix_dof_count": "",
+        "mass_matrix_rank_deficient": "",
+        "force_balance_acceleration_definition": "",
         "sfc_hht_force_balance_acceleration_norm_at_calculix_state": "",
         "sfc_hht_force_balance_vs_reconstructed_acceleration_rel": "",
         "sfc_on_calculix_static_residual_norm": "",
@@ -1932,6 +2026,8 @@ def _one_step_unavailable_row(model: DropModel, contact_mode: str, diagnosis: st
         "sfc_predicted_vs_calculix_displacement_norm": "",
         "sfc_predicted_vs_calculix_displacement_rel": "",
         "sfc_predicted_vs_calculix_acceleration_rel": "",
+        "raw_dominant_one_step_difference_source": "",
+        "acceleration_difference_interpretation": "",
         "mass_term_diff_norm": "",
         "static_residual_diff_norm": "",
         "internal_force_diff_norm": "",
@@ -1973,6 +2069,22 @@ def _vector_norm(value: np.ndarray) -> float:
     return float(np.linalg.norm(np.asarray(value, dtype=float)))
 
 
+def _minimum_norm_mass_acceleration(mass_matrix: Any, rhs: np.ndarray) -> tuple[np.ndarray, int, bool]:
+    """Return a mass-balance acceleration without assuming ``M`` is invertible.
+
+    CalculiX's one-point C3D4 mass preserves total translational mass but is
+    rank deficient at the nodal DOF level.  A direct sparse solve of ``M a = r``
+    can therefore produce arbitrary huge null-space components.  Diagnostics
+    use the minimum-norm least-squares acceleration and report the rank so the
+    result is not mistaken for a unique physical acceleration.
+    """
+
+    dense = mass_matrix.toarray() if hasattr(mass_matrix, "toarray") else np.asarray(mass_matrix, dtype=float)
+    rhs_arr = np.asarray(rhs, dtype=float).reshape(-1)
+    solution, _residuals, rank, _singular_values = np.linalg.lstsq(dense, rhs_arr, rcond=None)
+    return np.asarray(solution, dtype=float), int(rank), bool(rank < dense.shape[0])
+
+
 def _sparse_data_norm(matrix: Any) -> float:
     data = getattr(matrix, "data", np.asarray([], dtype=float))
     return float(np.linalg.norm(np.asarray(data, dtype=float))) if len(data) else 0.0
@@ -2001,6 +2113,8 @@ def hht_state_definition_diagnostics(
         contact,
         gravity=model.gravity,
         initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+        dt=model.dt,
+        alpha=model.hht_alpha,
     )
     _static_residual0, static_tangent0 = static_residual_and_tangent(
         mechanics,
@@ -2421,6 +2535,8 @@ def hht_residual_tangent_diagnostics(
         contact,
         gravity=model.gravity,
         initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+        dt=model.dt,
+        alpha=model.hht_alpha,
     )
     rows: list[Row] = []
     current_time = 0.0
@@ -2506,6 +2622,7 @@ def _hht_probe_row(
     contact_mode: str,
     details: str,
 ) -> Row:
+    _begin_contact_increment_for_validation(contact, state_n.x)
     residual, tangent, static_residual, static_tangent = _hht_dynamic_residual_and_tangent(
         mechanics,
         contact,
@@ -2730,8 +2847,9 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 quadrature="calculix_7",
                 release_tolerance_scale=1.0e-3,
                 contact_element_weight=1,
+                freeze_first_newton_iteration=True,
             ),
-            "clean-room persistent CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; stored projection/normal clearance; hard linear overclosure; rigid plane query",
+            "clean-room persistent CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; stored projection/normal clearance; first Newton iteration keeps the previous contact set; hard linear overclosure; rigid plane query",
         )
     if contact_mode == "calculix_c3d4_f2f":
         return (
@@ -2764,8 +2882,9 @@ def _make_contact_geometry(model: DropModel, contact_mode: str) -> tuple[Contact
                 quadrature="calculix_7",
                 release_tolerance_scale=1.0e-3,
                 contact_element_weight=1,
+                freeze_first_newton_iteration=True,
             ),
-            "clean-room persistent CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; stored projection/normal clearance; hard linear overclosure; dynamic FEM-SDF plane query",
+            "clean-room persistent CalculiX-style C3D4 face-to-face mode; seven slave-face integration springs; stored projection/normal clearance; first Newton iteration keeps the previous contact set; hard linear overclosure; dynamic FEM-SDF plane query",
         )
     if contact_mode == "dynamic_sdf_calculix_f2f":
         master_x, master_faces = _rigid_plane_master_surface(model)
@@ -2869,17 +2988,34 @@ def _snapshot_contact_lifecycle(contact: ContactGeometry) -> Any:
     lifecycle = getattr(contact, "lifecycle", None)
     if lifecycle is None or not hasattr(lifecycle, "snapshot"):
         return None
-    return (lifecycle.snapshot(), bool(getattr(contact, "cutback_retry", False)))
+    iteration_state = {
+        name: dict(getattr(contact, name)) if isinstance(getattr(contact, name), dict) else getattr(contact, name)
+        for name in ("newton_iteration", "increment_reference_spring_areas")
+        if hasattr(contact, name)
+    }
+    return (lifecycle.snapshot(), bool(getattr(contact, "cutback_retry", False)), iteration_state)
 
 
 def _restore_contact_lifecycle(contact: ContactGeometry, snapshot: Any) -> None:
     if snapshot is None:
         return
-    lifecycle_snapshot, cutback_retry = snapshot
+    if len(snapshot) == 2:
+        lifecycle_snapshot, cutback_retry = snapshot
+        iteration_state = {}
+    else:
+        lifecycle_snapshot, cutback_retry, iteration_state = snapshot
     lifecycle = getattr(contact, "lifecycle", None)
     if lifecycle is not None and hasattr(lifecycle, "restore"):
         lifecycle.restore(lifecycle_snapshot)
     _set_contact_cutback_retry(contact, bool(cutback_retry))
+    for name, value in iteration_state.items():
+        setattr(contact, name, value)
+
+
+def _begin_contact_increment_for_validation(contact: ContactGeometry, x_current: np.ndarray) -> None:
+    setter = getattr(contact, "begin_increment", None)
+    if callable(setter):
+        setter(np.asarray(x_current, dtype=float))
 
 
 def _set_contact_cutback_retry(contact: ContactGeometry, value: bool) -> None:
@@ -2984,13 +3120,53 @@ def _min_float(rows: list[Row], key: str) -> float | None:
 
 
 def _time_series_l2_relative(reference_rows: list[Row], candidate_rows: list[Row], key: str) -> float | str:
-    ref_times = np.asarray([float(row["time"]) for row in reference_rows], dtype=float)
-    cand_times = np.asarray([float(row["time"]) for row in candidate_rows], dtype=float)
+    reference_numeric = [row for row in reference_rows if _optional_float(row.get(key, "")) is not None]
+    candidate_numeric = [row for row in candidate_rows if _optional_float(row.get(key, "")) is not None]
+    ref_times = np.asarray([float(row["time"]) for row in reference_numeric], dtype=float)
+    cand_times = np.asarray([float(row["time"]) for row in candidate_numeric], dtype=float)
     if ref_times.size == 0 or cand_times.size == 0:
         return ""
-    ref_values = np.asarray([float(row[key]) for row in reference_rows], dtype=float)
-    cand_values = np.interp(ref_times, cand_times, np.asarray([float(row[key]) for row in candidate_rows], dtype=float))
+    ref_values = np.asarray([float(row[key]) for row in reference_numeric], dtype=float)
+    cand_values = np.interp(
+        ref_times,
+        cand_times,
+        np.asarray([float(row[key]) for row in candidate_numeric], dtype=float),
+    )
     return float(np.linalg.norm(cand_values - ref_values) / max(np.linalg.norm(ref_values), 1.0e-30))
+
+
+def _active_contact_time_series_l2_relative(
+    reference_rows: list[Row],
+    candidate_rows: list[Row],
+    key: str,
+) -> float | str:
+    """Return L2 relative error for a contact quantity on active reference times.
+
+    CalculiX CDIS is only printed for generated contact elements.  Before
+    contact, SFC's sample-based contact geometry has no active samples and
+    reports a neutral sample gap of zero, while geometric surface-centroid
+    gaps remain positive.  Comparing those two pre-contact conventions as a
+    full time series creates a false near-one error, so CDIS-style gap metrics
+    are restricted to reference rows where contact is active.
+    """
+
+    active_reference_rows = [
+        row
+        for row in reference_rows
+        if _row_has_active_contact(row) and row.get(key, "") not in {"", None}
+    ]
+    if not active_reference_rows:
+        return ""
+    return _time_series_l2_relative(active_reference_rows, candidate_rows, key)
+
+
+def _row_has_active_contact(row: Row) -> bool:
+    for key in ("active_contact_count", "calculix_contact_count", "calculix_equivalent_contact_count"):
+        value = _optional_float(row.get(key, ""))
+        if value is not None and value > 0.0:
+            return True
+    penetration = _optional_float(row.get("max_penetration", ""))
+    return bool(penetration is not None and penetration > 0.0)
 
 
 def compare_contact_histories(
@@ -3040,7 +3216,12 @@ def compare_contact_histories(
         "max_cnum_equivalent_sfc": "" if sfc_max_cnum is None else sfc_max_cnum,
         "max_cnum_abs_error": "" if cx_max_cnum is None or sfc_max_cnum is None else abs(sfc_max_cnum - cx_max_cnum),
         "z_cm_l2_rel_error": _time_series_l2_relative(calculix_rows, sfc_rows, "z_cm"),
-        "min_gap_l2_rel_error": _time_series_l2_relative(calculix_rows, sfc_rows, "min_gap"),
+        "min_gap_l2_rel_error": _active_contact_time_series_l2_relative(calculix_rows, sfc_rows, "min_gap"),
+        "surface_centroid_min_gap_l2_rel_error": _time_series_l2_relative(
+            calculix_rows,
+            sfc_rows,
+            "surface_centroid_min_gap",
+        ),
         "rebound_height_calculix": cx_rebound.get("max_rebound_z", ""),
         "rebound_height_sfc": sfc_rebound.get("max_rebound_z", ""),
         "contact_zone_max_vm_calculix": cx_contact_vm,

@@ -308,6 +308,42 @@ def test_persistent_plane_geometry_reports_generated_count_separately() -> None:
     assert response.normal_force == pytest.approx(5.0)
 
 
+def test_persistent_plane_geometry_can_freeze_first_newton_iteration_contact_set() -> None:
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    x_open = np.asarray([[0.0, 0.0, 0.1], [1.0, 0.0, 0.1], [0.0, 1.0, 0.1]], dtype=float)
+    x_penetrating = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    geometry = PersistentCalculixC3D4FaceToFacePlaneContactGeometry(
+        faces,
+        plane_z=0.0,
+        stiffness=100.0,
+        freeze_first_newton_iteration=True,
+    )
+
+    geometry.begin_newton_iteration(1)
+    assert geometry.contact_springs(x_open) == []
+    assert geometry.contact_springs(x_penetrating) == []
+    assert geometry.generated_contact_count == 0
+
+    geometry.begin_newton_iteration(2)
+    generated = geometry.contact_springs(x_penetrating)
+
+    assert len(generated) == 1
+    assert geometry.generated_contact_count == 1
+
+
+def test_persistent_plane_geometry_uses_increment_start_spring_area() -> None:
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    x_start = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    x_stretched = np.asarray([[0.0, 0.0, -0.1], [2.0, 0.0, -0.1], [0.0, 2.0, -0.1]], dtype=float)
+    geometry = PersistentCalculixC3D4FaceToFacePlaneContactGeometry(faces, plane_z=0.0, stiffness=100.0)
+
+    geometry.begin_increment(x_start)
+    spring = geometry.contact_springs(x_stretched)[0]
+
+    assert spring.spring_area == pytest.approx(0.5)
+    assert assemble_contact_response(geometry.samples(x_stretched), n_nodes=3).normal_force == pytest.approx(5.0)
+
+
 def test_persistent_plane_geometry_can_generate_positive_clearance_without_force() -> None:
     x = np.asarray([[0.0, 0.0, 0.1], [1.0, 0.0, 0.1], [0.0, 1.0, 0.1]], dtype=float)
     faces = np.asarray([[0, 1, 2]], dtype=np.int64)

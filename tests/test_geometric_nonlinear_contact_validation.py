@@ -17,6 +17,7 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _calculix_iterations_per_increment,
     _calculix_contact_print_quadrature_index,
     _calculix_contact_rows_from_dat,
+    _active_contact_time_series_l2_relative,
     _per_face_plane_contact_rows,
     _parse_calculix_dat_contact_elements,
     _parse_calculix_dat_contact_print_raw_rows,
@@ -217,6 +218,8 @@ def test_calculix_contact_print_rows_are_mapped_to_quadrature_order() -> None:
     rows = _calculix_contact_rows_from_dat(model, parsed, replay)
 
     assert _calculix_contact_print_quadrature_index(1) == 2
+    assert _calculix_contact_print_quadrature_index(2, {0, 1, 2, 4, 5, 6}) == 1
+    assert _calculix_contact_print_quadrature_index(3, {0, 1, 2, 4, 5, 6}) == 6
     assert rows[0]["contact_element_index"] == 2
     assert rows[0]["calculix_raw_contact_element_index"] == 1
     assert rows[0]["face_area"] == replay[0.004][(int(element_id), face_number_int, 2)]["face_area"]
@@ -276,6 +279,19 @@ def test_contact_replay_metrics_uses_calculix_shell_offset_and_cnum_weight() -> 
     assert offset_metrics["contact_energy"] > midplane_metrics["contact_energy"]
 
 
+def test_active_contact_gap_l2_ignores_precontact_gap_conventions() -> None:
+    reference = [
+        {"time": 0.0, "min_gap": 0.1, "max_penetration": 0.0, "active_contact_count": 0},
+        {"time": 1.0, "min_gap": -0.01, "max_penetration": 0.01, "active_contact_count": 7},
+    ]
+    candidate = [
+        {"time": 0.0, "min_gap": 0.0},
+        {"time": 1.0, "min_gap": -0.01001},
+    ]
+
+    assert _active_contact_time_series_l2_relative(reference, candidate, "min_gap") < 2.0e-3
+
+
 def test_one_step_calculix_state_diagnostics_decomposes_terms() -> None:
     model = _contact_model(resolution=1, duration=0.008, dt=0.004)
     u1 = np.zeros_like(model.nodes)
@@ -307,6 +323,14 @@ def test_one_step_calculix_state_diagnostics_decomposes_terms() -> None:
     assert float(rows[-1]["sfc_hht_required_mass_term_norm_at_calculix_state"]) >= 0.0
     assert float(rows[-1]["sfc_hht_force_balance_acceleration_norm_at_calculix_state"]) >= 0.0
     assert float(rows[-1]["sfc_hht_force_balance_vs_reconstructed_acceleration_rel"]) >= 0.0
+    assert rows[-1]["mass_matrix_rank_deficient"] == "true"
+    assert rows[-1]["force_balance_acceleration_definition"] == (
+        "minimum_norm_least_squares_for_rank_deficient_calculix_c3d4_mass"
+    )
+    assert rows[-1]["raw_dominant_one_step_difference_source"] == "acceleration"
+    assert rows[-1]["acceleration_difference_interpretation"] == (
+        "rank_deficient_mass_nullspace_not_a_unique_balance_variable"
+    )
 
 
 def test_hht_state_definition_diagnostics_reports_precision_and_initial_state() -> None:

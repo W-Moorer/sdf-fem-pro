@@ -7,7 +7,7 @@ per-contact output:
 
 - a seven-point triangular rule for the strict CalculiX-aligned validation
   modes, with the centroid mode retained as a small diagnostic variant;
-- current slave-face area as the spring area;
+- increment-start slave-face area as the spring area;
 - hard linear pressure-overclosure response;
 - a contact-spring-element style diagnostic record with persistent stored
   master projection and normal.
@@ -758,8 +758,11 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
     release_tolerance_scale: float = 0.0
     allow_positive_clearance_generation: bool = False
     contact_element_weight: int | None = None
+    freeze_first_newton_iteration: bool = False
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
+    newton_iteration: int = 0
+    increment_reference_spring_areas: dict[tuple[int, int], float] | None = None
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
@@ -783,6 +786,17 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Update lifecycle and return generated springs."""
 
+        assert self.lifecycle is not None
+        if self.freeze_first_newton_iteration and int(self.newton_iteration) == 1:
+            return [
+                _plane_spring_from_stored_projection(
+                    spring,
+                    x_current,
+                    self.faces,
+                    spring_area=self._increment_spring_area(spring),
+                )
+                for spring in (self.lifecycle.active_springs or {}).values()
+            ]
         stateless = CalculixC3D4FaceToFacePlaneContactGeometry(
             self.faces,
             self.plane_z,
@@ -791,8 +805,10 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
             self.quadrature,
             self.contact_element_weight,
         )
-        assert self.lifecycle is not None
-        candidates = stateless.contact_springs(x_current)
+        candidates = [
+            _spring_with_area(spring, self._increment_spring_area(spring))
+            for spring in stateless.contact_springs(x_current)
+        ]
         previous = self.lifecycle.active_springs or {}
         if previous:
             stored_candidates: list[CalculixF2FContactSpring] = []
@@ -801,7 +817,14 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
                 if previous_spring is None:
                     stored_candidates.append(spring)
                 else:
-                    stored_candidates.append(_plane_spring_from_stored_projection(previous_spring, x_current, self.faces))
+                    stored_candidates.append(
+                        _plane_spring_from_stored_projection(
+                            previous_spring,
+                            x_current,
+                            self.faces,
+                            spring_area=self._increment_spring_area(previous_spring),
+                        )
+                    )
             candidates = stored_candidates
         return self.lifecycle.update(candidates, cutback=self.cutback_retry)
 
@@ -809,6 +832,33 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
         """Set whether this evaluation is part of a cutback retry."""
 
         self.cutback_retry = bool(value)
+
+    def begin_newton_iteration(self, iteration: int) -> None:
+        """Set the current Newton iteration for CalculiX-style contact updates."""
+
+        self.newton_iteration = int(iteration)
+
+    def begin_increment(self, x_current: np.ndarray) -> None:
+        """Store CalculiX-style spring areas at the accepted increment start."""
+
+        stateless = CalculixC3D4FaceToFacePlaneContactGeometry(
+            self.faces,
+            self.plane_z,
+            self.stiffness,
+            self.normal,
+            self.quadrature,
+            self.contact_element_weight,
+        )
+        self.increment_reference_spring_areas = {
+            _spring_lifecycle_key(spring): float(spring.spring_area)
+            for spring in stateless.contact_springs(x_current)
+        }
+        self.newton_iteration = 0
+
+    def _increment_spring_area(self, spring: CalculixF2FContactSpring) -> float:
+        if self.increment_reference_spring_areas is None:
+            return float(spring.spring_area)
+        return float(self.increment_reference_spring_areas.get(_spring_lifecycle_key(spring), spring.spring_area))
 
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
         """Yield samples from generated springs."""
@@ -890,8 +940,11 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
     release_tolerance_scale: float = 0.0
     allow_positive_clearance_generation: bool = False
     contact_element_weight: int | None = None
+    freeze_first_newton_iteration: bool = False
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
+    newton_iteration: int = 0
+    increment_reference_spring_areas: dict[tuple[int, int], float] | None = None
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
@@ -915,6 +968,18 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
     def contact_springs(self, x_current: np.ndarray) -> list[CalculixF2FContactSpring]:
         """Update lifecycle and return generated springs."""
 
+        assert self.lifecycle is not None
+        if self.freeze_first_newton_iteration and int(self.newton_iteration) == 1:
+            return [
+                _sdf_spring_from_stored_master_projection(
+                    spring,
+                    x_current,
+                    self.slave_faces,
+                    self.master_x_current,
+                    spring_area=self._increment_spring_area(spring),
+                )
+                for spring in (self.lifecycle.active_springs or {}).values()
+            ]
         stateless = CalculixC3D4FaceToFaceSDFContactGeometry(
             self.slave_faces,
             self.master_x_current,
@@ -925,8 +990,10 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
             self.quadrature,
             self.contact_element_weight,
         )
-        candidates = stateless.contact_springs(x_current)
-        assert self.lifecycle is not None
+        candidates = [
+            _spring_with_area(spring, self._increment_spring_area(spring))
+            for spring in stateless.contact_springs(x_current)
+        ]
         previous = self.lifecycle.active_springs or {}
         if previous:
             candidate_by_key = {_spring_lifecycle_key(spring): spring for spring in candidates}
@@ -942,6 +1009,7 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
                             x_current,
                             self.slave_faces,
                             self.master_x_current,
+                            spring_area=self._increment_spring_area(previous_spring),
                         )
                     )
             candidates = stored_candidates
@@ -951,6 +1019,35 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
         """Set whether this evaluation is part of a cutback retry."""
 
         self.cutback_retry = bool(value)
+
+    def begin_newton_iteration(self, iteration: int) -> None:
+        """Set the current Newton iteration for CalculiX-style contact updates."""
+
+        self.newton_iteration = int(iteration)
+
+    def begin_increment(self, x_current: np.ndarray) -> None:
+        """Store CalculiX-style slave spring areas at the increment start."""
+
+        stateless = CalculixC3D4FaceToFaceSDFContactGeometry(
+            self.slave_faces,
+            self.master_x_current,
+            self.master_faces,
+            self.candidate_provider,
+            self.stiffness,
+            self.master_element_node_count,
+            self.quadrature,
+            self.contact_element_weight,
+        )
+        self.increment_reference_spring_areas = {
+            _spring_lifecycle_key(spring): float(spring.spring_area)
+            for spring in stateless.contact_springs(x_current)
+        }
+        self.newton_iteration = 0
+
+    def _increment_spring_area(self, spring: CalculixF2FContactSpring) -> float:
+        if self.increment_reference_spring_areas is None:
+            return float(spring.spring_area)
+        return float(self.increment_reference_spring_areas.get(_spring_lifecycle_key(spring), spring.spring_area))
 
     def samples(self, x_current: np.ndarray) -> Iterable[ContactSample]:
         """Yield samples from generated springs."""
@@ -1112,6 +1209,8 @@ def _plane_spring_from_stored_projection(
     previous: CalculixF2FContactSpring,
     x_current: np.ndarray,
     faces: np.ndarray,
+    *,
+    spring_area: float | None = None,
 ) -> CalculixF2FContactSpring:
     """Update a rigid-plane spring using stored projection and normal data."""
 
@@ -1119,7 +1218,6 @@ def _plane_spring_from_stored_projection(
     face_array = _validate_faces(faces, slave_x.shape[0])
     face = face_array[int(previous.slave_face_index)]
     tri = slave_x[face]
-    area = _triangle_area(tri)
     point = np.asarray(previous.slave_weights, dtype=float) @ tri
     projection = previous.master_projection
     if projection is None:
@@ -1128,7 +1226,6 @@ def _plane_spring_from_stored_projection(
     else:
         normal = _unit_normal(np.asarray(previous.normal, dtype=float))
         projection = np.asarray(projection, dtype=float)
-    area_weight = _stored_quadrature_area_weight(previous)
     return CalculixF2FContactSpring(
         slave_face_index=int(previous.slave_face_index),
         slave_nodes=np.asarray(face, dtype=np.int64),
@@ -1137,7 +1234,7 @@ def _plane_spring_from_stored_projection(
         master_nodes=np.asarray(previous.master_nodes, dtype=np.int64).copy(),
         master_weights=np.asarray(previous.master_weights, dtype=float).copy(),
         normal=normal,
-        spring_area=float(area * area_weight),
+        spring_area=float(previous.spring_area if spring_area is None else spring_area),
         clearance=float((point - projection) @ normal),
         slave_quadrature_index=int(previous.slave_quadrature_index),
         master_element_node_count=previous.master_element_node_count,
@@ -1151,6 +1248,8 @@ def _sdf_spring_from_stored_master_projection(
     x_current: np.ndarray,
     slave_faces: np.ndarray,
     master_x_current: np.ndarray,
+    *,
+    spring_area: float | None = None,
 ) -> CalculixF2FContactSpring:
     """Update a persistent SDF spring using CalculiX-style stored projection data.
 
@@ -1167,7 +1266,6 @@ def _sdf_spring_from_stored_master_projection(
     master_x = _validate_points(master_x_current)
     face = faces[int(previous.slave_face_index)]
     tri = slave_x[face]
-    area = _triangle_area(tri)
     point = np.asarray(previous.slave_weights, dtype=float) @ tri
     master_nodes = np.asarray(previous.master_nodes, dtype=np.int64)
     master_weights = np.asarray(previous.master_weights, dtype=float)
@@ -1184,12 +1282,30 @@ def _sdf_spring_from_stored_master_projection(
         master_nodes=master_nodes.copy(),
         master_weights=master_weights.copy(),
         normal=normal,
-        spring_area=float(area * _stored_quadrature_area_weight(previous)),
+        spring_area=float(previous.spring_area if spring_area is None else spring_area),
         clearance=float((point - projection) @ normal),
         slave_quadrature_index=int(previous.slave_quadrature_index),
         master_element_node_count=previous.master_element_node_count,
         master_projection=projection.copy(),
         contact_element_weight=previous.contact_element_weight,
+    )
+
+
+def _spring_with_area(spring: CalculixF2FContactSpring, spring_area: float) -> CalculixF2FContactSpring:
+    return CalculixF2FContactSpring(
+        slave_face_index=int(spring.slave_face_index),
+        slave_nodes=np.asarray(spring.slave_nodes, dtype=np.int64).copy(),
+        slave_weights=np.asarray(spring.slave_weights, dtype=float).copy(),
+        master_face_index=int(spring.master_face_index),
+        master_nodes=np.asarray(spring.master_nodes, dtype=np.int64).copy(),
+        master_weights=np.asarray(spring.master_weights, dtype=float).copy(),
+        normal=np.asarray(spring.normal, dtype=float).copy(),
+        spring_area=float(spring_area),
+        clearance=float(spring.clearance),
+        slave_quadrature_index=int(spring.slave_quadrature_index),
+        master_element_node_count=spring.master_element_node_count,
+        master_projection=None if spring.master_projection is None else np.asarray(spring.master_projection, dtype=float).copy(),
+        contact_element_weight=spring.contact_element_weight,
     )
 
 

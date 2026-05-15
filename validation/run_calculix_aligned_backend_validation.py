@@ -98,7 +98,7 @@ def mass_matrix_checks(resolutions: list[int]) -> list[Row]:
             component_errors.append(abs(float(ones @ (model.mass_matrix @ ones)) - total_mass))
         rows.append(
             {
-                "case": "consistent_tet4_mass",
+                "case": "calculix_c3d4_one_point_mass",
                 "resolution": resolution,
                 "nodes": model.n_nodes,
                 "elements": model.elements.shape[0],
@@ -187,7 +187,14 @@ def freefall_dynamics_checks(*, quick: bool) -> list[Row]:
     dt_values = [0.004] if quick else [0.004, 0.002, 0.001]
     rows: list[Row] = []
     for dt in dt_values:
-        state, previous = initial_state(model, contact, gravity=gravity, initial_velocity=(0.0, 0.0, v0))
+        state, previous = initial_state(
+            model,
+            contact,
+            gravity=gravity,
+            initial_velocity=(0.0, 0.0, v0),
+            dt=dt,
+            alpha=0.0,
+        )
         z0 = float(np.mean(state.x[:, 2]))
         energy_values = []
         max_z_error = 0.0
@@ -335,7 +342,7 @@ def claim_rows_from(
             "claim": "consistent_mass_backend_check",
             "supported": str(all(row["status"] == "passed" for row in mass_rows)).lower(),
             "evidence_csv": "backend_mass_matrix.csv",
-            "details": "consistent TET4 mass is symmetric and integrates total translational mass",
+            "details": "CalculiX C3D4 one-point mass is symmetric and integrates total translational mass",
         },
         {
             "claim": "stvk_affine_patch_backend_check",

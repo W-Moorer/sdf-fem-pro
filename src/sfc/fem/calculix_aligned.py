@@ -7,7 +7,7 @@ CalculiX-compatible modeling choices where practical:
 - C3D4/TET4 topology.
 - Total-Lagrangian St. Venant-Kirchhoff response for ``*ELASTIC, NLGEOM`` style
   diagnostics.
-- Consistent TET4 mass matrix for direct dynamics alignment.
+- CalculiX C3D4 one-point mass matrix for direct dynamics alignment.
 - HHT/Newmark parameters matching the CalculiX ``*DYNAMIC, ALPHA=...``
   convention.
 - A swappable contact-geometry interface so the contact query can be replaced
@@ -121,7 +121,7 @@ class MechanicsModel:
         X_arr = np.asarray(X, dtype=float)
         elements_arr = np.asarray(elements, dtype=np.int64)
         volumes, grads = tet4_reference_data(X_arr, elements_arr)
-        mass = assemble_consistent_mass(X_arr.shape[0], elements_arr, volumes, density)
+        mass = assemble_calculix_c3d4_mass(X_arr.shape[0], elements_arr, volumes, density)
         return cls(X_arr, elements_arr, float(E), float(nu), float(density), volumes, grads, mass)
 
     @property
@@ -381,6 +381,38 @@ def assemble_consistent_mass(n_nodes: int, elements: np.ndarray, volumes: np.nda
     ).tocsr()
 
 
+def assemble_calculix_c3d4_mass(n_nodes: int, elements: np.ndarray, volumes: np.ndarray, density: float) -> csr_matrix:
+    """Assemble the CalculiX C3D4 one-point mass matrix.
+
+    CalculiX evaluates C3D4 mass with the element's single centroid integration
+    point in the direct dynamic path.  For linear tetrahedra this gives the
+    rank-deficient scalar block ``rho * V / 16 * 1 1^T``.  It preserves total
+    translational mass but differs from the closed-form full consistent TET4
+    mass matrix used elsewhere in the standalone solver.
+    """
+
+    rho = float(density)
+    if rho <= 0.0:
+        raise ValueError("density must be positive")
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    data: list[np.ndarray] = []
+    scalar_template = np.ones((4, 4), dtype=float)
+    for element, volume in zip(elements, volumes, strict=True):
+        dofs = _element_dofs(element)
+        Me = np.kron(rho * float(volume) * scalar_template / 16.0, np.eye(3))
+        rr, cc = np.meshgrid(dofs, dofs, indexing="ij")
+        rows.append(rr.ravel())
+        cols.append(cc.ravel())
+        data.append(Me.ravel())
+    if not data:
+        return csr_matrix((3 * n_nodes, 3 * n_nodes), dtype=float)
+    return coo_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(3 * n_nodes, 3 * n_nodes),
+    ).tocsr()
+
+
 def stvk_internal_response(model: MechanicsModel, x_current: np.ndarray, *, assemble_tangent: bool = True) -> InternalResponse:
     """Return total-Lagrangian StVK internal force and tangent."""
 
@@ -506,6 +538,8 @@ def initial_state(
     *,
     gravity: float,
     initial_velocity: np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
+    dt: float | None = None,
+    alpha: float = -0.05,
 ) -> tuple[MechanicsState, np.ndarray]:
     """Return initial state and static residual for HHT stepping."""
 
@@ -513,7 +547,19 @@ def initial_state(
     velocity[:] = np.asarray(initial_velocity, dtype=float)
     state = MechanicsState(model.X.copy(), velocity, np.zeros_like(model.X), time=0.0)
     static_state = static_force_state(model, state.x, contact_geometry, gravity=gravity)
-    acceleration = np.asarray(spsolve(model.mass_matrix.tocsc(), -static_state.residual), dtype=float).reshape((-1, 3))
+    if dt is None:
+        initial_matrix = model.mass_matrix
+    else:
+        beta, _gamma = hht_newmark_parameters(alpha)
+        regularized_dt = float(dt) / 10.0
+        initial_matrix = (
+            model.mass_matrix
+            + static_state.tangent * (beta * regularized_dt * regularized_dt * (1.0 + float(alpha)))
+        ).tocsr()
+    acceleration = np.asarray(
+        spsolve(initial_matrix.tocsc(), static_state.calculix_rhs_balance),
+        dtype=float,
+    ).reshape((-1, 3))
     state.a = acceleration
     return state, static_state.calculix_rhs_balance
 
@@ -617,12 +663,14 @@ def hht_step(
     iteration_count = 0
     acceptance_reason = "iteration_limit"
     acceptance_metrics: list[NewtonAcceptanceMetrics] = []
+    _begin_contact_increment(contact_geometry, state.x)
     previous_contact_snapshot = _snapshot_contact_state(contact_geometry)
     previous_energy = evaluate_state(model, state, contact_geometry, gravity=gravity, assemble_tangent=False).total_energy
     _restore_contact_state(contact_geometry, previous_contact_snapshot)
     previous_ram: float | None = None
     previous_active_count: int | None = None
     for iteration in range(max(1, int(max_iterations))):
+        _begin_contact_newton_iteration(contact_geometry, iteration + 1)
         x_guess = model.X + u_guess.reshape((-1, 3))
         static_state = static_force_state(model, x_guess, contact_geometry, gravity=gravity)
         a_guess = c0 * (u_guess - u_pred)
@@ -698,9 +746,14 @@ def _snapshot_contact_state(contact_geometry: ContactGeometry) -> Any:
     lifecycle_snapshot = lifecycle.snapshot() if lifecycle is not None and hasattr(lifecycle, "snapshot") else None
     has_cutback = hasattr(contact_geometry, "cutback_retry")
     cutback_retry = bool(getattr(contact_geometry, "cutback_retry")) if has_cutback else None
-    if lifecycle_snapshot is None and cutback_retry is None:
+    iteration_state = {
+        name: _copy_contact_state_value(getattr(contact_geometry, name))
+        for name in ("newton_iteration", "increment_reference_spring_areas")
+        if hasattr(contact_geometry, name)
+    }
+    if lifecycle_snapshot is None and cutback_retry is None and not iteration_state:
         return None
-    return lifecycle_snapshot, cutback_retry
+    return lifecycle_snapshot, cutback_retry, iteration_state
 
 
 def _restore_contact_state(contact_geometry: ContactGeometry, snapshot: Any) -> None:
@@ -708,7 +761,11 @@ def _restore_contact_state(contact_geometry: ContactGeometry, snapshot: Any) -> 
 
     if snapshot is None:
         return
-    lifecycle_snapshot, cutback_retry = snapshot
+    if len(snapshot) == 2:
+        lifecycle_snapshot, cutback_retry = snapshot
+        iteration_state = {}
+    else:
+        lifecycle_snapshot, cutback_retry, iteration_state = snapshot
     lifecycle = getattr(contact_geometry, "lifecycle", None)
     if lifecycle_snapshot is not None and lifecycle is not None and hasattr(lifecycle, "restore"):
         lifecycle.restore(lifecycle_snapshot)
@@ -718,6 +775,30 @@ def _restore_contact_state(contact_geometry: ContactGeometry, snapshot: Any) -> 
             setter(bool(cutback_retry))
         elif hasattr(contact_geometry, "cutback_retry"):
             setattr(contact_geometry, "cutback_retry", bool(cutback_retry))
+    for name, value in iteration_state.items():
+        setattr(contact_geometry, name, value)
+
+
+def _begin_contact_newton_iteration(contact_geometry: ContactGeometry, iteration: int) -> None:
+    """Notify validation contact geometries of the current Newton iteration."""
+
+    setter = getattr(contact_geometry, "begin_newton_iteration", None)
+    if callable(setter):
+        setter(int(iteration))
+
+
+def _begin_contact_increment(contact_geometry: ContactGeometry, x_current: np.ndarray) -> None:
+    """Notify validation contact geometries that a new increment is starting."""
+
+    setter = getattr(contact_geometry, "begin_increment", None)
+    if callable(setter):
+        setter(np.asarray(x_current, dtype=float))
+
+
+def _copy_contact_state_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    return value
 
 
 def _newton_acceptance_metrics(
