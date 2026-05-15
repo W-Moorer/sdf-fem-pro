@@ -119,6 +119,7 @@ class CalculixF2FLifecycleEvent:
     persists: bool = False
     cutback_persisted: bool = False
     candidate_valid: bool = True
+    positive_clearance_allowed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +134,17 @@ class CalculixContactLifecycleDecision:
     persists: bool
     cutback_persisted: bool
     release_tolerance: float
+    positive_clearance_allowed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CalculixStaticClearanceRamp:
+    """Static-step clearance adjustment state for initial overclosure."""
+
+    adjusted_clearance: float
+    springarea_offset: float
+    initialized_offset: bool
+    small_gap_closed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +183,7 @@ class CalculixF2FContactLifecycle:
     activation_tolerance: float = 0.0
     release_tolerance: float = 0.0
     release_tolerance_scale: float = 0.0
+    allow_positive_clearance_generation: bool = False
     keep_previous_on_cutback: bool = True
     active_springs: dict[tuple[int, int], CalculixF2FContactSpring] | None = None
     known_spring_keys: set[tuple[int, int]] | None = None
@@ -208,6 +221,7 @@ class CalculixF2FContactLifecycle:
                 activation_tolerance=float(self.activation_tolerance),
                 release_tolerance=float(self.release_tolerance),
                 release_tolerance_scale=float(self.release_tolerance_scale),
+                allow_positive_clearance_generation=bool(self.allow_positive_clearance_generation),
                 cutback=bool(cutback),
                 keep_previous_on_cutback=bool(self.keep_previous_on_cutback),
             )
@@ -229,6 +243,7 @@ class CalculixF2FContactLifecycle:
                     persists=decision.persists,
                     cutback_persisted=decision.cutback_persisted,
                     candidate_valid=decision.candidate_valid,
+                    positive_clearance_allowed=decision.positive_clearance_allowed,
                 )
             )
 
@@ -243,6 +258,7 @@ class CalculixF2FContactLifecycle:
                 activation_tolerance=float(self.activation_tolerance),
                 release_tolerance=float(self.release_tolerance),
                 release_tolerance_scale=float(self.release_tolerance_scale),
+                allow_positive_clearance_generation=bool(self.allow_positive_clearance_generation),
                 cutback=bool(cutback),
                 keep_previous_on_cutback=bool(self.keep_previous_on_cutback),
                 candidate_valid=False,
@@ -263,6 +279,7 @@ class CalculixF2FContactLifecycle:
                     persists=decision.persists,
                     cutback_persisted=decision.cutback_persisted,
                     candidate_valid=False,
+                    positive_clearance_allowed=decision.positive_clearance_allowed,
                 )
             )
 
@@ -385,6 +402,7 @@ def calculix_contact_lifecycle_decision(
     activation_tolerance: float = 0.0,
     release_tolerance: float = 0.0,
     release_tolerance_scale: float = 0.0,
+    allow_positive_clearance_generation: bool = False,
     cutback: bool = False,
     keep_previous_on_cutback: bool = True,
     candidate_valid: bool = True,
@@ -411,14 +429,22 @@ def calculix_contact_lifecycle_decision(
             persists=False,
             cutback_persisted=cutback_persists,
             release_tolerance=float(release),
+            positive_clearance_allowed=False,
         )
     penetrates = gap <= float(activation_tolerance)
     force_active = gap <= 0.0
+    positive_allowed = bool(allow_positive_clearance_generation and gap > float(activation_tolerance))
     persists = bool(was_generated and gap <= release)
     cutback_persists = bool(cutback and keep_previous_on_cutback and was_generated)
-    generated = bool(penetrates or persists or cutback_persists)
+    generated = bool(penetrates or positive_allowed or persists or cutback_persists)
     if generated:
-        if penetrates and not was_generated and was_ever_generated:
+        if positive_allowed and not was_generated and was_ever_generated:
+            status = "reactivated_positive_clearance"
+        elif positive_allowed and not was_generated:
+            status = "generated_positive_clearance"
+        elif positive_allowed and was_generated:
+            status = "persisted_positive_clearance"
+        elif penetrates and not was_generated and was_ever_generated:
             status = "reactivated"
         elif penetrates and not was_generated:
             status = "generated"
@@ -439,6 +465,55 @@ def calculix_contact_lifecycle_decision(
         persists=bool(persists),
         cutback_persisted=bool(cutback_persists),
         release_tolerance=float(release),
+        positive_clearance_allowed=bool(positive_allowed),
+    )
+
+
+def calculix_static_clearance_ramp(
+    *,
+    clearance: float,
+    theta: float,
+    reltime: float,
+    pressure_stiffness: float,
+    previous_springarea_offset: float = 0.0,
+    initialize: bool = False,
+    initial_adjustment_allowed: bool = False,
+) -> CalculixStaticClearanceRamp:
+    """Return CalculiX-style static initial-overclosure clearance adjustment.
+
+    In the scoped F2F branch, the first static/tied search stores an initial
+    overclosure offset in ``springarea(2)``.  Later residual evaluations use the
+    stored offset and reduce it with the load-step time factor.  Small positive
+    clearances below ``1 / pressure_stiffness`` are snapped to zero during the
+    same initial adjustment pass.
+    """
+
+    gap = float(clearance)
+    theta_value = float(theta)
+    rel = float(reltime)
+    stiffness = float(pressure_stiffness)
+    if stiffness <= 0.0:
+        raise ValueError("pressure_stiffness must be positive")
+    if abs(1.0 - theta_value) <= 1.0e-15:
+        raise ValueError("theta must not equal 1")
+
+    offset = float(previous_springarea_offset)
+    initialized = False
+    small_closed = False
+    if initialize and initial_adjustment_allowed:
+        if gap < 0.0:
+            offset = gap / (1.0 - theta_value)
+            initialized = True
+        elif gap < 1.0 / stiffness:
+            gap = 0.0
+            small_closed = True
+
+    adjusted = gap - offset * (1.0 - rel)
+    return CalculixStaticClearanceRamp(
+        adjusted_clearance=float(adjusted),
+        springarea_offset=float(offset),
+        initialized_offset=bool(initialized),
+        small_gap_closed=bool(small_closed),
     )
 
 
@@ -540,13 +615,17 @@ class PersistentCalculixC3D4FaceToFacePlaneContactGeometry:
     normal: np.ndarray | None = None
     quadrature: str = "centroid"
     release_tolerance_scale: float = 0.0
+    allow_positive_clearance_generation: bool = False
     contact_element_weight: int | None = None
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
-            self.lifecycle = CalculixF2FContactLifecycle(release_tolerance_scale=float(self.release_tolerance_scale))
+            self.lifecycle = CalculixF2FContactLifecycle(
+                release_tolerance_scale=float(self.release_tolerance_scale),
+                allow_positive_clearance_generation=bool(self.allow_positive_clearance_generation),
+            )
 
     @property
     def generated_contact_count(self) -> int:
@@ -668,13 +747,17 @@ class PersistentCalculixC3D4FaceToFaceSDFContactGeometry:
     master_element_node_count: int | None = None
     quadrature: str = "centroid"
     release_tolerance_scale: float = 0.0
+    allow_positive_clearance_generation: bool = False
     contact_element_weight: int | None = None
     lifecycle: CalculixF2FContactLifecycle | None = None
     cutback_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.lifecycle is None:
-            self.lifecycle = CalculixF2FContactLifecycle(release_tolerance_scale=float(self.release_tolerance_scale))
+            self.lifecycle = CalculixF2FContactLifecycle(
+                release_tolerance_scale=float(self.release_tolerance_scale),
+                allow_positive_clearance_generation=bool(self.allow_positive_clearance_generation),
+            )
 
     @property
     def generated_contact_count(self) -> int:

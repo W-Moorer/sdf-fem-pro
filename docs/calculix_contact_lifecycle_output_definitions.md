@@ -35,6 +35,11 @@ contact spring elements:
   point search for every residual evaluation.
 - In dynamic analysis, positive clearance can drop a contact spring unless tied
   or persistent-contact branches keep it active for convergence control.
+- For special contact-type branches, a detected master face can still generate
+  a contact spring at positive clearance.  The SFC validation helper records
+  this as `generated_positive_clearance` or `persisted_positive_clearance`.
+  The scoped hard-linear pressure law still produces no tensile force for that
+  open spring.
 - A missing master-face candidate corresponds to `isol = 0`.  The SFC
   validation layer now treats an empty SDF candidate list as a no-master-face
   event instead of a query failure; during a cutback retry, a previously
@@ -60,6 +65,13 @@ read from `pmastsurf(4:6)`.  Initial static overclosure correction uses the
 stored `springarea(2)` term and the load-step ramp.  This is distinct from a
 fresh dynamic-SDF closest-point query at every row, where the closest face,
 barycentric coordinates, and normal may change continuously.
+
+The clean-room helper `calculix_static_clearance_ramp` now captures this scoped
+static branch: initial negative clearance stores a ramped offset analogous to
+`springarea(2)`, small positive initial clearances below
+`1 / pressure_stiffness` are closed to zero, and subsequent clearance uses the
+stored offset with the current load-step time factor.  This helper is diagnostic
+only and does not change the core `src/sfc` dynamic-SDF method.
 
 ## CNUM, CELS, And RF Definitions
 

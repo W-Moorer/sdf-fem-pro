@@ -24,6 +24,7 @@ from validation.calculix_f2f_contact import (
     calculix_equivalent_contact_element_count,
     calculix_contact_lifecycle_decision,
     calculix_hard_linear_spring_law,
+    calculix_static_clearance_ramp,
 )
 
 
@@ -182,6 +183,52 @@ def test_lifecycle_decision_reports_generated_persisted_cutback_and_released_sta
     assert lost_cutback.cutback_persisted
 
 
+def test_lifecycle_decision_can_generate_positive_clearance_contact_type() -> None:
+    generated_open = calculix_contact_lifecycle_decision(
+        clearance=0.03,
+        spring_area=0.25,
+        was_generated=False,
+        allow_positive_clearance_generation=True,
+    )
+    persisted_open = calculix_contact_lifecycle_decision(
+        clearance=0.04,
+        spring_area=0.25,
+        was_generated=True,
+        release_tolerance=0.0,
+        allow_positive_clearance_generation=True,
+    )
+    reactivated_open = calculix_contact_lifecycle_decision(
+        clearance=0.02,
+        spring_area=0.25,
+        was_generated=False,
+        was_ever_generated=True,
+        allow_positive_clearance_generation=True,
+    )
+
+    assert generated_open.status == "generated_positive_clearance"
+    assert generated_open.generated
+    assert generated_open.positive_clearance_allowed
+    assert not generated_open.force_active
+    assert persisted_open.status == "persisted_positive_clearance"
+    assert persisted_open.generated
+    assert not persisted_open.force_active
+    assert reactivated_open.status == "reactivated_positive_clearance"
+    assert reactivated_open.generated
+
+
+def test_lifecycle_can_keep_positive_clearance_springs_without_force() -> None:
+    lifecycle = CalculixF2FContactLifecycle(allow_positive_clearance_generation=True)
+
+    active = lifecycle.update([_spring(clearance=0.02)])
+
+    assert len(active) == 1
+    assert lifecycle.generated_count == 1
+    assert lifecycle.penetrating_count == 0
+    assert lifecycle.events[0].status == "generated_positive_clearance"
+    assert lifecycle.events[0].positive_clearance_allowed
+    assert not lifecycle.events[0].force_active
+
+
 def test_persistent_lifecycle_reports_reactivation_after_release() -> None:
     lifecycle = CalculixF2FContactLifecycle(release_tolerance=0.0)
 
@@ -235,6 +282,25 @@ def test_persistent_plane_geometry_reports_generated_count_separately() -> None:
     assert geometry.generated_contact_count == 1
     assert response.active_count == 1
     assert response.normal_force == pytest.approx(5.0)
+
+
+def test_persistent_plane_geometry_can_generate_positive_clearance_without_force() -> None:
+    x = np.asarray([[0.0, 0.0, 0.1], [1.0, 0.0, 0.1], [0.0, 1.0, 0.1]], dtype=float)
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    geometry = PersistentCalculixC3D4FaceToFacePlaneContactGeometry(
+        faces,
+        plane_z=0.0,
+        stiffness=100.0,
+        allow_positive_clearance_generation=True,
+    )
+
+    response = assemble_contact_response(geometry.samples(x), n_nodes=3)
+
+    assert geometry.generated_contact_count == 1
+    assert response.active_count == 0
+    assert response.normal_force == pytest.approx(0.0)
+    assert geometry.lifecycle is not None
+    assert geometry.lifecycle.events[0].status == "generated_positive_clearance"
 
 
 def test_persistent_sdf_geometry_reuses_stored_master_projection() -> None:
@@ -365,6 +431,52 @@ def test_calculix_hard_linear_spring_law_has_no_tension_and_area_weighted_compre
     assert closed_law.energy == pytest.approx(0.5 * 50.0 * 0.02 * 0.02)
     assert scaled_law.tangent_scale == pytest.approx(25.0)
     assert scaled_law.force_magnitude == pytest.approx(0.5)
+
+
+def test_static_clearance_ramp_stores_initial_overclosure_offset() -> None:
+    ramp = calculix_static_clearance_ramp(
+        clearance=-0.02,
+        theta=0.2,
+        reltime=0.5,
+        pressure_stiffness=1000.0,
+        initialize=True,
+        initial_adjustment_allowed=True,
+    )
+
+    assert ramp.springarea_offset == pytest.approx(-0.025)
+    assert ramp.adjusted_clearance == pytest.approx(-0.0075)
+    assert ramp.initialized_offset
+    assert not ramp.small_gap_closed
+
+
+def test_static_clearance_ramp_closes_small_positive_initial_gap() -> None:
+    ramp = calculix_static_clearance_ramp(
+        clearance=0.0005,
+        theta=0.2,
+        reltime=0.0,
+        pressure_stiffness=1000.0,
+        initialize=True,
+        initial_adjustment_allowed=True,
+    )
+
+    assert ramp.adjusted_clearance == pytest.approx(0.0)
+    assert ramp.springarea_offset == pytest.approx(0.0)
+    assert not ramp.initialized_offset
+    assert ramp.small_gap_closed
+
+
+def test_static_clearance_ramp_reuses_previous_offset_after_initialization() -> None:
+    ramp = calculix_static_clearance_ramp(
+        clearance=0.0,
+        theta=0.2,
+        reltime=0.25,
+        pressure_stiffness=1000.0,
+        previous_springarea_offset=-0.025,
+    )
+
+    assert ramp.adjusted_clearance == pytest.approx(0.01875)
+    assert ramp.springarea_offset == pytest.approx(-0.025)
+    assert not ramp.initialized_offset
 
 
 def test_convergence_heuristic_recommends_cutback_on_oscillation() -> None:
