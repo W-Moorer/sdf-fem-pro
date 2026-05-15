@@ -13,6 +13,7 @@ from sfc.fem.calculix_aligned import (
     hht_newmark_parameters,
     hht_step,
     initial_state,
+    static_force_state,
     static_residual_and_tangent,
     stvk_internal_response,
 )
@@ -116,6 +117,39 @@ def test_hht_step_keeps_contact_geometry_swappable() -> None:
     assert last.reason
     residual, _ = static_residual_and_tangent(model, next_state.x, EmptyContactGeometry(), gravity=9.81)
     assert residual.shape == previous.shape
+
+
+def test_initial_state_returns_calculix_fextini_minus_fini_history() -> None:
+    model = _unit_tet_model()
+    contact = EmptyContactGeometry()
+
+    state, previous = initial_state(model, contact, gravity=9.81)
+    static_state = static_force_state(model, state.x, contact, gravity=9.81)
+
+    assert previous == pytest.approx(static_state.calculix_rhs_balance)
+    assert previous == pytest.approx(-static_state.residual)
+
+
+def test_hht_step_saves_accepted_contact_internal_force_history() -> None:
+    model = _unit_tet_model()
+    contact = PlaneContactGeometry(np.asarray([[0, 2, 1]], dtype=np.int64), plane_z=0.05, stiffness=100.0)
+    state, previous = initial_state(model, contact, gravity=9.81)
+
+    next_state, next_previous, diagnostics = hht_step(
+        model,
+        state,
+        previous,
+        contact,
+        dt=0.001,
+        gravity=9.81,
+        alpha=-0.05,
+    )
+    static_state = static_force_state(model, next_state.x, contact, gravity=9.81)
+
+    assert diagnostics.contact.normal_force > 0.0
+    assert np.linalg.norm(static_state.contact_internal_force) > 0.0
+    assert next_previous == pytest.approx(static_state.calculix_rhs_balance)
+    assert next_previous == pytest.approx(-static_state.residual)
 
 
 def test_hht_step_supports_clean_room_calculix_multicriteria_acceptance() -> None:

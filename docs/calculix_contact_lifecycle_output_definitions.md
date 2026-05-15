@@ -124,8 +124,10 @@ RF/CELS/max-penetration differences are dominated by the coupled trajectory
 after contact, not by a broad-phase/SDF miss or by collapsing multiple
 CalculiX contact rows into a single face row.
 Earlier HHT residual/tangent diagnostics show that the SFC effective tangent,
-contact tangent sign convention, and previous-static residual update are
-finite-difference consistent for the sampled trajectory.
+contact tangent sign convention, and accepted previous-history update are
+finite-difference consistent for the sampled trajectory.  The accepted history
+is stored in the CalculiX `fextini - fini` sign, with contact spring reactions
+included through the internal spring-force contribution to `fini`.
 
 The validation-only persistent dynamic-SDF F2F mode also now preserves the
 generated master face, barycentric weights, and normal for an existing spring,

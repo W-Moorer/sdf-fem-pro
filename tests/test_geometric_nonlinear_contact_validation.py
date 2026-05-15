@@ -405,7 +405,7 @@ def test_hht_residual_tangent_diagnostics_probe_contact_sign_convention() -> Non
 
     assert rows
     row = rows[0]
-    assert row["calculix_calcresidual_sign_convention"] == "sfc_R_is_negative_of_CalculiX_rhs_b"
+    assert row["calculix_calcresidual_sign_convention"] == "sfc_R_is_negative_of_CalculiX_rhs_b_with_fextini_minus_fini_history"
     assert int(row["active_contact_count"]) > 0
     assert float(row["effective_tangent_directional_fd_rel_error"]) < 5.0e-5
     assert float(row["static_tangent_directional_fd_rel_error"]) < 5.0e-5

@@ -74,6 +74,7 @@ from sfc.fem.calculix_aligned import (  # noqa: E402
     hht_newmark_parameters,
     hht_step,
     initial_state,
+    static_force_state,
     static_residual_and_tangent,
 )
 from validation.run_geometric_nonlinear_vtk import (  # noqa: E402
@@ -1087,7 +1088,7 @@ def one_step_calculix_state_diagnostics(
             )
         )
         state = calc_state
-        previous_static = calc_static
+        previous_static = -calc_static
     if not rows:
         return [_one_step_unavailable_row(model, contact_mode, "insufficient_positive_time_steps")]
     return rows
@@ -1730,7 +1731,11 @@ def hht_residual_tangent_diagnostics(
     The probe mirrors the CalculiX `calcresidual.c` sign convention by checking
     the SFC residual form
 
-    `R = M a + (1 + alpha) R_static(u_{n+1}) - alpha R_static(u_n)`
+    `R = M a - (1 + alpha) B_static(u_{n+1}) + alpha B_static(u_n)`
+
+    where `B_static = f_ext - f_int` is the CalculiX `fextini - fini`
+    history sign.  The returned SFC residual is the negative of CalculiX's
+    right-hand side `b`.
 
     against finite differences.  It uses a stateless contact geometry to keep
     the active set deterministic during centered finite differences.
@@ -1877,7 +1882,7 @@ def _hht_probe_row(
         n_nodes=mechanics.n_nodes,
         eps=eps,
     )
-    update_abs = float(np.linalg.norm(accepted_static_residual - static_residual))
+    update_abs = float(np.linalg.norm(accepted_static_residual + static_residual))
     update_rel = update_abs / max(float(np.linalg.norm(static_residual)), 1.0e-30)
     return {
         "case": model.case,
@@ -1897,7 +1902,7 @@ def _hht_probe_row(
         "contact_residual_tangent_directional_fd_rel_error": contact_tangent_error,
         "previous_static_residual_update_abs_error": update_abs,
         "previous_static_residual_update_rel_error": update_rel,
-        "calculix_calcresidual_sign_convention": "sfc_R_is_negative_of_CalculiX_rhs_b",
+        "calculix_calcresidual_sign_convention": "sfc_R_is_negative_of_CalculiX_rhs_b_with_fextini_minus_fini_history",
         "details": details,
     }
 
@@ -1921,15 +1926,19 @@ def _hht_dynamic_residual_and_tangent(
     u_pred = u_n + float(dt) * v_n + float(dt) * float(dt) * (0.5 - beta) * a_n
     u = np.asarray(x_flat, dtype=float) - mechanics.X.reshape(-1)
     a = c0 * (u - u_pred)
-    static_residual, static_tangent = static_residual_and_tangent(
+    force_state = static_force_state(
         mechanics,
         np.asarray(x_flat, dtype=float).reshape((-1, 3)),
         contact,
         gravity=gravity,
     )
-    residual = mechanics.mass_matrix @ a + (1.0 + float(alpha)) * static_residual - float(alpha) * previous_static_residual
-    tangent = (mechanics.mass_matrix * c0 + static_tangent * (1.0 + float(alpha))).tocsr()
-    return np.asarray(residual, dtype=float), tangent, static_residual, static_tangent
+    residual = (
+        mechanics.mass_matrix @ a
+        - (1.0 + float(alpha)) * force_state.calculix_rhs_balance
+        + float(alpha) * np.asarray(previous_static_residual, dtype=float)
+    )
+    tangent = (mechanics.mass_matrix * c0 + force_state.tangent * (1.0 + float(alpha))).tocsr()
+    return np.asarray(residual, dtype=float), tangent, force_state.residual, force_state.tangent
 
 
 def _contact_probe_direction(model: DropModel, n_dofs: int) -> np.ndarray:

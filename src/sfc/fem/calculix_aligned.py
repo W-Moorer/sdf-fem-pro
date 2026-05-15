@@ -173,6 +173,28 @@ class ContactResponse:
     energy: float
 
 
+@dataclass(slots=True)
+class StaticForceState:
+    """Static force bookkeeping in both SFC and CalculiX residual signs.
+
+    ``residual`` is the SFC residual convention used by local tangent checks:
+    ``f_int - f_ext``.  Contact is stored as an internal spring contribution,
+    so ``f_int`` includes ``-f_contact``.
+
+    ``calculix_rhs_balance`` is the CalculiX ``calcresidual.c`` history sign:
+    ``f_ext - f_int``.  It is the quantity stored as ``fextini - fini`` after
+    an accepted increment and used in the HHT alpha history term.
+    """
+
+    residual: np.ndarray
+    calculix_rhs_balance: np.ndarray
+    internal_force: np.ndarray
+    external_force: np.ndarray
+    contact_internal_force: np.ndarray
+    contact_force: np.ndarray
+    tangent: csr_matrix
+
+
 @dataclass(frozen=True, slots=True)
 class NewtonAcceptanceMetrics:
     """Clean-room CalculiX-style Newton acceptance metrics for one iteration."""
@@ -401,10 +423,10 @@ def initial_state(
     velocity = np.zeros_like(model.X)
     velocity[:] = np.asarray(initial_velocity, dtype=float)
     state = MechanicsState(model.X.copy(), velocity, np.zeros_like(model.X), time=0.0)
-    static, _ = static_residual_and_tangent(model, state.x, contact_geometry, gravity=gravity)
-    acceleration = np.asarray(spsolve(model.mass_matrix.tocsc(), -static), dtype=float).reshape((-1, 3))
+    static_state = static_force_state(model, state.x, contact_geometry, gravity=gravity)
+    acceleration = np.asarray(spsolve(model.mass_matrix.tocsc(), -static_state.residual), dtype=float).reshape((-1, 3))
     state.a = acceleration
-    return state, static
+    return state, static_state.calculix_rhs_balance
 
 
 def static_residual_and_tangent(
@@ -416,11 +438,42 @@ def static_residual_and_tangent(
 ) -> tuple[np.ndarray, csr_matrix]:
     """Return ``f_int - f_ext - f_contact`` and its tangent."""
 
+    state = static_force_state(model, x_current, contact_geometry, gravity=gravity)
+    return state.residual, state.tangent
+
+
+def static_force_state(
+    model: MechanicsModel,
+    x_current: np.ndarray,
+    contact_geometry: ContactGeometry,
+    *,
+    gravity: float,
+) -> StaticForceState:
+    """Return static force history with CalculiX-style contact bookkeeping.
+
+    CalculiX face-to-face penalty contact is assembled as generated spring
+    elements.  For the validation backend, the positive ``contact.force`` is
+    the physical reaction force applied to the slave body, while the equivalent
+    internal spring contribution stored in ``fini`` is ``-contact.force``.
+    """
+
     internal = stvk_internal_response(model, x_current, assemble_tangent=True)
     contact = assemble_contact_response(contact_geometry.samples(x_current), model.n_nodes)
-    residual = internal.force.reshape(-1) - _nodal_gravity_loads(model, gravity) - contact.force.reshape(-1)
+    external = _nodal_gravity_loads(model, gravity)
+    contact_force = contact.force.reshape(-1)
+    contact_internal = -contact_force
+    total_internal = internal.force.reshape(-1) + contact_internal
+    residual = total_internal - external
     tangent = (internal.tangent + contact.tangent).tocsr()
-    return residual, tangent
+    return StaticForceState(
+        residual=np.asarray(residual, dtype=float),
+        calculix_rhs_balance=np.asarray(external - total_internal, dtype=float),
+        internal_force=np.asarray(total_internal, dtype=float),
+        external_force=np.asarray(external, dtype=float),
+        contact_internal_force=np.asarray(contact_internal, dtype=float),
+        contact_force=np.asarray(contact_force, dtype=float),
+        tangent=tangent,
+    )
 
 
 def hht_step(
@@ -436,7 +489,13 @@ def hht_step(
     tolerance: float = 1.0e-10,
     acceptance_policy: str = "relative_correction",
 ) -> tuple[MechanicsState, np.ndarray, StepDiagnostics]:
-    """Advance one implicit HHT/Newmark step using Newton iterations."""
+    """Advance one implicit HHT/Newmark step using Newton iterations.
+
+    ``previous_static_residual`` is kept for API compatibility, but its
+    semantics are CalculiX-style ``fextini - fini``.  Contact spring forces are
+    stored in ``fini`` through their internal-force sign, and the returned
+    history vector is recomputed at the accepted state.
+    """
 
     if acceptance_policy not in {"relative_correction", "calculix_multicriteria"}:
         raise ValueError("acceptance_policy must be 'relative_correction' or 'calculix_multicriteria'")
@@ -448,7 +507,7 @@ def hht_step(
     u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
     v_pred = v + dt * (1.0 - gamma) * a
     u_guess = u_pred.copy()
-    static_residual = previous_static_residual
+    previous_rhs_balance = np.asarray(previous_static_residual, dtype=float)
     residual_norm = np.inf
     iteration_count = 0
     acceptance_reason = "iteration_limit"
@@ -458,11 +517,15 @@ def hht_step(
     previous_active_count: int | None = None
     for iteration in range(max(1, int(max_iterations))):
         x_guess = model.X + u_guess.reshape((-1, 3))
-        static_residual, static_tangent = static_residual_and_tangent(model, x_guess, contact_geometry, gravity=gravity)
+        static_state = static_force_state(model, x_guess, contact_geometry, gravity=gravity)
         a_guess = c0 * (u_guess - u_pred)
-        dynamic_residual = model.mass_matrix @ a_guess + (1.0 + float(alpha)) * static_residual - float(alpha) * previous_static_residual
+        dynamic_residual = (
+            model.mass_matrix @ a_guess
+            - (1.0 + float(alpha)) * static_state.calculix_rhs_balance
+            + float(alpha) * previous_rhs_balance
+        )
         residual_norm = float(np.linalg.norm(dynamic_residual))
-        tangent = (model.mass_matrix * c0 + static_tangent * (1.0 + float(alpha))).tocsc()
+        tangent = (model.mass_matrix * c0 + static_state.tangent * (1.0 + float(alpha))).tocsc()
         correction = np.asarray(spsolve(tangent, -dynamic_residual), dtype=float)
         u_guess += correction
         iteration_count = iteration + 1
@@ -506,12 +569,13 @@ def hht_step(
         time=state.time + float(dt),
     )
     diagnostics = evaluate_state(model, next_state, contact_geometry, gravity=gravity, assemble_tangent=True)
+    accepted_static_state = static_force_state(model, next_state.x, contact_geometry, gravity=gravity)
     diagnostics.newton_iterations = iteration_count
     diagnostics.newton_residual_norm = residual_norm
     diagnostics.newton_acceptance_policy = acceptance_policy
     diagnostics.newton_acceptance_reason = acceptance_reason
     diagnostics.newton_acceptance_metrics = acceptance_metrics
-    return next_state, static_residual, diagnostics
+    return next_state, accepted_static_state.calculix_rhs_balance, diagnostics
 
 
 def _newton_acceptance_metrics(

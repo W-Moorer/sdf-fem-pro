@@ -11,7 +11,7 @@ external reference only.
 | --- | --- |
 | `nonlingeo.c` | Sets HHT/Newmark parameters for `*DYNAMIC`: `beta=(1-alpha)^2/4`, `gamma=0.5-alpha`; runs the nonlinear increment/iteration loop; calls `prediction`, residual assembly, and `checkconvergence`. |
 | `prediction.c` | Builds the dynamic predictor from old displacement, velocity, and acceleration using the same beta/gamma parameters. |
-| `calcresidual.c` | For implicit dynamics, forms the residual with `(1+alpha)(fext-fint)-alpha(fext_n-fint_n)-M*a` plus damping when active.  SFC uses the negative residual convention but checks the same HHT evaluation point by finite differences. |
+| `calcresidual.c` | For implicit dynamics, forms the residual with `(1+alpha)(fext-fint)-alpha(fext_n-fint_n)-M*a` plus damping when active.  SFC stores the previous accepted history in the same `fextini - fini` sign, uses the negative residual convention for Newton, and checks the same HHT evaluation point by finite differences. |
 | `checkconvergence.c` | Accepts increments using residual ratios, correction ratios, contact-element changes, energy/contact stabilization, and DIRECT-vs-automatic increment rules.  This is stricter and more stateful than SFC's current relative-correction Newton stop. |
 
 ## DIRECT Increment Interpretation

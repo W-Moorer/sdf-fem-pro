@@ -22,14 +22,16 @@ The relevant local CalculiX source files are under `/tmp/sfc_calculix_source/src
 
   SFC writes the same equation as:
 
-  `R = M a + (1 + alpha)(f_int - f_ext) - alpha(f_int_ini - f_ext_ini)`,
+  `R = M a - (1 + alpha)B + alpha B_ini`,
 
-  and solves `K_eff du = -R`.
+  where `B = f_ext - f_int`.  This is the negative of the CalculiX right-hand
+  side, and SFC solves `K_eff du = -R`.
 
 - `nonlingeo.c` stores the previous accepted force vectors by copying `f` into
-  `fini` and `fext` into `fextini` after convergence.  This matches the SFC
-  `previous_static_residual` update when `previous_static_residual =
-  f_int - f_ext - f_contact`.
+  `fini` and `fext` into `fextini` after convergence.  SFC now stores the
+  accepted history in the same sign, `previous_static_residual = fextini -
+  fini`.  Contact spring forces enter `fini` through their internal spring
+  sign rather than as a separate external load.
 - `springstiff_f2f.f` uses a hard-linear overclosure branch with contact
   stiffness proportional to slave area and `1 / kscale`.  The resulting normal
   derivative contributes the residual tangent with the same sign as SFC's
@@ -56,7 +58,8 @@ The CSV checks:
 - Directional finite-difference error for the contact residual tangent
   convention.
 - Absolute and relative error between the accepted `previous_static_residual`
-  and a recomputed static residual at the accepted state.
+  (`fextini - fini`) and the negative of the recomputed SFC static residual at
+  the accepted state.
 
 The one-step/state-definition CSV files additionally check:
 
