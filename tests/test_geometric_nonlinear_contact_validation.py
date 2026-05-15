@@ -22,6 +22,7 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     contact_element_clearance_lifecycle_audit,
     contact_replay_metrics,
     hht_residual_tangent_diagnostics,
+    one_step_calculix_state_diagnostics,
     run_sfc_geometric_contact_history,
     run_validation,
     write_calculix_contact_input_with_stress,
@@ -164,6 +165,36 @@ def test_contact_replay_metrics_uses_calculix_shell_offset_and_cnum_weight() -> 
     assert offset_metrics["contact_energy"] > midplane_metrics["contact_energy"]
 
 
+def test_one_step_calculix_state_diagnostics_decomposes_terms() -> None:
+    model = _contact_model(resolution=1, duration=0.008, dt=0.004)
+    u1 = np.zeros_like(model.nodes)
+    u2 = np.zeros_like(model.nodes)
+    u2[:, 2] -= 0.0505
+    calculix_rows = [
+        {"time": 0.004, "normal_force_proxy": 0.0, "calculix_contact_count": 0},
+        {"time": 0.008, "normal_force_proxy": 1.0, "calculix_contact_count": 14},
+    ]
+
+    rows = one_step_calculix_state_diagnostics(
+        model,
+        calculix_rows,
+        {0.004: u1, 0.008: u2},
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["calculix_internal_force_available"] == "false"
+    assert rows[0]["calculix_effective_tangent_available"] == "false"
+    assert rows[-1]["dominant_one_step_difference_source"] in {
+        "mass_term",
+        "static_residual",
+        "internal_force",
+        "contact_force",
+        "acceleration",
+    }
+    assert float(rows[-1]["sfc_on_calculix_internal_force_norm"]) >= 0.0
+    assert float(rows[-1]["sfc_hht_effective_residual_norm_at_calculix_state"]) >= 0.0
+
+
 def test_parse_calculix_stdout_increment_diagnostics(tmp_path: Path) -> None:
     log = tmp_path / "ccx.log"
     log.write_text(
@@ -295,6 +326,7 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["hht_residual_tangent_trajectory_diagnostics_available"]["supported"] == "true"
     assert claims["calculix_contact_lifecycle_output_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_mechanics_increment_acceptance_diagnostics_available"]["supported"] == "false"
+    assert claims["calculix_state_one_step_mechanics_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_per_contact_element_clearance_lifecycle_audit_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
@@ -312,6 +344,11 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
         mechanics_rows = list(csv.DictReader(f))
     assert mechanics_rows
     assert mechanics_rows[0]["diagnosis"] == "external_unavailable"
+
+    with outputs["one_step"].open(newline="", encoding="utf-8") as f:
+        one_step_rows = list(csv.DictReader(f))
+    assert one_step_rows
+    assert one_step_rows[0]["diagnosis"] == "external_unavailable"
 
     with outputs["mesh"].open(newline="", encoding="utf-8") as f:
         mesh_rows = list(csv.DictReader(f))

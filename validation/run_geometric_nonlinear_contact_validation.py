@@ -987,6 +987,331 @@ def contact_alignment_diagnostics(
     return base
 
 
+def one_step_calculix_state_diagnostics(
+    model: DropModel,
+    calculix_rows: list[Row],
+    calculix_displacements: dict[float, np.ndarray],
+    *,
+    contact_mode: str = "persistent_calculix_c3d4_f2f",
+) -> list[Row]:
+    """Compare one SFC step launched from each available CalculiX state.
+
+    CalculiX `.dat` output does not expose the full global internal-force vector
+    or tangent matrix.  This diagnostic therefore keeps those columns explicitly
+    marked unavailable and compares the SFC decomposition evaluated on the same
+    CalculiX kinematic states against the SFC one-step prediction from that
+    state.
+    """
+
+    if len(calculix_displacements) < 1:
+        return [_one_step_unavailable_row(model, contact_mode, "external_unavailable")]
+
+    mechanics = MechanicsModel.from_tet4_mesh(
+        model.nodes,
+        model.tet_elements,
+        E=model.E,
+        nu=model.nu,
+        density=model.density,
+    )
+    contact, details = _make_contact_geometry(model, contact_mode)
+    beta, gamma = hht_newmark_parameters(model.hht_alpha)
+    ordered = _ordered_calculix_displacements(model, calculix_displacements)
+    if len(ordered) < 2:
+        return [_one_step_unavailable_row(model, contact_mode, "insufficient_calculix_time_states")]
+
+    state, previous_static = initial_state(
+        mechanics,
+        contact,
+        gravity=model.gravity,
+        initial_velocity=(0.0, 0.0, model.initial_velocity_z),
+    )
+    state.time = float(ordered[0][0])
+    rows: list[Row] = []
+    for next_time, next_u in ordered[1:]:
+        dt = float(next_time) - float(state.time)
+        if dt <= 0.0:
+            continue
+        state_n = MechanicsState(state.x.copy(), state.v.copy(), state.a.copy(), time=state.time)
+        previous_static_n = previous_static.copy()
+        snapshot_n = _snapshot_contact_lifecycle(contact)
+
+        pred_state, _pred_static, pred_diag = hht_step(
+            mechanics,
+            state_n,
+            previous_static_n,
+            contact,
+            dt=dt,
+            gravity=model.gravity,
+            alpha=model.hht_alpha,
+            max_iterations=12,
+            tolerance=1.0e-10,
+        )
+        _restore_contact_lifecycle(contact, snapshot_n)
+
+        calc_state = _newmark_state_from_displacement(
+            mechanics,
+            state_n,
+            np.asarray(next_u, dtype=float),
+            next_time=float(next_time),
+            dt=dt,
+            beta=beta,
+            gamma=gamma,
+        )
+        calc_residual, calc_tangent, calc_static, _calc_static_tangent = _hht_dynamic_residual_and_tangent(
+            mechanics,
+            contact,
+            state_n,
+            previous_static_n,
+            calc_state.x.reshape(-1),
+            dt=dt,
+            gravity=model.gravity,
+            alpha=model.hht_alpha,
+        )
+        calc_diag = evaluate_state(mechanics, calc_state, contact, gravity=model.gravity, assemble_tangent=True)
+        rows.append(
+            _one_step_row(
+                model,
+                mechanics,
+                state_n,
+                calc_state,
+                pred_state,
+                calc_diag,
+                pred_diag,
+                calc_residual,
+                calc_tangent,
+                previous_static_n,
+                calculix_rows,
+                contact_mode=contact_mode,
+                details=details,
+                dt=dt,
+            )
+        )
+        state = calc_state
+        previous_static = calc_static
+    if not rows:
+        return [_one_step_unavailable_row(model, contact_mode, "insufficient_positive_time_steps")]
+    return rows
+
+
+def _ordered_calculix_displacements(
+    model: DropModel,
+    displacements: dict[float, np.ndarray],
+) -> list[tuple[float, np.ndarray]]:
+    rows: list[tuple[float, np.ndarray]] = [(0.0, np.zeros_like(model.nodes))]
+    for time in sorted(displacements):
+        if float(time) <= 1.0e-15:
+            continue
+        rows.append((float(time), np.asarray(displacements[time], dtype=float)))
+    return rows
+
+
+def _newmark_state_from_displacement(
+    mechanics: MechanicsModel,
+    previous: MechanicsState,
+    displacement: np.ndarray,
+    *,
+    next_time: float,
+    dt: float,
+    beta: float,
+    gamma: float,
+) -> MechanicsState:
+    u_n = (previous.x - mechanics.X).reshape(-1)
+    v_n = previous.v.reshape(-1)
+    a_n = previous.a.reshape(-1)
+    u_next = np.asarray(displacement, dtype=float).reshape(-1)
+    u_pred = u_n + float(dt) * v_n + float(dt) * float(dt) * (0.5 - beta) * a_n
+    a_next = (u_next - u_pred) / (beta * float(dt) * float(dt))
+    v_next = v_n + float(dt) * ((1.0 - gamma) * a_n + gamma * a_next)
+    return MechanicsState(
+        mechanics.X + u_next.reshape((-1, 3)),
+        v_next.reshape((-1, 3)),
+        a_next.reshape((-1, 3)),
+        time=float(next_time),
+    )
+
+
+def _one_step_row(
+    model: DropModel,
+    mechanics: MechanicsModel,
+    state_n: MechanicsState,
+    calc_state: MechanicsState,
+    pred_state: MechanicsState,
+    calc_diag: StepDiagnostics,
+    pred_diag: StepDiagnostics,
+    calc_residual: np.ndarray,
+    calc_tangent: Any,
+    previous_static_n: np.ndarray,
+    calculix_rows: list[Row],
+    *,
+    contact_mode: str,
+    details: str,
+    dt: float,
+) -> Row:
+    mass_calc = mechanics.mass_matrix @ calc_state.a.reshape(-1)
+    mass_pred = mechanics.mass_matrix @ pred_state.a.reshape(-1)
+    internal_calc = calc_diag.internal.force.reshape(-1)
+    internal_pred = pred_diag.internal.force.reshape(-1)
+    contact_calc = calc_diag.contact.force.reshape(-1)
+    contact_pred = pred_diag.contact.force.reshape(-1)
+    static_calc = internal_calc - _nodal_gravity_like(model, mechanics) - contact_calc
+    static_pred = internal_pred - _nodal_gravity_like(model, mechanics) - contact_pred
+    calc_row = _nearest_row(calculix_rows, float(calc_state.time)) if calculix_rows else None
+    calc_rf = _optional_float(calc_row.get("normal_force_proxy", "")) if calc_row else None
+    calc_cnum = _optional_float(calc_row.get("calculix_contact_count", "")) if calc_row else None
+    component_diffs = {
+        "mass_term": _vector_norm(mass_pred - mass_calc),
+        "static_residual": _vector_norm(static_pred - static_calc),
+        "internal_force": _vector_norm(internal_pred - internal_calc),
+        "contact_force": _vector_norm(contact_pred - contact_calc),
+        "acceleration": _vector_norm(pred_state.a.reshape(-1) - calc_state.a.reshape(-1)),
+    }
+    dominant = max(component_diffs, key=component_diffs.get)
+    displacement_error = _vector_norm((pred_state.x - calc_state.x).reshape(-1))
+    displacement_scale = max(_vector_norm((calc_state.x - state_n.x).reshape(-1)), 1.0e-30)
+    acceleration_error = _relative_vector_error(pred_state.a.reshape(-1), calc_state.a.reshape(-1))
+    contact_force_rel_to_calculix_rf = (
+        ""
+        if calc_rf is None
+        else abs(float(calc_diag.contact.normal_force) - calc_rf) / max(abs(calc_rf), 1.0e-30)
+    )
+    residual_scale = max(
+        _vector_norm(mass_calc)
+        + _vector_norm((1.0 + float(model.hht_alpha)) * static_calc)
+        + _vector_norm(float(model.hht_alpha) * previous_static_n),
+        1.0e-30,
+    )
+    return {
+        "case": model.case,
+        "resolution": model.resolution,
+        "contact_mode": contact_mode,
+        "time_n": float(state_n.time),
+        "time_np1": float(calc_state.time),
+        "dt": float(dt),
+        "dt_matches_model_dt": str(abs(float(dt) - float(model.dt)) <= 1.0e-12).lower(),
+        "calculix_internal_force_available": "false",
+        "calculix_effective_tangent_available": "false",
+        "calculix_unavailable_reason": "CalculiX .dat does not print full global internal force vectors or tangent matrices",
+        "calculix_rf_z": "" if calc_rf is None else calc_rf,
+        "calculix_cnum": "" if calc_cnum is None else calc_cnum,
+        "sfc_on_calculix_active_count": int(calc_diag.contact.active_count),
+        "sfc_predicted_active_count": int(pred_diag.contact.active_count),
+        "sfc_on_calculix_max_penetration": float(calc_diag.contact.max_penetration),
+        "sfc_predicted_max_penetration": float(pred_diag.contact.max_penetration),
+        "sfc_on_calculix_contact_force_z": float(calc_diag.contact.normal_force),
+        "sfc_predicted_contact_force_z": float(pred_diag.contact.normal_force),
+        "contact_force_rel_error_to_calculix_rf_at_calculix_state": contact_force_rel_to_calculix_rf,
+        "sfc_on_calculix_internal_force_norm": _vector_norm(internal_calc),
+        "sfc_predicted_internal_force_norm": _vector_norm(internal_pred),
+        "sfc_on_calculix_contact_force_norm": _vector_norm(contact_calc),
+        "sfc_predicted_contact_force_norm": _vector_norm(contact_pred),
+        "sfc_on_calculix_mass_term_norm": _vector_norm(mass_calc),
+        "sfc_predicted_mass_term_norm": _vector_norm(mass_pred),
+        "sfc_on_calculix_static_residual_norm": _vector_norm(static_calc),
+        "sfc_predicted_static_residual_norm": _vector_norm(static_pred),
+        "sfc_hht_effective_residual_norm_at_calculix_state": _vector_norm(calc_residual),
+        "sfc_hht_effective_residual_relative_at_calculix_state": _vector_norm(calc_residual) / residual_scale,
+        "sfc_effective_tangent_norm_at_calculix_state": _sparse_data_norm(calc_tangent),
+        "sfc_material_tangent_norm_at_calculix_state": _sparse_data_norm(calc_diag.internal.material_tangent),
+        "sfc_geometric_tangent_norm_at_calculix_state": _sparse_data_norm(calc_diag.internal.geometric_tangent),
+        "sfc_contact_tangent_norm_at_calculix_state": _sparse_data_norm(calc_diag.contact.tangent),
+        "sfc_predicted_vs_calculix_displacement_norm": displacement_error,
+        "sfc_predicted_vs_calculix_displacement_rel": displacement_error / displacement_scale,
+        "sfc_predicted_vs_calculix_acceleration_rel": acceleration_error,
+        "mass_term_diff_norm": component_diffs["mass_term"],
+        "static_residual_diff_norm": component_diffs["static_residual"],
+        "internal_force_diff_norm": component_diffs["internal_force"],
+        "contact_force_diff_norm": component_diffs["contact_force"],
+        "acceleration_diff_norm": component_diffs["acceleration"],
+        "dominant_one_step_difference_source": dominant,
+        "diagnosis": _one_step_diagnosis(calc_diag, pred_diag, displacement_error / displacement_scale, dominant),
+        "details": details,
+    }
+
+
+def _one_step_unavailable_row(model: DropModel, contact_mode: str, diagnosis: str) -> Row:
+    return {
+        "case": model.case,
+        "resolution": model.resolution,
+        "contact_mode": contact_mode,
+        "time_n": "",
+        "time_np1": "",
+        "dt": model.dt,
+        "dt_matches_model_dt": "",
+        "calculix_internal_force_available": "false",
+        "calculix_effective_tangent_available": "false",
+        "calculix_unavailable_reason": "CalculiX displacement/contact history unavailable",
+        "calculix_rf_z": "",
+        "calculix_cnum": "",
+        "sfc_on_calculix_active_count": "",
+        "sfc_predicted_active_count": "",
+        "sfc_on_calculix_max_penetration": "",
+        "sfc_predicted_max_penetration": "",
+        "sfc_on_calculix_contact_force_z": "",
+        "sfc_predicted_contact_force_z": "",
+        "contact_force_rel_error_to_calculix_rf_at_calculix_state": "",
+        "sfc_on_calculix_internal_force_norm": "",
+        "sfc_predicted_internal_force_norm": "",
+        "sfc_on_calculix_contact_force_norm": "",
+        "sfc_predicted_contact_force_norm": "",
+        "sfc_on_calculix_mass_term_norm": "",
+        "sfc_predicted_mass_term_norm": "",
+        "sfc_on_calculix_static_residual_norm": "",
+        "sfc_predicted_static_residual_norm": "",
+        "sfc_hht_effective_residual_norm_at_calculix_state": "",
+        "sfc_hht_effective_residual_relative_at_calculix_state": "",
+        "sfc_effective_tangent_norm_at_calculix_state": "",
+        "sfc_material_tangent_norm_at_calculix_state": "",
+        "sfc_geometric_tangent_norm_at_calculix_state": "",
+        "sfc_contact_tangent_norm_at_calculix_state": "",
+        "sfc_predicted_vs_calculix_displacement_norm": "",
+        "sfc_predicted_vs_calculix_displacement_rel": "",
+        "sfc_predicted_vs_calculix_acceleration_rel": "",
+        "mass_term_diff_norm": "",
+        "static_residual_diff_norm": "",
+        "internal_force_diff_norm": "",
+        "contact_force_diff_norm": "",
+        "acceleration_diff_norm": "",
+        "dominant_one_step_difference_source": "",
+        "diagnosis": diagnosis,
+        "details": "",
+    }
+
+
+def _one_step_diagnosis(
+    calc_diag: StepDiagnostics,
+    pred_diag: StepDiagnostics,
+    displacement_rel: float,
+    dominant: str,
+) -> str:
+    if calc_diag.contact.active_count <= 0 and pred_diag.contact.active_count <= 0:
+        return "precontact_or_no_active_contact"
+    if displacement_rel <= 1.0e-3:
+        return "one_step_update_close"
+    if dominant == "contact_force":
+        return "contact_force_difference_dominant"
+    if dominant == "internal_force":
+        return "internal_force_difference_dominant"
+    if dominant in {"mass_term", "acceleration"}:
+        return "newmark_acceleration_difference_dominant"
+    return "static_residual_difference_dominant"
+
+
+def _nodal_gravity_like(model: DropModel, mechanics: MechanicsModel) -> np.ndarray:
+    values = np.zeros(mechanics.n_dofs, dtype=float)
+    lumped = np.asarray(mechanics.mass_matrix.sum(axis=1)).reshape(-1)
+    values[2::3] = -float(model.gravity) * lumped[2::3]
+    return values
+
+
+def _vector_norm(value: np.ndarray) -> float:
+    return float(np.linalg.norm(np.asarray(value, dtype=float)))
+
+
+def _sparse_data_norm(matrix: Any) -> float:
+    data = getattr(matrix, "data", np.asarray([], dtype=float))
+    return float(np.linalg.norm(np.asarray(data, dtype=float))) if len(data) else 0.0
+
+
 def contact_lifecycle_output_diagnostics(
     model: DropModel,
     calculix_rows: list[Row],
@@ -2090,6 +2415,7 @@ def run_validation(
     hht_rows: list[Row] = []
     lifecycle_rows: list[Row] = []
     mechanics_rows: list[Row] = []
+    one_step_rows: list[Row] = []
     contact_element_audit_rows: list[Row] = []
     contact_element_audit_summary_rows: list[Row] = []
     command_rows: list[Row] = []
@@ -2127,6 +2453,14 @@ def run_validation(
         hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
         lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
         mechanics_rows.append(mechanics_increment_acceptance_diagnostics(model, sfc_rows, command_rows[-1], out_dir))
+        one_step_rows.extend(
+            one_step_calculix_state_diagnostics(
+                model,
+                calc_rows,
+                calc_displacements,
+                contact_mode=contact_mode,
+            )
+        )
         per_face_rows, per_step_rows = contact_element_clearance_lifecycle_audit(
             model,
             calculix_dat_contact=calc_contact_elements,
@@ -2160,6 +2494,7 @@ def run_validation(
         hht_rows,
         lifecycle_rows,
         mechanics_rows,
+        one_step_rows,
         contact_element_audit_summary_rows,
     )
     outputs = {
@@ -2169,6 +2504,7 @@ def run_validation(
         "hht": out_dir / "geometric_contact_hht_residual_tangent.csv",
         "lifecycle": out_dir / "geometric_contact_lifecycle_output_diagnostics.csv",
         "mechanics": out_dir / "geometric_contact_mechanics_increment_acceptance.csv",
+        "one_step": out_dir / "geometric_contact_one_step_state_diagnostics.csv",
         "contact_element_audit": out_dir / "geometric_contact_element_clearance_lifecycle_audit.csv",
         "contact_element_audit_summary": out_dir / "geometric_contact_element_clearance_lifecycle_audit_summary.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
@@ -2184,6 +2520,7 @@ def run_validation(
     _write_csv(outputs["hht"], hht_rows)
     _write_csv(outputs["lifecycle"], lifecycle_rows)
     _write_csv(outputs["mechanics"], mechanics_rows)
+    _write_csv(outputs["one_step"], one_step_rows)
     _write_csv(outputs["contact_element_audit"], contact_element_audit_rows)
     _write_csv(outputs["contact_element_audit_summary"], contact_element_audit_summary_rows)
     _write_csv(outputs["mesh"], mesh_rows)
@@ -2202,6 +2539,7 @@ def run_validation(
         hht_rows,
         lifecycle_rows,
         mechanics_rows,
+        one_step_rows,
         contact_element_audit_summary_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
@@ -2218,6 +2556,7 @@ def _claim_rows(
     hht_rows: list[Row],
     lifecycle_rows: list[Row],
     mechanics_rows: list[Row],
+    one_step_rows: list[Row],
     contact_element_audit_summary_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
@@ -2239,6 +2578,10 @@ def _claim_rows(
     )
     mechanics_supported = bool(mechanics_rows) and any(
         row.get("diagnosis") not in {"", None, "external_unavailable"} for row in mechanics_rows
+    )
+    one_step_supported = bool(one_step_rows) and any(
+        row.get("diagnosis") not in {"", None, "external_unavailable", "insufficient_calculix_time_states"}
+        for row in one_step_rows
     )
     contact_element_audit_supported = bool(contact_element_audit_summary_rows) and any(
         row.get("calculix_per_contact_output_available") == "true" for row in contact_element_audit_summary_rows
@@ -2281,6 +2624,12 @@ def _claim_rows(
             "details": "Tracks CalculiX DIRECT increment attempts, Newton iterations, convergence messages, HHT alpha/beta/gamma, and SFC Newton acceptance diagnostics",
         },
         {
+            "claim": "calculix_state_one_step_mechanics_diagnostics_available",
+            "supported": str(one_step_supported).lower(),
+            "evidence_csv": "geometric_contact_one_step_state_diagnostics.csv",
+            "details": "Starts SFC from each CalculiX displacement state and decomposes internal force, contact force, mass term, HHT residual, tangent norms, and Newmark update error",
+        },
+        {
             "claim": "calculix_per_contact_element_clearance_lifecycle_audit_available",
             "supported": str(contact_element_audit_supported).lower(),
             "evidence_csv": "geometric_contact_element_clearance_lifecycle_audit_summary.csv",
@@ -2318,6 +2667,7 @@ def _write_markdown(
     hht_rows: list[Row],
     lifecycle_rows: list[Row],
     mechanics_rows: list[Row],
+    one_step_rows: list[Row],
     contact_element_audit_summary_rows: list[Row],
     *,
     contact_mode: str,
@@ -2341,6 +2691,7 @@ def _write_markdown(
         "- `geometric_contact_hht_residual_tangent.csv`",
         "- `geometric_contact_lifecycle_output_diagnostics.csv`",
         "- `geometric_contact_mechanics_increment_acceptance.csv`",
+        "- `geometric_contact_one_step_state_diagnostics.csv`",
         "- `geometric_contact_element_clearance_lifecycle_audit.csv`",
         "- `geometric_contact_element_clearance_lifecycle_audit_summary.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
@@ -2436,6 +2787,28 @@ def _write_markdown(
     lines.extend(
         [
             "",
+            "## One-Step CalculiX-State Diagnostics",
+            "",
+            "This table starts SFC from CalculiX displacement states. CalculiX does not print full global internal force vectors or tangent matrices in the parsed `.dat`, so the internal-force and tangent entries are SFC decompositions evaluated on CalculiX kinematics rather than direct CalculiX vectors.",
+            "",
+            "| Resolution | time n+1 | Diagnosis | Dominant term | disp. rel. | accel. rel. | residual rel. | CalculiX RF | SFC-on-CalculiX force | SFC predicted force |",
+            "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in _representative_one_step_rows(one_step_rows):
+        lines.append(
+            f"| {row['resolution']} | {_fmt(row.get('time_np1', ''))} | {row.get('diagnosis', '')} | "
+            f"{row.get('dominant_one_step_difference_source', '')} | "
+            f"{_fmt(row.get('sfc_predicted_vs_calculix_displacement_rel', ''))} | "
+            f"{_fmt(row.get('sfc_predicted_vs_calculix_acceleration_rel', ''))} | "
+            f"{_fmt(row.get('sfc_hht_effective_residual_relative_at_calculix_state', ''))} | "
+            f"{_fmt(row.get('calculix_rf_z', ''))} | "
+            f"{_fmt(row.get('sfc_on_calculix_contact_force_z', ''))} | "
+            f"{_fmt(row.get('sfc_predicted_contact_force_z', ''))} |"
+        )
+    lines.extend(
+        [
+            "",
             "## Per-Contact-Element Clearance/Lifecycle Audit",
             "",
             "| Resolution | time | CalculiX active | SFC native active | Replay active | per-contact output | clearance replay Linf | force replay Linf | energy replay Linf | Diagnosis |",
@@ -2474,6 +2847,27 @@ def _write_markdown(
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _representative_one_step_rows(rows: list[Row]) -> list[Row]:
+    if not rows:
+        return []
+    contact_rows = [
+        row
+        for row in rows
+        if _optional_float(row.get("sfc_on_calculix_max_penetration", "")) not in {None, 0.0}
+        or _optional_float(row.get("sfc_predicted_max_penetration", "")) not in {None, 0.0}
+    ]
+    if not contact_rows:
+        return rows[: min(3, len(rows))]
+    worst = max(
+        contact_rows,
+        key=lambda row: float(row.get("sfc_predicted_vs_calculix_displacement_rel") or 0.0),
+    )
+    first = contact_rows[0]
+    if first is worst:
+        return [first]
+    return [first, worst]
 
 
 def _fmt(value: Any) -> str:
