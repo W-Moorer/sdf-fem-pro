@@ -113,9 +113,26 @@ def write_calculix_contact_input_with_stress(model: DropModel, path: Path) -> No
 
     write_calculix_input(model, path)
     text = path.read_text(encoding="utf-8")
+    frequency = max(1, int(model.output_frequency))
+    per_contact_block = "\n".join(
+        [
+            f"*contact print, frequency={frequency}",
+            "cdis",
+            "cstr",
+            "cels",
+            f"*contact print, frequency={frequency}, totals=only",
+            "cnum",
+        ]
+    )
+    text = re.sub(
+        r"\*contact print[^\n]*totals=only[^\n]*\n[ \t]*cdis[ \t]*,[ \t]*cstr[ \t]*,[ \t]*cels[ \t]*,[ \t]*cnum[ \t]*",
+        per_contact_block,
+        text,
+        flags=re.IGNORECASE,
+    )
     stress_block = "\n".join(
         [
-            f"*el print, elset=elall, frequency={max(1, int(model.output_frequency))}",
+            f"*el print, elset=elall, frequency={frequency}",
             "s",
             "e",
         ]
@@ -174,6 +191,31 @@ def run_calculix_contact_with_stress(
         return [], np.zeros_like(model.nodes), np.zeros((model.tet_elements.shape[0], 6), dtype=float), command_row, {}
     displacements = _parse_calculix_dat_displacements_strict(dat, model.node_ids)
     contact_totals = _parse_calculix_dat_contact_totals(dat)
+    per_contact = _parse_calculix_dat_contact_elements(dat)
+    face_lookup = _face_ref_index(model)
+    for time, records in per_contact.items():
+        disp_time = min(displacements, key=lambda value: abs(float(value) - float(time))) if displacements else None
+        current_areas: np.ndarray | None = None
+        if disp_time is not None:
+            tri = (model.nodes + displacements[disp_time])[model.surface_faces]
+            current_areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+        energy_values = [
+            float(row["calculix_contact_energy"])
+            for row in records.values()
+            if row.get("calculix_contact_energy", "") not in {"", None}
+        ]
+        derived_energy_values: list[float] = []
+        if not energy_values and current_areas is not None:
+            for key, row in records.items():
+                face_index = face_lookup.get((int(key[0]), int(key[1])), -1)
+                pressure = _optional_float(row.get("calculix_stress_normal", ""))
+                clearance = _optional_float(row.get("calculix_clearance_normal", ""))
+                if face_index >= 0 and pressure is not None and clearance is not None:
+                    derived_energy_values.append(
+                        0.5 * abs(float(pressure)) * float(current_areas[face_index]) * max(-float(clearance), 0.0)
+                    )
+        if (energy_values or derived_energy_values) and "calculix_contact_energy" not in contact_totals.setdefault(float(time), {}):
+            contact_totals[float(time)]["calculix_contact_energy"] = float(np.sum(energy_values or derived_energy_values))
     history = _history_from_displacements("calculix", model, displacements, contact_totals)
     final_u = displacements[max(displacements)]
     final_stress = _parse_final_stress_voigt(dat, model.tet_elements.shape[0])
@@ -186,6 +228,7 @@ def run_sfc_geometric_contact_history(
     contact_mode: str = "persistent_calculix_c3d4_f2f",
     cutback_policy: str = "calculix_direct",
     source: str = "sfc_geometric_nonlinear",
+    contact_element_audit_rows: list[Row] | None = None,
 ) -> tuple[list[Row], np.ndarray, NonlinearState]:
     """Run the clean-room CalculiX-aligned StVK contact backend."""
 
@@ -227,6 +270,13 @@ def run_sfc_geometric_contact_history(
             cutback_limited=False,
             cutback_policy=cutback_policy,
         )
+    )
+    _append_sfc_contact_element_audit_rows(
+        contact_element_audit_rows,
+        model,
+        state,
+        contact,
+        source=source,
     )
     current_time = 0.0
     step = 0
@@ -293,6 +343,13 @@ def run_sfc_geometric_contact_history(
                     cutback_limited=cutback_limited,
                     cutback_policy=cutback_policy,
                 )
+            )
+            _append_sfc_contact_element_audit_rows(
+                contact_element_audit_rows,
+                model,
+                state,
+                contact,
+                source=source,
             )
             break
     return rows, state.x, _vtk_state_from_backend(state, diagnostics)
@@ -399,6 +456,378 @@ def contact_replay_metrics(model: DropModel, x_current: np.ndarray, *, plane_z: 
         "normal_force": force,
         "contact_energy": energy,
     }
+
+
+def _parse_calculix_dat_contact_elements(path: Path) -> dict[float, dict[tuple[int, int], Row]]:
+    """Parse per-contact-element CDIS/CSTR/CELS blocks from a CalculiX ``.dat`` file.
+
+    CalculiX writes face-to-face contact rows as ``slave element, slave face``
+    followed by either three components (CDIS/CSTR) or one scalar (CELS).
+    Totals-only blocks are intentionally ignored here.
+    """
+
+    number = r"([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)"
+    headers = {
+        "cdis": re.compile(r"relative contact displacement .* time\s+" + number, re.IGNORECASE),
+        "cstr": re.compile(r"contact stress .* time\s+" + number, re.IGNORECASE),
+        "cels": re.compile(r"contact spring energy .* time\s+" + number, re.IGNORECASE),
+    }
+    vector_row = re.compile(r"^\s*(\d+)\s+(\d+)\s+" + number + r"\s+" + number + r"\s+" + number + r"\s*$")
+    scalar_row = re.compile(r"^\s*(\d+)\s+(\d+)\s+" + number + r"\s*$")
+    parsed: dict[float, dict[tuple[int, int], Row]] = {}
+    current_kind: str | None = None
+    current_time: float | None = None
+
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        header_matched = False
+        for kind, pattern in headers.items():
+            match = pattern.search(line)
+            if match:
+                current_kind = kind
+                current_time = float(match.group(1))
+                parsed.setdefault(current_time, {})
+                header_matched = True
+                break
+        if header_matched:
+            continue
+        if current_kind is None or current_time is None:
+            continue
+        if not line.strip():
+            continue
+
+        if current_kind in {"cdis", "cstr"}:
+            match = vector_row.match(line)
+            if match is None:
+                if re.search(r"[A-Za-z]", line):
+                    current_kind = None
+                    current_time = None
+                continue
+            element = int(match.group(1))
+            face = int(match.group(2))
+            values = [float(match.group(i)) for i in range(3, 6)]
+            row = parsed.setdefault(current_time, {}).setdefault((element, face), {})
+            prefix = "calculix_clearance" if current_kind == "cdis" else "calculix_stress"
+            row[f"{prefix}_normal"] = values[0]
+            row[f"{prefix}_tangential_1"] = values[1]
+            row[f"{prefix}_tangential_2"] = values[2]
+        else:
+            match = scalar_row.match(line)
+            if match is None:
+                if re.search(r"[A-Za-z]", line):
+                    current_kind = None
+                    current_time = None
+                continue
+            element = int(match.group(1))
+            face = int(match.group(2))
+            energy = float(match.group(3))
+            row = parsed.setdefault(current_time, {}).setdefault((element, face), {})
+            row["calculix_contact_energy"] = energy
+    return dict(sorted(parsed.items()))
+
+
+def _face_ref_key(model: DropModel, face_index: int) -> tuple[int, int]:
+    element_id, label = model.slave_face_refs[int(face_index)]
+    match = re.search(r"(\d+)", str(label))
+    if match is None:
+        raise ValueError(f"unsupported CalculiX face label: {label!r}")
+    return int(element_id), int(match.group(1))
+
+
+def _face_ref_index(model: DropModel) -> dict[tuple[int, int], int]:
+    return {_face_ref_key(model, i): i for i in range(len(model.slave_face_refs))}
+
+
+def _contact_springs_by_face(contact: ContactGeometry, x_current: np.ndarray) -> dict[int, Any]:
+    lifecycle = getattr(contact, "lifecycle", None)
+    active_springs = getattr(lifecycle, "active_springs", None)
+    if isinstance(active_springs, dict):
+        return {int(key): spring for key, spring in active_springs.items()}
+    if hasattr(contact, "contact_springs"):
+        springs = getattr(contact, "contact_springs")(x_current)
+        return {int(spring.slave_face_index): spring for spring in springs if bool(getattr(spring, "active", False))}
+    return {}
+
+
+def _per_face_plane_contact_rows(
+    model: DropModel,
+    x_current: np.ndarray,
+    *,
+    time: float,
+    source: str,
+    generated_springs: dict[int, Any] | None = None,
+) -> list[Row]:
+    """Return per-slave-face clearance, force, and energy rows for a plane replay."""
+
+    x = np.asarray(x_current, dtype=float)
+    tri = x[model.surface_faces]
+    areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    centroid_gaps = np.mean(tri, axis=1)[:, 2] - _contact_plane_z(model)
+    generated = {} if generated_springs is None else generated_springs
+    rows: list[Row] = []
+    for face_index, (area, gap) in enumerate(zip(areas, centroid_gaps, strict=True)):
+        spring = generated.get(int(face_index))
+        if spring is not None:
+            clearance = float(spring.clearance)
+            spring_area = float(spring.spring_area)
+            generated_flag = True
+        else:
+            clearance = float(gap)
+            spring_area = float(area)
+            generated_flag = bool(max(-clearance, 0.0) > 0.0) if source == "calculix_displacement_replay" else False
+        penetration = max(-clearance, 0.0)
+        force = model.contact_stiffness * spring_area * penetration if generated_flag or penetration > 0.0 else 0.0
+        energy = 0.5 * model.contact_stiffness * spring_area * penetration * penetration if generated_flag or penetration > 0.0 else 0.0
+        element_id, face_number = _face_ref_key(model, face_index)
+        rows.append(
+            {
+                "case": model.case,
+                "resolution": model.resolution,
+                "source": source,
+                "time": float(time),
+                "surface_face_index": int(face_index),
+                "slave_element": int(element_id),
+                "slave_face": int(face_number),
+                "slave_face_label": f"S{face_number}",
+                "face_area": float(spring_area),
+                "clearance": float(clearance),
+                "active_spring": str(bool(generated_flag)).lower(),
+                "force": float(force),
+                "energy": float(energy),
+            }
+        )
+    return rows
+
+
+def _append_sfc_contact_element_audit_rows(
+    rows: list[Row] | None,
+    model: DropModel,
+    state: MechanicsState,
+    contact: ContactGeometry,
+    *,
+    source: str,
+) -> None:
+    if rows is None:
+        return
+    rows.extend(
+        _per_face_plane_contact_rows(
+            model,
+            state.x,
+            time=float(state.time),
+            source=source,
+            generated_springs=_contact_springs_by_face(contact, state.x),
+        )
+    )
+
+
+def _time_key(value: float) -> float:
+    return round(float(value), 12)
+
+
+def _index_contact_rows(rows: list[Row]) -> dict[float, dict[tuple[int, int], Row]]:
+    indexed: dict[float, dict[tuple[int, int], Row]] = {}
+    for row in rows:
+        time = _time_key(float(row["time"]))
+        key = (int(row["slave_element"]), int(row["slave_face"]))
+        indexed.setdefault(time, {})[key] = row
+    return indexed
+
+
+def _calculix_contact_rows_from_dat(
+    model: DropModel,
+    parsed: dict[float, dict[tuple[int, int], Row]],
+    replay_by_time: dict[float, dict[tuple[int, int], Row]],
+) -> list[Row]:
+    rows: list[Row] = []
+    face_lookup = _face_ref_index(model)
+    for time, records in parsed.items():
+        time_key = _time_key(time)
+        replay = replay_by_time.get(time_key, {})
+        for (element_id, face_number), values in records.items():
+            face_index = face_lookup.get((int(element_id), int(face_number)), -1)
+            area = ""
+            if (int(element_id), int(face_number)) in replay:
+                area = replay[(int(element_id), int(face_number))]["face_area"]
+            elif face_index >= 0:
+                tri = model.nodes[model.surface_faces[face_index]]
+                area = 0.5 * float(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+            normal_pressure = _optional_float(values.get("calculix_stress_normal", ""))
+            force = "" if normal_pressure is None or area == "" else abs(normal_pressure) * float(area)
+            cels_energy = values.get("calculix_contact_energy", "")
+            clearance = values.get("calculix_clearance_normal", "")
+            clearance_value = _optional_float(clearance)
+            if cels_energy not in {"", None}:
+                energy = cels_energy
+                energy_source = "cels"
+            elif normal_pressure is not None and clearance_value is not None and area != "":
+                energy = 0.5 * abs(normal_pressure) * float(area) * max(-float(clearance_value), 0.0)
+                energy_source = "derived_from_cdis_cstr"
+            else:
+                energy = ""
+                energy_source = "unavailable"
+            rows.append(
+                {
+                    "case": model.case,
+                    "resolution": model.resolution,
+                    "source": "calculix_dat",
+                    "time": float(time),
+                    "surface_face_index": int(face_index),
+                    "slave_element": int(element_id),
+                    "slave_face": int(face_number),
+                    "slave_face_label": f"S{int(face_number)}",
+                    "face_area": area,
+                    "clearance": clearance,
+                    "active_spring": "true",
+                    "force": force,
+                    "energy": energy,
+                    "calculix_cels_energy": cels_energy,
+                    "calculix_energy_source": energy_source,
+                    "calculix_clearance_tangential_1": values.get("calculix_clearance_tangential_1", ""),
+                    "calculix_clearance_tangential_2": values.get("calculix_clearance_tangential_2", ""),
+                    "calculix_stress_normal": values.get("calculix_stress_normal", ""),
+                    "calculix_stress_tangential_1": values.get("calculix_stress_tangential_1", ""),
+                    "calculix_stress_tangential_2": values.get("calculix_stress_tangential_2", ""),
+                }
+            )
+    return rows
+
+
+def contact_element_clearance_lifecycle_audit(
+    model: DropModel,
+    *,
+    calculix_dat_contact: dict[float, dict[tuple[int, int], Row]],
+    sfc_native_rows: list[Row],
+    calculix_displacements: dict[float, np.ndarray],
+) -> tuple[list[Row], list[Row]]:
+    """Return per-contact-element and per-step lifecycle audit rows."""
+
+    replay_rows: list[Row] = []
+    for time, displacement in sorted(calculix_displacements.items()):
+        replay_rows.extend(
+            _per_face_plane_contact_rows(
+                model,
+                model.nodes + displacement,
+                time=float(time),
+                source="calculix_displacement_replay",
+            )
+        )
+
+    replay_by_time = _index_contact_rows(replay_rows)
+    calc_rows = _calculix_contact_rows_from_dat(model, calculix_dat_contact, replay_by_time)
+    calc_by_time = _index_contact_rows(calc_rows)
+    native_by_time = _index_contact_rows(sfc_native_rows)
+    times = sorted(set(calc_by_time) | set(native_by_time) | set(replay_by_time))
+    face_keys = sorted(_face_ref_index(model))
+    audit_rows: list[Row] = []
+    summary_rows: list[Row] = []
+
+    for time in times:
+        calc = calc_by_time.get(time, {})
+        native = native_by_time.get(time, {})
+        replay = replay_by_time.get(time, {})
+        keys = sorted(set(face_keys) | set(calc) | set(native) | set(replay))
+        clearance_errors: list[float] = []
+        force_errors: list[float] = []
+        energy_errors: list[float] = []
+        for element_id, face_number in keys:
+            calc_row = calc.get((element_id, face_number), {})
+            native_row = native.get((element_id, face_number), {})
+            replay_row = replay.get((element_id, face_number), {})
+            face_index = native_row.get("surface_face_index", replay_row.get("surface_face_index", calc_row.get("surface_face_index", "")))
+            area = native_row.get("face_area", replay_row.get("face_area", calc_row.get("face_area", "")))
+            calc_clearance = calc_row.get("clearance", "")
+            replay_clearance = replay_row.get("clearance", "")
+            calc_force = calc_row.get("force", "")
+            replay_force = replay_row.get("force", "")
+            calc_energy = calc_row.get("energy", "")
+            replay_energy = replay_row.get("energy", "")
+            _append_abs_error(clearance_errors, calc_clearance, replay_clearance)
+            _append_abs_error(force_errors, calc_force, replay_force)
+            _append_abs_error(energy_errors, calc_energy, replay_energy)
+            audit_rows.append(
+                {
+                    "case": model.case,
+                    "resolution": model.resolution,
+                    "time": float(time),
+                    "surface_face_index": face_index,
+                    "slave_element": int(element_id),
+                    "slave_face": int(face_number),
+                    "slave_face_label": f"S{int(face_number)}",
+                    "face_area": area,
+                    "calculix_present": str(bool(calc_row)).lower(),
+                    "sfc_native_active_spring": native_row.get("active_spring", "false"),
+                    "calculix_displacement_replay_active_spring": replay_row.get("active_spring", "false"),
+                    "calculix_clearance": calc_clearance,
+                    "calculix_clearance_tangential_1": calc_row.get("calculix_clearance_tangential_1", ""),
+                    "calculix_clearance_tangential_2": calc_row.get("calculix_clearance_tangential_2", ""),
+                    "calculix_normal_pressure": calc_row.get("calculix_stress_normal", ""),
+                    "calculix_tangential_stress_1": calc_row.get("calculix_stress_tangential_1", ""),
+                    "calculix_tangential_stress_2": calc_row.get("calculix_stress_tangential_2", ""),
+                    "calculix_force_proxy": calc_force,
+                    "calculix_contact_energy": calc_energy,
+                    "calculix_cels_energy": calc_row.get("calculix_cels_energy", ""),
+                    "calculix_contact_energy_source": calc_row.get("calculix_energy_source", ""),
+                    "sfc_native_clearance": native_row.get("clearance", ""),
+                    "sfc_native_force": native_row.get("force", ""),
+                    "sfc_native_energy": native_row.get("energy", ""),
+                    "calculix_displacement_replay_clearance": replay_clearance,
+                    "calculix_displacement_replay_force": replay_force,
+                    "calculix_displacement_replay_energy": replay_energy,
+                }
+            )
+        calc_count = sum(1 for row in calc.values() if row.get("active_spring") == "true")
+        native_count = sum(1 for row in native.values() if row.get("active_spring") == "true")
+        replay_count = sum(1 for row in replay.values() if row.get("active_spring") == "true")
+        summary_rows.append(
+            {
+                "case": model.case,
+                "resolution": model.resolution,
+                "time": float(time),
+                "calculix_active_contact_elements": int(calc_count),
+                "sfc_native_active_springs": int(native_count),
+                "calculix_displacement_replay_active_springs": int(replay_count),
+                "calculix_per_contact_output_available": str(bool(calc)).lower(),
+                "clearance_replay_linf_error": _max_or_blank(clearance_errors),
+                "force_replay_linf_error": _max_or_blank(force_errors),
+                "energy_replay_linf_error": _max_or_blank(energy_errors),
+                "diagnosis": _contact_element_audit_diagnosis(calc_count, native_count, replay_count),
+            }
+        )
+    if not summary_rows:
+        summary_rows.append(
+            {
+                "case": model.case,
+                "resolution": model.resolution,
+                "time": "",
+                "calculix_active_contact_elements": "",
+                "sfc_native_active_springs": "",
+                "calculix_displacement_replay_active_springs": "",
+                "calculix_per_contact_output_available": "false",
+                "clearance_replay_linf_error": "",
+                "force_replay_linf_error": "",
+                "energy_replay_linf_error": "",
+                "diagnosis": "external_unavailable",
+            }
+        )
+    return audit_rows, summary_rows
+
+
+def _append_abs_error(errors: list[float], a: Any, b: Any) -> None:
+    aval = _optional_float(a)
+    bval = _optional_float(b)
+    if aval is not None and bval is not None:
+        errors.append(abs(float(aval) - float(bval)))
+
+
+def _contact_element_audit_diagnosis(calc_count: int, native_count: int, replay_count: int) -> str:
+    if calc_count <= 0 and native_count <= 0 and replay_count <= 0:
+        return "no_contact"
+    if calc_count == replay_count == native_count:
+        return "active_sets_aligned"
+    if calc_count == replay_count and calc_count != native_count:
+        return "native_trajectory_or_lifecycle_differs_from_calculix_displacement_replay"
+    if calc_count != replay_count:
+        return "calculix_contact_lifecycle_or_clearance_output_differs_from_replay"
+    return "active_set_difference_observed"
 
 
 def contact_alignment_diagnostics(
@@ -1609,14 +2038,18 @@ def run_validation(
     hht_rows: list[Row] = []
     lifecycle_rows: list[Row] = []
     mechanics_rows: list[Row] = []
+    contact_element_audit_rows: list[Row] = []
+    contact_element_audit_summary_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
+        sfc_native_contact_element_rows: list[Row] = []
         sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(
             model,
             contact_mode=contact_mode,
             cutback_policy=cutback_policy,
+            contact_element_audit_rows=sfc_native_contact_element_rows,
         )
         history_rows.extend(sfc_rows)
         if skip_calculix:
@@ -1624,16 +2057,32 @@ def run_validation(
             calc_u = np.zeros_like(model.nodes)
             calc_stress = np.zeros((model.tet_elements.shape[0], 6), dtype=float)
             calc_displacements: dict[float, np.ndarray] = {}
+            calc_contact_elements: dict[float, dict[tuple[int, int], Row]] = {}
             command_rows.append({"case": model.case, "resolution": resolution, "completed": "false", "return_code": "skipped", "command": ""})
         else:
             calc_rows, calc_u, calc_stress, command, calc_displacements = run_calculix_contact_with_stress(model, out_dir)
             command_rows.append(command)
             history_rows.extend(calc_rows)
+            dat_rel = str(command.get("dat_file", ""))
+            dat_path = out_dir / dat_rel if dat_rel else None
+            calc_contact_elements = (
+                _parse_calculix_dat_contact_elements(dat_path)
+                if dat_path is not None and dat_path.exists()
+                else {}
+            )
         comparison_rows.append(compare_contact_histories(model, calc_rows, sfc_rows, calc_stress, sfc_state))
         alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
         hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
         lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
         mechanics_rows.append(mechanics_increment_acceptance_diagnostics(model, sfc_rows, command_rows[-1], out_dir))
+        per_face_rows, per_step_rows = contact_element_clearance_lifecycle_audit(
+            model,
+            calculix_dat_contact=calc_contact_elements,
+            sfc_native_rows=sfc_native_contact_element_rows,
+            calculix_displacements=calc_displacements,
+        )
+        contact_element_audit_rows.extend(per_face_rows)
+        contact_element_audit_summary_rows.extend(per_step_rows)
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
@@ -1659,6 +2108,7 @@ def run_validation(
         hht_rows,
         lifecycle_rows,
         mechanics_rows,
+        contact_element_audit_summary_rows,
     )
     outputs = {
         "history": out_dir / "geometric_contact_history.csv",
@@ -1667,6 +2117,8 @@ def run_validation(
         "hht": out_dir / "geometric_contact_hht_residual_tangent.csv",
         "lifecycle": out_dir / "geometric_contact_lifecycle_output_diagnostics.csv",
         "mechanics": out_dir / "geometric_contact_mechanics_increment_acceptance.csv",
+        "contact_element_audit": out_dir / "geometric_contact_element_clearance_lifecycle_audit.csv",
+        "contact_element_audit_summary": out_dir / "geometric_contact_element_clearance_lifecycle_audit_summary.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
         "vtk": out_dir / "geometric_contact_stress_clouds.csv",
@@ -1680,6 +2132,8 @@ def run_validation(
     _write_csv(outputs["hht"], hht_rows)
     _write_csv(outputs["lifecycle"], lifecycle_rows)
     _write_csv(outputs["mechanics"], mechanics_rows)
+    _write_csv(outputs["contact_element_audit"], contact_element_audit_rows)
+    _write_csv(outputs["contact_element_audit_summary"], contact_element_audit_summary_rows)
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
     _write_csv(outputs["vtk"], vtk_rows)
@@ -1696,6 +2150,7 @@ def run_validation(
         hht_rows,
         lifecycle_rows,
         mechanics_rows,
+        contact_element_audit_summary_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
     )
@@ -1711,6 +2166,7 @@ def _claim_rows(
     hht_rows: list[Row],
     lifecycle_rows: list[Row],
     mechanics_rows: list[Row],
+    contact_element_audit_summary_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
     accepted = any(row["acceptance_status"] == "passed_scoped_gate" for row in comparison_rows)
@@ -1731,6 +2187,9 @@ def _claim_rows(
     )
     mechanics_supported = bool(mechanics_rows) and any(
         row.get("diagnosis") not in {"", None, "external_unavailable"} for row in mechanics_rows
+    )
+    contact_element_audit_supported = bool(contact_element_audit_summary_rows) and any(
+        row.get("calculix_per_contact_output_available") == "true" for row in contact_element_audit_summary_rows
     )
     return [
         {
@@ -1770,6 +2229,12 @@ def _claim_rows(
             "details": "Tracks CalculiX DIRECT increment attempts, Newton iterations, convergence messages, HHT alpha/beta/gamma, and SFC Newton acceptance diagnostics",
         },
         {
+            "claim": "calculix_per_contact_element_clearance_lifecycle_audit_available",
+            "supported": str(contact_element_audit_supported).lower(),
+            "evidence_csv": "geometric_contact_element_clearance_lifecycle_audit_summary.csv",
+            "details": "Parses per-contact CDIS/CSTR/CELS from CalculiX .dat and compares CalculiX active contact elements against SFC native and CalculiX-displacement replay springs",
+        },
+        {
             "claim": "contact_mesh_convergence_trend_available",
             "supported": str(len({int(row['resolution']) for row in mesh_rows}) >= 3).lower(),
             "evidence_csv": "geometric_contact_mesh_convergence.csv",
@@ -1801,6 +2266,7 @@ def _write_markdown(
     hht_rows: list[Row],
     lifecycle_rows: list[Row],
     mechanics_rows: list[Row],
+    contact_element_audit_summary_rows: list[Row],
     *,
     contact_mode: str,
     cutback_policy: str,
@@ -1823,6 +2289,8 @@ def _write_markdown(
         "- `geometric_contact_hht_residual_tangent.csv`",
         "- `geometric_contact_lifecycle_output_diagnostics.csv`",
         "- `geometric_contact_mechanics_increment_acceptance.csv`",
+        "- `geometric_contact_element_clearance_lifecycle_audit.csv`",
+        "- `geometric_contact_element_clearance_lifecycle_audit_summary.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
         "- `geometric_contact_stress_clouds.csv`",
@@ -1912,6 +2380,27 @@ def _write_markdown(
             f"{_fmt(row.get('sfc_steps_with_contact_element_change', ''))} | "
             f"{_fmt(row.get('sfc_energy_stabilization_count', ''))} | "
             f"{_fmt(row.get('sfc_final_calculix_style_rejected_step_count', ''))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Per-Contact-Element Clearance/Lifecycle Audit",
+            "",
+            "| Resolution | time | CalculiX active | SFC native active | Replay active | per-contact output | clearance replay Linf | force replay Linf | energy replay Linf | Diagnosis |",
+            "| ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in contact_element_audit_summary_rows:
+        lines.append(
+            f"| {row['resolution']} | {_fmt(row['time'])} | "
+            f"{_fmt(row['calculix_active_contact_elements'])} | "
+            f"{_fmt(row['sfc_native_active_springs'])} | "
+            f"{_fmt(row['calculix_displacement_replay_active_springs'])} | "
+            f"{row['calculix_per_contact_output_available']} | "
+            f"{_fmt(row['clearance_replay_linf_error'])} | "
+            f"{_fmt(row['force_replay_linf_error'])} | "
+            f"{_fmt(row['energy_replay_linf_error'])} | "
+            f"{row['diagnosis']} |"
         )
     lines.extend(
         [

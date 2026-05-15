@@ -79,6 +79,8 @@ The external comparison now treats these outputs as definition-sensitive:
 - `geometric_contact_lifecycle_output_diagnostics.csv`
 - `geometric_contact_alignment_diagnostics.csv`
 - `geometric_contact_hht_residual_tangent.csv`
+- `geometric_contact_element_clearance_lifecycle_audit.csv`
+- `geometric_contact_element_clearance_lifecycle_audit_summary.csv`
 
 The lifecycle CSV records:
 
@@ -92,6 +94,24 @@ The lifecycle CSV records:
 - Peak-time differences for RF and CELS proxies.
 - A diagnosis string separating external-unavailable cases from true
   lifecycle/output-trajectory differences.
+
+The per-contact-element audit is more granular.  The generated CalculiX input
+requests non-totals `CDIS`, `CSTR`, and `CELS` contact print blocks and keeps
+totals-only `CNUM` for the existing aggregate contact-count comparison.  The parser maps
+each CalculiX row by `slave element + slave face` and writes, per time step:
+
+- CalculiX active contact elements from `.dat` `CDIS/CSTR/CELS` rows.
+- SFC native generated springs on the same slave element+face keys.
+- CalculiX-displacement replay springs using the same SFC hard-linear
+  area-weighted force law on CalculiX nodal displacements.
+- Per-face clearance, normal pressure/force proxy, and contact energy.
+- If this CalculiX build does not emit per-element `CELS` rows despite the
+  request, the audit keeps the raw `calculix_cels_energy` field blank and fills
+  `calculix_contact_energy` as an explicitly labeled
+  `derived_from_cdis_cstr` proxy:
+  `0.5 * |normal pressure| * current face area * max(-clearance, 0)`.
+- Linf replay errors for clearance, force, and energy where CalculiX per-face
+  output exists.
 
 The current key finding is that the remaining RF/CELS/max-penetration
 differences are consistent with contact spring lifecycle, trajectory, and

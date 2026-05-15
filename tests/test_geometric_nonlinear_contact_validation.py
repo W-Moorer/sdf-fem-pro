@@ -15,9 +15,11 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _make_contact_geometry,
     _contact_model,
     _calculix_iterations_per_increment,
+    _parse_calculix_dat_contact_elements,
     _parse_calculix_dynamic_step_options,
     _parse_calculix_stdout_diagnostics,
     contact_lifecycle_output_diagnostics,
+    contact_element_clearance_lifecycle_audit,
     contact_replay_metrics,
     hht_residual_tangent_diagnostics,
     run_sfc_geometric_contact_history,
@@ -33,10 +35,79 @@ def test_calculix_contact_input_requests_contact_stress_output(tmp_path: Path) -
 
     text = inp.read_text(encoding="utf-8").lower()
     assert "*contact pair, interaction=contact,type=surface to surface" in text
-    assert "*contact print" in text
+    assert "*contact print, frequency=1\ncdis\ncstr\ncels" in text
+    assert "*contact print, frequency=1, totals=only\ncnum\n" in text
     assert "*el print, elset=elall" in text
     assert "\ns\n" in text
     assert "\ne\n" in text
+
+
+def test_parse_calculix_dat_per_contact_cdis_cstr_cels(tmp_path: Path) -> None:
+    dat = tmp_path / "case.dat"
+    dat.write_text(
+        "\n".join(
+            [
+                " relative contact displacement (slave element+face,normal,tang1,tang2) for all contact elements and time 0.1000000E+00",
+                "",
+                "         4          1 -1.250000E-03  2.000000E-04 -3.000000E-04",
+                " contact stress (slave element+face,press,tang1,tang2) for all contact elements and time 0.1000000E+00",
+                "",
+                "         4          1  2.500000E+01  1.000000E+00 -2.000000E+00",
+                " contact spring energy (slave element+face,energy) for all contact elements and time 0.1000000E+00",
+                "",
+                "         4          1  7.812500E-04",
+                " total contact spring energy for time 0.1000000E+00",
+                "  7.812500E-04",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = _parse_calculix_dat_contact_elements(dat)
+
+    row = parsed[0.1][(4, 1)]
+    assert row["calculix_clearance_normal"] == -1.25e-3
+    assert row["calculix_clearance_tangential_1"] == 2.0e-4
+    assert row["calculix_stress_normal"] == 25.0
+    assert row["calculix_stress_tangential_2"] == -2.0
+    assert row["calculix_contact_energy"] == 7.8125e-4
+
+
+def test_contact_element_audit_compares_calculix_native_and_replay() -> None:
+    model = _contact_model(resolution=1, duration=0.02, dt=0.004)
+    x = model.nodes.copy()
+    x[:, 2] -= 0.0505
+    native_rows: list[dict[str, object]] = []
+    run_sfc_geometric_contact_history(
+        model,
+        contact_element_audit_rows=native_rows,
+        cutback_policy="calculix_direct",
+    )
+    element_id, face_number = model.slave_face_refs[0]
+    face_number_int = int(face_number[1:])
+    displacement = np.zeros_like(model.nodes)
+    displacement[:, 2] -= 0.0505
+    parsed = {
+        0.004: {
+            (int(element_id), face_number_int): {
+                "calculix_clearance_normal": -5.0e-4,
+                "calculix_stress_normal": 10.0,
+                "calculix_contact_energy": 1.0e-6,
+            }
+        }
+    }
+
+    rows, summary = contact_element_clearance_lifecycle_audit(
+        model,
+        calculix_dat_contact=parsed,
+        sfc_native_rows=native_rows,
+        calculix_displacements={0.004: displacement},
+    )
+
+    assert rows
+    assert any(row["calculix_present"] == "true" for row in rows)
+    assert any(row["calculix_displacement_replay_active_spring"] == "true" for row in rows)
+    assert any(row["calculix_per_contact_output_available"] == "true" for row in summary)
 
 
 def test_sfc_geometric_contact_history_activates_contact() -> None:
@@ -224,6 +295,7 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["hht_residual_tangent_trajectory_diagnostics_available"]["supported"] == "true"
     assert claims["calculix_contact_lifecycle_output_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_mechanics_increment_acceptance_diagnostics_available"]["supported"] == "false"
+    assert claims["calculix_per_contact_element_clearance_lifecycle_audit_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
         alignment_rows = list(csv.DictReader(f))
