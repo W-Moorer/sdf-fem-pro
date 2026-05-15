@@ -46,6 +46,7 @@ from validation.run_calculix_drop_impact_comparison import (  # noqa: E402
     _wsl_path,
     build_drop_model,
     calculix_available,
+    write_plots as write_contact_history_plots,
     write_calculix_input,
 )
 from validation.run_geometric_nonlinear_acceptance import (  # noqa: E402
@@ -104,18 +105,29 @@ def _write_csv(path: Path, rows: list[Row]) -> None:
         writer.writerows(rows)
 
 
-def _contact_model(*, resolution: int, duration: float, dt: float, output_frequency: int = 1) -> DropModel:
+def _contact_model(
+    *,
+    resolution: int,
+    duration: float,
+    dt: float,
+    output_frequency: int = 1,
+    case: str = "block_drop",
+    initial_velocity_z: float | None = 0.0,
+    gravity: float | None = 9.81,
+    contact_stiffness: float | None = None,
+    hht_alpha: float | None = -0.05,
+) -> DropModel:
     return build_drop_model(
         quick=True,
-        case="block_drop",
+        case=case,
         resolution=resolution,
         duration=duration,
         dt=dt,
         output_frequency=output_frequency,
-        initial_velocity_z=0.0,
-        gravity=9.81,
-        contact_stiffness_override=2.0e4,
-        hht_alpha=-0.05,
+        initial_velocity_z=initial_velocity_z,
+        gravity=gravity,
+        contact_stiffness_override=contact_stiffness,
+        hht_alpha=hht_alpha,
     )
 
 
@@ -3175,6 +3187,8 @@ def compare_contact_histories(
     sfc_rows: list[Row],
     calculix_stress: np.ndarray,
     sfc_state: NonlinearState,
+    *,
+    calculix_completed: bool | None = None,
 ) -> Row:
     """Return one comparison row for CalculiX/SFC contact histories."""
 
@@ -3199,7 +3213,7 @@ def compare_contact_histories(
         "contact_mode": sfc_rows[0].get("contact_mode", "") if sfc_rows else "",
         "dt": model.dt,
         "duration": model.total_time,
-        "calculix_completed": str(bool(calculix_rows)).lower(),
+        "calculix_completed": str(bool(calculix_rows) if calculix_completed is None else bool(calculix_completed)).lower(),
         "contact_activation_time_calculix": "" if cx_first is None else cx_first,
         "contact_activation_time_sfc": "" if sfc_first is None else sfc_first,
         "contact_activation_abs_error": "" if cx_first is None or sfc_first is None else abs(sfc_first - cx_first),
@@ -3385,13 +3399,25 @@ def run_validation(
     skip_calculix: bool = False,
     contact_mode: str = "persistent_calculix_c3d4_f2f",
     cutback_policy: str = "calculix_direct",
+    duration: float | None = None,
+    dt: float | None = None,
+    cases: list[str] | tuple[str, ...] | None = None,
+    resolutions: list[int] | tuple[int, ...] | None = None,
+    output_frequency: int = 1,
+    initial_velocity_z: float | None = 0.0,
+    gravity: float | None = 9.81,
+    contact_stiffness: float | None = None,
+    hht_alpha: float | None = -0.05,
+    calculix_timeout_seconds: int = 300,
+    curve_only: bool = False,
 ) -> dict[str, Path]:
     """Run geometric nonlinear contact validation and write CSV/Markdown."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    duration = 0.12 if quick else 0.14
-    dt = 0.002
-    comparison_resolutions = [1] if quick else [1, 2, 3]
+    duration_value = float(duration) if duration is not None else (0.12 if quick else 0.14)
+    dt_value = float(dt) if dt is not None else 0.002
+    comparison_resolutions = [int(value) for value in (resolutions or ([1] if quick else [1, 2, 3]))]
+    case_values = list(cases or ["block_drop"])
     history_rows: list[Row] = []
     comparison_rows: list[Row] = []
     alignment_rows: list[Row] = []
@@ -3409,118 +3435,171 @@ def run_validation(
     velocity_comparison_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
-    for resolution in comparison_resolutions:
-        model = _contact_model(resolution=resolution, duration=duration, dt=dt)
-        sfc_native_contact_element_rows: list[Row] = []
-        sfc_state_snapshots: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]] = []
-        sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(
-            model,
-            contact_mode=contact_mode,
-            cutback_policy=cutback_policy,
-            contact_element_audit_rows=sfc_native_contact_element_rows,
-            state_snapshots=sfc_state_snapshots,
-        )
-        history_rows.extend(sfc_rows)
-        if skip_calculix:
-            calc_rows: list[Row] = []
-            calc_u = np.zeros_like(model.nodes)
-            calc_stress = np.zeros((model.tet_elements.shape[0], 6), dtype=float)
-            calc_displacements: dict[float, np.ndarray] = {}
-            calc_contact_elements: dict[float, dict[tuple[int, int], Row]] = {}
-            calc_velocities: dict[float, np.ndarray] = {}
-            calc_accelerations: dict[float, np.ndarray] = {}
-            calc_floor_rf: dict[float, np.ndarray] = {}
-            command_rows.append({"case": model.case, "resolution": resolution, "completed": "false", "return_code": "skipped", "command": ""})
-        else:
-            calc_rows, calc_u, calc_stress, command, calc_displacements = run_calculix_contact_with_stress(model, out_dir)
-            command_rows.append(command)
-            history_rows.extend(calc_rows)
-            dat_rel = str(command.get("dat_file", ""))
-            dat_path = out_dir / dat_rel if dat_rel else None
-            calc_contact_elements = (
-                _parse_calculix_dat_contact_elements(dat_path)
-                if dat_path is not None and dat_path.exists()
-                else {}
+    plot_rows: list[Row] = []
+    for case_name in case_values:
+        for resolution in comparison_resolutions:
+            model = _contact_model(
+                case=case_name,
+                resolution=resolution,
+                duration=duration_value,
+                dt=dt_value,
+                output_frequency=output_frequency,
+                initial_velocity_z=initial_velocity_z,
+                gravity=gravity,
+                contact_stiffness=contact_stiffness,
+                hht_alpha=hht_alpha,
             )
-            if dat_path is not None and dat_path.exists():
-                calc_velocities = _parse_calculix_dat_nodal_vectors(dat_path, model.node_ids, quantity="v")
-                calc_accelerations = _parse_calculix_dat_nodal_vectors(dat_path, model.node_ids, quantity="a")
-                calc_floor_rf = _parse_calculix_dat_nodal_vectors(
-                    dat_path,
-                    np.asarray(model.floor_nodes[:, 0], dtype=np.int64),
-                    quantity="rf",
-                )
-                raw_contact_print_rows.extend(
-                    _raw_contact_rows_with_case(model, _parse_calculix_dat_contact_print_raw_rows(dat_path))
+            sfc_native_contact_element_rows: list[Row] = []
+            sfc_state_snapshots: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]] = []
+            sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(
+                model,
+                contact_mode=contact_mode,
+                cutback_policy=cutback_policy,
+                contact_element_audit_rows=sfc_native_contact_element_rows,
+                state_snapshots=sfc_state_snapshots,
+            )
+            history_rows.extend(sfc_rows)
+            if skip_calculix:
+                calc_rows: list[Row] = []
+                calc_u = np.zeros_like(model.nodes)
+                calc_stress = np.zeros((model.tet_elements.shape[0], 6), dtype=float)
+                calc_displacements: dict[float, np.ndarray] = {}
+                calc_contact_elements: dict[float, dict[tuple[int, int], Row]] = {}
+                calc_velocities: dict[float, np.ndarray] = {}
+                calc_accelerations: dict[float, np.ndarray] = {}
+                calc_floor_rf: dict[float, np.ndarray] = {}
+                command_rows.append(
+                    {
+                        "case": model.case,
+                        "resolution": resolution,
+                        "completed": "false",
+                        "return_code": "skipped",
+                        "command": "",
+                    }
                 )
             else:
-                calc_velocities = {}
-                calc_accelerations = {}
-                calc_floor_rf = {}
-        comparison_rows.append(compare_contact_histories(model, calc_rows, sfc_rows, calc_stress, sfc_state))
-        alignment_rows.append(contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir))
-        hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
-        lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
-        mechanics_rows.append(mechanics_increment_acceptance_diagnostics(model, sfc_rows, command_rows[-1], out_dir))
-        one_step_resolution_rows = one_step_calculix_state_diagnostics(
-            model,
-            calc_rows,
-            calc_displacements,
-            contact_mode=contact_mode,
-        )
-        one_step_rows.extend(one_step_resolution_rows)
-        hht_state_rows.append(
-            hht_state_definition_diagnostics(
-                model,
-                calc_displacements,
-                one_step_resolution_rows,
-                contact_mode=contact_mode,
-            )
-        )
-        per_face_rows, per_step_rows = contact_element_clearance_lifecycle_audit(
-            model,
-            calculix_dat_contact=calc_contact_elements,
-            sfc_native_rows=sfc_native_contact_element_rows,
-            calculix_displacements=calc_displacements,
-        )
-        contact_element_audit_rows.extend(per_face_rows)
-        contact_element_audit_summary_rows.extend(per_step_rows)
-        nodal_state_rows.extend(
-            nodal_state_output_diagnostics(
-                model,
-                calc_rows,
-                calc_displacements,
-                calc_velocities,
-                calc_accelerations,
-                contact_mode=contact_mode,
-            )
-        )
-        floor_rf_rows.extend(floor_rf_distribution_rows(model, calc_floor_rf, calc_rows, sfc_rows))
-        first_contact_rows.extend(
-            first_contact_spring_comparison(
-                model,
-                calculix_dat_contact=calc_contact_elements,
-                sfc_native_rows=sfc_native_contact_element_rows,
-                calculix_displacements=calc_displacements,
-            )
-        )
-        velocity_comparison_rows.extend(true_velocity_comparison_rows(model, calc_velocities, sfc_state_snapshots))
-        if calc_rows:
-            vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
+                calc_rows, calc_u, calc_stress, command, calc_displacements = run_calculix_contact_with_stress(
+                    model,
+                    out_dir,
+                    timeout=calculix_timeout_seconds,
+                )
+                command_rows.append(command)
+                history_rows.extend(calc_rows)
+                dat_rel = str(command.get("dat_file", ""))
+                dat_path = out_dir / dat_rel if dat_rel else None
+                calc_contact_elements = (
+                    _parse_calculix_dat_contact_elements(dat_path)
+                    if dat_path is not None and dat_path.exists()
+                    else {}
+                )
+                if dat_path is not None and dat_path.exists():
+                    calc_velocities = _parse_calculix_dat_nodal_vectors(dat_path, model.node_ids, quantity="v")
+                    calc_accelerations = _parse_calculix_dat_nodal_vectors(dat_path, model.node_ids, quantity="a")
+                    calc_floor_rf = _parse_calculix_dat_nodal_vectors(
+                        dat_path,
+                        np.asarray(model.floor_nodes[:, 0], dtype=np.int64),
+                        quantity="rf",
+                    )
+                    raw_contact_print_rows.extend(
+                        _raw_contact_rows_with_case(model, _parse_calculix_dat_contact_print_raw_rows(dat_path))
+                    )
+                else:
+                    calc_velocities = {}
+                    calc_accelerations = {}
+                    calc_floor_rf = {}
 
-    mesh_rows = sfc_mesh_convergence(
-        [1, 2, 3],
-        duration=duration,
-        dt=dt,
-        contact_mode=contact_mode,
-        cutback_policy=cutback_policy,
-    )
-    timestep_rows = sfc_timestep_convergence(
-        [0.004, 0.002, 0.001] if quick else [0.002, 0.001, 0.0005],
-        duration=duration,
-        contact_mode=contact_mode,
-        cutback_policy=cutback_policy,
-    )
+            command_completed = str(command_rows[-1].get("completed", "")).lower() == "true"
+            comparison_rows.append(
+                compare_contact_histories(
+                    model,
+                    calc_rows,
+                    sfc_rows,
+                    calc_stress,
+                    sfc_state,
+                    calculix_completed=command_completed,
+                )
+            )
+            alignment_rows.append(
+                contact_alignment_diagnostics(model, calc_rows, sfc_rows, calc_displacements, command_rows[-1], out_dir)
+            )
+            lifecycle_rows.append(contact_lifecycle_output_diagnostics(model, calc_rows, sfc_rows, calc_displacements))
+            mechanics_rows.append(mechanics_increment_acceptance_diagnostics(model, sfc_rows, command_rows[-1], out_dir))
+            floor_rf_rows.extend(floor_rf_distribution_rows(model, calc_floor_rf, calc_rows, sfc_rows))
+            first_contact_rows.extend(
+                first_contact_spring_comparison(
+                    model,
+                    calculix_dat_contact=calc_contact_elements,
+                    sfc_native_rows=sfc_native_contact_element_rows,
+                    calculix_displacements=calc_displacements,
+                )
+            )
+            velocity_comparison_rows.extend(true_velocity_comparison_rows(model, calc_velocities, sfc_state_snapshots))
+            if not curve_only:
+                hht_rows.extend(hht_residual_tangent_diagnostics(model, contact_mode=contact_mode))
+                one_step_resolution_rows = one_step_calculix_state_diagnostics(
+                    model,
+                    calc_rows,
+                    calc_displacements,
+                    contact_mode=contact_mode,
+                )
+                one_step_rows.extend(one_step_resolution_rows)
+                hht_state_rows.append(
+                    hht_state_definition_diagnostics(
+                        model,
+                        calc_displacements,
+                        one_step_resolution_rows,
+                        contact_mode=contact_mode,
+                    )
+                )
+                per_face_rows, per_step_rows = contact_element_clearance_lifecycle_audit(
+                    model,
+                    calculix_dat_contact=calc_contact_elements,
+                    sfc_native_rows=sfc_native_contact_element_rows,
+                    calculix_displacements=calc_displacements,
+                )
+                contact_element_audit_rows.extend(per_face_rows)
+                contact_element_audit_summary_rows.extend(per_step_rows)
+                nodal_state_rows.extend(
+                    nodal_state_output_diagnostics(
+                        model,
+                        calc_rows,
+                        calc_displacements,
+                        calc_velocities,
+                        calc_accelerations,
+                        contact_mode=contact_mode,
+                    )
+                )
+                if calc_rows:
+                    vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
+            else:
+                hht_state_rows.append(
+                    {
+                        "case": model.case,
+                        "resolution": model.resolution,
+                        "contact_mode": contact_mode,
+                        "calculix_completed": str(bool(calc_rows)).lower(),
+                        "diagnosis": "curve_only_mode_skipped_heavy_hht_state_diagnostics",
+                    }
+                )
+    plot_rows = write_contact_history_plots(out_dir, history_rows)
+
+    if curve_only:
+        mesh_rows = []
+        timestep_rows = []
+    else:
+        mesh_rows = sfc_mesh_convergence(
+            comparison_resolutions if len(comparison_resolutions) >= 3 else [1, 2, 3],
+            duration=duration_value,
+            dt=dt_value,
+            contact_mode=contact_mode,
+            cutback_policy=cutback_policy,
+        )
+        timestep_rows = sfc_timestep_convergence(
+            [0.004, 0.002, 0.001] if quick else [0.002, 0.001, 0.0005],
+            duration=duration_value,
+            contact_mode=contact_mode,
+            cutback_policy=cutback_policy,
+        )
     claim_rows = _claim_rows(
         comparison_rows,
         mesh_rows,
@@ -3560,6 +3639,7 @@ def run_validation(
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
         "vtk": out_dir / "geometric_contact_stress_clouds.csv",
+        "plots": out_dir / "geometric_contact_plots.csv",
         "commands": out_dir / "external_solver_commands.csv",
         "claims": out_dir / "geometric_contact_claims.csv",
         "summary": out_dir / "geometric_contact_validation_summary.md",
@@ -3583,6 +3663,7 @@ def run_validation(
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
     _write_csv(outputs["vtk"], vtk_rows)
+    _write_csv(outputs["plots"], plot_rows)
     _write_csv(outputs["commands"], command_rows)
     _write_csv(outputs["claims"], claim_rows)
     _write_markdown(
@@ -3591,6 +3672,7 @@ def run_validation(
         mesh_rows,
         timestep_rows,
         vtk_rows,
+        plot_rows,
         claim_rows,
         alignment_rows,
         hht_rows,
@@ -3784,6 +3866,7 @@ def _write_markdown(
     mesh_rows: list[Row],
     timestep_rows: list[Row],
     vtk_rows: list[Row],
+    plot_rows: list[Row],
     claim_rows: list[Row],
     alignment_rows: list[Row],
     hht_rows: list[Row],
@@ -3833,6 +3916,7 @@ def _write_markdown(
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
         "- `geometric_contact_stress_clouds.csv`",
+        "- `geometric_contact_plots.csv`",
         "- `geometric_contact_claims.csv`",
         "",
         "## Claim Gates",
@@ -4033,6 +4117,19 @@ def _write_markdown(
             f"- Mesh convergence rows: `{len(mesh_rows)}`",
             f"- Time-step convergence rows: `{len(timestep_rows)}`",
             f"- VTK stress cloud rows: `{len(vtk_rows)}`",
+            f"- Curve plot rows: `{len(plot_rows)}`",
+            "",
+            "## Curve Plots",
+            "",
+        ]
+    )
+    if plot_rows:
+        for row in plot_rows:
+            lines.append(f"- `{row['png']}` and `{row['pdf']}`")
+    else:
+        lines.append("- no curve plots generated")
+    lines.extend(
+        [
             "",
             "## Limitations",
             "",
@@ -4113,6 +4210,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "geometric_nonlinear_contact_validation")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--skip-calculix", action="store_true")
+    parser.add_argument("--duration", type=float, default=None, help="Override total simulated time.")
+    parser.add_argument("--dt", type=float, default=None, help="Override nominal time increment.")
+    parser.add_argument(
+        "--case",
+        action="append",
+        choices=["sphere_like_drop", "block_drop"],
+        default=None,
+        help="Run one or more cases. Repeat for multiple cases.",
+    )
+    parser.add_argument(
+        "--resolution",
+        action="append",
+        type=int,
+        default=None,
+        help="Run one or more mesh resolutions. Repeat for multiple resolutions.",
+    )
+    parser.add_argument("--output-frequency", type=int, default=1, help="CalculiX/SFC output frequency in increments.")
+    parser.add_argument("--initial-velocity-z", type=float, default=0.0, help="Initial vertical velocity.")
+    parser.add_argument("--gravity", type=float, default=9.81, help="Gravity magnitude.")
+    parser.add_argument("--contact-stiffness", type=float, default=None, help="Override pressure-overclosure stiffness.")
+    parser.add_argument("--hht-alpha", type=float, default=-0.05, help="HHT alpha parameter.")
+    parser.add_argument("--calculix-timeout-seconds", type=int, default=300, help="Per-case CalculiX timeout.")
+    parser.add_argument(
+        "--curve-only",
+        action="store_true",
+        help="Run long time-history comparison and plots while skipping heavy one-step/audit/convergence diagnostics.",
+    )
     parser.add_argument(
         "--contact-mode",
         choices=[
@@ -4143,6 +4267,17 @@ def main() -> None:
         skip_calculix=args.skip_calculix,
         contact_mode=args.contact_mode,
         cutback_policy=args.cutback_policy,
+        duration=args.duration,
+        dt=args.dt,
+        cases=args.case,
+        resolutions=args.resolution,
+        output_frequency=args.output_frequency,
+        initial_velocity_z=args.initial_velocity_z,
+        gravity=args.gravity,
+        contact_stiffness=args.contact_stiffness,
+        hht_alpha=args.hht_alpha,
+        calculix_timeout_seconds=args.calculix_timeout_seconds,
+        curve_only=args.curve_only,
     )
     print("Geometric nonlinear contact validation complete.")
     for name, path in outputs.items():
