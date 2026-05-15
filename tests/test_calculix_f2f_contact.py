@@ -22,6 +22,7 @@ from validation.calculix_f2f_contact import (
     PersistentCalculixC3D4FaceToFaceSDFContactGeometry,
     assemble_deformable_f2f_contact_response,
     calculix_equivalent_contact_element_count,
+    calculix_contact_lifecycle_decision,
     calculix_hard_linear_spring_law,
 )
 
@@ -107,6 +108,66 @@ def test_persistent_lifecycle_generates_persists_and_releases_springs() -> None:
     assert active == []
     assert lifecycle.events[0].status == "released"
     assert lifecycle.generated_count == 0
+
+
+def test_lifecycle_decision_reports_generated_persisted_cutback_and_released_states() -> None:
+    inactive = calculix_contact_lifecycle_decision(clearance=0.03, spring_area=0.25, was_generated=False)
+    generated = calculix_contact_lifecycle_decision(clearance=-0.01, spring_area=0.25, was_generated=False)
+    persisted = calculix_contact_lifecycle_decision(
+        clearance=0.01,
+        spring_area=0.25,
+        was_generated=True,
+        release_tolerance=0.02,
+    )
+    cutback = calculix_contact_lifecycle_decision(
+        clearance=0.03,
+        spring_area=0.25,
+        was_generated=True,
+        release_tolerance=0.02,
+        cutback=True,
+    )
+    released = calculix_contact_lifecycle_decision(
+        clearance=0.03,
+        spring_area=0.25,
+        was_generated=True,
+        release_tolerance=0.02,
+    )
+    reactivated = calculix_contact_lifecycle_decision(
+        clearance=-0.01,
+        spring_area=0.25,
+        was_generated=False,
+        was_ever_generated=True,
+    )
+
+    assert inactive.status == "inactive"
+    assert not inactive.generated
+    assert generated.status == "generated"
+    assert generated.generated
+    assert generated.force_active
+    assert persisted.status == "persisted"
+    assert persisted.generated
+    assert not persisted.force_active
+    assert cutback.status == "cutback_persisted"
+    assert cutback.generated
+    assert released.status == "released"
+    assert not released.generated
+    assert reactivated.status == "reactivated"
+    assert reactivated.generated
+
+
+def test_persistent_lifecycle_reports_reactivation_after_release() -> None:
+    lifecycle = CalculixF2FContactLifecycle(release_tolerance=0.0)
+
+    lifecycle.update([_spring(clearance=-0.01)])
+    assert lifecycle.events[0].status == "generated"
+
+    lifecycle.update([_spring(clearance=0.03)])
+    assert lifecycle.events[0].status == "released"
+    assert lifecycle.generated_count == 0
+
+    lifecycle.update([_spring(clearance=-0.02)])
+    assert lifecycle.events[0].status == "reactivated"
+    assert lifecycle.generated_count == 1
 
 
 def test_lifecycle_snapshot_restore_rolls_back_trial_contact_state() -> None:

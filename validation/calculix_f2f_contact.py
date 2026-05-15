@@ -113,6 +113,24 @@ class CalculixF2FLifecycleEvent:
     clearance: float
     was_active: bool
     is_active: bool
+    force_active: bool = False
+    release_tolerance: float = 0.0
+    penetrates: bool = False
+    persists: bool = False
+    cutback_persisted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CalculixContactLifecycleDecision:
+    """Generated contact-spring lifecycle decision for one candidate."""
+
+    status: str
+    generated: bool
+    force_active: bool
+    penetrates: bool
+    persists: bool
+    cutback_persisted: bool
+    release_tolerance: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,11 +171,14 @@ class CalculixF2FContactLifecycle:
     release_tolerance_scale: float = 0.0
     keep_previous_on_cutback: bool = True
     active_springs: dict[tuple[int, int], CalculixF2FContactSpring] | None = None
+    known_spring_keys: set[tuple[int, int]] | None = None
     events: list[CalculixF2FLifecycleEvent] | None = None
 
     def __post_init__(self) -> None:
         if self.active_springs is None:
             self.active_springs = {}
+        if self.known_spring_keys is None:
+            self.known_spring_keys = set()
         if self.events is None:
             self.events = []
 
@@ -177,34 +198,34 @@ class CalculixF2FContactLifecycle:
             key = _spring_lifecycle_key(spring)
             seen.add(key)
             was_active = key in previous
-            penetrates = spring.clearance <= float(self.activation_tolerance)
-            release_tolerance = max(
-                float(self.release_tolerance),
-                float(self.release_tolerance_scale) * float(np.sqrt(max(float(spring.spring_area), 0.0))),
+            decision = calculix_contact_lifecycle_decision(
+                clearance=float(spring.clearance),
+                spring_area=float(spring.spring_area),
+                was_generated=was_active,
+                was_ever_generated=key in (self.known_spring_keys or set()),
+                activation_tolerance=float(self.activation_tolerance),
+                release_tolerance=float(self.release_tolerance),
+                release_tolerance_scale=float(self.release_tolerance_scale),
+                cutback=bool(cutback),
+                keep_previous_on_cutback=bool(self.keep_previous_on_cutback),
             )
-            persists = was_active and spring.clearance <= release_tolerance
-            cutback_persists = bool(cutback and self.keep_previous_on_cutback and was_active)
-            is_active = bool(penetrates or persists or cutback_persists)
-            if is_active:
+            if decision.generated:
                 next_active[key] = spring
-                if penetrates and not was_active:
-                    status = "generated"
-                elif cutback_persists and not penetrates and not persists:
-                    status = "cutback_persisted"
-                elif was_active:
-                    status = "persisted"
-                else:
-                    status = "generated"
-            else:
-                status = "released" if was_active else "inactive"
+                assert self.known_spring_keys is not None
+                self.known_spring_keys.add(key)
             events.append(
                 CalculixF2FLifecycleEvent(
                     slave_face_index=int(spring.slave_face_index),
                     slave_quadrature_index=int(spring.slave_quadrature_index),
-                    status=status,
+                    status=decision.status,
                     clearance=float(spring.clearance),
                     was_active=was_active,
-                    is_active=is_active,
+                    is_active=decision.generated,
+                    force_active=decision.force_active,
+                    release_tolerance=decision.release_tolerance,
+                    penetrates=decision.penetrates,
+                    persists=decision.persists,
+                    cutback_persisted=decision.cutback_persisted,
                 )
             )
 
@@ -219,6 +240,7 @@ class CalculixF2FContactLifecycle:
                     clearance=float(spring.clearance),
                     was_active=True,
                     is_active=False,
+                    force_active=False,
                 )
             )
 
@@ -226,17 +248,31 @@ class CalculixF2FContactLifecycle:
         self.events = events
         return list(next_active.values())
 
-    def snapshot(self) -> tuple[dict[tuple[int, int], CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]:
+    def snapshot(
+        self,
+    ) -> tuple[
+        dict[tuple[int, int], CalculixF2FContactSpring],
+        list[CalculixF2FLifecycleEvent],
+        set[tuple[int, int]],
+    ]:
         """Return a rollback snapshot of generated springs and events."""
 
-        return dict(self.active_springs or {}), list(self.events or [])
+        return dict(self.active_springs or {}), list(self.events or []), set(self.known_spring_keys or set())
 
-    def restore(self, snapshot: tuple[dict[tuple[int, int], CalculixF2FContactSpring], list[CalculixF2FLifecycleEvent]]) -> None:
+    def restore(
+        self,
+        snapshot: tuple[
+            dict[tuple[int, int], CalculixF2FContactSpring],
+            list[CalculixF2FLifecycleEvent],
+            set[tuple[int, int]],
+        ],
+    ) -> None:
         """Restore a rollback snapshot."""
 
-        springs, events = snapshot
+        springs, events, known = snapshot
         self.active_springs = dict(springs)
         self.events = list(events)
+        self.known_spring_keys = set(known)
 
     @property
     def generated_count(self) -> int:
@@ -316,6 +352,58 @@ def _triangle_contact_rule(name: str) -> tuple[np.ndarray, np.ndarray]:
     if name == "calculix_7":
         return CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC.copy(), CALCULIX_TRIANGLE_CONTACT_WEIGHTS.copy()
     raise ValueError("quadrature must be 'centroid' or 'calculix_7'")
+
+
+def calculix_contact_lifecycle_decision(
+    *,
+    clearance: float,
+    spring_area: float,
+    was_generated: bool,
+    was_ever_generated: bool = False,
+    activation_tolerance: float = 0.0,
+    release_tolerance: float = 0.0,
+    release_tolerance_scale: float = 0.0,
+    cutback: bool = False,
+    keep_previous_on_cutback: bool = True,
+) -> CalculixContactLifecycleDecision:
+    """Return a clean-room contact-spring lifecycle decision.
+
+    This helper isolates the generated-contact-element state transition used by
+    the validation layer.  It distinguishes force-producing penetration from a
+    generated but currently open persistent spring, which is essential when
+    comparing CalculiX `CNUM` against contact force or `CELS`.
+    """
+
+    area = max(float(spring_area), 0.0)
+    release = max(float(release_tolerance), float(release_tolerance_scale) * float(np.sqrt(area)))
+    gap = float(clearance)
+    penetrates = gap <= float(activation_tolerance)
+    force_active = gap <= 0.0
+    persists = bool(was_generated and gap <= release)
+    cutback_persists = bool(cutback and keep_previous_on_cutback and was_generated)
+    generated = bool(penetrates or persists or cutback_persists)
+    if generated:
+        if penetrates and not was_generated and was_ever_generated:
+            status = "reactivated"
+        elif penetrates and not was_generated:
+            status = "generated"
+        elif cutback_persists and not penetrates and not persists:
+            status = "cutback_persisted"
+        elif was_generated:
+            status = "persisted"
+        else:
+            status = "generated"
+    else:
+        status = "released" if was_generated else "inactive"
+    return CalculixContactLifecycleDecision(
+        status=status,
+        generated=generated,
+        force_active=force_active and generated,
+        penetrates=bool(penetrates),
+        persists=bool(persists),
+        cutback_persisted=bool(cutback_persists),
+        release_tolerance=float(release),
+    )
 
 
 def calculix_hard_linear_spring_law(
