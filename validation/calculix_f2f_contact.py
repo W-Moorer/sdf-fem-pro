@@ -118,6 +118,7 @@ class CalculixF2FLifecycleEvent:
     penetrates: bool = False
     persists: bool = False
     cutback_persisted: bool = False
+    candidate_valid: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +128,7 @@ class CalculixContactLifecycleDecision:
     status: str
     generated: bool
     force_active: bool
+    candidate_valid: bool
     penetrates: bool
     persists: bool
     cutback_persisted: bool
@@ -226,21 +228,41 @@ class CalculixF2FContactLifecycle:
                     penetrates=decision.penetrates,
                     persists=decision.persists,
                     cutback_persisted=decision.cutback_persisted,
+                    candidate_valid=decision.candidate_valid,
                 )
             )
 
         for key, spring in previous.items():
             if key in seen:
                 continue
+            decision = calculix_contact_lifecycle_decision(
+                clearance=float(spring.clearance),
+                spring_area=float(spring.spring_area),
+                was_generated=True,
+                was_ever_generated=key in (self.known_spring_keys or set()),
+                activation_tolerance=float(self.activation_tolerance),
+                release_tolerance=float(self.release_tolerance),
+                release_tolerance_scale=float(self.release_tolerance_scale),
+                cutback=bool(cutback),
+                keep_previous_on_cutback=bool(self.keep_previous_on_cutback),
+                candidate_valid=False,
+            )
+            if decision.generated:
+                next_active[key] = spring
             events.append(
                 CalculixF2FLifecycleEvent(
                     slave_face_index=int(spring.slave_face_index),
                     slave_quadrature_index=int(spring.slave_quadrature_index),
-                    status="lost_candidate_released",
+                    status=decision.status,
                     clearance=float(spring.clearance),
                     was_active=True,
-                    is_active=False,
-                    force_active=False,
+                    is_active=decision.generated,
+                    force_active=decision.force_active,
+                    release_tolerance=decision.release_tolerance,
+                    penetrates=decision.penetrates,
+                    persists=decision.persists,
+                    cutback_persisted=decision.cutback_persisted,
+                    candidate_valid=False,
                 )
             )
 
@@ -365,6 +387,7 @@ def calculix_contact_lifecycle_decision(
     release_tolerance_scale: float = 0.0,
     cutback: bool = False,
     keep_previous_on_cutback: bool = True,
+    candidate_valid: bool = True,
 ) -> CalculixContactLifecycleDecision:
     """Return a clean-room contact-spring lifecycle decision.
 
@@ -377,6 +400,18 @@ def calculix_contact_lifecycle_decision(
     area = max(float(spring_area), 0.0)
     release = max(float(release_tolerance), float(release_tolerance_scale) * float(np.sqrt(area)))
     gap = float(clearance)
+    if not candidate_valid:
+        cutback_persists = bool(cutback and keep_previous_on_cutback and was_generated)
+        return CalculixContactLifecycleDecision(
+            status="lost_candidate_cutback_persisted" if cutback_persists else ("lost_candidate_released" if was_generated else "no_master_candidate"),
+            generated=cutback_persists,
+            force_active=False,
+            candidate_valid=False,
+            penetrates=False,
+            persists=False,
+            cutback_persisted=cutback_persists,
+            release_tolerance=float(release),
+        )
     penetrates = gap <= float(activation_tolerance)
     force_active = gap <= 0.0
     persists = bool(was_generated and gap <= release)
@@ -399,6 +434,7 @@ def calculix_contact_lifecycle_decision(
         status=status,
         generated=generated,
         force_active=force_active and generated,
+        candidate_valid=True,
         penetrates=bool(penetrates),
         persists=bool(persists),
         cutback_persisted=bool(cutback_persists),
@@ -591,6 +627,8 @@ class CalculixC3D4FaceToFaceSDFContactGeometry:
             for quadrature_index, (shape_weights, area_weight) in enumerate(zip(barycentric, weights, strict=True)):
                 point = shape_weights @ tri
                 candidates = np.asarray(self.candidate_provider(point), dtype=np.int64).ravel()
+                if candidates.size == 0:
+                    continue
                 result = dynamic_surface_sdf(point, master_x, master_faces, candidates)
                 springs.append(
                     CalculixF2FContactSpring(

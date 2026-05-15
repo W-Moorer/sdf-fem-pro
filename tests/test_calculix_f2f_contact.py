@@ -138,6 +138,25 @@ def test_lifecycle_decision_reports_generated_persisted_cutback_and_released_sta
         was_generated=False,
         was_ever_generated=True,
     )
+    no_master = calculix_contact_lifecycle_decision(
+        clearance=-0.01,
+        spring_area=0.25,
+        was_generated=False,
+        candidate_valid=False,
+    )
+    lost = calculix_contact_lifecycle_decision(
+        clearance=-0.01,
+        spring_area=0.25,
+        was_generated=True,
+        candidate_valid=False,
+    )
+    lost_cutback = calculix_contact_lifecycle_decision(
+        clearance=-0.01,
+        spring_area=0.25,
+        was_generated=True,
+        cutback=True,
+        candidate_valid=False,
+    )
 
     assert inactive.status == "inactive"
     assert not inactive.generated
@@ -153,6 +172,14 @@ def test_lifecycle_decision_reports_generated_persisted_cutback_and_released_sta
     assert not released.generated
     assert reactivated.status == "reactivated"
     assert reactivated.generated
+    assert no_master.status == "no_master_candidate"
+    assert not no_master.generated
+    assert not no_master.candidate_valid
+    assert lost.status == "lost_candidate_released"
+    assert not lost.generated
+    assert lost_cutback.status == "lost_candidate_cutback_persisted"
+    assert lost_cutback.generated
+    assert lost_cutback.cutback_persisted
 
 
 def test_persistent_lifecycle_reports_reactivation_after_release() -> None:
@@ -168,6 +195,21 @@ def test_persistent_lifecycle_reports_reactivation_after_release() -> None:
     lifecycle.update([_spring(clearance=-0.02)])
     assert lifecycle.events[0].status == "reactivated"
     assert lifecycle.generated_count == 1
+
+
+def test_lifecycle_can_keep_lost_candidate_during_cutback() -> None:
+    lifecycle = CalculixF2FContactLifecycle()
+    lifecycle.update([_spring(clearance=-0.01)])
+
+    released = lifecycle.update([])
+    assert released == []
+    assert lifecycle.events[0].status == "lost_candidate_released"
+
+    lifecycle.update([_spring(clearance=-0.01)])
+    kept = lifecycle.update([], cutback=True)
+    assert len(kept) == 1
+    assert lifecycle.events[0].status == "lost_candidate_cutback_persisted"
+    assert lifecycle.events[0].cutback_persisted
 
 
 def test_lifecycle_snapshot_restore_rolls_back_trial_contact_state() -> None:
@@ -233,6 +275,52 @@ def test_persistent_sdf_geometry_reuses_stored_master_projection() -> None:
     assert second.master_weights == pytest.approx(first.master_weights)
     assert second.normal == pytest.approx(first.normal)
     assert second.clearance == pytest.approx(first.clearance)
+
+
+def test_sdf_geometry_skips_empty_candidate_queries_like_no_master_face() -> None:
+    slave_x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    slave_faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    master_x = np.asarray([[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0]], dtype=float)
+    master_faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    geometry = CalculixC3D4FaceToFaceSDFContactGeometry(
+        slave_faces,
+        master_x,
+        master_faces,
+        lambda _point: np.zeros(0, dtype=np.int64),
+        stiffness=100.0,
+    )
+
+    assert geometry.contact_springs(slave_x) == []
+    assert list(geometry.samples(slave_x)) == []
+
+
+def test_persistent_sdf_geometry_keeps_lost_candidate_on_cutback() -> None:
+    slave_x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
+    slave_faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    master_x = np.asarray([[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0]], dtype=float)
+    master_faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    candidate = {"active": True}
+
+    def candidates(_point: np.ndarray) -> np.ndarray:
+        return np.asarray([0], dtype=np.int64) if candidate["active"] else np.zeros(0, dtype=np.int64)
+
+    geometry = PersistentCalculixC3D4FaceToFaceSDFContactGeometry(
+        slave_faces,
+        master_x,
+        master_faces,
+        candidates,
+        stiffness=100.0,
+    )
+    first = geometry.contact_springs(slave_x)
+    assert len(first) == 1
+
+    candidate["active"] = False
+    geometry.set_cutback_retry(True)
+    kept = geometry.contact_springs(slave_x)
+
+    assert len(kept) == 1
+    assert geometry.lifecycle is not None
+    assert geometry.lifecycle.events[0].status == "lost_candidate_cutback_persisted"
 
 
 def test_calculix_equivalent_cnum_counts_slave_and_master_nodes() -> None:

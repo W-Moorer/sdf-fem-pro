@@ -35,6 +35,11 @@ contact spring elements:
   point search for every residual evaluation.
 - In dynamic analysis, positive clearance can drop a contact spring unless tied
   or persistent-contact branches keep it active for convergence control.
+- A missing master-face candidate corresponds to `isol = 0`.  The SFC
+  validation layer now treats an empty SDF candidate list as a no-master-face
+  event instead of a query failure; during a cutback retry, a previously
+  generated spring can be retained and reported as
+  `lost_candidate_cutback_persisted`.
 
 This explains why matching the force law alone is not enough.  The SFC
 diagnostic has to track the generated contact-spring lifecycle, not only active
