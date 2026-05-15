@@ -25,6 +25,7 @@ from validation.calculix_f2f_contact import (
     calculix_contact_lifecycle_decision,
     calculix_hard_linear_spring_law,
     calculix_static_clearance_ramp,
+    calculix_static_iloop_generation_decision,
 )
 
 
@@ -477,6 +478,101 @@ def test_static_clearance_ramp_reuses_previous_offset_after_initialization() -> 
     assert ramp.adjusted_clearance == pytest.approx(0.01875)
     assert ramp.springarea_offset == pytest.approx(-0.025)
     assert not ramp.initialized_offset
+
+
+def test_static_iloop_generation_uses_penetration_without_cutback() -> None:
+    open_decision = calculix_static_iloop_generation_decision(clearance=0.01)
+    penetrating = calculix_static_iloop_generation_decision(clearance=-0.01)
+
+    assert open_decision.status == "released_positive_clearance"
+    assert not open_decision.generated
+    assert not open_decision.force_active
+    assert penetrating.status == "generated_by_penetration"
+    assert penetrating.generated
+    assert penetrating.force_active
+    assert penetrating.increments_iact
+
+
+def test_static_iloop_generation_counts_previous_increment_contact() -> None:
+    decision = calculix_static_iloop_generation_decision(
+        clearance=-0.01,
+        step=2,
+        increment=1,
+        iteration=0,
+        n_contact_material_terms=7,
+        tangential_regularization=0.1,
+        previous_state_norm=1.0e-12,
+    )
+
+    assert decision.generated
+    assert decision.increments_iprev
+    assert decision.previous_contact_present
+
+
+def test_static_iloop_cutback_keeps_previous_positive_clearance_contact() -> None:
+    kept = calculix_static_iloop_generation_decision(
+        clearance=0.02,
+        cutback=True,
+        n_contact_material_terms=7,
+        tangential_regularization=0.1,
+        previous_state_norm=1.0e-12,
+    )
+    released = calculix_static_iloop_generation_decision(
+        clearance=0.02,
+        cutback=True,
+        n_contact_material_terms=7,
+        tangential_regularization=0.1,
+        previous_state_norm=0.0,
+    )
+
+    assert kept.status == "cutback_previous_or_penetration_generated"
+    assert kept.generated
+    assert not kept.force_active
+    assert kept.increments_iact
+    assert released.status == "cutback_released_positive_without_previous"
+    assert not released.generated
+
+
+def test_static_iloop2_uses_previous_state_only() -> None:
+    kept = calculix_static_iloop_generation_decision(
+        clearance=0.02,
+        iloop=2,
+        previous_state_norm=1.0e-12,
+    )
+    released = calculix_static_iloop_generation_decision(
+        clearance=-0.02,
+        iloop=2,
+        previous_state_norm=0.0,
+    )
+
+    assert kept.status == "iloop2_previous_generated"
+    assert kept.generated
+    assert not kept.force_active
+    assert released.status == "iloop2_released_without_previous"
+    assert not released.generated
+
+
+def test_static_iloop_generation_models_no_master_aleatoric_and_contact_type_branches() -> None:
+    no_master = calculix_static_iloop_generation_decision(clearance=-0.01, master_face_detected=False)
+    aleatoric = calculix_static_iloop_generation_decision(
+        clearance=-0.01,
+        aleatoric_enabled=True,
+        aleatoric_harvest=0.95,
+        aleatoric_probability=0.1,
+    )
+    contact_type = calculix_static_iloop_generation_decision(
+        clearance=0.03,
+        contact_type_allows_positive_clearance=True,
+    )
+
+    assert no_master.status == "no_master_candidate"
+    assert not no_master.generated
+    assert aleatoric.status == "aleatoric_removed"
+    assert aleatoric.aleatoric_removed
+    assert not aleatoric.generated
+    assert contact_type.status == "contact_type_generated"
+    assert contact_type.generated
+    assert not contact_type.force_active
 
 
 def test_convergence_heuristic_recommends_cutback_on_oscillation() -> None:

@@ -73,6 +73,15 @@ static branch: initial negative clearance stores a ramped offset analogous to
 stored offset with the current load-step time factor.  This helper is diagnostic
 only and does not change the core `src/sfc` dynamic-SDF method.
 
+The helper `calculix_static_iloop_generation_decision` captures the next scoped
+piece of the same generation function.  It records when a regular static
+iteration generates by penetration, when `xstateini` indicates previous
+increment contact, when a cutback keeps a previously active spring despite
+positive current clearance, when `iloop=2` replays previous contact elements,
+and when no-master or aleatoric-removal branches release a candidate.  These
+states are exposed as diagnostics rather than as a wholesale replacement for
+CalculiX contact element storage.
+
 ## CNUM, CELS, And RF Definitions
 
 The external comparison now treats these outputs as definition-sensitive:

@@ -148,6 +148,19 @@ class CalculixStaticClearanceRamp:
 
 
 @dataclass(frozen=True, slots=True)
+class CalculixStaticIloopGenerationDecision:
+    """Static `gencontelem_f2f` iloop branch decision."""
+
+    status: str
+    generated: bool
+    force_active: bool
+    increments_iprev: bool
+    increments_iact: bool
+    previous_contact_present: bool
+    aleatoric_removed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ContactConvergenceRecord:
     """Contact active-set convergence diagnostic for one iteration."""
 
@@ -514,6 +527,134 @@ def calculix_static_clearance_ramp(
         springarea_offset=float(offset),
         initialized_offset=bool(initialized),
         small_gap_closed=bool(small_closed),
+    )
+
+
+def calculix_static_iloop_generation_decision(
+    *,
+    clearance: float,
+    master_face_detected: bool = True,
+    iloop: int = 1,
+    step: int = 1,
+    increment: int = 1,
+    iteration: int = 0,
+    n_contact_material_terms: int = 7,
+    tangential_regularization: float = 0.0,
+    cutback: bool = False,
+    previous_state_norm: float = 0.0,
+    contact_type_allows_positive_clearance: bool = False,
+    aleatoric_enabled: bool = False,
+    aleatoric_harvest: float = 0.0,
+    aleatoric_probability: float = 0.1,
+    previous_state_threshold: float = 1.0e-30,
+) -> CalculixStaticIloopGenerationDecision:
+    """Return the clean-room static `iloop` contact-generation branch result.
+
+    This models the scoped `gencontelem_f2f` static branch after clearance has
+    been evaluated and any static clearance ramp has been applied.  It separates
+    generated contact-spring elements from force-active compression and exposes
+    the diagnostic counters that CalculiX updates around `xstateini`.
+    """
+
+    gap = float(clearance)
+    previous_present = float(previous_state_norm) >= float(previous_state_threshold)
+    has_tangential_history = int(n_contact_material_terms) >= 7 and float(tangential_regularization) > 0.0
+    new_increment = int(step) > 1 or int(increment) > 1
+    increments_iprev = bool(new_increment and int(iteration) <= 0 and has_tangential_history and previous_present)
+
+    if not master_face_detected:
+        return CalculixStaticIloopGenerationDecision(
+            status="no_master_candidate",
+            generated=False,
+            force_active=False,
+            increments_iprev=False,
+            increments_iact=False,
+            previous_contact_present=previous_present,
+            aleatoric_removed=False,
+        )
+
+    if contact_type_allows_positive_clearance:
+        return CalculixStaticIloopGenerationDecision(
+            status="contact_type_generated",
+            generated=True,
+            force_active=bool(gap <= 0.0),
+            increments_iprev=increments_iprev,
+            increments_iact=False,
+            previous_contact_present=previous_present,
+            aleatoric_removed=False,
+        )
+
+    if int(iloop) == 1:
+        if aleatoric_enabled and float(aleatoric_harvest) > 1.0 - float(aleatoric_probability):
+            return CalculixStaticIloopGenerationDecision(
+                status="aleatoric_removed",
+                generated=False,
+                force_active=False,
+                increments_iprev=increments_iprev,
+                increments_iact=False,
+                previous_contact_present=previous_present,
+                aleatoric_removed=True,
+            )
+
+        if (not cutback) or (int(n_contact_material_terms) < 7) or float(tangential_regularization) <= 0.0:
+            if gap > 0.0:
+                return CalculixStaticIloopGenerationDecision(
+                    status="released_positive_clearance",
+                    generated=False,
+                    force_active=False,
+                    increments_iprev=increments_iprev,
+                    increments_iact=False,
+                    previous_contact_present=previous_present,
+                    aleatoric_removed=False,
+                )
+            return CalculixStaticIloopGenerationDecision(
+                status="generated_by_penetration",
+                generated=True,
+                force_active=True,
+                increments_iprev=increments_iprev,
+                increments_iact=True,
+                previous_contact_present=previous_present,
+                aleatoric_removed=False,
+            )
+
+        if (not previous_present) and gap > 0.0:
+            return CalculixStaticIloopGenerationDecision(
+                status="cutback_released_positive_without_previous",
+                generated=False,
+                force_active=False,
+                increments_iprev=increments_iprev,
+                increments_iact=False,
+                previous_contact_present=False,
+                aleatoric_removed=False,
+            )
+        return CalculixStaticIloopGenerationDecision(
+            status="cutback_previous_or_penetration_generated",
+            generated=True,
+            force_active=bool(gap <= 0.0),
+            increments_iprev=increments_iprev,
+            increments_iact=True,
+            previous_contact_present=previous_present,
+            aleatoric_removed=False,
+        )
+
+    if not previous_present:
+        return CalculixStaticIloopGenerationDecision(
+            status="iloop2_released_without_previous",
+            generated=False,
+            force_active=False,
+            increments_iprev=False,
+            increments_iact=False,
+            previous_contact_present=False,
+            aleatoric_removed=False,
+        )
+    return CalculixStaticIloopGenerationDecision(
+        status="iloop2_previous_generated",
+        generated=True,
+        force_active=bool(gap <= 0.0),
+        increments_iprev=False,
+        increments_iact=False,
+        previous_contact_present=True,
+        aleatoric_removed=False,
     )
 
 
