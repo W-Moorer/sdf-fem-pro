@@ -276,6 +276,7 @@ def run_sfc_geometric_contact_history(
     cutback_policy: str = "calculix_direct",
     source: str = "sfc_geometric_nonlinear",
     contact_element_audit_rows: list[Row] | None = None,
+    state_snapshots: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]] | None = None,
 ) -> tuple[list[Row], np.ndarray, NonlinearState]:
     """Run the clean-room CalculiX-aligned StVK contact backend."""
 
@@ -318,6 +319,7 @@ def run_sfc_geometric_contact_history(
             cutback_policy=cutback_policy,
         )
     )
+    _append_state_snapshot(state_snapshots, state)
     _append_sfc_contact_element_audit_rows(
         contact_element_audit_rows,
         model,
@@ -391,6 +393,7 @@ def run_sfc_geometric_contact_history(
                     cutback_policy=cutback_policy,
                 )
             )
+            _append_state_snapshot(state_snapshots, state)
             _append_sfc_contact_element_audit_rows(
                 contact_element_audit_rows,
                 model,
@@ -799,6 +802,22 @@ def _append_sfc_contact_element_audit_rows(
             time=float(state.time),
             source=source,
             generated_springs=_contact_springs_by_contact_element(contact, state.x),
+        )
+    )
+
+
+def _append_state_snapshot(
+    snapshots: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]] | None,
+    state: MechanicsState,
+) -> None:
+    if snapshots is None:
+        return
+    snapshots.append(
+        (
+            float(state.time),
+            np.asarray(state.x, dtype=float).copy(),
+            np.asarray(state.v, dtype=float).copy(),
+            np.asarray(state.a, dtype=float).copy(),
         )
     )
 
@@ -1238,6 +1257,66 @@ def nodal_state_output_diagnostics(
             time=float(next_time),
         )
         previous_static = force_state.calculix_rhs_balance.copy()
+    return rows
+
+
+def true_velocity_comparison_rows(
+    model: DropModel,
+    calculix_velocities: dict[float, np.ndarray],
+    sfc_snapshots: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]],
+) -> list[Row]:
+    """Directly compare CalculiX printed nodal V against SFC nodal velocity."""
+
+    if not calculix_velocities or not sfc_snapshots:
+        return [
+            {
+                "case": model.case,
+                "resolution": model.resolution,
+                "time": "",
+                "sfc_time": "",
+                "time_abs_error": "",
+                "calculix_velocity_output_available": str(bool(calculix_velocities)).lower(),
+                "sfc_velocity_output_available": str(bool(sfc_snapshots)).lower(),
+                "calculix_v_cm_z": "",
+                "sfc_v_cm_z": "",
+                "v_cm_z_abs_error": "",
+                "v_cm_z_rel_error": "",
+                "nodal_velocity_l2_rel_error": "",
+                "nodal_velocity_z_l2_rel_error": "",
+                "max_nodal_velocity_abs_error": "",
+                "diagnosis": "external_unavailable",
+            }
+        ]
+
+    rows: list[Row] = []
+    for time, calc_v in sorted(calculix_velocities.items()):
+        sfc_time, _sfc_x, sfc_v, _sfc_a = min(sfc_snapshots, key=lambda item: abs(float(item[0]) - float(time)))
+        calc_arr = np.asarray(calc_v, dtype=float)
+        sfc_arr = np.asarray(sfc_v, dtype=float)
+        calc_v_cm = _mass_weighted_velocity_z(model, calc_arr.reshape(-1))
+        sfc_v_cm = _mass_weighted_velocity_z(model, sfc_arr.reshape(-1))
+        nodal_rel = _relative_vector_error(sfc_arr.reshape(-1), calc_arr.reshape(-1))
+        z_rel = _relative_vector_error(sfc_arr[:, 2], calc_arr[:, 2])
+        v_cm_abs = abs(float(sfc_v_cm) - float(calc_v_cm))
+        rows.append(
+            {
+                "case": model.case,
+                "resolution": model.resolution,
+                "time": float(time),
+                "sfc_time": float(sfc_time),
+                "time_abs_error": abs(float(sfc_time) - float(time)),
+                "calculix_velocity_output_available": "true",
+                "sfc_velocity_output_available": "true",
+                "calculix_v_cm_z": float(calc_v_cm),
+                "sfc_v_cm_z": float(sfc_v_cm),
+                "v_cm_z_abs_error": v_cm_abs,
+                "v_cm_z_rel_error": v_cm_abs / max(abs(float(calc_v_cm)), 1.0e-30),
+                "nodal_velocity_l2_rel_error": nodal_rel,
+                "nodal_velocity_z_l2_rel_error": z_rel,
+                "max_nodal_velocity_abs_error": float(np.max(np.abs(sfc_arr - calc_arr))) if calc_arr.size else 0.0,
+                "diagnosis": "velocity_trajectory_aligned" if nodal_rel < 1.0e-3 else "velocity_trajectory_difference",
+            }
+        )
     return rows
 
 
@@ -3122,16 +3201,19 @@ def run_validation(
     floor_rf_rows: list[Row] = []
     raw_contact_print_rows: list[Row] = []
     first_contact_rows: list[Row] = []
+    velocity_comparison_rows: list[Row] = []
     command_rows: list[Row] = []
     vtk_rows: list[Row] = []
     for resolution in comparison_resolutions:
         model = _contact_model(resolution=resolution, duration=duration, dt=dt)
         sfc_native_contact_element_rows: list[Row] = []
+        sfc_state_snapshots: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]] = []
         sfc_rows, sfc_x, sfc_state = run_sfc_geometric_contact_history(
             model,
             contact_mode=contact_mode,
             cutback_policy=cutback_policy,
             contact_element_audit_rows=sfc_native_contact_element_rows,
+            state_snapshots=sfc_state_snapshots,
         )
         history_rows.extend(sfc_rows)
         if skip_calculix:
@@ -3217,6 +3299,7 @@ def run_validation(
                 calculix_displacements=calc_displacements,
             )
         )
+        velocity_comparison_rows.extend(true_velocity_comparison_rows(model, calc_velocities, sfc_state_snapshots))
         if calc_rows:
             vtk_rows.extend(write_stress_cloud_vtks(out_dir, model, calc_u, calc_stress, sfc_x, sfc_state))
 
@@ -3249,6 +3332,7 @@ def run_validation(
         floor_rf_rows,
         raw_contact_print_rows,
         first_contact_rows,
+        velocity_comparison_rows,
     )
     internal_exportability_rows = calculix_internal_state_exportability_rows()
     outputs = {
@@ -3266,6 +3350,7 @@ def run_validation(
         "floor_rf_distribution": out_dir / "geometric_contact_floor_rf_distribution.csv",
         "raw_contact_print": out_dir / "geometric_contact_raw_contact_print_rows.csv",
         "first_contact_spring": out_dir / "geometric_contact_first_contact_spring_comparison.csv",
+        "velocity_comparison": out_dir / "geometric_contact_true_velocity_comparison.csv",
         "calculix_internal_exportability": out_dir / "geometric_contact_calculix_internal_exportability.csv",
         "mesh": out_dir / "geometric_contact_mesh_convergence.csv",
         "timestep": out_dir / "geometric_contact_timestep_convergence.csv",
@@ -3288,6 +3373,7 @@ def run_validation(
     _write_csv(outputs["floor_rf_distribution"], floor_rf_rows)
     _write_csv(outputs["raw_contact_print"], raw_contact_print_rows)
     _write_csv(outputs["first_contact_spring"], first_contact_rows)
+    _write_csv(outputs["velocity_comparison"], velocity_comparison_rows)
     _write_csv(outputs["calculix_internal_exportability"], internal_exportability_rows)
     _write_csv(outputs["mesh"], mesh_rows)
     _write_csv(outputs["timestep"], timestep_rows)
@@ -3312,6 +3398,7 @@ def run_validation(
         floor_rf_rows,
         raw_contact_print_rows,
         first_contact_rows,
+        velocity_comparison_rows,
         internal_exportability_rows,
         contact_mode=contact_mode,
         cutback_policy=cutback_policy,
@@ -3335,6 +3422,7 @@ def _claim_rows(
     floor_rf_rows: list[Row],
     raw_contact_print_rows: list[Row],
     first_contact_rows: list[Row],
+    velocity_comparison_rows: list[Row],
 ) -> list[Row]:
     comparison_available = any(row["calculix_completed"] == "true" for row in comparison_rows)
     accepted = any(row["acceptance_status"] == "passed_scoped_gate" for row in comparison_rows)
@@ -3375,6 +3463,9 @@ def _claim_rows(
     raw_contact_supported = bool(raw_contact_print_rows)
     first_contact_supported = bool(first_contact_rows) and any(
         row.get("diagnosis") == "first_contact_spring_row" for row in first_contact_rows
+    )
+    true_velocity_supported = bool(velocity_comparison_rows) and any(
+        row.get("calculix_velocity_output_available") == "true" for row in velocity_comparison_rows
     )
     return [
         {
@@ -3456,6 +3547,12 @@ def _claim_rows(
             "details": "Compares clearance, area, force, energy, normal, and slave weights at the nominal first contact step",
         },
         {
+            "claim": "calculix_sfc_true_velocity_comparison_available",
+            "supported": str(true_velocity_supported).lower(),
+            "evidence_csv": "geometric_contact_true_velocity_comparison.csv",
+            "details": "Directly compares CalculiX printed nodal velocity V against SFC nodal velocity at matching output times",
+        },
+        {
             "claim": "contact_mesh_convergence_trend_available",
             "supported": str(len({int(row['resolution']) for row in mesh_rows}) >= 3).lower(),
             "evidence_csv": "geometric_contact_mesh_convergence.csv",
@@ -3494,6 +3591,7 @@ def _write_markdown(
     floor_rf_rows: list[Row],
     raw_contact_print_rows: list[Row],
     first_contact_rows: list[Row],
+    velocity_comparison_rows: list[Row],
     internal_exportability_rows: list[Row],
     *,
     contact_mode: str,
@@ -3525,6 +3623,7 @@ def _write_markdown(
         "- `geometric_contact_floor_rf_distribution.csv`",
         "- `geometric_contact_raw_contact_print_rows.csv`",
         "- `geometric_contact_first_contact_spring_comparison.csv`",
+        "- `geometric_contact_true_velocity_comparison.csv`",
         "- `geometric_contact_calculix_internal_exportability.csv`",
         "- `geometric_contact_mesh_convergence.csv`",
         "- `geometric_contact_timestep_convergence.csv`",
@@ -3691,6 +3790,23 @@ def _write_markdown(
             f"| floor per-node RF distribution | {len(floor_rf_rows)} | {_diagnostic_status(floor_rf_rows)} |",
             f"| raw CDIS/CSTR/CELS rows | {len(raw_contact_print_rows)} | {'available' if raw_contact_print_rows else 'unavailable'} |",
             f"| first-contact per-spring comparison | {len(first_contact_rows)} | {_diagnostic_status(first_contact_rows)} |",
+            f"| direct CalculiX/SFC true velocity comparison | {len(velocity_comparison_rows)} | {_diagnostic_status(velocity_comparison_rows)} |",
+            "",
+            "## Direct True Velocity Comparison",
+            "",
+            "| Resolution | max nodal V rel. | max Vz rel. | max v_cm_z abs. | first contact V rel. | Diagnosis |",
+            "| ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in _velocity_summary_rows(velocity_comparison_rows):
+        lines.append(
+            f"| {row['resolution']} | {_fmt(row['max_nodal_velocity_l2_rel_error'])} | "
+            f"{_fmt(row['max_nodal_velocity_z_l2_rel_error'])} | "
+            f"{_fmt(row['max_v_cm_z_abs_error'])} | {_fmt(row['first_contact_nodal_velocity_l2_rel_error'])} | "
+            f"{row['diagnosis']} |"
+        )
+    lines.extend(
+        [
             "",
             "CalculiX internal arrays `clearini`, `pmastsurf`, `xstateini`, and `springarea` are not standard `.dat` outputs. The exportability table records source-path hints and whether instrumentation/debug export is required.",
             "",
@@ -3745,6 +3861,31 @@ def _representative_one_step_rows(rows: list[Row]) -> list[Row]:
     if first is worst:
         return [first]
     return [first, worst]
+
+
+def _velocity_summary_rows(rows: list[Row]) -> list[Row]:
+    grouped: dict[int, list[Row]] = {}
+    for row in rows:
+        if row.get("calculix_velocity_output_available") != "true":
+            continue
+        grouped.setdefault(int(row["resolution"]), []).append(row)
+    summaries: list[Row] = []
+    for resolution, values in sorted(grouped.items()):
+        first_contact = min(values, key=lambda row: abs(float(row["time"]) - 0.096))
+        max_nodal = max(float(row["nodal_velocity_l2_rel_error"]) for row in values)
+        max_z = max(float(row["nodal_velocity_z_l2_rel_error"]) for row in values)
+        max_cm = max(float(row["v_cm_z_abs_error"]) for row in values)
+        summaries.append(
+            {
+                "resolution": resolution,
+                "max_nodal_velocity_l2_rel_error": max_nodal,
+                "max_nodal_velocity_z_l2_rel_error": max_z,
+                "max_v_cm_z_abs_error": max_cm,
+                "first_contact_nodal_velocity_l2_rel_error": first_contact["nodal_velocity_l2_rel_error"],
+                "diagnosis": "velocity_trajectory_difference" if max_nodal >= 1.0e-3 else "velocity_trajectory_aligned",
+            }
+        )
+    return summaries
 
 
 def _fmt(value: Any) -> str:

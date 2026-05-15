@@ -28,6 +28,7 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     one_step_calculix_state_diagnostics,
     run_sfc_geometric_contact_history,
     run_validation,
+    true_velocity_comparison_rows,
     write_calculix_contact_input_with_stress,
 )
 
@@ -131,6 +132,25 @@ def test_parse_calculix_dat_nodal_vectors_reads_velocity_acceleration_and_rf(tmp
     assert np.allclose(velocities[0.1], [[1, 2, 3], [4, 5, 6]])
     assert np.allclose(accelerations[0.1], [[-1, -2, -3], [-4, -5, -6]])
     assert np.allclose(rf[0.1], [[0, 0, -7], [0, 0, -8]])
+
+
+def test_true_velocity_comparison_directly_compares_calculix_and_sfc_v() -> None:
+    model = _contact_model(resolution=1, duration=0.004, dt=0.004)
+    calc_v = np.zeros_like(model.nodes)
+    calc_v[:, 2] = -1.0
+    sfc_v = calc_v.copy()
+    sfc_v[0, 2] -= 0.1
+
+    rows = true_velocity_comparison_rows(
+        model,
+        {0.004: calc_v},
+        [(0.004, model.nodes.copy(), sfc_v, np.zeros_like(model.nodes))],
+    )
+
+    assert rows[0]["calculix_velocity_output_available"] == "true"
+    assert rows[0]["sfc_velocity_output_available"] == "true"
+    assert float(rows[0]["nodal_velocity_l2_rel_error"]) > 0.0
+    assert float(rows[0]["v_cm_z_abs_error"]) > 0.0
 
 
 def test_contact_element_audit_compares_calculix_native_and_replay() -> None:
@@ -423,6 +443,7 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["calculix_floor_node_rf_distribution_available"]["supported"] == "false"
     assert claims["calculix_raw_contact_print_rows_preserved"]["supported"] == "false"
     assert claims["first_contact_per_spring_comparison_available"]["supported"] == "false"
+    assert claims["calculix_sfc_true_velocity_comparison_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
         alignment_rows = list(csv.DictReader(f))
