@@ -16,6 +16,8 @@ from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E40
     _contact_model,
     _calculix_iterations_per_increment,
     _parse_calculix_dat_contact_elements,
+    _parse_calculix_dat_contact_print_raw_rows,
+    _parse_calculix_dat_nodal_vectors,
     _parse_calculix_dynamic_step_options,
     _parse_calculix_stdout_diagnostics,
     contact_lifecycle_output_diagnostics,
@@ -37,6 +39,10 @@ def test_calculix_contact_input_requests_contact_stress_output(tmp_path: Path) -
 
     text = inp.read_text(encoding="utf-8").lower()
     assert "*contact pair, interaction=contact,type=surface to surface" in text
+    assert "*node print, nset=nall, frequency=1\nu\n*node print, nset=nall, frequency=1\nv" in text
+    assert "*node print, nset=nall, frequency=1\na" in text
+    assert "*node print, nset=nfloor, global=yes, frequency=1\nrf" in text
+    assert "nset=nfloor, totals=only, global=yes" not in text
     assert "*contact print, frequency=1\ncdis\ncstr\ncels" in text
     assert "*contact print, frequency=1, totals=only\ncnum\n" in text
     assert "*el print, elset=elall" in text
@@ -73,6 +79,58 @@ def test_parse_calculix_dat_per_contact_cdis_cstr_cels(tmp_path: Path) -> None:
     assert row["calculix_stress_normal"] == 25.0
     assert row["calculix_stress_tangential_2"] == -2.0
     assert row["calculix_contact_energy"] == 7.8125e-4
+
+
+def test_parse_calculix_dat_raw_contact_rows_preserves_repeated_lines(tmp_path: Path) -> None:
+    dat = tmp_path / "case.dat"
+    dat.write_text(
+        "\n".join(
+            [
+                " contact stress (slave element+face,press,tang1,tang2) for all contact elements and time 0.9600000E-01",
+                "         4          1  2.500000E+01  0.000000E+00  0.000000E+00",
+                "         4          1  3.500000E+01  0.000000E+00  0.000000E+00",
+                " contact print energy (slave element+face,energy)for all contact elements and time 0.9600000E-01",
+                "         4          1  1.000000E-04",
+                "         4          1  2.000000E-04",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = _parse_calculix_dat_contact_print_raw_rows(dat)
+
+    assert len(rows) == 4
+    assert [row["contact_element_index"] for row in rows if row["quantity"] == "cstr"] == [0, 1]
+    assert [row["contact_element_index"] for row in rows if row["quantity"] == "cels"] == [0, 1]
+    assert rows[1]["raw_line"].startswith("4")
+
+
+def test_parse_calculix_dat_nodal_vectors_reads_velocity_acceleration_and_rf(tmp_path: Path) -> None:
+    dat = tmp_path / "case.dat"
+    dat.write_text(
+        "\n".join(
+            [
+                " velocities (vx,vy,vz) for set NALL and time 0.1000000E+00",
+                "         1  1.000000E+00  2.000000E+00  3.000000E+00",
+                "         2  4.000000E+00  5.000000E+00  6.000000E+00",
+                " accelerations (ax,ay,az) for set NALL and time 0.1000000E+00",
+                "         1 -1.000000E+00 -2.000000E+00 -3.000000E+00",
+                "         2 -4.000000E+00 -5.000000E+00 -6.000000E+00",
+                " forces (fx,fy,fz) for set NFLOOR and time 0.1000000E+00",
+                "        11  0.000000E+00  0.000000E+00 -7.000000E+00",
+                "        12  0.000000E+00  0.000000E+00 -8.000000E+00",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    velocities = _parse_calculix_dat_nodal_vectors(dat, np.asarray([1, 2], dtype=int), quantity="v")
+    accelerations = _parse_calculix_dat_nodal_vectors(dat, np.asarray([1, 2], dtype=int), quantity="a")
+    rf = _parse_calculix_dat_nodal_vectors(dat, np.asarray([11, 12], dtype=int), quantity="rf")
+
+    assert np.allclose(velocities[0.1], [[1, 2, 3], [4, 5, 6]])
+    assert np.allclose(accelerations[0.1], [[-1, -2, -3], [-4, -5, -6]])
+    assert np.allclose(rf[0.1], [[0, 0, -7], [0, 0, -8]])
 
 
 def test_contact_element_audit_compares_calculix_native_and_replay() -> None:
@@ -361,6 +419,10 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     assert claims["calculix_state_one_step_mechanics_diagnostics_available"]["supported"] == "false"
     assert claims["hht_newmark_state_definition_precision_diagnostics_available"]["supported"] == "false"
     assert claims["calculix_per_contact_element_clearance_lifecycle_audit_available"]["supported"] == "false"
+    assert claims["calculix_nodal_velocity_acceleration_output_available"]["supported"] == "false"
+    assert claims["calculix_floor_node_rf_distribution_available"]["supported"] == "false"
+    assert claims["calculix_raw_contact_print_rows_preserved"]["supported"] == "false"
+    assert claims["first_contact_per_spring_comparison_available"]["supported"] == "false"
 
     with outputs["alignment"].open(newline="", encoding="utf-8") as f:
         alignment_rows = list(csv.DictReader(f))
