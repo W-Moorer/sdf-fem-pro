@@ -13,6 +13,8 @@ if str(ROOT) not in sys.path:
 from sfc.fem.calculix_aligned import PlaneContactGeometry, assemble_contact_response
 from validation.calculix_f2f_contact import (
     C3D4_FACE_CENTROID_WEIGHTS,
+    CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC,
+    CALCULIX_TRIANGLE_CONTACT_WEIGHTS,
     CalculixContactConvergenceHeuristic,
     CalculixC3D4FaceToFacePlaneContactGeometry,
     CalculixC3D4FaceToFaceSDFContactGeometry,
@@ -27,6 +29,27 @@ from validation.calculix_f2f_contact import (
     calculix_static_clearance_ramp,
     calculix_static_iloop_generation_decision,
 )
+
+
+def test_calculix_seven_point_rule_matches_gauss2d6_order() -> None:
+    assert CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC[1] == pytest.approx(
+        [0.101286507323456, 0.797426985353087, 0.101286507323456]
+    )
+    assert CALCULIX_TRIANGLE_CONTACT_BARYCENTRIC[4] == pytest.approx(
+        [0.470142064105115, 0.470142064105115, 0.059715871789770]
+    )
+    assert CALCULIX_TRIANGLE_CONTACT_WEIGHTS == pytest.approx(
+        [
+            0.225000000000000,
+            0.125939180544827,
+            0.125939180544827,
+            0.125939180544827,
+            0.132394152788506,
+            0.132394152788506,
+            0.132394152788506,
+        ]
+    )
+    assert np.sum(CALCULIX_TRIANGLE_CONTACT_WEIGHTS) == pytest.approx(1.0)
 
 
 def test_calculix_c3d4_f2f_uses_one_centroid_sample_per_face() -> None:

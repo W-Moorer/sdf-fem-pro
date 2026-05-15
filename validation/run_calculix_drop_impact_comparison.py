@@ -72,10 +72,13 @@ C3D4_FACE_LABELS = {
     (0, 2, 3): "S4",
 }
 LOCAL_FACE_NODES = {
-    "S1": (0, 1, 2),
+    # CalculiX internally maps C3D4 face labels through ifacet in
+    # gencontelem_f2f.f.  The order matters for face-to-face contact
+    # integration because pslavsurf shape weights are applied to nodefs(m).
+    "S1": (0, 2, 1),
     "S2": (0, 1, 3),
     "S3": (1, 2, 3),
-    "S4": (0, 2, 3),
+    "S4": (0, 3, 2),
 }
 
 
