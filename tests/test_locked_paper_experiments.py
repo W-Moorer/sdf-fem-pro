@@ -15,6 +15,7 @@ CONTACTENERGY_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_contac
 C3D8_TRAJECTORY_CASE = ROOT / "paper" / "numerical_experiments" / "c3d8_contact_trajectory_validation"
 PHASE9_CASE = ROOT / "paper" / "numerical_experiments" / "phase9_full_contact_validation"
 OFFICIAL_CALCULIX_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_official_contact_examples"
+OFFICIAL_LAW_SDF_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_official_law_sdf_replay"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -411,3 +412,45 @@ def test_locked_official_calculix_contact_example_line_is_claim_gated() -> None:
     assert by_case_claim[("scheibe2f2f_c3d8_nlgeom_static", "recommended_next_adaptation")]["allowed"] == "true"
     assert by_case_claim[("ball_c3d8_dynamic_drop", "recommended_next_adaptation")]["allowed"] == "true"
     assert all(row["allowed"] == "false" for row in gates if row["claim"] == "full_trajectory_or_full_field_equivalence")
+
+
+def test_locked_official_law_sdf_replay_outputs_deforming_sdf_metrics() -> None:
+    required = [
+        OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_summary.csv",
+        OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_contact_points.csv",
+        OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_claim_gates.csv",
+        OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_commands.csv",
+        OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_plots.csv",
+        OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_summary.md",
+        OFFICIAL_LAW_SDF_CASE / "figures" / "official_law_sdf_replay_errors.png",
+        OFFICIAL_LAW_SDF_CASE / "figures" / "official_law_sdf_replay_force_balance.png",
+        OFFICIAL_LAW_SDF_CASE / "inputs" / "contactenergy.inp",
+        OFFICIAL_LAW_SDF_CASE / "inputs" / "contact1.inp",
+        OFFICIAL_LAW_SDF_CASE / "inputs" / "contact3.inp",
+        OFFICIAL_LAW_SDF_CASE / "inputs" / "contact6.inp",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    summaries = {row["case_id"]: row for row in _rows(OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_summary.csv")}
+    assert summaries["contactenergy_c3d8_surface_linear"]["pressure_law"] == "LINEAR"
+    assert summaries["contact1_c3d8_node_exponential"]["pressure_law"] == "EXPONENTIAL"
+    assert float(summaries["contactenergy_c3d8_surface_linear"]["max_gap_abs_error"]) <= 1.0e-10
+    assert float(summaries["contactenergy_c3d8_surface_linear"]["total_energy_rel_error"]) <= 1.0e-5
+    assert float(summaries["contact1_c3d8_node_exponential"]["max_pressure_rel_error"]) <= 1.0e-4
+    assert float(summaries["contact3_c3d8_node_linear"]["max_pressure_rel_error"]) <= 5.0e-2
+    assert float(summaries["contact6_c3d8_node_stiff_linear"]["max_pressure_rel_error"]) <= 5.0e-2
+
+    gates = _rows(OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_claim_gates.csv")
+    by_case_claim = {(row["case_id"], row["claim"]): row for row in gates}
+    assert by_case_claim[("contactenergy_c3d8_surface_linear", "contact_energy_matches_calculix_cels")]["allowed"] == "true"
+    assert by_case_claim[("contact1_c3d8_node_exponential", "pressure_law_matches_calculix_cstr")]["allowed"] == "true"
+    assert by_case_claim[("contact1_c3d8_node_exponential", "contact_energy_matches_calculix_cels")]["allowed"] == "false"
+    assert by_case_claim[("contact3_c3d8_node_linear", "linear_pressure_law_matches_calculix_cstr")]["allowed"] == "true"
+    assert by_case_claim[("contact6_c3d8_node_stiff_linear", "linear_pressure_law_matches_calculix_cstr")]["allowed"] == "true"
+    assert all(row["allowed"] == "false" for row in gates if row["claim"] == "native_sfc_trajectory_equivalence")
+
+    contact_points = _rows(OFFICIAL_LAW_SDF_CASE / "official_law_sdf_replay_contact_points.csv")
+    assert len(contact_points) >= 4
+    assert all(row["calculix_cdis"] != "" for row in contact_points)
+    assert all(row["calculix_cstr"] != "" for row in contact_points)

@@ -1,0 +1,3 @@
+plot,png,pdf,description
+official_law_sdf_replay_errors,figures\official_law_sdf_replay_errors.png,figures\official_law_sdf_replay_errors.pdf,gap/CDIS and pressure/CSTR replay errors on CalculiX-deformed official examples
+official_law_sdf_replay_force_balance,figures\official_law_sdf_replay_force_balance.png,figures\official_law_sdf_replay_force_balance.pdf,SFC replay contact force norm against applied load norm

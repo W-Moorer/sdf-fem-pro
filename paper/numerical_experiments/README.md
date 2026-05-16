@@ -27,6 +27,11 @@ boundary, input/output data, figures, and acceptance thresholds.
   `contactenergy.inp`, `contact1/contact3/contact6`, `scheibe2f2f.inp.gz`,
   and `ball.inp.gz`, and uses claim gates to separate direct paper references
   from law-alignment checks and future engineering candidates.
+- `calculix_official_law_sdf_replay/`: official CalculiX C3D8 contact-law
+  replay package. It instruments `contactenergy.inp` and
+  `contact1/contact3/contact6` with contact-output requests, compares SFC
+  current-surface dynamic-SDF gaps against CalculiX `CDIS`, compares replayed
+  pressure against `CSTR`, and claim-gates `CELS` energy equivalence.
 
 ## Claim Discipline
 

@@ -1,0 +1,21 @@
+case_id,claim,allowed,reason
+contactenergy_c3d8_surface_linear,deforming_sdf_gap_matches_calculix_cdis,true,requires instrumented CalculiX CDIS and SFC current-surface gap agreement
+contactenergy_c3d8_surface_linear,pressure_law_matches_calculix_cstr,true,requires pressure-overclosure replay and CalculiX CSTR agreement
+contactenergy_c3d8_surface_linear,linear_pressure_law_matches_calculix_cstr,true,allowed only for linear pressure-overclosure rows with CSTR agreement
+contactenergy_c3d8_surface_linear,contact_energy_matches_calculix_cels,true,currently only the official contactenergy surface-to-surface case has a locked total CELS match
+contactenergy_c3d8_surface_linear,native_sfc_trajectory_equivalence,false,this runner replays CalculiX deformed states; it does not run a native SFC trajectory
+contact1_c3d8_node_exponential,deforming_sdf_gap_matches_calculix_cdis,true,requires instrumented CalculiX CDIS and SFC current-surface gap agreement
+contact1_c3d8_node_exponential,pressure_law_matches_calculix_cstr,true,requires pressure-overclosure replay and CalculiX CSTR agreement
+contact1_c3d8_node_exponential,linear_pressure_law_matches_calculix_cstr,false,allowed only for linear pressure-overclosure rows with CSTR agreement
+contact1_c3d8_node_exponential,contact_energy_matches_calculix_cels,false,currently only the official contactenergy surface-to-surface case has a locked total CELS match
+contact1_c3d8_node_exponential,native_sfc_trajectory_equivalence,false,this runner replays CalculiX deformed states; it does not run a native SFC trajectory
+contact3_c3d8_node_linear,deforming_sdf_gap_matches_calculix_cdis,true,requires instrumented CalculiX CDIS and SFC current-surface gap agreement
+contact3_c3d8_node_linear,pressure_law_matches_calculix_cstr,true,requires pressure-overclosure replay and CalculiX CSTR agreement
+contact3_c3d8_node_linear,linear_pressure_law_matches_calculix_cstr,true,allowed only for linear pressure-overclosure rows with CSTR agreement
+contact3_c3d8_node_linear,contact_energy_matches_calculix_cels,false,currently only the official contactenergy surface-to-surface case has a locked total CELS match
+contact3_c3d8_node_linear,native_sfc_trajectory_equivalence,false,this runner replays CalculiX deformed states; it does not run a native SFC trajectory
+contact6_c3d8_node_stiff_linear,deforming_sdf_gap_matches_calculix_cdis,true,requires instrumented CalculiX CDIS and SFC current-surface gap agreement
+contact6_c3d8_node_stiff_linear,pressure_law_matches_calculix_cstr,true,requires pressure-overclosure replay and CalculiX CSTR agreement
+contact6_c3d8_node_stiff_linear,linear_pressure_law_matches_calculix_cstr,true,allowed only for linear pressure-overclosure rows with CSTR agreement
+contact6_c3d8_node_stiff_linear,contact_energy_matches_calculix_cels,false,currently only the official contactenergy surface-to-surface case has a locked total CELS match
+contact6_c3d8_node_stiff_linear,native_sfc_trajectory_equivalence,false,this runner replays CalculiX deformed states; it does not run a native SFC trajectory
