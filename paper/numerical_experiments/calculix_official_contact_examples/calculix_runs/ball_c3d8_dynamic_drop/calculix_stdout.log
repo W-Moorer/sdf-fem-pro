@@ -1,0 +1,184 @@
+
+************************************************************
+
+CalculiX Version 2.17, Copyright(C) 1998-2020 Guido Dhondt
+CalculiX comes with ABSOLUTELY NO WARRANTY. This is free
+software, and you are welcome to redistribute it under
+certain conditions, see gpl.htm
+
+************************************************************
+
+You are using an executable made on Thu Jul 23 21:43:50 CEST 2020
+
+  The numbers below are estimated upper bounds
+
+  number of:
+
+   nodes:         6072
+   elements:          800
+   one-dimensional elements:            0
+   two-dimensional elements:            1
+   integration points per element:           27
+   degrees of freedom per node:            3
+   layers per element:            1
+
+   distributed facial loads:            0
+   distributed volumetric loads:            1
+   concentrated loads:            0
+   single point constraints:          264
+   multiple point constraints:          121
+   terms in all multiple point constraints:          769
+   tie constraints:            1
+   dependent nodes tied by cyclic constraints:            0
+   dependent nodes in pre-tension constraints:            0
+
+   sets:            7
+   terms in all sets:         3712
+
+   materials:            2
+   constants per material and temperature:            4
+   temperature points per material:            1
+   plastic data points per material:            0
+
+   orientations:            1
+   amplitudes:            3
+   data points in all amplitudes:         1004
+   print requests:            1
+   transformations:            0
+   property cards:            0
+
+ *INFO reading *STEP: nonlinear geometric
+       effects are turned on
+
+
+ STEP            1
+
+ Dynamic analysis was selected
+
+ Newton-Raphson iterative procedure is active
+
+ Nonlinear geometric effects are taken into account
+
+ Decascading the MPC's
+
+ Determining the structure of the matrix:
+ number of equations
+ 3059
+ number of nonzero lower triangular matrix elements
+ 101215
+
+ *WARNING in checktime: a time point
+          precedes the initial time
+          increment tinc; tinc is
+          decreased to    1.0000000000000000E-003
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the energy calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the energy calculation.
+
+ increment 1 attempt 1 
+ increment size= 1.000000e-03
+ sum of previous increments=0.000000e+00
+ actual step time=1.000000e-03
+ actual total time=1.000000e-03
+
+ iteration 1
+
+ Number of contact spring elements=0
+
+ Determining the structure of the matrix:
+ number of equations
+ 3059
+ number of nonzero lower triangular matrix elements
+ 101215
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the energy calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the energy calculation.
+
+ average force= 0.000000
+ time avg. forc= 0.010000
+ largest residual force= 0.000000 in node 218 and dof 1
+ largest increment of disp= 1.000000e-01
+ largest correction to disp= 2.703881e-03 in node 77 and dof 3
+
+ no convergence
+
+ iteration 2
+
+ Number of contact spring elements=0
+
+ Determining the structure of the matrix:
+ number of equations
+ 3059
+ number of nonzero lower triangular matrix elements
+ 101215
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the energy calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the energy calculation.
+
+ average force= 0.000000
+ time avg. forc= 0.010000
+ largest residual force= 0.000000 in node 515 and dof 1
+ largest increment of disp= 1.000000e-01
+ largest correction to disp= 1.304087e-15 in node 77 and dof 3
+
+ convergence
+
+ the increment size exceeds the remainder of the step and is decreased to 0.000000e+00
+
+ initial energy (at start of step) = 4.098027e-01
+
+ since start of the step: 
+ external work = 3.943782e-03
+ work performed by the damping forces = 0.000000e+00
+ netto work = 3.943782e-03
+
+ actual energy: 
+ internal energy = 3.109595e-28
+ kinetic energy = 4.137465e-01
+ elastic contact energy = 0.000000e+00
+ energy lost due to friction = 0.000000e+00
+ total energy  = 4.137465e-01
+
+ energy increase = 3.943782e-03
+
+ energy balance (absolute) = 8.092485e-16 
+ energy balance (relative) = 0.000000 % 
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+
+ Job finished
+
+________________________________________
+
+Total CalculiX Time: 0.497642
+________________________________________

@@ -14,6 +14,7 @@ SCIKIT_FEM_CASE = ROOT / "paper" / "numerical_experiments" / "scikit_fem_cantile
 CONTACTENERGY_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_contactenergy_c3d8_replay"
 C3D8_TRAJECTORY_CASE = ROOT / "paper" / "numerical_experiments" / "c3d8_contact_trajectory_validation"
 PHASE9_CASE = ROOT / "paper" / "numerical_experiments" / "phase9_full_contact_validation"
+OFFICIAL_CALCULIX_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_official_contact_examples"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -368,3 +369,45 @@ def test_locked_phase9_full_contact_validation_claim_gates() -> None:
     assert {"C3D4", "C3D8"} <= {row["element_type"] for row in side_by_side}
     timings = _rows(PHASE9_CASE / "phase9_solver_timing.csv")
     assert any(row["timing_claim_allowed"] == "true" for row in timings)
+
+
+def test_locked_official_calculix_contact_example_line_is_claim_gated() -> None:
+    required = [
+        OFFICIAL_CALCULIX_CASE / "official_calculix_example_catalog.csv",
+        OFFICIAL_CALCULIX_CASE / "official_calculix_example_runs.csv",
+        OFFICIAL_CALCULIX_CASE / "official_calculix_example_claim_gates.csv",
+        OFFICIAL_CALCULIX_CASE / "official_calculix_example_commands.csv",
+        OFFICIAL_CALCULIX_CASE / "official_calculix_example_plots.csv",
+        OFFICIAL_CALCULIX_CASE / "official_calculix_contact_examples_summary.md",
+        OFFICIAL_CALCULIX_CASE / "figures" / "official_calculix_example_classification.png",
+        OFFICIAL_CALCULIX_CASE / "figures" / "official_calculix_example_runtime.png",
+        OFFICIAL_CALCULIX_CASE / "inputs" / "contactenergy.inp",
+        OFFICIAL_CALCULIX_CASE / "inputs" / "scheibe2f2f.inp",
+        OFFICIAL_CALCULIX_CASE / "inputs" / "ball.inp",
+        OFFICIAL_CALCULIX_CASE / "inputs" / "contact1.inp",
+        OFFICIAL_CALCULIX_CASE / "inputs" / "contact3.inp",
+        OFFICIAL_CALCULIX_CASE / "inputs" / "contact6.inp",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    catalog = {row["case_id"]: row for row in _rows(OFFICIAL_CALCULIX_CASE / "official_calculix_example_catalog.csv")}
+    assert catalog["contactenergy_c3d8_static_energy"]["paper_use"] == "direct_reference_already_locked"
+    assert catalog["scheibe2f2f_c3d8_nlgeom_static"]["paper_use"] == "candidate_requires_native_sfc_metric_extraction"
+    assert catalog["ball_c3d8_dynamic_drop"]["paper_use"] == "candidate_requires_s8_floor_equivalent_or_filtered_comparison"
+    assert catalog["contact1_c3d8_exponential_law"]["paper_use"] == "law_alignment_reference"
+    assert catalog["ball_c3d8_dynamic_drop"]["element_types"] == "C3D8;S8"
+
+    runs = {row["case_id"]: row for row in _rows(OFFICIAL_CALCULIX_CASE / "official_calculix_example_runs.csv")}
+    assert all(row["run_status"] == "ok" for row in runs.values())
+    assert runs["scheibe2f2f_c3d8_nlgeom_static"]["dat_nonempty"] == "false"
+    assert runs["scheibe2f2f_c3d8_nlgeom_static"]["frd"]
+    assert runs["ball_c3d8_dynamic_drop"]["dat_nonempty"] == "true"
+
+    gates = _rows(OFFICIAL_CALCULIX_CASE / "official_calculix_example_claim_gates.csv")
+    by_case_claim = {(row["case_id"], row["claim"]): row for row in gates}
+    assert by_case_claim[("contactenergy_c3d8_static_energy", "paper_external_reference_direct")]["allowed"] == "true"
+    assert by_case_claim[("contact3_c3d8_linear_law", "small_law_alignment_reference")]["allowed"] == "true"
+    assert by_case_claim[("scheibe2f2f_c3d8_nlgeom_static", "recommended_next_adaptation")]["allowed"] == "true"
+    assert by_case_claim[("ball_c3d8_dynamic_drop", "recommended_next_adaptation")]["allowed"] == "true"
+    assert all(row["allowed"] == "false" for row in gates if row["claim"] == "full_trajectory_or_full_field_equivalence")

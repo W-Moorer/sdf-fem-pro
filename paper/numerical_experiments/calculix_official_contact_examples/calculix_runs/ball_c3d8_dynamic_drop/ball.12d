@@ -1,0 +1,22 @@
+ ELEMENT          800 with label "S8      " and with nodes:
+       6001       6002       6003       6004       6005       6006       6007       6008
+  is expanded into a "C3D20 L " element with topology:
+       6009       6012       6015       6018       6011       6014       6017       6020       6021       6024
+       6027       6030       6023       6026       6029       6032       6010       6013       6016       6019
+
+ a KNOT was generated in node         6001
+
+ a KNOT was generated in node         6002
+
+ a KNOT was generated in node         6003
+
+ a KNOT was generated in node         6004
+
+ a KNOT was generated in node         6005
+
+ a KNOT was generated in node         6006
+
+ a KNOT was generated in node         6007
+
+ a KNOT was generated in node         6008
+

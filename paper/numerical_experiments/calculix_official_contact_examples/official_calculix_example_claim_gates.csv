@@ -1,0 +1,31 @@
+case_id,claim,allowed,reason
+contactenergy_c3d8_static_energy,official_calculix_example_available,true,official input was found and parsed
+contactenergy_c3d8_static_energy,paper_external_reference_direct,true,direct paper use is currently limited to the locked contactenergy C3D8 law/energy reference
+contactenergy_c3d8_static_energy,small_law_alignment_reference,false,small C3D8 law examples are allowed for pressure-overclosure and contact-print alignment only
+contactenergy_c3d8_static_energy,full_trajectory_or_full_field_equivalence,false,requires a native SFC solve plus metric-level comparison before this official example can support full equivalence
+contactenergy_c3d8_static_energy,recommended_next_adaptation,false,scheibe2f2f and ball are the best official engineering candidates but need dedicated native SFC comparison paths
+scheibe2f2f_c3d8_nlgeom_static,official_calculix_example_available,true,official input was found and parsed
+scheibe2f2f_c3d8_nlgeom_static,paper_external_reference_direct,false,direct paper use is currently limited to the locked contactenergy C3D8 law/energy reference
+scheibe2f2f_c3d8_nlgeom_static,small_law_alignment_reference,false,small C3D8 law examples are allowed for pressure-overclosure and contact-print alignment only
+scheibe2f2f_c3d8_nlgeom_static,full_trajectory_or_full_field_equivalence,false,requires a native SFC solve plus metric-level comparison before this official example can support full equivalence
+scheibe2f2f_c3d8_nlgeom_static,recommended_next_adaptation,true,scheibe2f2f and ball are the best official engineering candidates but need dedicated native SFC comparison paths
+ball_c3d8_dynamic_drop,official_calculix_example_available,true,official input was found and parsed
+ball_c3d8_dynamic_drop,paper_external_reference_direct,false,direct paper use is currently limited to the locked contactenergy C3D8 law/energy reference
+ball_c3d8_dynamic_drop,small_law_alignment_reference,false,small C3D8 law examples are allowed for pressure-overclosure and contact-print alignment only
+ball_c3d8_dynamic_drop,full_trajectory_or_full_field_equivalence,false,requires a native SFC solve plus metric-level comparison before this official example can support full equivalence
+ball_c3d8_dynamic_drop,recommended_next_adaptation,true,scheibe2f2f and ball are the best official engineering candidates but need dedicated native SFC comparison paths
+contact1_c3d8_exponential_law,official_calculix_example_available,true,official input was found and parsed
+contact1_c3d8_exponential_law,paper_external_reference_direct,false,direct paper use is currently limited to the locked contactenergy C3D8 law/energy reference
+contact1_c3d8_exponential_law,small_law_alignment_reference,true,small C3D8 law examples are allowed for pressure-overclosure and contact-print alignment only
+contact1_c3d8_exponential_law,full_trajectory_or_full_field_equivalence,false,requires a native SFC solve plus metric-level comparison before this official example can support full equivalence
+contact1_c3d8_exponential_law,recommended_next_adaptation,false,scheibe2f2f and ball are the best official engineering candidates but need dedicated native SFC comparison paths
+contact3_c3d8_linear_law,official_calculix_example_available,true,official input was found and parsed
+contact3_c3d8_linear_law,paper_external_reference_direct,false,direct paper use is currently limited to the locked contactenergy C3D8 law/energy reference
+contact3_c3d8_linear_law,small_law_alignment_reference,true,small C3D8 law examples are allowed for pressure-overclosure and contact-print alignment only
+contact3_c3d8_linear_law,full_trajectory_or_full_field_equivalence,false,requires a native SFC solve plus metric-level comparison before this official example can support full equivalence
+contact3_c3d8_linear_law,recommended_next_adaptation,false,scheibe2f2f and ball are the best official engineering candidates but need dedicated native SFC comparison paths
+contact6_c3d8_stiff_linear_law,official_calculix_example_available,true,official input was found and parsed
+contact6_c3d8_stiff_linear_law,paper_external_reference_direct,false,direct paper use is currently limited to the locked contactenergy C3D8 law/energy reference
+contact6_c3d8_stiff_linear_law,small_law_alignment_reference,true,small C3D8 law examples are allowed for pressure-overclosure and contact-print alignment only
+contact6_c3d8_stiff_linear_law,full_trajectory_or_full_field_equivalence,false,requires a native SFC solve plus metric-level comparison before this official example can support full equivalence
+contact6_c3d8_stiff_linear_law,recommended_next_adaptation,false,scheibe2f2f and ball are the best official engineering candidates but need dedicated native SFC comparison paths

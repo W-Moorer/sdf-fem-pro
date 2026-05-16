@@ -22,6 +22,11 @@ boundary, input/output data, figures, and acceptance thresholds.
   and contact-pressure figures for the final deformed C3D8 state, plus a
   registered SFC C3D8 static solve for direct stress/error plotting. This
   is contact-law/energy evidence, not a TET4 trajectory-equivalence claim.
+- `calculix_official_contact_examples/`: conservative catalog and smoke-run
+  package for selected official CalculiX contact examples. It records
+  `contactenergy.inp`, `contact1/contact3/contact6`, `scheibe2f2f.inp.gz`,
+  and `ball.inp.gz`, and uses claim gates to separate direct paper references
+  from law-alignment checks and future engineering candidates.
 
 ## Claim Discipline
 

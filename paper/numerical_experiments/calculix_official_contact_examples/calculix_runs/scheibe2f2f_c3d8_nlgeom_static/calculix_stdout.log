@@ -1,0 +1,179 @@
+
+************************************************************
+
+CalculiX Version 2.17, Copyright(C) 1998-2020 Guido Dhondt
+CalculiX comes with ABSOLUTELY NO WARRANTY. This is free
+software, and you are welcome to redistribute it under
+certain conditions, see gpl.htm
+
+************************************************************
+
+You are using an executable made on Thu Jul 23 21:43:50 CEST 2020
+
+  The numbers below are estimated upper bounds
+
+  number of:
+
+   nodes:         1158
+   elements:          512
+   one-dimensional elements:            0
+   two-dimensional elements:            0
+   integration points per element:            8
+   degrees of freedom per node:            3
+   layers per element:            1
+
+   distributed facial loads:           32
+   distributed volumetric loads:            0
+   concentrated loads:            0
+   single point constraints:         1153
+   multiple point constraints:          681
+   terms in all multiple point constraints:        17001
+   tie constraints:            3
+   dependent nodes tied by cyclic constraints:           68
+   dependent nodes in pre-tension constraints:            0
+
+   sets:           21
+   terms in all sets:         6496
+
+   materials:            2
+   constants per material and temperature:            4
+   temperature points per material:            1
+   plastic data points per material:            0
+
+   orientations:            0
+   amplitudes:            2
+   data points in all amplitudes:            2
+   print requests:            0
+   transformations:            2
+   property cards:            0
+
+ *INFO reading *SURFACE BEHAVIOR: the tension
+       value at large clearances
+       (only relevant for node-to-surface contact)
+       must be strictly positive
+       the following default will be used:   3.0000000000000000     
+       the user is advised to analyze the results
+       carefully
+ *INFO in cyclicsymmetrymodels:
+       failed nodes (if any) are stored in file
+       WarnNodeMissCyclicSymmetry.nam
+       This file can be loaded into
+       an active cgx-session by typing
+       read WarnNodeMissCyclicSymmetry.nam inp
+
+ *INFO in cyclicsymmetrymodels:
+       failed nodes (if any) are stored in file
+       WarnNodeMissCyclicSymmetry.nam
+       This file can be loaded into
+       an active cgx-session by typing
+       read WarnNodeMissCyclicSymmetry.nam inp
+
+ *INFO reading *STEP: nonlinear geometric
+       effects are turned on
+
+ *WARNING reading *STATIC:
+          the minimum increment    0.0000000000000000     
+          is smaller then 1.e-6 times the 
+          step time;
+          the minimum increment is changed
+          to    9.9999999999999995E-007
+          which is the minimum of the initial
+          increment time and 1.e-6 times the step time
+ *INFO: line search control parameters set to:
+        nls =    1.5000000000000000     
+        smaxls =    1.0000000000000000     
+        sminls =    1.0000000000000000     
+        fls =    1.0000000000000000     
+        etls =    1.0000000000000000     
+
+ STEP            1
+
+ Static analysis was selected
+
+ Newton-Raphson iterative procedure is active
+
+ Nonlinear geometric effects are taken into account
+
+ Decascading the MPC's
+
+ Determining the structure of the matrix:
+ number of equations
+ 2111
+ number of nonzero lower triangular matrix elements
+ 35389
+
+ increment 1 attempt 1 
+ increment size= 1.000000e+00
+ sum of previous increments=0.000000e+00
+ actual step time=1.000000e+00
+ actual total time=1.000000e+00
+
+ iteration 1
+
+ Number of contact spring elements=448
+
+ Determining the structure of the matrix:
+maximal possible contact elements = 
+448
+
+ number of equations
+ 2111
+ number of nonzero lower triangular matrix elements
+ 36157
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ average force= 0.082505
+ time avg. forc= 0.082505
+ largest residual force= 0.001170 in node 1124 and dof 1
+ largest increment of disp= 5.912999e-04
+ largest correction to disp= 5.912999e-04 in node 1124 and dof 1
+
+ no convergence
+
+ iteration 2
+
+ Number of contact spring elements=448
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+line search factor=1.000000
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ average force= 0.082582
+ time avg. forc= 0.082582
+ largest residual force= 0.000000 in node 545 and dof 1
+ largest increment of disp= 5.912999e-04
+ largest correction to disp= 5.584243e-07 in node 1123 and dof 1
+
+ convergence
+
+ the increment size exceeds the remainder of the step and is decreased to 0.000000e+00
+
+nonlingeo iinc=1
+ pressure ratio (smallest/largest pressure over all contact areas) =0.000000e+00
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+
+ Job finished
+
+________________________________________
+
+Total CalculiX Time: 0.169177
+________________________________________

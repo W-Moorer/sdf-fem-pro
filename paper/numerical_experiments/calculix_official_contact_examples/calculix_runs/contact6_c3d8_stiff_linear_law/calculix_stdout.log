@@ -1,0 +1,144 @@
+
+************************************************************
+
+CalculiX Version 2.17, Copyright(C) 1998-2020 Guido Dhondt
+CalculiX comes with ABSOLUTELY NO WARRANTY. This is free
+software, and you are welcome to redistribute it under
+certain conditions, see gpl.htm
+
+************************************************************
+
+You are using an executable made on Thu Jul 23 21:43:50 CEST 2020
+
+  The numbers below are estimated upper bounds
+
+  number of:
+
+   nodes:           16
+   elements:            2
+   one-dimensional elements:            0
+   two-dimensional elements:            0
+   integration points per element:            8
+   degrees of freedom per node:            3
+   layers per element:            1
+
+   distributed facial loads:            0
+   distributed volumetric loads:            0
+   concentrated loads:            4
+   single point constraints:           28
+   multiple point constraints:            7
+   terms in all multiple point constraints:           13
+   tie constraints:            1
+   dependent nodes tied by cyclic constraints:            0
+   dependent nodes in pre-tension constraints:            0
+
+   sets:            8
+   terms in all sets:           50
+
+   materials:            2
+   constants per material and temperature:            4
+   temperature points per material:            1
+   plastic data points per material:            0
+
+   orientations:            0
+   amplitudes:            2
+   data points in all amplitudes:            2
+   print requests:            2
+   transformations:            0
+   property cards:            0
+
+ *INFO reading *STEP: nonlinear geometric
+       effects are turned on
+
+ *WARNING reading *STATIC: a nonlinear analysis is requested
+          but no time increment nor step is specified
+          the defaults (1,1) are used
+
+
+ STEP            1
+
+ Static analysis was selected
+
+ Newton-Raphson iterative procedure is active
+
+ Nonlinear geometric effects are taken into account
+
+ Decascading the MPC's
+
+ Determining the structure of the matrix:
+ number of equations
+ 14
+ number of nonzero lower triangular matrix elements
+ 78
+
+ increment 1 attempt 1 
+ increment size= 1.000000e+00
+ sum of previous increments=0.000000e+00
+ actual step time=1.000000e+00
+ actual total time=1.000000e+00
+
+ iteration 1
+
+ Number of contact spring elements=1
+
+ Determining the structure of the matrix:
+ number of equations
+ 14
+ number of nonzero lower triangular matrix elements
+ 79
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ average force= 0.516642
+ time avg. forc= 0.516642
+ largest residual force= 0.003026 in node 10 and dof 3
+ largest increment of disp= 8.571401e-05
+ largest correction to disp= 8.571401e-05 in node 10 and dof 3
+
+ no convergence
+
+ iteration 2
+
+ Number of contact spring elements=1
+
+ Determining the structure of the matrix:
+ number of equations
+ 14
+ number of nonzero lower triangular matrix elements
+ 79
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
+
+ Factoring the system of equations using the symmetric spooles solver
+ Using up to 1 cpu(s) for spooles.
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+ average force= 0.516745
+ time avg. forc= 0.516745
+ largest residual force= 0.000000 in node 3 and dof 3
+ largest increment of disp= 8.571401e-05
+ largest correction to disp= 5.793399e-08 in node 11 and dof 3
+
+ convergence
+
+ the increment size exceeds the remainder of the step and is decreased to 0.000000e+00
+
+ Using up to 1 cpu(s) for the stress calculation.
+
+
+ Job finished
+
+________________________________________
+
+Total CalculiX Time: 0.083137
+________________________________________

@@ -1,0 +1,2 @@
+command,external_solver,external_solver_version,notes
+python validation/run_calculix_official_contact_examples.py --quick --out-dir paper\numerical_experiments\calculix_official_contact_examples,CalculiX,This is Version 2.17,validation-only official example catalog and smoke runner
