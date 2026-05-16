@@ -49,6 +49,8 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
             "element-face",
             "--out-dir",
             str(out_dir),
+            "--gap-candidate-count",
+            "8",
         ],
         cwd=ROOT,
         check=True,
@@ -64,8 +66,14 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
         "recurdyn_gear_calculix_vtk_frames.csv",
         "recurdyn_gear_calculix_figures.csv",
         "recurdyn_gear_calculix_summary.md",
+        "initial_gap_samples.csv",
+        "initial_gap_summary.csv",
+        "contact_law_alignment.csv",
+        "contact_law_alignment_summary.csv",
         "vtk/recurdyn_gear_calculix_frame_0000.vtk",
         "figures/recurdyn_gear_surface_preview.png",
+        "figures/initial_gap_histogram.png",
+        "figures/contact_law_alignment.png",
     ]
     for relative in expected:
         path = out_dir / relative
@@ -86,3 +94,10 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
     assert metadata["flexible_contact_element_faces"] == "10738"
     assert metadata["slave_surface_mode"] == "element-face"
     assert metadata["run_completed"] == "False"
+
+    gap_summary = {row["sample_type"]: row for row in _rows(out_dir / "initial_gap_summary.csv")}
+    assert {"node", "face_centroid", "all"} <= set(gap_summary)
+    assert int(gap_summary["all"]["count"]) > 10000
+
+    law_summary = {row["fit"]: row for row in _rows(out_dir / "contact_law_alignment_summary.csv")}
+    assert {"parsed_K", "endpoint_fit", "least_squares_fit"} <= set(law_summary)

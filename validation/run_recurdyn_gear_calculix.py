@@ -39,8 +39,10 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from scipy.spatial import cKDTree  # noqa: E402
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 
+from sfc.sdf.local_projection import closest_point_on_triangle  # noqa: E402
 from validation.run_c3d8_contact_trajectory_validation import (  # noqa: E402
     _parse_contact_elements,
     _parse_nodal_vectors,
@@ -435,6 +437,208 @@ def _c3d4_surface_face_refs(model: RecurDynGearModel) -> list[tuple[int, str]]:
     return refs
 
 
+def _oriented_rigid_surface(model: RecurDynGearModel) -> tuple[np.ndarray, np.ndarray]:
+    """Return rigid nodes and outward-ish oriented triangle connectivity."""
+
+    points = model.rigid_surface.nodes_global
+    faces = np.asarray(model.rigid_surface.patches, dtype=np.int64) - 1
+    center = np.mean(points, axis=0)
+    oriented = faces.copy()
+    for i, face in enumerate(oriented):
+        tri = points[face]
+        normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+        if np.linalg.norm(normal) <= 0.0:
+            continue
+        if float(np.dot(normal, np.mean(tri, axis=0) - center)) < 0.0:
+            oriented[i, [1, 2]] = oriented[i, [2, 1]]
+    return points, oriented
+
+
+def _initial_contact_query_points(model: RecurDynGearModel) -> tuple[np.ndarray, list[tuple[str, int]]]:
+    """Return flexible contact nodes and face centroids for initial gap checks."""
+
+    point_rows: list[np.ndarray] = []
+    labels: list[tuple[str, int]] = []
+    contact_nodes = sorted({int(node) for patch in model.flexible_surface_patches for node in patch if int(node) in model.nodes})
+    for node_id in contact_nodes:
+        point_rows.append(model.nodes[node_id])
+        labels.append(("node", node_id))
+    for i, patch in enumerate(model.flexible_surface_patches):
+        coords = [model.nodes[int(node)] for node in patch if int(node) in model.nodes]
+        if len(coords) == 3:
+            point_rows.append(np.mean(np.vstack(coords), axis=0))
+            labels.append(("face_centroid", i))
+    return np.vstack(point_rows), labels
+
+
+def evaluate_initial_gap_diagnostics(
+    model: RecurDynGearModel,
+    *,
+    candidate_count: int = 96,
+) -> tuple[list[Row], list[Row]]:
+    """Evaluate initial flexible contact-surface gaps to the rigid gear surface."""
+
+    rigid_points, rigid_faces = _oriented_rigid_surface(model)
+    query_points, labels = _initial_contact_query_points(model)
+    triangles = rigid_points[rigid_faces]
+    centroids = np.mean(triangles, axis=1)
+    tree = cKDTree(centroids)
+    k = min(max(1, int(candidate_count)), len(triangles))
+
+    sample_rows: list[Row] = []
+    for point_index, point in enumerate(query_points):
+        _, candidate_ids = tree.query(point, k=k)
+        candidate_array = np.atleast_1d(candidate_ids).astype(np.int64)
+        best: tuple[float, float, int, np.ndarray, np.ndarray] | None = None
+        for face_id in candidate_array:
+            tri = triangles[int(face_id)]
+            p, _, dist2, _ = closest_point_on_triangle(point, tri[0], tri[1], tri[2])
+            normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            norm = np.linalg.norm(normal)
+            if norm <= 0.0:
+                continue
+            normal = normal / norm
+            distance = float(np.sqrt(dist2))
+            signed_gap = float(np.dot(point - p, normal))
+            # If closest feature is an edge/vertex, the oriented local surface
+            # sign remains only diagnostic; unsigned distance is authoritative.
+            if best is None or dist2 < best[0]:
+                best = (float(dist2), signed_gap, int(face_id), p, normal)
+        if best is None:
+            continue
+        dist2, signed_gap, face_id, p, normal = best
+        sample_type, sample_id = labels[point_index]
+        sample_rows.append(
+            {
+                "sample_index": point_index,
+                "sample_type": sample_type,
+                "sample_id": sample_id,
+                "x": float(point[0]),
+                "y": float(point[1]),
+                "z": float(point[2]),
+                "nearest_face": face_id,
+                "signed_gap": signed_gap,
+                "unsigned_distance": float(np.sqrt(dist2)),
+                "projection_x": float(p[0]),
+                "projection_y": float(p[1]),
+                "projection_z": float(p[2]),
+                "normal_x": float(normal[0]),
+                "normal_y": float(normal[1]),
+                "normal_z": float(normal[2]),
+            }
+        )
+
+    summary_rows: list[Row] = []
+    for sample_type in ("node", "face_centroid", "all"):
+        rows = sample_rows if sample_type == "all" else [row for row in sample_rows if row["sample_type"] == sample_type]
+        if not rows:
+            continue
+        gaps = np.asarray([float(row["signed_gap"]) for row in rows], dtype=float)
+        distances = np.asarray([float(row["unsigned_distance"]) for row in rows], dtype=float)
+        summary_rows.append(
+            {
+                "sample_type": sample_type,
+                "count": len(rows),
+                "candidate_count": k,
+                "min_signed_gap": float(np.min(gaps)),
+                "max_signed_gap": float(np.max(gaps)),
+                "mean_signed_gap": float(np.mean(gaps)),
+                "negative_signed_gap_count": int(np.sum(gaps < 0.0)),
+                "min_unsigned_distance": float(np.min(distances)),
+                "max_unsigned_distance": float(np.max(distances)),
+                "mean_unsigned_distance": float(np.mean(distances)),
+                "near_zero_distance_count_1e_6": int(np.sum(distances < 1.0e-6)),
+                "near_zero_distance_count_1e_3": int(np.sum(distances < 1.0e-3)),
+            }
+        )
+    return sample_rows, summary_rows
+
+
+def _write_gap_histogram(path: Path, sample_rows: list[Row]) -> Row:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gaps = np.asarray([float(row["signed_gap"]) for row in sample_rows], dtype=float)
+    distances = np.asarray([float(row["unsigned_distance"]) for row in sample_rows], dtype=float)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].hist(gaps, bins=80, color="#3b82f6", alpha=0.85)
+    axes[0].axvline(0.0, color="black", linewidth=1.0)
+    axes[0].set_title("Signed gap diagnostic")
+    axes[0].set_xlabel("signed gap [mm]")
+    axes[0].set_ylabel("count")
+    axes[1].hist(distances, bins=80, color="#10b981", alpha=0.85)
+    axes[1].set_title("Unsigned closest distance")
+    axes[1].set_xlabel("distance [mm]")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return {"figure_path": str(path), "source": "initial_gap_diagnostic", "sample_count": len(sample_rows)}
+
+
+def evaluate_contact_law_alignment(model: RecurDynGearModel, *, samples: int = 101) -> tuple[list[Row], list[Row]]:
+    """Generate a reviewable RecurDyn-vs-CalculiX contact-law proxy table."""
+
+    max_pen = max(float(model.contact.max_penetration), 1.0e-9)
+    overclosure = np.linspace(0.0, max_pen, max(3, int(samples)))
+    K = float(model.contact.stiffness)
+    order = max(1, int(model.contact.order))
+
+    # RecurDyn's exact internal law is proprietary to RecurDyn.  This proxy
+    # records the common polynomial interpretation implied by KORDER and makes
+    # the approximation explicit in CSV/Markdown instead of hiding it in the
+    # CalculiX deck.
+    recur_proxy = K * overclosure**order
+    endpoint_slope = float(recur_proxy[-1] / max_pen)
+    lsq_slope = float(np.dot(overclosure, recur_proxy) / max(np.dot(overclosure, overclosure), 1.0e-30))
+    parsed_slope = K
+    rows: list[Row] = []
+    for d, reference in zip(overclosure, recur_proxy):
+        rows.append(
+            {
+                "overclosure": float(d),
+                "recurdyn_polynomial_proxy": float(reference),
+                "calculix_linear_parsed_K": float(parsed_slope * d),
+                "calculix_linear_endpoint_fit": float(endpoint_slope * d),
+                "calculix_linear_lsq_fit": float(lsq_slope * d),
+            }
+        )
+    summary: list[Row] = []
+    for name, slope in (
+        ("parsed_K", parsed_slope),
+        ("endpoint_fit", endpoint_slope),
+        ("least_squares_fit", lsq_slope),
+    ):
+        pred = slope * overclosure
+        err = pred - recur_proxy
+        summary.append(
+            {
+                "fit": name,
+                "linear_slope": float(slope),
+                "max_abs_error": float(np.max(np.abs(err))),
+                "rms_error": float(np.sqrt(np.mean(err * err))),
+                "relative_rms_error": float(np.sqrt(np.mean(err * err)) / max(np.sqrt(np.mean(recur_proxy * recur_proxy)), 1.0e-30)),
+                "law_scope": "proxy_only_recurdyn_KORDER_not_exact",
+            }
+        )
+    return rows, summary
+
+
+def _write_contact_law_plot(path: Path, rows: list[Row]) -> Row:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    overclosure = np.asarray([float(row["overclosure"]) for row in rows], dtype=float)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(overclosure, [float(row["recurdyn_polynomial_proxy"]) for row in rows], label="RecurDyn KORDER proxy", linewidth=2.0)
+    ax.plot(overclosure, [float(row["calculix_linear_parsed_K"]) for row in rows], label="CalculiX linear parsed K", linestyle="--")
+    ax.plot(overclosure, [float(row["calculix_linear_endpoint_fit"]) for row in rows], label="CalculiX endpoint fit", linestyle=":")
+    ax.plot(overclosure, [float(row["calculix_linear_lsq_fit"]) for row in rows], label="CalculiX LSQ fit", linestyle="-.")
+    ax.set_xlabel("overclosure [mm]")
+    ax.set_ylabel("pressure/force proxy")
+    ax.set_title("Contact law alignment proxy")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return {"figure_path": str(path), "source": "contact_law_alignment_proxy", "sample_count": len(rows)}
+
+
 def _write_calculix_input(
     path: Path,
     model: RecurDynGearModel,
@@ -449,6 +653,8 @@ def _write_calculix_input(
     drive_mode: str,
     contact_stiffness_scale: float,
     slave_surface_mode: str,
+    analysis: str,
+    preload_rotation: float,
 ) -> dict[str, Any]:
     """Write a CalculiX input deck and return generation metadata."""
 
@@ -469,7 +675,7 @@ def _write_calculix_input(
     rigid_node_ids = [rigid_node_offset + i + 1 for i in range(model.rigid_surface.nodes_global.shape[0])]
     rigid_element_ids = [rigid_element_offset + i + 1 for i in range(model.rigid_surface.patches.shape[0])]
 
-    total_rotation = model.angular_velocity * duration
+    total_rotation = preload_rotation if analysis == "static-preload" else model.angular_velocity * duration
     rigid_final_displacement = _rigid_rotation_displacement(
         model.rigid_surface.nodes_global,
         center=ref_point,
@@ -484,11 +690,15 @@ def _write_calculix_input(
         pressure_keyword = "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=EXPONENTIAL"
         pressure_line = f"{max(model.contact.bpen, 1.0e-9):.12e}, {max(effective_contact_stiffness / 100000.0, 1.0e-9):.12e}"
 
-    if explicit_dynamic:
+    if analysis == "static-preload":
+        dynamic_keyword = "*STATIC"
+        dynamic_line = "1.0e-1, 1.0, 1.0e-8, 1.0e-1"
+    elif explicit_dynamic:
         dynamic_keyword = "*DYNAMIC, DIRECT, EXPLICIT"
+        dynamic_line = f"{dt:.12e}, {duration:.12e}"
     else:
         dynamic_keyword = "*DYNAMIC, DIRECT" if direct_dynamic else "*DYNAMIC"
-    dynamic_line = f"{dt:.12e}, {duration:.12e}" if direct_dynamic else f"{dt:.12e}, {duration:.12e}, {0.01 * dt:.12e}, {dt:.12e}"
+        dynamic_line = f"{dt:.12e}, {duration:.12e}" if direct_dynamic else f"{dt:.12e}, {duration:.12e}, {0.01 * dt:.12e}, {dt:.12e}"
 
     lines: list[str] = [
         "** Generated from assets/jiandanjiaolian.rmd by validation/run_recurdyn_gear_calculix.py",
@@ -592,12 +802,11 @@ def _write_calculix_input(
             lines.append(f"{int(node_id)}, 3, 3, {uz:.12e}")
     else:
         lines.append("GEAR21_RIGID_NODES, 1, 3, 0.0")
+    lines.extend([f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}", "U"])
+    if analysis != "static-preload":
+        lines.extend([f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}", "V"])
     lines.extend(
         [
-            f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}",
-            "U",
-            f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}",
-            "V",
             f"*NODE PRINT, NSET=GEAR22_HUB, TOTALS=ONLY, GLOBAL=YES, FREQUENCY={output_every}",
             "RF",
             f"*CONTACT PRINT, FREQUENCY={output_every}",
@@ -632,6 +841,8 @@ def _write_calculix_input(
         "explicit_dynamic": explicit_dynamic,
         "drive_mode": drive_mode,
         "slave_surface_mode": slave_surface_mode,
+        "analysis": analysis,
+        "preload_rotation": preload_rotation,
     }
 
 
@@ -929,6 +1140,8 @@ def _write_markdown(
     *,
     model: RecurDynGearModel,
     generation: Row,
+    gap_summary: list[Row],
+    law_summary: list[Row],
     run_row: Row | None,
     frame_rows: list[Row],
     totals: dict[float, Row],
@@ -937,6 +1150,8 @@ def _write_markdown(
 ) -> None:
     run_completed = run_row is not None and int(run_row.get("return_code", -1)) == 0
     vtk_status = "generated_from_calculix_dat" if frame_rows and frame_rows[0]["source"] == "calculix_dat" else "placeholder_or_no_dat"
+    all_gap = gap_summary[-1] if gap_summary else {}
+    best_law = min(law_summary, key=lambda row: float(row["relative_rms_error"])) if law_summary else {}
     text = [
         "# RecurDyn Gear to CalculiX 1s Validation Handoff",
         "",
@@ -953,6 +1168,21 @@ def _write_markdown(
         f"- Fixed hub nodes from FRBE: {generation['hub_fixed_nodes']}",
         f"- Material: E={model.material.E:g} N/mm^2, nu={model.material.nu:g}, density={model.material.rho_tonne_per_mm3:.6e} tonne/mm^3",
         f"- RecurDyn contact law: K={model.contact.stiffness:g}, order={model.contact.order}, damping={model.contact.damping:g}",
+        "",
+        "## Initial gap / penetration diagnostic",
+        "",
+        f"- Samples: {all_gap.get('count', 0)}",
+        f"- Minimum signed gap: {float(all_gap.get('min_signed_gap', 0.0)):.6e} mm",
+        f"- Negative signed-gap count: {all_gap.get('negative_signed_gap_count', 0)}",
+        f"- Minimum unsigned closest distance: {float(all_gap.get('min_unsigned_distance', 0.0)):.6e} mm",
+        f"- Near-zero unsigned distance count (`<1e-3 mm`): {all_gap.get('near_zero_distance_count_1e_3', 0)}",
+        "",
+        "## Contact law alignment proxy",
+        "",
+        f"- Best linear proxy fit: {best_law.get('fit', 'n/a')}",
+        f"- Best linear proxy slope: {float(best_law.get('linear_slope', 0.0)):.6e}",
+        f"- Relative RMS proxy error: {float(best_law.get('relative_rms_error', 0.0)):.6e}",
+        "- This is a proxy only; RecurDyn's exact `KORDER=2` internal law is not assumed to equal this polynomial model.",
         "",
         "## CalculiX run",
         "",
@@ -1016,6 +1246,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=0.001)
     parser.add_argument("--output-every", type=int, default=10)
+    parser.add_argument("--analysis", choices=["dynamic", "static-preload"], default="dynamic")
+    parser.add_argument("--preload-rotation", type=float, default=0.0)
     parser.add_argument("--rotation-axis", choices=["x", "y", "z"], default="x")
     parser.add_argument("--contact-law", choices=["linear", "exponential"], default="linear")
     parser.add_argument(
@@ -1047,6 +1279,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Use CalculiX *DYNAMIC,DIRECT,EXPLICIT for a fixed-step engineering stress-cloud run.",
     )
     parser.add_argument("--skip-calculix", action="store_true")
+    parser.add_argument("--gap-diagnostic-only", action="store_true")
+    parser.add_argument("--gap-candidate-count", type=int, default=96)
     parser.add_argument("--quick", action="store_true", help="Generate a short smoke deck unless duration/dt are explicitly overridden.")
     parser.add_argument("--max-vtk-frames", type=int, default=101)
     parser.add_argument("--timeout", type=int, default=3600)
@@ -1061,6 +1295,15 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model = parse_recurdyn_rmd(args.rmd)
+    gap_rows, gap_summary = evaluate_initial_gap_diagnostics(model, candidate_count=args.gap_candidate_count)
+    law_rows, law_summary = evaluate_contact_law_alignment(model)
+    _write_csv(out_dir / "initial_gap_samples.csv", list(gap_rows[0].keys()), gap_rows)
+    _write_csv(out_dir / "initial_gap_summary.csv", list(gap_summary[0].keys()), gap_summary)
+    gap_plot = _write_gap_histogram(out_dir / "figures" / "initial_gap_histogram.png", gap_rows)
+    _write_csv(out_dir / "contact_law_alignment.csv", list(law_rows[0].keys()), law_rows)
+    _write_csv(out_dir / "contact_law_alignment_summary.csv", list(law_summary[0].keys()), law_summary)
+    law_plot = _write_contact_law_plot(out_dir / "figures" / "contact_law_alignment.png", law_rows)
+
     inp_path = out_dir / "jiandanjiaolian_calculix_1s.inp"
     generation = _write_calculix_input(
         inp_path,
@@ -1075,10 +1318,12 @@ def main(argv: list[str] | None = None) -> int:
         drive_mode=args.drive_mode,
         contact_stiffness_scale=args.contact_stiffness_scale,
         slave_surface_mode=args.slave_surface_mode,
+        analysis=args.analysis,
+        preload_rotation=args.preload_rotation,
     )
 
     run_row: Row | None = None
-    if not args.skip_calculix:
+    if not args.skip_calculix and not args.gap_diagnostic_only:
         run_row = _run_calculix(inp_path, out_dir / "logs" / "calculix_run.log", timeout=args.timeout)
 
     dat_path = inp_path.with_suffix(".dat")
@@ -1099,7 +1344,8 @@ def main(argv: list[str] | None = None) -> int:
     ]
     _write_csv(out_dir / "recurdyn_gear_calculix_metadata.csv", ["key", "value"], metadata_rows)
     _write_csv(out_dir / "recurdyn_gear_calculix_vtk_frames.csv", list(frame_rows[0].keys()), frame_rows)
-    _write_csv(out_dir / "recurdyn_gear_calculix_figures.csv", list(preview.keys()), [preview])
+    figure_rows = [preview, gap_plot, law_plot]
+    _write_csv(out_dir / "recurdyn_gear_calculix_figures.csv", sorted({key for row in figure_rows for key in row}), figure_rows)
 
     summary_rows = [
         {
@@ -1111,6 +1357,9 @@ def main(argv: list[str] | None = None) -> int:
             "vtk_frames": len(frame_rows),
             "stress_strain_vtk_generated": str(frame_rows and frame_rows[0]["source"] == "calculix_dat").lower(),
             "contact_totals_rows": len(totals),
+            "min_initial_signed_gap": gap_summary[-1]["min_signed_gap"],
+            "negative_initial_gap_count": gap_summary[-1]["negative_signed_gap_count"],
+            "contact_law_best_lsq_slope": law_summary[-1]["linear_slope"],
             "acceptance": "pass"
             if run_row is not None and int(run_row.get("return_code", -1)) == 0 and frame_rows and frame_rows[0]["source"] == "calculix_dat"
             else "blocked_or_partial",
@@ -1125,6 +1374,8 @@ def main(argv: list[str] | None = None) -> int:
         out_dir / "recurdyn_gear_calculix_summary.md",
         model=model,
         generation=generation,
+        gap_summary=gap_summary,
+        law_summary=law_summary,
         run_row=run_row,
         frame_rows=frame_rows,
         totals=totals,
