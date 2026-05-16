@@ -26,6 +26,13 @@ registered mechanics backend is C3D4/TET4. HEX8/C3D8 remains supported as mesh
 topology for current-surface dynamic-SDF replay, but no C3D8 or C3D10 mechanics
 backend is currently registered.
 
+The production solver architecture is split into three layers: element
+backends, analysis backends, and contact backends. The current analysis layer
+contains linear static and linear Newmark dynamic adapters around the existing
+assembly/integration kernels. The current contact layer contains a penalty
+normal-contact adapter around the existing dynamic-SDF constraints and
+Gauss-Newton contact stiffness path.
+
 ## Phase-3 Validation Case Table
 
 | Case | Expected quantities | Current status | Limitations |

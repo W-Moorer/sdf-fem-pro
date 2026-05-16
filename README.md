@@ -17,11 +17,28 @@ python -m pip install -e ".[dev]"
 - TET4/C3D4 small-strain linear elastic stiffness and mass matrices through a
   registered element backend interface.
 - Sparse global stiffness, mass, and gravity force assembly.
+- Linear static and linear Newmark dynamic analysis backends.
 - Dirichlet DOF utilities and a linear Newmark-beta step.
 - Point-triangle closest projection and oriented local dynamic surface distance.
 - Uniform spatial-hash broad phase over padded triangle AABBs.
-- Contact constraints, gap Jacobian, penalty force, and Gauss-Newton stiffness.
+- Contact backend wrapper for constraints, gap Jacobian, penalty force, and
+  Gauss-Newton stiffness.
 - Deterministic example and CI-sized benchmark scripts.
+
+## Solver Architecture
+
+The solver is split into three extension layers:
+
+1. **Element backend**: element stiffness, mass, volume, and body-force
+   distribution. The current registered backend is C3D4/TET4.
+2. **Analysis backend**: global solve or time integration. The current
+   production backends are linear static `K u = f` and linear Newmark dynamics.
+3. **Contact backend**: contact constraints, gap Jacobian, contact force, and
+   tangent contribution. The current backend is frictionless penalty normal
+   contact driven by current-surface dynamic SDF constraints.
+
+C3D8/C3D10 support should be added by registering new element backends first,
+then wiring them into the same analysis and contact layers.
 
 ## Minimal Usage
 

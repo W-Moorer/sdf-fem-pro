@@ -1,6 +1,7 @@
 """Contact detection and response utilities."""
 
 from .broad_phase import UniformTriangleAABBHash, triangle_aabbs
+from .backends import ContactBackendResult, PenaltyContactBackend
 from .jacobian import (
     assemble_contact_jacobian,
     contact_jacobian_entries,
@@ -17,7 +18,9 @@ from .sdf_geometry import DynamicSurfaceSDFContactGeometry
 
 __all__ = [
     "ContactConstraint",
+    "ContactBackendResult",
     "DynamicSurfaceSDFContactGeometry",
+    "PenaltyContactBackend",
     "SurfaceSample",
     "UniformTriangleAABBHash",
     "assemble_contact_jacobian",
