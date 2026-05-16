@@ -1,0 +1,13 @@
+case_id,claim,allowed,reason
+c3d8_linear_static_contact,external_correctness,true,requires native SFC result and CalculiX comparison
+c3d8_linear_static_contact,trajectory_equivalence,false,requires native SFC trajectory and CalculiX trajectory comparison
+c3d8_linear_static_contact,efficiency,false,requires acceleration/timing evidence for this case
+c3d8_nonlinear_static_contact,external_correctness,false,requires native SFC result and CalculiX comparison
+c3d8_nonlinear_static_contact,trajectory_equivalence,false,requires native SFC trajectory and CalculiX trajectory comparison
+c3d8_nonlinear_static_contact,efficiency,false,requires acceleration/timing evidence for this case
+c3d8_linear_dynamic_contact,external_correctness,false,requires native SFC result and CalculiX comparison
+c3d8_linear_dynamic_contact,trajectory_equivalence,false,requires native SFC trajectory and CalculiX trajectory comparison
+c3d8_linear_dynamic_contact,efficiency,false,requires acceleration/timing evidence for this case
+c3d8_nonlinear_dynamic_contact,external_correctness,false,requires native SFC result and CalculiX comparison
+c3d8_nonlinear_dynamic_contact,trajectory_equivalence,false,requires native SFC trajectory and CalculiX trajectory comparison
+c3d8_nonlinear_dynamic_contact,efficiency,false,requires acceleration/timing evidence for this case

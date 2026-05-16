@@ -1,0 +1,3 @@
+claim,supported,evidence_file,details
+c3d8_dynamic_sdf_external_trajectory_replay,true,c3d8_contact_trajectory.csv,CalculiX C3D8 trajectory replay with current-surface dynamic SDF; synthetic quick mode does not support the external claim.
+native_sfc_nonlinear_c3d8_trajectory_equivalence,false,,This runner replays CalculiX trajectories; it is not a native nonlinear C3D8 solve-equivalence claim.

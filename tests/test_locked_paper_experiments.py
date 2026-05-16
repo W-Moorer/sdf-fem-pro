@@ -13,6 +13,7 @@ TET4_PATCH_CASE = ROOT / "paper" / "numerical_experiments" / "tet4_analytic_patc
 SCIKIT_FEM_CASE = ROOT / "paper" / "numerical_experiments" / "scikit_fem_cantilever_external"
 CONTACTENERGY_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_contactenergy_c3d8_replay"
 C3D8_TRAJECTORY_CASE = ROOT / "paper" / "numerical_experiments" / "c3d8_contact_trajectory_validation"
+PHASE9_CASE = ROOT / "paper" / "numerical_experiments" / "phase9_full_contact_validation"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -301,3 +302,33 @@ def test_locked_c3d8_contact_trajectory_replay_artifacts_and_thresholds() -> Non
     claims = {row["claim"]: row for row in _rows(C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_claims.csv")}
     assert claims["c3d8_dynamic_sdf_external_trajectory_replay"]["supported"] == "true"
     assert claims["native_sfc_nonlinear_c3d8_trajectory_equivalence"]["supported"] == "false"
+
+
+def test_locked_phase9_full_contact_validation_claim_gates() -> None:
+    required = [
+        PHASE9_CASE / "README.md",
+        PHASE9_CASE / "phase9_full_contact_validation.csv",
+        PHASE9_CASE / "phase9_claim_gates.csv",
+        PHASE9_CASE / "phase9_stress_strain_cloud.csv",
+        PHASE9_CASE / "phase9_full_contact_validation_summary.md",
+        PHASE9_CASE / "figures" / "phase9_claim_gate_matrix.png",
+        PHASE9_CASE / "figures" / "phase9_contact_error_metrics.png",
+        PHASE9_CASE / "vtk" / "c3d8_linear_static_contact_0000.vtk",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    rows = _rows(PHASE9_CASE / "phase9_full_contact_validation.csv")
+    by_case = {row["case_id"]: row for row in rows}
+    assert by_case["c3d8_linear_static_contact"]["supports_external_correctness"] == "true"
+    assert by_case["c3d8_linear_dynamic_contact"]["status"] == "external_replay_only"
+    assert by_case["c3d8_linear_dynamic_contact"]["supports_trajectory_equivalence"] == "false"
+    assert by_case["c3d8_nonlinear_static_contact"]["status"] == "blocked_no_native_c3d8_nonlinear_backend"
+    assert by_case["c3d8_nonlinear_dynamic_contact"]["status"] == "blocked_no_native_c3d8_nonlinear_backend"
+
+    gates = _rows(PHASE9_CASE / "phase9_claim_gates.csv")
+    assert all(
+        row["allowed"] == "false"
+        for row in gates
+        if row["claim"] in {"trajectory_equivalence", "efficiency"}
+    )

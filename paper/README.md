@@ -30,6 +30,7 @@ Evidence source:
 - `../results/external_contact_solver/`
 - `../results/calculix_contactenergy_replay/`
 - `../results/c3d8_contact_trajectory_quick/`
+- `../results/phase9_full_contact_validation/`
 - `../docs/phase6_final_experiment_handoff.md`
 - `../docs/phase7_physical_validation_handoff.md`
 - `../docs/external_fem_comparison_handoff.md`
@@ -62,6 +63,9 @@ Scope for the submission draft:
   an external trajectory replay: CalculiX supplies the deformed states, and SFC
   replays current-surface dynamic SDF gap, force, energy, and stress-cloud
   diagnostics on triangulated C3D8 boundaries.
+- Phase-9 stores the full static/dynamic, linear/nonlinear C3D8 claim matrix.
+  Its gates prevent external-correctness, trajectory-equivalence, or efficiency
+  claims when native SFC, CalculiX, or timing evidence is missing.
 
 Unsupported claims that must not be added without new evidence:
 
