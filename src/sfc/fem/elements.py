@@ -1,8 +1,8 @@
 """Finite-element backend registry.
 
 The registry keeps global assembly independent of a specific element formula.
-The current production backend is C3D4/TET4; higher-order or hexahedral
-elements can be added by registering another backend with the same interface.
+Additional elements are added by registering another backend with the same
+stiffness, mass, and volume interface.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .hex8 import hex8_mass, hex8_stiffness, hex8_volume
 from .tet4 import tet4_mass, tet4_stiffness, tet4_volume
 
 StiffnessFunction = Callable[[np.ndarray, float, float], np.ndarray]
@@ -52,10 +53,17 @@ C3D4_TET4_BACKEND = ElementBackend(
     volume=tet4_volume,
 )
 
+C3D8_HEX8_BACKEND = ElementBackend(
+    name="hex8",
+    aliases=("hex8", "c3d8"),
+    nodes_per_element=8,
+    stiffness=hex8_stiffness,
+    mass=hex8_mass,
+    volume=hex8_volume,
+)
+
 _REGISTERED_BACKENDS: dict[str, ElementBackend] = {}
 _KNOWN_UNREGISTERED_ALIASES = {
-    "hex8": "c3d8",
-    "c3d8": "c3d8",
     "tet10": "c3d10",
     "c3d10": "c3d10",
 }
@@ -96,9 +104,9 @@ def _available_alias_text() -> str:
 def get_element_backend(element_type: str) -> ElementBackend:
     """Return the registered FEM backend for ``element_type``.
 
-    ``tet4`` and solver-style ``C3D4`` are aliases for the same backend. C3D8
-    and C3D10 are intentionally not registered yet; callers get a clear error
-    instead of silently falling back to TET4 logic.
+    ``tet4``/``C3D4`` and ``hex8``/``C3D8`` are registered aliases. C3D10 is
+    intentionally not registered yet; callers get a clear error instead of
+    silently falling back to a lower-order element.
     """
 
     key = str(element_type).lower()
@@ -126,3 +134,4 @@ def canonical_fem_element_type(element_type: str) -> str:
 
 
 register_element_backend(C3D4_TET4_BACKEND)
+register_element_backend(C3D8_HEX8_BACKEND)

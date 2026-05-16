@@ -1,6 +1,4 @@
 import numpy as np
-import pytest
-
 from sfc.fem import (
     DeformableBody,
     assemble_gravity_force,
@@ -54,6 +52,26 @@ def _two_c3d4_body() -> DeformableBody:
     return DeformableBody(mesh=mesh, material={"E": 1000.0, "nu": 0.25}, density=2.5)
 
 
+def _single_c3d8_body() -> DeformableBody:
+    mesh = VolumeMesh(
+        X=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ]
+        ),
+        elements=np.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
+        element_type="C3D8",
+    )
+    return DeformableBody(mesh=mesh, material={"E": 1000.0, "nu": 0.25}, density=1.5)
+
+
 def test_global_stiffness_shape_for_two_tet_mesh() -> None:
     body = _two_tet_body()
 
@@ -93,24 +111,15 @@ def test_total_gravity_force_equals_total_mass_times_g() -> None:
     assert np.allclose(resultant, total_mass * gravity)
 
 
-def test_fem_assembler_rejects_hex8_mesh_with_clear_message() -> None:
-    mesh = VolumeMesh(
-        X=np.array(
-            [
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [1.0, 0.0, 1.0],
-                [1.0, 1.0, 1.0],
-                [0.0, 1.0, 1.0],
-            ]
-        ),
-        elements=np.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
-        element_type="hex8",
-    )
-    body = DeformableBody(mesh=mesh, material={"E": 1000.0, "nu": 0.25}, density=1.0)
+def test_global_assembly_accepts_c3d8_alias() -> None:
+    body = _single_c3d8_body()
+    gravity = np.array([0.5, -1.0, -9.81])
 
-    with pytest.raises(ValueError, match="No FEM element backend registered.*c3d8"):
-        assemble_stiffness_matrix(body)
+    K = assemble_stiffness_matrix(body)
+    M = assemble_mass_matrix(body)
+    F = assemble_gravity_force(body, gravity)
+
+    assert body.mesh.element_type == "hex8"
+    assert K.shape == (3 * body.n_nodes, 3 * body.n_nodes)
+    assert M.shape == (3 * body.n_nodes, 3 * body.n_nodes)
+    assert np.allclose(F.reshape(-1, 3).sum(axis=0), body.density * gravity)

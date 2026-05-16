@@ -62,10 +62,10 @@ class VolumeMesh:
     """Reference-domain volume mesh.
 
     The mesh container accepts ``tet4``/``c3d4`` and ``hex8``/``c3d8`` aliases.
-    The FEM assembler currently has a registered backend only for C3D4/TET4,
-    while HEX8/C3D8 remains usable for validation-only current-surface distance
-    queries. Node and face sets store integer indices into the mesh arrays and
-    are copied to NumPy arrays on construction.
+    Registered FEM backends currently cover C3D4/TET4 and HEX8/C3D8 linear
+    mechanics, while higher-order elements still require new backends. Node and
+    face sets store integer indices into the mesh arrays and are copied to NumPy
+    arrays on construction.
     """
 
     X: np.ndarray

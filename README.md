@@ -14,10 +14,11 @@ python -m pip install -e ".[dev]"
 ## Implemented Modules
 
 - TET4/C3D4 volume mesh validation and boundary face extraction.
-- TET4/C3D4 small-strain linear elastic stiffness and mass matrices through a
-  registered element backend interface.
+- TET4/C3D4 and HEX8/C3D8 small-strain linear elastic stiffness and mass
+  matrices through a registered element backend interface.
 - Sparse global stiffness, mass, and gravity force assembly.
-- Linear static and linear Newmark dynamic analysis backends.
+- Linear static, linear Newmark dynamic, nonlinear static Newton, and nonlinear
+  HHT/Newmark analysis backends.
 - Dirichlet DOF utilities and a linear Newmark-beta step.
 - Point-triangle closest projection and oriented local dynamic surface distance.
 - Uniform spatial-hash broad phase over padded triangle AABBs.
@@ -30,15 +31,16 @@ python -m pip install -e ".[dev]"
 The solver is split into three extension layers:
 
 1. **Element backend**: element stiffness, mass, volume, and body-force
-   distribution. The current registered backend is C3D4/TET4.
+   distribution. The current registered backends are C3D4/TET4 and HEX8/C3D8.
 2. **Analysis backend**: global solve or time integration. The current
-   production backends are linear static `K u = f` and linear Newmark dynamics.
+   production backends are linear static `K u = f`, linear Newmark dynamics,
+   nonlinear static Newton, and nonlinear HHT/Newmark dynamics.
 3. **Contact backend**: contact constraints, gap Jacobian, contact force, and
    tangent contribution. The current backend is frictionless penalty normal
    contact driven by current-surface dynamic SDF constraints.
 
-C3D8/C3D10 support should be added by registering new element backends first,
-then wiring them into the same analysis and contact layers.
+C3D10 support should be added by registering a new element backend first, then
+wiring it into the same analysis and contact layers.
 
 ## Minimal Usage
 
@@ -106,22 +108,23 @@ The external FEM comparison uses `scikit-fem` as a validation-only open-source
 reference for equivalent linear TET4 cantilever models. The external contact
 comparison uses SfePy as a validation-only open-source contact solver and
 replays its final deformed contact state with SFC gap queries. The CalculiX
-contactenergy replay is a validation-only C3D8 contact-law/energy reference
-showing that dynamic SDF queries operate on triangulated current boundary
-surfaces rather than on TET4 topology specifically.
+contactenergy replay is a C3D8 contact-law/energy reference that uses the
+registered SFC C3D8 stiffness backend for its companion static solve and
+dynamic SDF replay on triangulated current C3D8 boundary surfaces.
 
 ## Element Backends
 
 FEM assembly uses a small element-backend registry. The currently registered
-mechanics backend is C3D4/TET4. `tet4` and `C3D4` are accepted as aliases for
-that backend. `hex8`/`C3D8` meshes are accepted for boundary-surface dynamic-SDF
-queries, but C3D8 and C3D10 mechanics backends are not implemented yet.
+mechanics backends are C3D4/TET4 and HEX8/C3D8. `tet4`/`C3D4` and
+`hex8`/`C3D8` are accepted as aliases. C3D10 mechanics is not implemented yet.
 
 ## Current Limitations
 
-- Registered FEM mechanics backend is C3D4/TET4 only.
-- C3D8/C3D10 mechanics backends are not implemented yet.
+- Registered FEM mechanics backends are C3D4/TET4 and HEX8/C3D8.
+- C3D10 mechanics backend is not implemented yet.
 - Small-strain linear FEM only.
+- Nonlinear StVK/HHT support is available through the CalculiX-aligned C3D4
+  analysis backend and remains scoped to validation/benchmark use.
 - Penalty contact only.
 - No friction.
 - No self-contact.

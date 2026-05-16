@@ -7,7 +7,7 @@ the official CalculiX `contactenergy.inp` C3D8 test. CalculiX performs the
 static C3D8 surface-to-surface contact solve. SFC then replays the final
 deformed geometry with the current-surface dynamic SDF query on triangulated
 C3D8 boundary faces and evaluates the same linear pressure-overclosure law.
-The folder also includes a validation-only SFC C3D8 static backend on the same
+The folder also includes a registered SFC C3D8 static backend solve on the same
 input geometry, constraints, loads, and linear pressure-overclosure law, so the
 SFC and CalculiX displacement, strain, stress, and von Mises fields can be
 compared directly.
@@ -68,7 +68,7 @@ values.
 The direct C3D8 comparison figure uses the same visualization scheme and shows
 SFC C3D8 von Mises stress, CalculiX von Mises stress, and the absolute stress
 error on the same boundary. This is a validation backend for the external
-evidence case; the main solver remains the TET4 FEM-SDF implementation.
+evidence case; nonlinear C3D8 trajectory equivalence is not claimed.
 
 ## Locked Metrics
 
@@ -91,7 +91,6 @@ the total contact spring energy and normal force to the locked tolerance.
 ## Boundaries
 
 This is not a TET4 trajectory-equivalence claim. It is a C3D8 static
-contact-law/energy replay plus a validation-only SFC C3D8 static field
-comparison. The C3D8 validation backend is included only to make this external
-evidence visually auditable; the main solver claim remains TET4 FEM-SDF
-contact.
+contact-law/energy replay plus a registered SFC C3D8 static field comparison.
+The C3D8 backend evidence is included to make this external evidence visually
+auditable; nonlinear C3D8 contact trajectories are not claimed.

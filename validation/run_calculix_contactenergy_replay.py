@@ -32,8 +32,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.colors import Normalize  # noqa: E402
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 
-from sfc.fem.material import isotropic_linear_elasticity_matrix  # noqa: E402
-from sfc.mesh import extract_boundary_triangles  # noqa: E402
+from sfc.fem import DeformableBody, assemble_stiffness_matrix  # noqa: E402
+from sfc.fem.hex8 import hex8_center_strain_stress  # noqa: E402
+from sfc.mesh import VolumeMesh, extract_boundary_triangles  # noqa: E402
 from sfc.sdf.dynamic_surface_sdf import dynamic_surface_sdf  # noqa: E402
 
 
@@ -395,74 +396,14 @@ def replay_contactenergy_with_dynamic_sdf(model: ContactEnergyModel, U: np.ndarr
     }
 
 
-C3D8_NATURAL_NODE_COORDS = np.array(
-    [
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
-        [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
-    ],
-    dtype=float,
-)
-
-HEX8_CENTER_NATURAL_GRADIENTS = C3D8_NATURAL_NODE_COORDS / 8.0
-
-
-def _hex8_natural_gradients(xi: float, eta: float, zeta: float) -> np.ndarray:
-    gradients = np.empty((8, 3), dtype=float)
-    for idx, (r, s, t) in enumerate(C3D8_NATURAL_NODE_COORDS):
-        gradients[idx, 0] = 0.125 * r * (1.0 + s * eta) * (1.0 + t * zeta)
-        gradients[idx, 1] = 0.125 * s * (1.0 + r * xi) * (1.0 + t * zeta)
-        gradients[idx, 2] = 0.125 * t * (1.0 + r * xi) * (1.0 + s * eta)
-    return gradients
-
-
-def _hex8_B_matrix(gradients: np.ndarray) -> np.ndarray:
-    B = np.zeros((6, 24), dtype=float)
-    for local_node, (dndx, dndy, dndz) in enumerate(gradients):
-        col = 3 * local_node
-        B[0, col] = dndx
-        B[1, col + 1] = dndy
-        B[2, col + 2] = dndz
-        B[3, col] = dndy
-        B[3, col + 1] = dndx
-        B[4, col + 1] = dndz
-        B[4, col + 2] = dndy
-        B[5, col] = dndz
-        B[5, col + 2] = dndx
-    return B
-
-
-def _hex8_element_stiffness(Xe: np.ndarray, C: np.ndarray) -> np.ndarray:
-    Ke = np.zeros((24, 24), dtype=float)
-    gp = 1.0 / np.sqrt(3.0)
-    for xi in (-gp, gp):
-        for eta in (-gp, gp):
-            for zeta in (-gp, gp):
-                dN_dnatural = _hex8_natural_gradients(float(xi), float(eta), float(zeta))
-                jacobian = Xe.T @ dN_dnatural
-                detJ = float(np.linalg.det(jacobian))
-                if detJ <= 0.0:
-                    raise ValueError("C3D8 element has non-positive Jacobian determinant")
-                gradients = dN_dnatural @ np.linalg.inv(jacobian)
-                B = _hex8_B_matrix(gradients)
-                Ke += B.T @ C @ B * detJ
-    return Ke
-
-
 def _assemble_c3d8_stiffness(model: ContactEnergyModel) -> np.ndarray:
-    C = isotropic_linear_elasticity_matrix(model.material_E, model.material_nu)
-    ndofs = 3 * model.X.shape[0]
-    K = np.zeros((ndofs, ndofs), dtype=float)
-    for element in model.elements:
-        Ke = _hex8_element_stiffness(model.X[element], C)
-        dofs = np.asarray([3 * node + component for node in element for component in range(3)], dtype=np.int64)
-        K[np.ix_(dofs, dofs)] += Ke
-    return K
+    mesh = VolumeMesh(model.X, model.elements, element_type="C3D8")
+    body = DeformableBody(
+        mesh=mesh,
+        material={"E": model.material_E, "nu": model.material_nu},
+        density=1.0,
+    )
+    return assemble_stiffness_matrix(body).toarray()
 
 
 def _external_force_vector(model: ContactEnergyModel) -> np.ndarray:
@@ -555,7 +496,7 @@ def _contact_jacobian_rows(model: ContactEnergyModel) -> list[tuple[np.ndarray, 
 
 
 def solve_sfc_c3d8_contactenergy_static(model: ContactEnergyModel) -> tuple[np.ndarray, Row]:
-    """Solve the contactenergy model with a validation-only SFC C3D8 backend."""
+    """Solve the contactenergy model with the registered SFC C3D8 backend."""
 
     K = _assemble_c3d8_stiffness(model)
     contact_rows = _contact_jacobian_rows(model)
@@ -591,13 +532,8 @@ def _von_mises(stress: np.ndarray) -> float:
 
 
 def _hex8_center_strain_stress(model: ContactEnergyModel, U: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Recover one-point C3D8 engineering strain and linear stress.
+    """Recover one-point C3D8 engineering strain and linear stress."""
 
-    This is a validation-only post-process of the CalculiX final displacement
-    field. SFC does not solve C3D8 mechanics in this replay.
-    """
-
-    C = isotropic_linear_elasticity_matrix(model.material_E, model.material_nu)
     strains: list[np.ndarray] = []
     stresses: list[np.ndarray] = []
     von_mises_values: list[float] = []
@@ -605,21 +541,7 @@ def _hex8_center_strain_stress(model: ContactEnergyModel, U: np.ndarray) -> tupl
     for element in model.elements:
         Xe = model.X[element]
         Ue = U[element]
-        jacobian = Xe.T @ HEX8_CENTER_NATURAL_GRADIENTS
-        gradients = HEX8_CENTER_NATURAL_GRADIENTS @ np.linalg.inv(jacobian)
-        displacement_gradient = Ue.T @ gradients
-        engineering_strain = np.asarray(
-            [
-                displacement_gradient[0, 0],
-                displacement_gradient[1, 1],
-                displacement_gradient[2, 2],
-                displacement_gradient[0, 1] + displacement_gradient[1, 0],
-                displacement_gradient[1, 2] + displacement_gradient[2, 1],
-                displacement_gradient[0, 2] + displacement_gradient[2, 0],
-            ],
-            dtype=float,
-        )
-        stress = C @ engineering_strain
+        engineering_strain, stress = hex8_center_strain_stress(Xe, Ue, model.material_E, model.material_nu)
         strain_tensor = np.asarray(
             [
                 [engineering_strain[0], 0.5 * engineering_strain[3], 0.5 * engineering_strain[5]],
@@ -934,7 +856,7 @@ def _write_visualization_artifacts(out_dir: Path, model: ContactEnergyModel, U: 
             "png": error_png.relative_to(out_dir).as_posix(),
             "pdf": error_pdf.relative_to(out_dir).as_posix(),
             "status": "ok",
-            "details": "validation-only SFC C3D8 static solve compared to CalculiX von Mises stress on the same boundary",
+            "details": "registered SFC C3D8 static solve compared to CalculiX von Mises stress on the same boundary",
         },
     ]
     return plot_rows, cloud_rows
@@ -1114,8 +1036,8 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
         "  CalculiX-vs-SFC replay values and log-scale relative errors for",
         "  normal force and contact energy.",
         "- `figures/calculix_contactenergy_sfc_c3d8_error_3d.png`: direct",
-        "  validation-only SFC C3D8 static solve compared with the CalculiX",
-        "  C3D8 stress field on the same boundary.",
+        "  registered SFC C3D8 static solve compared with the CalculiX C3D8",
+        "  stress field on the same boundary.",
         "",
         "## Claims",
         "",
@@ -1131,8 +1053,8 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
             "",
             "- This is a C3D8 external contact-law/energy replay, not a TET4 trajectory",
             "  equivalence claim.",
-            "- The validation-only SFC C3D8 static backend is included for direct",
-            "  field-error plotting; it is not the main solver element type.",
+            "- The registered SFC C3D8 static backend is included for direct",
+            "  field-error plotting; nonlinear C3D8 trajectories are not claimed.",
             "- Dynamic SDF is evaluated on triangulated current C3D8 boundary faces.",
             "- Friction, self-contact, hard contact, and nonlinear material behavior are",
             "  outside this replay.",

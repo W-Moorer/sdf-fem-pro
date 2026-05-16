@@ -4,8 +4,8 @@ This validation uses the official CalculiX `contactenergy.inp` C3D8
 surface-to-surface contact-energy test as an external contact-law
 reference. The primary SFC evidence replays the final CalculiX
 deformed geometry with the current-surface dynamic SDF query and the
-same linear pressure-overclosure law. A separate validation-only SFC
-C3D8 static backend solves the same input to produce direct field-error
+same linear pressure-overclosure law. A separate registered SFC C3D8
+static backend solves the same input to produce direct field-error
 plots.
 
 ## Command
@@ -45,8 +45,8 @@ python validation/run_calculix_contactenergy_replay.py --out-dir results/calculi
   CalculiX-vs-SFC replay values and log-scale relative errors for
   normal force and contact energy.
 - `figures/calculix_contactenergy_sfc_c3d8_error_3d.png`: direct
-  validation-only SFC C3D8 static solve compared with the CalculiX
-  C3D8 stress field on the same boundary.
+  registered SFC C3D8 static solve compared with the CalculiX C3D8
+  stress field on the same boundary.
 
 ## Claims
 
@@ -60,8 +60,8 @@ python validation/run_calculix_contactenergy_replay.py --out-dir results/calculi
 
 - This is a C3D8 external contact-law/energy replay, not a TET4 trajectory
   equivalence claim.
-- The validation-only SFC C3D8 static backend is included for direct
-  field-error plotting; it is not the main solver element type.
+- The registered SFC C3D8 static backend is included for direct
+  field-error plotting; nonlinear C3D8 trajectories are not claimed.
 - Dynamic SDF is evaluated on triangulated current C3D8 boundary faces.
 - Friction, self-contact, hard contact, and nonlinear material behavior are
   outside this replay.

@@ -24,7 +24,7 @@ Signed distance fields provide an attractive geometric representation for contac
 
 This paper presents a training-free dynamic surface-distance framework for finite-element contact. Instead of reconstructing a deformed SDF from data, the proposed method induces a local oriented surface distance directly from the current finite-element boundary. The contact gap is defined as the signed distance from a slave surface sample to the current master surface, and the corresponding normal, closest-point projection, contact Jacobian, and penalty contact force are assembled consistently from the current FEM geometry. A standalone implementation is developed without dependence on Abaqus-generated matrices, force files, or post-processing outputs.
 
-The implementation is validated on linear TET4 finite elements with normal penalty contact. Verification is organized in three layers: analytic and scikit-fem checks for the non-contact FEM stress and displacement fields, CalculiX contact-output comparisons for static C3D8 contact energy and dynamic C3D4 block-plane contact trajectories, and implementation-level closest-point checks for the accelerated distance query. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions; a separate total-step timing check also remains faster than the brute-force counterpart in the tested cases. The current scope is limited to linear TET4 elasticity in the core solver, oriented local surface distances, spatial-hash broad phase, and frictionless penalty normal contact.
+The implementation is validated primarily on linear TET4 finite elements with normal penalty contact, with a registered linear C3D8 backend used for a static external contact reference. Verification is organized in three layers: analytic and scikit-fem checks for the non-contact FEM stress and displacement fields, CalculiX contact-output comparisons for static C3D8 contact energy and dynamic C3D4 block-plane contact trajectories, and implementation-level closest-point checks for the accelerated distance query. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions; a separate total-step timing check also remains faster than the brute-force counterpart in the tested cases. The current scope is limited to C3D4/TET4 and linear C3D8 mechanics backends, oriented local surface distances, spatial-hash broad phase, and frictionless penalty normal contact.
 \end{abstract}
 
 \section{Introduction}
@@ -39,9 +39,9 @@ This paper proposes a training-free dynamic surface-distance framework for defor
 
 The current-surface distance is used consistently in the contact formulation. The contact gap is defined as the signed distance from a slave surface sample to the current master surface. The slave and master Jacobian blocks are assembled from the same normal and shape-function weights used in the closest-point projection. A frictionless penalty contact force and Gauss-Newton contact stiffness approximation are then assembled from this Jacobian. This gives a compact contact pipeline in which geometry evaluation and force assembly share the same local surface representation.
 
-We implement the method in a standalone FEM-SDF prototype with internally assembled TET4 stiffness, mass, body-force, constraint, contact, and time-integration components. The core solver does not depend on Abaqus-generated matrices, force files, \texttt{.odb} files, or spreadsheet outputs. Experiments first verify the non-contact FEM backend against analytic stress/strain references and an equivalent scikit-fem model. The contact evidence then uses external CalculiX outputs: a static C3D8 contact-energy test validates force and energy replay on the deformed current surface, and a dynamic C3D4 block-plane case compares activation time, penetration, normal reaction, contact energy, center-of-mass motion, and contact-zone stress. Brute-force closest-point projection is retained only as an implementation-level geometry oracle and timing baseline. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions.
+We implement the method in a standalone FEM-SDF prototype with internally assembled element stiffness, mass, body-force, constraint, contact, and time-integration components. The core solver does not depend on Abaqus-generated matrices, force files, \texttt{.odb} files, or spreadsheet outputs. Experiments first verify the non-contact FEM backend against analytic stress/strain references and an equivalent scikit-fem model. The contact evidence then uses external CalculiX outputs: a static C3D8 contact-energy test validates force and energy replay on the deformed current surface using the registered C3D8 stiffness backend, and a dynamic C3D4 block-plane case compares activation time, penetration, normal reaction, contact energy, center-of-mass motion, and contact-zone stress. Brute-force closest-point projection is retained only as an implementation-level geometry oracle and timing baseline. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions.
 
-In summary, this work makes four contributions. First, it introduces a training-free current-surface-induced distance representation for deformable FEM contact. Second, it derives a consistent contact gap, normal, Jacobian, and penalty force assembly from local current-surface projection. Third, it provides a standalone linear TET4 FEM-SDF implementation independent of Abaqus-generated solver artifacts. Fourth, it presents a reproducible validation and evidence package in which FEM field correctness is checked against analytic and scikit-fem references, contact correctness is checked against CalculiX contact outputs, and computational benefit is measured against brute-force all-triangle projection.
+In summary, this work makes four contributions. First, it introduces a training-free current-surface-induced distance representation for deformable FEM contact. Second, it derives a consistent contact gap, normal, Jacobian, and penalty force assembly from local current-surface projection. Third, it provides a standalone FEM-SDF implementation with registered C3D4/TET4 and linear C3D8 mechanics backends independent of Abaqus-generated solver artifacts. Fourth, it presents a reproducible validation and evidence package in which FEM field correctness is checked against analytic and scikit-fem references, contact correctness is checked against CalculiX contact outputs, and computational benefit is measured against brute-force all-triangle projection.
 
 \section{Related Work}
 
@@ -59,7 +59,7 @@ The proposed method sits between traditional closest-point contact and precomput
 
 \subsection{Current finite-element surface}
 
-Let the deformable body occupy a reference domain \(\Omega_0\), discretized by TET4 elements. The current nodal coordinates are denoted by \(\mathbf{x}_a\). A boundary triangle \(e\) on the current surface is represented as
+Let the deformable body occupy a reference domain \(\Omega_0\), discretized by finite elements. The current nodal coordinates are denoted by \(\mathbf{x}_a\). The contact query acts on a triangulated boundary surface: a TET4 boundary face is already triangular, while a C3D8 boundary quad is split into triangles for the SDF query. A boundary triangle \(e\) on the current surface is represented as
 \begin{equation}
 \mathbf{s}_e(\boldsymbol{\xi}, \mathbf{q})
 =
@@ -75,7 +75,7 @@ where \(\boldsymbol{\xi}\) denotes surface coordinates, \(N_a^\Gamma\) are the s
 \left\|\mathbf{s}_{,\xi} \times \mathbf{s}_{,\eta}\right\|
 }.
 \end{equation}
-The implementation repairs negatively oriented TET4 elements and orients boundary faces outward for closed TET4 surfaces, ensuring a consistent local sign convention for the supported geometries.
+The implementation repairs negatively oriented TET4 elements and orients boundary faces outward for closed TET4 surfaces, ensuring a consistent local sign convention for the supported C3D4 trajectory experiments. C3D8 contact replay uses the same current-surface triangle query after boundary quads are triangulated.
 
 \subsection{Dynamic surface distance}
 
@@ -158,14 +158,14 @@ k_i \mathbf{J}_i^T \mathbf{J}_i .
 
 \section{Implementation}
 
-The method is implemented as a standalone Python prototype. The solver contains modules for mesh topology, TET4 finite-element assembly, boundary extraction, current-surface distance queries, contact broad phase, contact narrow phase, penalty force assembly, and validation scripts.
+The method is implemented as a standalone Python prototype. The solver contains modules for mesh topology, registered element backends, analysis backends, boundary extraction, current-surface distance queries, contact broad phase, contact narrow phase, penalty force assembly, and validation scripts.
 
-The finite-element implementation supports small-strain linear TET4 elasticity. The element stiffness is assembled as
+The finite-element implementation supports small-strain linear C3D4/TET4 and HEX8/C3D8 elasticity through a common backend interface. For TET4, the element stiffness is assembled as
 \begin{equation}
 \mathbf{K}_e =
 V_e \mathbf{B}_e^T \mathbf{C} \mathbf{B}_e ,
 \end{equation}
-where \(V_e\) is the TET4 volume, \(\mathbf{B}_e\) is the strain-displacement matrix, and \(\mathbf{C}\) is the isotropic linear-elastic constitutive matrix. Both consistent and lumped mass options are implemented, and gravity/body-force assembly is performed internally.
+where \(V_e\) is the TET4 volume, \(\mathbf{B}_e\) is the strain-displacement matrix, and \(\mathbf{C}\) is the isotropic linear-elastic constitutive matrix. The C3D8 backend uses the corresponding trilinear shape functions, engineering-strain \(\mathbf{B}\) matrix, and \(2\times2\times2\) Gauss integration used by the external C3D8 validation model. Both consistent and lumped mass options are implemented, and gravity/body-force assembly is performed internally.
 
 The broad phase uses a uniform spatial hash over padded triangle AABBs. Candidate triangles are passed to the dynamic surface-distance query. A brute-force all-triangle closest-point projection is retained only as an implementation-level geometry oracle and timing baseline; external contact-solver outputs provide the main contact-correctness evidence.
 
@@ -187,6 +187,7 @@ Claim family & Evidence source & Role in the paper \\
 FEM stress/displacement & Analytic patch and scikit-fem & Non-contact mechanics correctness \\
 Static contact law and energy & CalculiX \texttt{contactenergy.inp} & External contact-output reference \\
 Dynamic contact trajectory & CalculiX generated C3D4 block-plane case & External trajectory reference \\
+C3D8 backend extensibility & SFC companion solve on \texttt{contactenergy.inp} & Linear C3D8 backend evidence \\
 Current-surface SDF geometry & CalculiX-deformed geometry replay & Gap/force/energy on deformed surface \\
 Query acceleration & Brute-force all-triangle projection & Timing baseline only \\
 \bottomrule
@@ -296,7 +297,7 @@ The maximum von Mises relative error in this comparison is \(7.996486\times 10^{
 
 \subsection{External static contact reference: CalculiX C3D8 contact energy}
 
-The first contact-correctness experiment uses CalculiX's official \texttt{contactenergy.inp} surface-to-surface contact test. CalculiX performs the static C3D8 contact solve and prints contact force and contact spring energy quantities. SFC then replays the final CalculiX-deformed geometry with the proposed current-surface dynamic SDF on triangulated C3D8 boundary faces. This is an external contact-output comparison: the reference values are CalculiX force and contact-energy outputs, while brute-force projection is not used as the correctness target.
+The first contact-correctness experiment uses CalculiX's official \texttt{contactenergy.inp} surface-to-surface contact test. CalculiX performs the static C3D8 contact solve and prints contact force and contact spring energy quantities. SFC then replays the final CalculiX-deformed geometry with the proposed current-surface dynamic SDF on triangulated C3D8 boundary faces. A companion SFC static solve uses the registered C3D8 stiffness backend with the same linear elastic material, nodal constraints, loads, and pressure-overclosure stiffness. This is an external contact-output comparison: the reference values are CalculiX force and contact-energy outputs, while brute-force projection is not used as the correctness target.
 
 \begin{table}[t]
 \centering
@@ -314,7 +315,7 @@ Active quadrature rows & -- & 2 & -- \\
 \end{tabular}
 \end{table}
 
-The replay reproduces the CalculiX normal force and contact spring energy to approximately \(4\times 10^{-8}\) relative error. Because this case uses C3D8 elements, it also checks that the current-surface distance query is not topologically restricted to TET4 boundaries. The C3D8 mechanics solve used for visual comparison is validation-only; the main core solver remains the TET4 FEM-SDF implementation.
+The replay reproduces the CalculiX normal force and contact spring energy to approximately \(4\times 10^{-8}\) relative error. Because this case uses C3D8 elements, it also checks that the current-surface distance query is not topologically restricted to TET4 boundaries. The C3D8 companion solve is linear static evidence for the registered C3D8 backend; the full nonlinear dynamic trajectory evidence remains the C3D4 block-plane case below.
 
 \begin{figure}[t]
   \centering
@@ -329,11 +330,11 @@ The replay reproduces the CalculiX normal force and contact spring energy to app
 \end{figure}
 
 For a direct field comparison on the same C3D8 model, we additionally assemble
-a validation-only SFC C3D8 static solve with the same linear elastic material,
-constraints, nodal loads, and linear pressure-overclosure stiffness. This
-backend is used only for the external evidence case. It allows the SFC C3D8
-von Mises field to be plotted against the CalculiX field and exposes the
-remaining error from the simplified validation contact discretization.
+an SFC C3D8 static solve through the registered element backend with the same
+linear elastic material, constraints, nodal loads, and linear
+pressure-overclosure stiffness. This allows the SFC C3D8 von Mises field to be
+plotted against the CalculiX field and exposes the remaining error from the
+simplified validation contact discretization.
 
 \begin{figure}[t]
   \centering
@@ -342,8 +343,8 @@ remaining error from the simplified validation contact discretization.
   \texttt{contactenergy.inp}. The first panel shows the SFC C3D8 static
   solve, the second shows CalculiX, and the third shows the absolute von
   Mises stress error. This comparison is included to make the external contact
-  evidence visually auditable; it is not a claim that C3D8 is the main solver
-  element type.}
+  evidence visually auditable; it is not a claim of nonlinear C3D8 dynamic
+  trajectory equivalence.}
   \label{fig:calculix-contactenergy-c3d8-error}
 \end{figure}
 
@@ -529,7 +530,7 @@ The comparison is not a claim of superiority over production BVH, IPC, GPU colli
 
 The current implementation and experiments have several limitations.
 
-First, the FEM formulation is limited to small-strain linear TET4 elasticity. Nonlinear materials, large-deformation FEM, corotational formulations, and hyperelasticity are not implemented.
+First, the production FEM formulation is still narrow. Linear C3D4/TET4 and C3D8 mechanics backends are implemented, and a C3D4 StVK/HHT path is used for nonlinear validation. Nonlinear C3D8, C3D10, corotational formulations, and hyperelasticity are not implemented.
 
 Second, contact is limited to frictionless normal penalty contact. Friction, self-contact, augmented Lagrangian methods, active-set methods, barrier contact, and IPC-style formulations are outside the current scope.
 
@@ -539,15 +540,15 @@ Fourth, the broad phase is a uniform spatial hash. The reported speedups are mea
 
 Finally, timing results are hardware- and implementation-dependent. The final experiment metadata must accompany any performance table derived from these results. The reported numbers should be interpreted as evidence for the current standalone prototype and not as a universal performance bound.
 
-The external evidence is also bounded. The stress/strain check is an analytic affine patch test, and the external open-source FEM comparison uses scikit-fem on matching linear TET4 cantilever models. The contact evidence uses CalculiX output for a static C3D8 contact-energy replay and a scoped dynamic C3D4 block-plane trajectory. These cases support the current-surface contact query and force/energy replay in the tested settings, but they do not establish general nonlinear FEM, frictional contact, self-contact, sphere-drop impact, production BVH, or source-level CalculiX equivalence.
+The external evidence is also bounded. The stress/strain check is an analytic affine patch test, and the external open-source FEM comparison uses scikit-fem on matching linear TET4 cantilever models. The contact evidence uses CalculiX output for a static C3D8 contact-energy replay and a scoped dynamic C3D4 block-plane trajectory. These cases support the current-surface contact query and force/energy replay in the tested settings, but they do not establish nonlinear C3D8 trajectory equivalence, frictional contact, self-contact, sphere-drop impact, production BVH, or source-level CalculiX equivalence.
 
 \section{Conclusion}
 
 This paper presented a training-free dynamic surface-distance framework for finite-element contact of deformable bodies. Unlike static SDFs or data-driven dynamic SDF reconstruction, the proposed method induces a local oriented distance directly from the current finite-element boundary. The resulting contact gap, normal, Jacobian, and penalty force are assembled consistently from the current FEM geometry.
 
-A standalone implementation was developed without dependence on Abaqus-generated matrices or data files. The prototype supports linear TET4 finite elements, spatial-hash contact candidates, dynamic surface-distance queries, local closest-point projection, and frictionless penalty contact. Validation includes analytic linear-elastic stress/strain references, external scikit-fem displacement/stress comparisons, CalculiX static contact-energy replay on a C3D8 surface, a CalculiX dynamic C3D4 block-plane trajectory comparison, material-space SDF baseline comparisons, implementation-level closest-point checks, and repeated performance timing.
+A standalone implementation was developed without dependence on Abaqus-generated matrices or data files. The prototype supports registered C3D4/TET4 and linear C3D8 element backends, spatial-hash contact candidates, dynamic surface-distance queries, local closest-point projection, and frictionless penalty contact. Validation includes analytic linear-elastic stress/strain references, external scikit-fem displacement/stress comparisons, CalculiX static contact-energy replay on a C3D8 surface, a CalculiX dynamic C3D4 block-plane trajectory comparison, material-space SDF baseline comparisons, implementation-level closest-point checks, and repeated performance timing.
 
-In the tested final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieved \(3.58\times\) to \(57.07\times\) speedup over brute-force all-triangle projection. These results suggest that current-surface-induced dynamic distance queries can provide an efficient and training-free geometric front end for deformable FEM contact. Future work will extend the framework to nonlinear FEM, frictional and self-contact, robust global sign handling, production BVH/GPU acceleration, and barrier or augmented-Lagrangian contact formulations.
+In the tested final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieved \(3.58\times\) to \(57.07\times\) speedup over brute-force all-triangle projection. These results suggest that current-surface-induced dynamic distance queries can provide an efficient and training-free geometric front end for deformable FEM contact. Future work will extend the framework to nonlinear C3D8/C3D10 mechanics, frictional and self-contact, robust global sign handling, production BVH/GPU acceleration, and barrier or augmented-Lagrangian contact formulations.
 
 \section*{Evidence Package}
 

@@ -3,11 +3,14 @@ import numpy as np
 from sfc.analysis import (
     LinearNewmarkAnalysis,
     LinearStaticAnalysis,
+    NonlinearHHTAnalysis,
+    NonlinearStaticNewtonAnalysis,
     available_analysis_backends,
     get_analysis_backend,
 )
 from sfc.fem import (
     DeformableBody,
+    MechanicsModel,
     assemble_gravity_force,
     assemble_mass_matrix,
     assemble_stiffness_matrix,
@@ -34,10 +37,28 @@ def _single_tet_body() -> DeformableBody:
     return DeformableBody(mesh=mesh, material={"E": 1000.0, "nu": 0.25}, density=2.0)
 
 
+def _single_tet_mechanics_model() -> MechanicsModel:
+    body = _single_tet_body()
+    return MechanicsModel.from_tet4_mesh(
+        body.mesh.X,
+        body.mesh.elements,
+        E=1000.0,
+        nu=0.25,
+        density=2.0,
+    )
+
+
 def test_linear_analysis_backends_are_registered() -> None:
-    assert available_analysis_backends() == ("linear_static", "linear_newmark")
+    assert set(available_analysis_backends()) >= {
+        "linear_static",
+        "linear_newmark",
+        "nonlinear_static_newton",
+        "nonlinear_hht",
+    }
     assert get_analysis_backend("linear_static").name == "linear_static"
     assert get_analysis_backend("linear_newmark").name == "linear_newmark"
+    assert get_analysis_backend("nonlinear_static_newton").name == "nonlinear_static_newton"
+    assert get_analysis_backend("nonlinear_hht").name == "nonlinear_hht"
 
 
 def test_linear_static_backend_solves_free_dof_equilibrium() -> None:
@@ -81,3 +102,29 @@ def test_linear_newmark_backend_can_update_body_state() -> None:
     assert np.allclose(body.u, result.u)
     assert np.allclose(body.v, result.v)
     assert np.allclose(body.a, result.a)
+
+
+def test_nonlinear_static_backend_keeps_fixed_reference_state() -> None:
+    model = _single_tet_mechanics_model()
+    fixed = np.arange(model.n_dofs, dtype=np.int64)
+
+    result = NonlinearStaticNewtonAnalysis().solve(model, fixed_dofs=fixed)
+
+    assert result.converged
+    assert result.iterations == 0
+    assert np.allclose(result.x, model.X)
+    assert np.allclose(result.u, 0.0)
+    assert result.free_dofs.size == 0
+
+
+def test_nonlinear_hht_backend_zero_load_has_no_motion() -> None:
+    model = _single_tet_mechanics_model()
+    backend = NonlinearHHTAnalysis(alpha=0.0)
+    state, previous = backend.initial_state(model, gravity=0.0, dt=1.0e-3)
+
+    result = backend.step(model, state, previous, dt=1.0e-3, gravity=0.0)
+
+    assert np.allclose(result.state.x, model.X)
+    assert np.allclose(result.state.v, 0.0)
+    assert np.allclose(result.state.a, 0.0)
+    assert np.allclose(result.previous_static_residual, 0.0, atol=1.0e-10)
