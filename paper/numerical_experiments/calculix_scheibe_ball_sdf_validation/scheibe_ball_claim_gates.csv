@@ -1,0 +1,7 @@
+case_id,claim,allowed,reason
+scheibe2f2f_c3d8_nonlinear_static_sdf_replay,deforming_sdf_gap_matches_calculix_copen,true,requires FRD DISP/CONTACT replay gap and pressure metrics below thresholds
+scheibe2f2f_c3d8_nonlinear_static_sdf_replay,native_sfc_trajectory_equivalence,false,"scheibe2f2f is deformed-state replay, not a native SFC solve"
+scheibe2f2f_c3d8_nonlinear_static_sdf_replay,efficiency,false,"this replay isolates correctness, not timing acceleration"
+ball_c3d8_dynamic_drop_native_trajectory,native_sfc_trajectory_equivalence,false,"requires native SFC C3D8 trajectory, CalculiX dynamic trajectory, active contact, and error metrics below thresholds"
+ball_c3d8_dynamic_drop_native_trajectory,external_correctness,false,requires the native trajectory equivalence gate for this dynamic contact case
+ball_c3d8_dynamic_drop_native_trajectory,efficiency,false,"ball runner is a correctness trajectory check, not a repeated timing benchmark"

@@ -16,6 +16,7 @@ C3D8_TRAJECTORY_CASE = ROOT / "paper" / "numerical_experiments" / "c3d8_contact_
 PHASE9_CASE = ROOT / "paper" / "numerical_experiments" / "phase9_full_contact_validation"
 OFFICIAL_CALCULIX_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_official_contact_examples"
 OFFICIAL_LAW_SDF_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_official_law_sdf_replay"
+SCHEIBE_BALL_SDF_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_scheibe_ball_sdf_validation"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -454,3 +455,62 @@ def test_locked_official_law_sdf_replay_outputs_deforming_sdf_metrics() -> None:
     assert len(contact_points) >= 4
     assert all(row["calculix_cdis"] != "" for row in contact_points)
     assert all(row["calculix_cstr"] != "" for row in contact_points)
+
+
+def test_locked_scheibe_ball_sdf_validation_outputs_claim_gated_official_cases() -> None:
+    required = [
+        SCHEIBE_BALL_SDF_CASE / "scheibe_ball_sdf_validation_summary.csv",
+        SCHEIBE_BALL_SDF_CASE / "scheibe2f2f_contact_points.csv",
+        SCHEIBE_BALL_SDF_CASE / "ball_dynamic_drop_trajectory.csv",
+        SCHEIBE_BALL_SDF_CASE / "scheibe_ball_claim_gates.csv",
+        SCHEIBE_BALL_SDF_CASE / "scheibe_ball_commands.csv",
+        SCHEIBE_BALL_SDF_CASE / "scheibe_ball_plots.csv",
+        SCHEIBE_BALL_SDF_CASE / "scheibe_ball_sdf_validation_summary.md",
+        SCHEIBE_BALL_SDF_CASE / "figures" / "scheibe2f2f_sdf_replay_scatter.png",
+        SCHEIBE_BALL_SDF_CASE / "figures" / "scheibe2f2f_sdf_replay_scatter.pdf",
+        SCHEIBE_BALL_SDF_CASE / "figures" / "ball_dynamic_drop_native_trajectory.png",
+        SCHEIBE_BALL_SDF_CASE / "figures" / "ball_dynamic_drop_native_trajectory.pdf",
+        SCHEIBE_BALL_SDF_CASE / "inputs" / "scheibe2f2f.inp",
+        SCHEIBE_BALL_SDF_CASE / "inputs" / "ball_instrumented.inp",
+        SCHEIBE_BALL_SDF_CASE / "calculix_runs" / "scheibe2f2f_c3d8_nonlinear_static_sdf_replay" / "scheibe2f2f.frd",
+        SCHEIBE_BALL_SDF_CASE / "calculix_runs" / "ball_c3d8_dynamic_drop" / "ball.dat",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    summaries = {row["case_id"]: row for row in _rows(SCHEIBE_BALL_SDF_CASE / "scheibe_ball_sdf_validation_summary.csv")}
+    scheibe = summaries["scheibe2f2f_c3d8_nonlinear_static_sdf_replay"]
+    assert scheibe["status"] == "supported"
+    assert int(scheibe["contact_point_count"]) == 34
+    assert int(scheibe["master_triangle_count"]) == 32
+    assert float(scheibe["max_gap_abs_error"]) < 2.0e-8
+    assert float(scheibe["max_pressure_rel_error"]) < 1.0e-3
+
+    ball = summaries["ball_c3d8_dynamic_drop_native_trajectory"]
+    assert ball["supports_external_correctness"] == "false"
+    assert ball["supports_native_trajectory_equivalence"] == "false"
+    assert ball["supports_efficiency"] == "false"
+    assert int(ball["max_sfc_active_contact_count"]) > 0
+    assert int(ball["max_calculix_active_contact_count"]) == 0
+    assert float(ball["z_cm_l2_rel_error"]) < 1.0e-8
+
+    gates = _rows(SCHEIBE_BALL_SDF_CASE / "scheibe_ball_claim_gates.csv")
+    by_case_claim = {(row["case_id"], row["claim"]): row for row in gates}
+    assert by_case_claim[
+        ("scheibe2f2f_c3d8_nonlinear_static_sdf_replay", "deforming_sdf_gap_matches_calculix_copen")
+    ]["allowed"] == "true"
+    assert by_case_claim[
+        ("scheibe2f2f_c3d8_nonlinear_static_sdf_replay", "native_sfc_trajectory_equivalence")
+    ]["allowed"] == "false"
+    assert by_case_claim[
+        ("ball_c3d8_dynamic_drop_native_trajectory", "native_sfc_trajectory_equivalence")
+    ]["allowed"] == "false"
+
+    contact_points = _rows(SCHEIBE_BALL_SDF_CASE / "scheibe2f2f_contact_points.csv")
+    assert len(contact_points) == 34
+    assert max(float(row["gap_abs_error"]) for row in contact_points) < 2.0e-8
+    assert max(float(row["pressure_rel_error"]) for row in contact_points) < 1.0e-3
+
+    trajectory = _rows(SCHEIBE_BALL_SDF_CASE / "ball_dynamic_drop_trajectory.csv")
+    assert max(int(row["sfc_active_contact_count"]) for row in trajectory if row["sfc_active_contact_count"]) > 0
+    assert all(row["calculix_contact_count"] in {"", "0"} for row in trajectory)

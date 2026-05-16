@@ -32,6 +32,14 @@ boundary, input/output data, figures, and acceptance thresholds.
   `contact1/contact3/contact6` with contact-output requests, compares SFC
   current-surface dynamic-SDF gaps against CalculiX `CDIS`, compares replayed
   pressure against `CSTR`, and claim-gates `CELS` energy equivalence.
+- `calculix_scheibe_ball_sdf_validation/`: official `scheibe2f2f` FRD
+  replay plus official `ball` dynamic-drop native trajectory probe. The
+  `scheibe2f2f` row parses CalculiX `DISP/CONTACT` FRD data and validates SFC
+  deformed-surface SDF gap/pressure against `COPEN/CPRESS`. The `ball` row
+  runs native SFC C3D8 dynamics and compares against CalculiX output where
+  available, but its trajectory-equivalence claim is gated off because the
+  locked CalculiX run fails near first contact and does not provide a complete
+  active-contact history.
 
 ## Claim Discipline
 
