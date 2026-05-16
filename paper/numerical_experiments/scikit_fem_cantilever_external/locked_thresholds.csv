@@ -1,0 +1,7 @@
+metric,actual,operator,threshold,status
+resolution_count,4,ge,4,pass
+max_displacement_l2_rel_error,8.203660706987664e-13,le,1.0e-10,pass
+max_stress_l2_rel_error,8.507136039642287e-13,le,1.0e-10,pass
+max_von_mises_l2_rel_error,7.996485535331023e-13,le,1.0e-10,pass
+max_stiffness_fro_rel_error,6.519881706486751e-16,le,1.0e-12,pass
+

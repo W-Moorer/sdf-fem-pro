@@ -1,0 +1,7 @@
+metric,actual,operator,threshold,status
+phase8_external_cantilever_fem_agreement,supported,eq,supported,pass
+phase8_rigid_indenter_contact_response,supported,eq,supported,pass
+phase8_deformable_deformable_action_reaction,supported,eq,supported,pass
+engineering_stress_cloud_figure_count,3,ge,3,pass
+latest_stress_cloud_scheme,nodal_average_subdivided_boundary_triangles,eq,nodal_average_subdivided_boundary_triangles,pass
+

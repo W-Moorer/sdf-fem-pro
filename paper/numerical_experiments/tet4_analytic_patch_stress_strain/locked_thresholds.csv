@@ -1,0 +1,7 @@
+metric,actual,operator,threshold,status
+resolution_count,4,ge,4,pass
+max_strain_l2_error,0.0,le,1.0e-14,pass
+rms_strain_l2_error,0.0,le,1.0e-14,pass
+max_stress_l2_error,0.0,le,1.0e-10,pass
+rms_stress_l2_error,0.0,le,1.0e-10,pass
+

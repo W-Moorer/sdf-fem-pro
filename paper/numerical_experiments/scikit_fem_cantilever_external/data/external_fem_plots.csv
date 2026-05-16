@@ -1,0 +1,4 @@
+plot,png,pdf,status
+external_fem_error_trends,external_fem_error_trends.png,external_fem_error_trends.pdf,ok
+external_fem_stress_cloud,external_fem_stress_cloud.png,external_fem_stress_cloud.pdf,ok
+external_fem_stress_3d,external_fem_stress_3d.png,external_fem_stress_3d.pdf,ok

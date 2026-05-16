@@ -1,0 +1,4 @@
+claim_id,claim_text,evidence_csv,evidence_field,gate_value,claim_status,details
+stress_strain_physical_correctness,Element strain and stress match analytic affine linear-elastic references.,phase7_stress_strain.csv,max_stress_l2_error,0.0,supported,analytic stress/strain patch test
+contact_force_reference_correctness,Dynamic SDF contact force-displacement response matches brute-force CPP contact reference.,phase7_contact_reference.csv,normal_force_rel_error,0.0,supported,rigid plane penalty force-displacement comparison
+total_step_acceleration_feasibility,Geometry acceleration remains beneficial when included in a small FEM assembly/solve/contact timing step.,phase7_acceleration_feasibility.csv,speedup_vs_bruteforce,4.034890573878422,supported,distinguishes contact-only speedup from total-step timing

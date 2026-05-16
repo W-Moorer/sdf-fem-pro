@@ -9,11 +9,43 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 LOCKED_CASE = ROOT / "paper" / "numerical_experiments" / "block_drop_dynamic_sdf_calculix_1s"
+TET4_PATCH_CASE = ROOT / "paper" / "numerical_experiments" / "tet4_analytic_patch_stress_strain"
+SCIKIT_FEM_CASE = ROOT / "paper" / "numerical_experiments" / "scikit_fem_cantilever_external"
+STRESS_CLOUD_CASE = ROOT / "paper" / "numerical_experiments" / "engineering_stress_clouds_latest"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def _assert_file(path: Path) -> None:
+    assert path.exists(), path
+    assert path.stat().st_size > 0, path
+
+
+def _assert_threshold(gate: dict[str, str], actual: object) -> None:
+    operator = gate["operator"]
+    expected_actual = gate["actual"]
+    threshold = gate["threshold"]
+    assert gate["status"] == "pass"
+
+    if operator == "eq":
+        actual_text = str(actual)
+        assert actual_text == expected_actual
+        assert actual_text == threshold
+    elif operator == "le":
+        actual_value = float(actual)
+        expected_value = float(expected_actual)
+        assert abs(actual_value - expected_value) <= max(1.0e-15, abs(expected_value) * 1.0e-12)
+        assert actual_value <= float(threshold)
+    elif operator == "ge":
+        actual_value = float(actual)
+        expected_value = float(expected_actual)
+        assert abs(actual_value - expected_value) <= max(1.0e-15, abs(expected_value) * 1.0e-12)
+        assert actual_value >= float(threshold)
+    else:  # pragma: no cover - catches malformed future threshold rows
+        raise AssertionError(f"unsupported operator {operator!r} for {gate['metric']}")
 
 
 def test_locked_dynamic_sdf_block_drop_artifacts_exist() -> None:
@@ -36,8 +68,7 @@ def test_locked_dynamic_sdf_block_drop_artifacts_exist() -> None:
     ]
 
     for path in required:
-        assert path.exists(), path
-        assert path.stat().st_size > 0, path
+        _assert_file(path)
 
 
 def test_locked_dynamic_sdf_block_drop_metrics_satisfy_thresholds() -> None:
@@ -75,3 +106,120 @@ def test_locked_dynamic_sdf_block_drop_claim_boundary_is_explicit() -> None:
     assert "does not claim arbitrary contact equivalence" in readme
     assert claims["block_plane_geometric_contact_scoped_acceptance"]["supported"] == "true"
     assert claims["block_plane_geometric_contact_calculix_comparison_available"]["supported"] == "true"
+
+
+def test_locked_tet4_analytic_patch_artifacts_and_thresholds() -> None:
+    required = [
+        TET4_PATCH_CASE / "README.md",
+        TET4_PATCH_CASE / "MANIFEST.md",
+        TET4_PATCH_CASE / "locked_thresholds.csv",
+        TET4_PATCH_CASE / "runner_summary.md",
+        TET4_PATCH_CASE / "data" / "stress_strain_patch.csv",
+        TET4_PATCH_CASE / "data" / "phase7_claims.csv",
+        TET4_PATCH_CASE / "figures" / "stress_strain_error.png",
+        TET4_PATCH_CASE / "figures" / "stress_strain_error.pdf",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    rows = _rows(TET4_PATCH_CASE / "data" / "stress_strain_patch.csv")
+    assert len(rows) == 4
+    assert {row["case"] for row in rows} == {"analytic_uniaxial_stress_strain_patch"}
+    assert {row["reference"] for row in rows} == {"analytic_affine_small_strain"}
+    assert {row["status"] for row in rows} == {"ok"}
+
+    metrics: dict[str, object] = {
+        "resolution_count": len(rows),
+        "max_strain_l2_error": max(float(row["max_strain_l2_error"]) for row in rows),
+        "rms_strain_l2_error": max(float(row["rms_strain_l2_error"]) for row in rows),
+        "max_stress_l2_error": max(float(row["max_stress_l2_error"]) for row in rows),
+        "rms_stress_l2_error": max(float(row["rms_stress_l2_error"]) for row in rows),
+    }
+    for gate in _rows(TET4_PATCH_CASE / "locked_thresholds.csv"):
+        _assert_threshold(gate, metrics[gate["metric"]])
+
+    claims = {row["claim_id"]: row for row in _rows(TET4_PATCH_CASE / "data" / "phase7_claims.csv")}
+    assert claims["stress_strain_physical_correctness"]["claim_status"] == "supported"
+
+
+def test_locked_scikit_fem_cantilever_artifacts_and_latest_stress_cloud_scheme() -> None:
+    required = [
+        SCIKIT_FEM_CASE / "README.md",
+        SCIKIT_FEM_CASE / "MANIFEST.md",
+        SCIKIT_FEM_CASE / "locked_thresholds.csv",
+        SCIKIT_FEM_CASE / "runner_summary.md",
+        SCIKIT_FEM_CASE / "data" / "external_fem_comparison.csv",
+        SCIKIT_FEM_CASE / "data" / "external_fem_stress_cloud.csv",
+        SCIKIT_FEM_CASE / "data" / "external_fem_plots.csv",
+        SCIKIT_FEM_CASE / "figures" / "external_fem_error_trends.png",
+        SCIKIT_FEM_CASE / "figures" / "external_fem_error_trends.pdf",
+        SCIKIT_FEM_CASE / "figures" / "external_fem_stress_3d.png",
+        SCIKIT_FEM_CASE / "figures" / "external_fem_stress_3d.pdf",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    readme = (SCIKIT_FEM_CASE / "README.md").read_text(encoding="utf-8")
+    assert "element von Mises stress is averaged to nodes" in readme
+    assert "triangles are subdivided" in readme
+    assert "not the older element-constant/blocky stress-coloring scheme" in readme
+
+    rows = _rows(SCIKIT_FEM_CASE / "data" / "external_fem_comparison.csv")
+    assert len(rows) == 4
+    assert {row["case"] for row in rows} == {"cantilever_external_open_source_fem"}
+    assert {row["external_solver"] for row in rows} == {"scikit-fem"}
+    assert {row["status"] for row in rows} == {"ok"}
+
+    metrics: dict[str, object] = {
+        "resolution_count": len(rows),
+        "max_displacement_l2_rel_error": max(float(row["displacement_l2_rel_error"]) for row in rows),
+        "max_stress_l2_rel_error": max(float(row["stress_l2_rel_error"]) for row in rows),
+        "max_von_mises_l2_rel_error": max(float(row["von_mises_l2_rel_error"]) for row in rows),
+        "max_stiffness_fro_rel_error": max(float(row["stiffness_fro_rel_error"]) for row in rows),
+    }
+    for gate in _rows(SCIKIT_FEM_CASE / "locked_thresholds.csv"):
+        _assert_threshold(gate, metrics[gate["metric"]])
+
+
+def test_locked_engineering_stress_clouds_use_latest_scheme() -> None:
+    primary_figures = [
+        STRESS_CLOUD_CASE / "figures" / "phase8_cantilever_external_stress_3d.png",
+        STRESS_CLOUD_CASE / "figures" / "phase8_rigid_indenter_stress_3d.png",
+        STRESS_CLOUD_CASE / "figures" / "phase8_deformable_deformable_stress_3d.png",
+    ]
+    required = [
+        STRESS_CLOUD_CASE / "README.md",
+        STRESS_CLOUD_CASE / "MANIFEST.md",
+        STRESS_CLOUD_CASE / "locked_thresholds.csv",
+        STRESS_CLOUD_CASE / "runner_summary.md",
+        STRESS_CLOUD_CASE / "data" / "phase8_claims.csv",
+        STRESS_CLOUD_CASE / "data" / "phase8_cantilever_external.csv",
+        STRESS_CLOUD_CASE / "data" / "phase8_rigid_indenter_history.csv",
+        STRESS_CLOUD_CASE / "data" / "phase8_deformable_deformable_history.csv",
+        STRESS_CLOUD_CASE / "data" / "phase8_rigid_indenter_stress_cloud.csv",
+        STRESS_CLOUD_CASE / "data" / "phase8_deformable_deformable_stress_cloud.csv",
+        STRESS_CLOUD_CASE / "data" / "phase8_plots.csv",
+        *primary_figures,
+        STRESS_CLOUD_CASE / "figures" / "phase8_cantilever_external_stress_3d.pdf",
+        STRESS_CLOUD_CASE / "figures" / "phase8_rigid_indenter_stress_3d.pdf",
+        STRESS_CLOUD_CASE / "figures" / "phase8_deformable_deformable_stress_3d.pdf",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    readme = (STRESS_CLOUD_CASE / "README.md").read_text(encoding="utf-8")
+    assert "element stress is averaged to nodes" in readme
+    assert "boundary triangle colors are interpolated from nodal stress" in readme
+    assert "boundary triangles are subdivided" in readme
+    assert "not the previous incorrect visual scheme" in readme
+
+    claims = {row["claim_id"]: row for row in _rows(STRESS_CLOUD_CASE / "data" / "phase8_claims.csv")}
+    metrics: dict[str, object] = {
+        "phase8_external_cantilever_fem_agreement": claims["phase8_external_cantilever_fem_agreement"]["claim_status"],
+        "phase8_rigid_indenter_contact_response": claims["phase8_rigid_indenter_contact_response"]["claim_status"],
+        "phase8_deformable_deformable_action_reaction": claims["phase8_deformable_deformable_action_reaction"]["claim_status"],
+        "engineering_stress_cloud_figure_count": len(primary_figures),
+        "latest_stress_cloud_scheme": "nodal_average_subdivided_boundary_triangles",
+    }
+    for gate in _rows(STRESS_CLOUD_CASE / "locked_thresholds.csv"):
+        _assert_threshold(gate, metrics[gate["metric"]])
