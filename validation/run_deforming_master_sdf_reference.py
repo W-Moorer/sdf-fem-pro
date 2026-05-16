@@ -43,6 +43,7 @@ def run_reference(out_dir: Path, *, quick: bool = False) -> dict[str, Path]:
     deformation_names = ["stretch", "shear"] if quick else ["stretch", "shear", "bend"]
     query_rows: list[Row] = []
     force_rows: list[Row] = []
+    baseline_rows: list[Row] = []
     for resolution in resolutions:
         master_reference, master_faces = _triangulated_master_surface(resolution)
         slave_reference, slave_faces = _slave_surface_samples(resolution)
@@ -51,18 +52,31 @@ def run_reference(out_dir: Path, *, quick: bool = False) -> dict[str, Path]:
             slave_current = _place_slave_near_master(slave_reference, deformation)
             query_rows.extend(_query_error_rows(resolution, deformation, master_current, master_faces, slave_current, slave_faces))
             force_rows.append(_force_error_row(resolution, deformation, master_current, master_faces, slave_current, slave_faces))
+            baseline_rows.extend(
+                _frozen_reference_baseline_rows(
+                    resolution,
+                    deformation,
+                    master_reference,
+                    master_faces,
+                    master_current,
+                    slave_current,
+                    slave_faces,
+                )
+            )
 
-    claim_rows = _claim_rows(query_rows, force_rows)
+    claim_rows = _claim_rows(query_rows, force_rows, baseline_rows)
     outputs = {
         "queries": out_dir / "deforming_master_sdf_queries.csv",
         "forces": out_dir / "deforming_master_sdf_forces.csv",
+        "baseline": out_dir / "deforming_master_sdf_frozen_baseline.csv",
         "claims": out_dir / "deforming_master_sdf_claims.csv",
         "summary": out_dir / "deforming_master_sdf_summary.md",
     }
     _write_csv(outputs["queries"], query_rows)
     _write_csv(outputs["forces"], force_rows)
+    _write_csv(outputs["baseline"], baseline_rows)
     _write_csv(outputs["claims"], claim_rows)
-    _write_markdown(outputs["summary"], query_rows, force_rows, claim_rows, quick=quick)
+    _write_markdown(outputs["summary"], query_rows, force_rows, baseline_rows, claim_rows, quick=quick)
     return outputs
 
 
@@ -230,9 +244,68 @@ def _force_error_row(
     }
 
 
-def _claim_rows(query_rows: list[Row], force_rows: list[Row]) -> list[Row]:
+def _frozen_reference_baseline_rows(
+    resolution: int,
+    deformation: str,
+    master_reference: np.ndarray,
+    master_faces: np.ndarray,
+    master_current: np.ndarray,
+    slave_x: np.ndarray,
+    slave_faces: np.ndarray,
+) -> list[Row]:
+    """Compare current-surface SDF with a frozen reference-surface baseline."""
+
+    all_faces = np.arange(master_faces.shape[0], dtype=np.int64)
+    master_motion = np.linalg.norm(master_current - master_reference, axis=1)
+    rows: list[Row] = []
+    sample_id = 0
+    for face in slave_faces:
+        tri = slave_x[face]
+        for shape in (
+            np.asarray([2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0]),
+            np.asarray([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0]),
+            np.asarray([1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0]),
+        ):
+            point = shape @ tri
+            current = dynamic_surface_sdf(point, master_current, master_faces, all_faces)
+            frozen = dynamic_surface_sdf(point, master_reference, master_faces, all_faces)
+            normal_dot = float(np.clip(current.n @ frozen.n, -1.0, 1.0))
+            rows.append(
+                {
+                    "case": "frozen_reference_surface_sdf_baseline",
+                    "resolution": resolution,
+                    "deformation": deformation,
+                    "sample_id": sample_id,
+                    "master_node_displacement_max": float(np.max(master_motion)),
+                    "master_node_displacement_rms": float(np.sqrt(np.mean(master_motion**2))),
+                    "current_surface_gap": current.g,
+                    "frozen_reference_gap": frozen.g,
+                    "gap_abs_difference": abs(current.g - frozen.g),
+                    "current_surface_normal_x": current.n[0],
+                    "current_surface_normal_y": current.n[1],
+                    "current_surface_normal_z": current.n[2],
+                    "frozen_reference_normal_x": frozen.n[0],
+                    "frozen_reference_normal_y": frozen.n[1],
+                    "frozen_reference_normal_z": frozen.n[2],
+                    "normal_angle_difference": float(np.arccos(normal_dot)),
+                    "current_closest_face": current.face_id,
+                    "frozen_closest_face": frozen.face_id,
+                    "status": "evidence",
+                }
+            )
+            sample_id += 1
+    return rows
+
+
+def _claim_rows(query_rows: list[Row], force_rows: list[Row], baseline_rows: list[Row]) -> list[Row]:
     query_supported = bool(query_rows) and all(row["status"] == "passed" for row in query_rows)
     force_supported = bool(force_rows) and all(row["status"] == "passed" for row in force_rows)
+    baseline_deformations = sorted({str(row["deformation"]) for row in baseline_rows})
+    max_baseline_gap = max((float(row["gap_abs_difference"]) for row in baseline_rows), default=0.0)
+    max_baseline_angle = max((float(row["normal_angle_difference"]) for row in baseline_rows), default=0.0)
+    baseline_supported = bool(baseline_rows) and len(baseline_deformations) >= 2 and (
+        max_baseline_gap > 1.0e-4 or max_baseline_angle > 1.0e-3
+    )
     return [
         {
             "claim": "broad_phase_dynamic_sdf_matches_bruteforce_on_deforming_master",
@@ -245,6 +318,16 @@ def _claim_rows(query_rows: list[Row], force_rows: list[Row]) -> list[Row]:
             "supported": str(force_supported).lower(),
             "evidence_csv": "deforming_master_sdf_forces.csv",
             "details": "Penalty contact force assembled from spatial-hash dynamic SDF matches all-face reference contact samples.",
+        },
+        {
+            "claim": "frozen_reference_sdf_differs_from_current_deforming_master_sdf",
+            "supported": str(baseline_supported).lower(),
+            "evidence_csv": "deforming_master_sdf_frozen_baseline.csv",
+            "details": (
+                "The frozen reference surface baseline is intentionally validation-only. "
+                f"Max gap difference={max_baseline_gap:.6e}, max normal-angle difference={max_baseline_angle:.6e}, "
+                f"deformations={','.join(baseline_deformations)}."
+            ),
         },
     ]
 
@@ -265,7 +348,15 @@ def _write_csv(path: Path, rows: list[Row]) -> None:
         writer.writerows(rows)
 
 
-def _write_markdown(path: Path, query_rows: list[Row], force_rows: list[Row], claim_rows: list[Row], *, quick: bool) -> None:
+def _write_markdown(
+    path: Path,
+    query_rows: list[Row],
+    force_rows: list[Row],
+    baseline_rows: list[Row],
+    claim_rows: list[Row],
+    *,
+    quick: bool,
+) -> None:
     command = "python validation/run_deforming_master_sdf_reference.py"
     if quick:
         command += " --quick"
@@ -273,6 +364,8 @@ def _write_markdown(path: Path, query_rows: list[Row], force_rows: list[Row], cl
     max_gap = max(float(row["gap_abs_error"]) for row in query_rows) if query_rows else 0.0
     max_angle = max(float(row["normal_angle_error"]) for row in query_rows) if query_rows else 0.0
     max_force = max(float(row["force_l2_rel_error"]) for row in force_rows) if force_rows else 0.0
+    max_baseline_gap = max(float(row["gap_abs_difference"]) for row in baseline_rows) if baseline_rows else 0.0
+    max_baseline_angle = max(float(row["normal_angle_difference"]) for row in baseline_rows) if baseline_rows else 0.0
     lines = [
         "# Deforming Master Dynamic-SDF Reference",
         "",
@@ -302,10 +395,13 @@ def _write_markdown(path: Path, query_rows: list[Row], force_rows: list[Row], cl
             f"- Max gap absolute error: `{max_gap:.6e}`",
             f"- Max normal angle error: `{max_angle:.6e}`",
             f"- Max force relative error: `{max_force:.6e}`",
+            f"- Frozen-reference baseline max gap difference: `{max_baseline_gap:.6e}`",
+            f"- Frozen-reference baseline max normal-angle difference: `{max_baseline_angle:.6e}`",
             "",
             "## Interpretation",
             "",
             "A passing result means that broad-phase candidate filtering did not change the local dynamic-SDF answer relative to all-face projection for the tested deforming master surfaces.",
+            "The frozen-reference baseline rows show the error that appears if the SDF is not updated with the current master coordinates.",
             "It supports the contact-query side of the method; it does not claim external solver equivalence or nonlinear material validation.",
         ]
     )

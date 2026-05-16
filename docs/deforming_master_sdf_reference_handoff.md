@@ -8,7 +8,9 @@ compares:
 
 - spatial hash + dynamic FEM-induced SDF on the current master surface;
 - brute-force all-face closest-projection reference on the same current master
-  surface.
+  surface;
+- frozen reference-surface SDF baseline, which intentionally does not follow
+  the current master deformation.
 
 The brute-force path is validation-only evidence. It is not the production
 contact pipeline.
@@ -31,23 +33,28 @@ python validation/run_deforming_master_sdf_reference.py --out-dir results/deform
 
 - `deforming_master_sdf_queries.csv`
 - `deforming_master_sdf_forces.csv`
+- `deforming_master_sdf_frozen_baseline.csv`
 - `deforming_master_sdf_claims.csv`
 - `deforming_master_sdf_summary.md`
 
-## Latest Full Result
+## Latest Quick Result
 
 | Metric | Value |
 | --- | ---: |
-| query rows | `1008` |
-| force rows | `9` |
+| query rows | `48` |
+| force rows | `2` |
+| frozen baseline rows | `48` |
 | max gap absolute error | `0.000000e+00` |
-| max normal angle error | `2.980232e-08` |
+| max normal angle error | `2.580957e-08` |
 | max force relative error | `0.000000e+00` |
+| frozen-reference max gap difference | `1.468324e-02` |
+| frozen-reference max normal-angle difference | `3.603990e-02` |
 
-Both claim gates are supported:
+All claim gates are supported:
 
 - `broad_phase_dynamic_sdf_matches_bruteforce_on_deforming_master`
 - `dynamic_sdf_contact_force_matches_bruteforce_reference`
+- `frozen_reference_sdf_differs_from_current_deforming_master_sdf`
 
 ## Interpretation
 
@@ -55,6 +62,11 @@ For the tested prescribed deforming master surfaces, broad-phase candidate
 filtering does not change the dynamic-SDF gap, normal, or assembled penalty
 force relative to all-face projection. This supports the SDF/contact-query side
 of the method under current-surface deformation.
+
+The frozen baseline rows show that if the SDF is not updated with the current
+master coordinates, the same slave samples acquire measurable gap and normal
+errors. This is the direct evidence that the FEM-induced dynamic SDF follows the
+deforming master surface rather than using a static reference surface.
 
 ## Limitations
 
