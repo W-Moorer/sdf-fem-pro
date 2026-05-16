@@ -25,6 +25,8 @@ Important options:
 - `--automatic-increment`
 - `--explicit`
 - `--contact-stiffness-scale`
+- `--analysis dynamic|static-preload|preload-dynamic`
+- `--contact-adjust VALUE`
 
 ## RMD Mapping
 
@@ -94,6 +96,24 @@ Static preload with contact-law proxy slope:
 python validation/run_recurdyn_gear_calculix.py --analysis static-preload --preload-rotation 0.0 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --gap-candidate-count 16 --output-every 1 --out-dir results/recurdyn_gear_static_preload_fixed --timeout 300 --max-vtk-frames 5
 ```
 
+Two-step preload-to-dynamic smoke:
+
+```bash
+python validation/run_recurdyn_gear_calculix.py --analysis preload-dynamic --duration 0.002 --dt 0.001 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --gap-candidate-count 16 --output-every 1 --out-dir results/recurdyn_gear_preload_dynamic_smoke --timeout 450 --max-vtk-frames 8
+```
+
+Rigid-body two-step preload-to-dynamic smoke:
+
+```bash
+python validation/run_recurdyn_gear_calculix.py --analysis preload-dynamic --duration 0.002 --dt 0.001 --automatic-increment --drive-mode rigid-body --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --gap-candidate-count 16 --output-every 1 --out-dir results/recurdyn_gear_preload_dynamic_rigidbody_smoke --timeout 450 --max-vtk-frames 8
+```
+
+Dynamic smoke with CalculiX contact adjustment:
+
+```bash
+python validation/run_recurdyn_gear_calculix.py --duration 0.002 --dt 0.001 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --contact-adjust 0.0 --gap-candidate-count 16 --output-every 1 --out-dir results/recurdyn_gear_adjust_dynamic_smoke --timeout 450 --max-vtk-frames 8
+```
+
 Dynamic 1 s attempt with contact-law proxy slope:
 
 ```bash
@@ -137,6 +157,9 @@ The least-squares proxy slope corresponds to `--contact-stiffness-scale 0.045223
 | Prescribed-surface explicit | Failed in CalculiX explicit contact path due invalid NaN energy behavior; not acceptable as a validation run. |
 | Prescribed-surface face-to-face automatic | Generated 5 real CalculiX `.dat`-derived VTK frames before timeout; reached about 0.000494 s of the requested 0.002 s smoke. |
 | Static preload with fitted law | Passed. Completed 10 static increments, generated stress/strain VTK frames, and contact totals. |
+| Two-step preload-to-dynamic smoke | Passed for `T=0.002s`. It completed the static preload step and two dynamic increments, and generated 8 `.dat`-derived VTK frames. The dynamic step is still an engineering prescribed-surface mapping, and the energy output must be treated as a diagnostic rather than final validation evidence. |
+| Rigid-body two-step preload-to-dynamic smoke | Failed in CalculiX with `*ERROR in add_sm_st: coefficient should be 0`; the faithful rigid-body contact/MPC mapping is blocked for this model. |
+| Dynamic smoke with `CONTACT PAIR ADJUST=0.0` | Timed out at 450 s. It produced partial VTK/contact rows but only advanced to about `6.37e-4 s` of a `0.002 s` target, so clearing initial slave nodes with `ADJUST` alone does not make the transient acceptable. |
 | Dynamic 1 s with fitted law | Still timed out at 300 s; impact rules forced maximum increment to 1e-5 near the first contact increment. |
 | Requested 1 s run | Timed out at 300 s. It generated one real `.dat`-derived VTK frame, but did not complete the requested 1 s interval. |
 
@@ -166,6 +189,19 @@ results/recurdyn_gear_static_preload_fixed/vtk/recurdyn_gear_calculix_frame_0003
 results/recurdyn_gear_static_preload_fixed/vtk/recurdyn_gear_calculix_frame_0004.vtk
 ```
 
+Two-step preload-to-dynamic VTK:
+
+```text
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0000.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0001.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0002.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0003.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0004.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0005.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0006.vtk
+results/recurdyn_gear_preload_dynamic_smoke/vtk/recurdyn_gear_calculix_frame_0007.vtk
+```
+
 ## Acceptance
 
 Conversion infrastructure: **PASS**.
@@ -178,6 +214,22 @@ Evidence:
 
 Static preload stress/strain cloud after contact-law proxy alignment: **PASS**.
 
+Two-step preload-to-dynamic smoke: **PARTIAL PASS**.
+
+Reason:
+
+- The generated deck now supports a static preload step followed by dynamic continuation in the same CalculiX job.
+- The prescribed-surface version completed a short `T=0.002s`, `dt=0.001s` smoke and exported stress/strain VTK frames.
+- This does not yet validate the full `T=1s` transient, and the prescribed-surface drive remains an approximation of the original RecurDyn rigid-body joint.
+
+Initial-penetration cleanup with `ADJUST=0.0`: **NOT SUFFICIENT**.
+
+Reason:
+
+- CalculiX accepted the generated `CONTACT PAIR, ADJUST=0.0` deck, but the short dynamic run still timed out.
+- It advanced only to about `6.37e-4s` of `0.002s` after 450 s wall time.
+- Therefore the blocking issue is not just initial slave-node adjustment; it is the combination of dense gear contact, prescribed-surface drive, contact law mismatch, and severe cutback behavior.
+
 Full 1 s CalculiX transient stress/strain cloud at `dt=0.001`: **NOT PASSED YET**.
 
 Reason:
@@ -186,16 +238,19 @@ Reason:
 - The explicit path is incompatible with nonlinear rigid-body/contact MPCs, and the prescribed-surface explicit attempt produced invalid energy output.
 - The face-to-face automatic mapping generated real stress/strain VTK frames but timed out before completing even the 0.002 s smoke interval.
 - The initial gap diagnostic shows a nontrivial initial penetration population, so direct transient contact begins from an impact-like state.
-- A static preload with the contact-law proxy slope is now stable, but the subsequent 1 s transient still needs a restart/preload-to-dynamic workflow or cleaned initial clearance.
+- A static preload with the contact-law proxy slope is stable.
+- A short preload-to-dynamic continuation completes, but full `1s` dynamic evidence has not been produced.
+- `CONTACT PAIR ADJUST=0.0` alone does not remove the dynamic bottleneck.
 
 ## Recommended Next Step
 
 Before claiming this RecurDyn gear case as external paper evidence, reduce it to a stable CalculiX benchmark:
 
 1. Verify initial clearance/penetration between the two gear surfaces.
-2. Use the completed static preload result as the initial state for the transient run, or clean the initial clearance so the transient does not start in penetration.
+2. Use the completed static preload result as the initial state for a longer transient only after the short preload-to-dynamic run has physically acceptable energy and contact histories.
 3. Use C3D4 face-to-face contact as the primary CalculiX contact mode.
 4. Tune pressure-overclosure law from RecurDyn `KORDER=2` to a CalculiX tabular or exponential law, rather than using a one-value linear approximation.
-5. Only after a preload-to-transient smoke completes should the full `T=1s`, `dt=0.001s` run be attempted.
+5. Prefer an actual restart workflow if the two-step deck becomes too expensive, but treat it as equivalent only after displacement, reaction, contact energy, and stress histories are checked.
+6. Only after a physically acceptable preload-to-transient smoke completes should the full `T=1s`, `dt=0.001s` run be accepted.
 
 This case should not yet be used as a final paper result.

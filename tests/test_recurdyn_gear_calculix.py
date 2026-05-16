@@ -47,6 +47,10 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
             "prescribed-surface",
             "--slave-surface-mode",
             "element-face",
+            "--analysis",
+            "preload-dynamic",
+            "--contact-adjust",
+            "0.0",
             "--out-dir",
             str(out_dir),
             "--gap-candidate-count",
@@ -84,7 +88,11 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
     assert "*ELEMENT, TYPE=C3D4, ELSET=GEAR22_SOLID" in deck
     assert "*ELEMENT, TYPE=S3, ELSET=GEAR21_SURF" in deck
     assert "*SURFACE, NAME=GEAR22_SLAVE, TYPE=ELEMENT" in deck
-    assert "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=SURFACE TO SURFACE" in deck
+    assert "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=SURFACE TO SURFACE, ADJUST=0.0" in deck
+    assert deck.count("*STEP, NLGEOM") == 2
+    assert "*STATIC" in deck
+    assert "*DYNAMIC" in deck
+    assert "*AMPLITUDE, NAME=PRELOADAMP" in deck
     assert "*EL PRINT, ELSET=GEAR22_SOLID" in deck
     assert "S,E" in deck
 
@@ -93,6 +101,8 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
     assert metadata["tet4_elements"] == "64644"
     assert metadata["flexible_contact_element_faces"] == "10738"
     assert metadata["slave_surface_mode"] == "element-face"
+    assert metadata["analysis"] == "preload-dynamic"
+    assert metadata["contact_adjust"] == "0.0"
     assert metadata["run_completed"] == "False"
 
     gap_summary = {row["sample_type"]: row for row in _rows(out_dir / "initial_gap_summary.csv")}

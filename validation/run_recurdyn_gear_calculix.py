@@ -655,6 +655,7 @@ def _write_calculix_input(
     slave_surface_mode: str,
     analysis: str,
     preload_rotation: float,
+    contact_adjust: str | None,
 ) -> dict[str, Any]:
     """Write a CalculiX input deck and return generation metadata."""
 
@@ -675,13 +676,12 @@ def _write_calculix_input(
     rigid_node_ids = [rigid_node_offset + i + 1 for i in range(model.rigid_surface.nodes_global.shape[0])]
     rigid_element_ids = [rigid_element_offset + i + 1 for i in range(model.rigid_surface.patches.shape[0])]
 
-    total_rotation = preload_rotation if analysis == "static-preload" else model.angular_velocity * duration
-    rigid_final_displacement = _rigid_rotation_displacement(
-        model.rigid_surface.nodes_global,
-        center=ref_point,
-        axis=axis,
-        angle=total_rotation,
-    )
+    if analysis == "static-preload":
+        total_rotation = preload_rotation
+    elif analysis == "preload-dynamic":
+        total_rotation = preload_rotation + model.angular_velocity * duration
+    else:
+        total_rotation = model.angular_velocity * duration
     effective_contact_stiffness = model.contact.stiffness * contact_stiffness_scale
     pressure_line = f"{effective_contact_stiffness:.12e}"
     pressure_keyword = "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR"
@@ -759,6 +759,14 @@ def _write_calculix_input(
             lines.append(f"{element_id}, {label}")
     else:
         lines.extend(["*SURFACE, NAME=GEAR22_SLAVE, TYPE=NODE", "GEAR22_CONTACT_NODES"])
+    contact_pair_keyword = (
+        "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=SURFACE TO SURFACE"
+        if slave_surface_mode == "element-face"
+        else "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=NODE TO SURFACE"
+    )
+    if contact_adjust:
+        contact_pair_keyword += f", ADJUST={contact_adjust}"
+
     lines.extend(
         [
             "*SURFACE, NAME=GEAR21_MASTER, TYPE=ELEMENT",
@@ -766,12 +774,8 @@ def _write_calculix_input(
             "*SURFACE INTERACTION, NAME=GEAR_CONTACT",
             pressure_keyword,
             pressure_line,
-            "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=SURFACE TO SURFACE"
-            if slave_surface_mode == "element-face"
-            else "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=NODE TO SURFACE",
+            contact_pair_keyword,
             "GEAR22_SLAVE, GEAR21_MASTER",
-            "*AMPLITUDE, NAME=ROTAMP",
-            f"0.0, 0.0, {duration:.12e}, 1.0",
             "*BOUNDARY",
             "GEAR22_HUB, 1, 3, 0.0",
         ]
@@ -784,40 +788,62 @@ def _write_calculix_input(
                 f"{rot_node}, {3 if axis_dof in {1, 2} else 2}, {3 if axis_dof in {1, 2} else 2}, 0.0",
             ]
         )
-    lines.extend(
-        [
-            "*STEP, NLGEOM, INC=1000000",
-            dynamic_keyword,
-            dynamic_line,
-            "*BOUNDARY, AMPLITUDE=ROTAMP",
-        ]
-    )
-    if drive_mode == "rigid-body":
-        lines.append(f"{rot_node}, {axis_dof}, {axis_dof}, {total_rotation:.12e}")
-    elif drive_mode == "prescribed-surface":
-        for node_id, displacement in zip(rigid_node_ids, rigid_final_displacement):
-            ux, uy, uz = displacement
-            lines.append(f"{int(node_id)}, 1, 1, {ux:.12e}")
-            lines.append(f"{int(node_id)}, 2, 2, {uy:.12e}")
-            lines.append(f"{int(node_id)}, 3, 3, {uz:.12e}")
+    def _append_motion_boundary(angle: float) -> None:
+        if drive_mode == "rigid-body":
+            lines.append(f"{rot_node}, {axis_dof}, {axis_dof}, {angle:.12e}")
+        elif drive_mode == "prescribed-surface":
+            displacement_rows = _rigid_rotation_displacement(
+                model.rigid_surface.nodes_global,
+                center=ref_point,
+                axis=axis,
+                angle=angle,
+            )
+            for node_id, displacement in zip(rigid_node_ids, displacement_rows):
+                ux, uy, uz = displacement
+                lines.append(f"{int(node_id)}, 1, 1, {ux:.12e}")
+                lines.append(f"{int(node_id)}, 2, 2, {uy:.12e}")
+                lines.append(f"{int(node_id)}, 3, 3, {uz:.12e}")
+        else:
+            lines.append("GEAR21_RIGID_NODES, 1, 3, 0.0")
+
+    def _append_print_requests(include_velocity: bool) -> None:
+        lines.extend([f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}", "U"])
+        if include_velocity:
+            lines.extend([f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}", "V"])
+        lines.extend(
+            [
+                f"*NODE PRINT, NSET=GEAR22_HUB, TOTALS=ONLY, GLOBAL=YES, FREQUENCY={output_every}",
+                "RF",
+                f"*CONTACT PRINT, FREQUENCY={output_every}",
+                "CDIS,CSTR,CELS",
+                f"*CONTACT PRINT, TOTALS=ONLY, FREQUENCY={output_every}",
+                "CELS,CNUM",
+                f"*EL PRINT, ELSET=GEAR22_SOLID, FREQUENCY={output_every}",
+                "S,E",
+            ]
+        )
+
+    def _append_step(keyword: str, line: str, *, amplitude: str, angle: float, include_velocity: bool) -> None:
+        lines.extend(["*STEP, NLGEOM, INC=1000000", keyword, line, f"*BOUNDARY, AMPLITUDE={amplitude}"])
+        _append_motion_boundary(angle)
+        _append_print_requests(include_velocity)
+        lines.append("*END STEP")
+
+    if analysis == "preload-dynamic":
+        preload_fraction = preload_rotation / total_rotation if abs(total_rotation) > 1.0e-30 else 0.0
+        lines.extend(
+            [
+                "*AMPLITUDE, NAME=PRELOADAMP",
+                "0.0, 0.0, 1.0, 1.0",
+                "*AMPLITUDE, NAME=ROTAMP",
+                f"1.0, {preload_fraction:.12e}, {1.0 + duration:.12e}, 1.0",
+            ]
+        )
+        _append_step("*STATIC", "1.0e-1, 1.0, 1.0e-8, 1.0e-1", amplitude="PRELOADAMP", angle=preload_rotation, include_velocity=False)
+        _append_step(dynamic_keyword, dynamic_line, amplitude="ROTAMP", angle=total_rotation, include_velocity=True)
     else:
-        lines.append("GEAR21_RIGID_NODES, 1, 3, 0.0")
-    lines.extend([f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}", "U"])
-    if analysis != "static-preload":
-        lines.extend([f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}", "V"])
-    lines.extend(
-        [
-            f"*NODE PRINT, NSET=GEAR22_HUB, TOTALS=ONLY, GLOBAL=YES, FREQUENCY={output_every}",
-            "RF",
-            f"*CONTACT PRINT, FREQUENCY={output_every}",
-            "CDIS,CSTR,CELS",
-            f"*CONTACT PRINT, TOTALS=ONLY, FREQUENCY={output_every}",
-            "CELS,CNUM",
-            f"*EL PRINT, ELSET=GEAR22_SOLID, FREQUENCY={output_every}",
-            "S,E",
-            "*END STEP",
-        ]
-    )
+        lines.extend(["*AMPLITUDE, NAME=ROTAMP", f"0.0, 0.0, {duration:.12e}, 1.0"])
+        _append_step(dynamic_keyword, dynamic_line, amplitude="ROTAMP", angle=total_rotation, include_velocity=analysis != "static-preload")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     return {
@@ -843,6 +869,7 @@ def _write_calculix_input(
         "slave_surface_mode": slave_surface_mode,
         "analysis": analysis,
         "preload_rotation": preload_rotation,
+        "contact_adjust": contact_adjust or "",
     }
 
 
@@ -1246,7 +1273,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=0.001)
     parser.add_argument("--output-every", type=int, default=10)
-    parser.add_argument("--analysis", choices=["dynamic", "static-preload"], default="dynamic")
+    parser.add_argument("--analysis", choices=["dynamic", "static-preload", "preload-dynamic"], default="dynamic")
     parser.add_argument("--preload-rotation", type=float, default=0.0)
     parser.add_argument("--rotation-axis", choices=["x", "y", "z"], default="x")
     parser.add_argument("--contact-law", choices=["linear", "exponential"], default="linear")
@@ -1267,6 +1294,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["node", "element-face"],
         default="node",
         help="Use RecurDyn node contact or map the surface triangles back to C3D4 element faces.",
+    )
+    parser.add_argument(
+        "--contact-adjust",
+        default=None,
+        help="Optional CalculiX CONTACT PAIR ADJUST value, e.g. 0.0 to adjust initially penetrating slave nodes.",
     )
     parser.add_argument(
         "--automatic-increment",
@@ -1320,6 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
         slave_surface_mode=args.slave_surface_mode,
         analysis=args.analysis,
         preload_rotation=args.preload_rotation,
+        contact_adjust=args.contact_adjust,
     )
 
     run_row: Row | None = None
