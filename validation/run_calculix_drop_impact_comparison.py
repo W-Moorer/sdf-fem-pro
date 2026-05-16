@@ -592,7 +592,7 @@ def _parse_calculix_dat_displacements(path: Path, node_ids: np.ndarray) -> dict[
     blocks: dict[float, np.ndarray] = {}
     current_time: float | None = None
     current = np.zeros((len(node_ids), 3), dtype=float)
-    seen = 0
+    seen_ids: set[int] = set()
     header = re.compile(r"displacements.*time\s+([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)", re.IGNORECASE)
     row_pattern = re.compile(
         r"^\s*(\d+)\s+([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)\s+([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)\s+([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)"
@@ -601,14 +601,16 @@ def _parse_calculix_dat_displacements(path: Path, node_ids: np.ndarray) -> dict[
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         match = header.search(line)
         if match:
-            if current_time is not None and seen:
+            if current_time is not None and seen_ids:
                 blocks[current_time] = current.copy()
             current_time = float(match.group(1))
             current = np.zeros((len(node_ids), 3), dtype=float)
-            seen = 0
+            seen_ids = set()
             continue
 
         if current_time is None:
+            continue
+        if len(seen_ids) >= len(node_ids):
             continue
         row = row_pattern.match(line)
         if row is None:
@@ -616,10 +618,12 @@ def _parse_calculix_dat_displacements(path: Path, node_ids: np.ndarray) -> dict[
         node_id = int(row.group(1))
         if node_id not in id_to_row:
             continue
+        if node_id in seen_ids:
+            continue
         current[id_to_row[node_id], :] = [float(row.group(2)), float(row.group(3)), float(row.group(4))]
-        seen += 1
+        seen_ids.add(node_id)
 
-    if current_time is not None and seen:
+    if current_time is not None and seen_ids:
         blocks[current_time] = current.copy()
     if not blocks:
         raise RuntimeError(f"no displacement blocks parsed from {path}")
