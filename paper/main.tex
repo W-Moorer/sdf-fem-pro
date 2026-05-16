@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/paper_final/figures/}{../results/phase7/}{../results/external_fem/}{../results/external_contact_solver/}{results/paper_final/figures/}{results/phase7/}{results/external_fem/}{results/external_contact_solver/}{numerical_experiments/calculix_contactenergy_c3d8_replay/figures/}{paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/}}
+\graphicspath{{../results/paper_final/figures/}{../results/phase7/}{../results/external_fem/}{../results/external_contact_solver/}{results/paper_final/figures/}{results/phase7/}{results/external_fem/}{results/external_contact_solver/}{numerical_experiments/calculix_contactenergy_c3d8_replay/figures/}{paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/}{numerical_experiments/block_drop_dynamic_sdf_calculix_1s/figures/}{paper/numerical_experiments/block_drop_dynamic_sdf_calculix_1s/figures/}}
 
 \title{A Training-Free Dynamic Surface Distance Field for Efficient Finite-Element Contact of Deformable Bodies}
 \author{Anonymous Authors}
@@ -24,7 +24,7 @@ Signed distance fields provide an attractive geometric representation for contac
 
 This paper presents a training-free dynamic surface-distance framework for finite-element contact. Instead of reconstructing a deformed SDF from data, the proposed method induces a local oriented surface distance directly from the current finite-element boundary. The contact gap is defined as the signed distance from a slave surface sample to the current master surface, and the corresponding normal, closest-point projection, contact Jacobian, and penalty contact force are assembled consistently from the current FEM geometry. A standalone implementation is developed without dependence on Abaqus-generated matrices, force files, or post-processing outputs.
 
-The implementation is validated on linear TET4 finite elements with normal penalty contact. Verification includes element-level stiffness and mass checks, analytic small-strain stress/strain and energy references, an external open-source FEM comparison using scikit-fem, an external contact-solver state comparison using SfePy, brute-force closest-point projection references, material-space SDF baseline comparisons, contact force-displacement diagnostics, and repeated timing experiments. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions; a separate total-step timing check also remains faster than the brute-force counterpart in the tested cases. The current scope is limited to linear TET4 elasticity, oriented local surface distances, spatial-hash broad phase, and frictionless penalty normal contact.
+The implementation is validated on linear TET4 finite elements with normal penalty contact. Verification is organized in three layers: analytic and scikit-fem checks for the non-contact FEM stress and displacement fields, CalculiX contact-output comparisons for static C3D8 contact energy and dynamic C3D4 block-plane contact trajectories, and implementation-level closest-point checks for the accelerated distance query. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions; a separate total-step timing check also remains faster than the brute-force counterpart in the tested cases. The current scope is limited to linear TET4 elasticity in the core solver, oriented local surface distances, spatial-hash broad phase, and frictionless penalty normal contact.
 \end{abstract}
 
 \section{Introduction}
@@ -39,9 +39,9 @@ This paper proposes a training-free dynamic surface-distance framework for defor
 
 The current-surface distance is used consistently in the contact formulation. The contact gap is defined as the signed distance from a slave surface sample to the current master surface. The slave and master Jacobian blocks are assembled from the same normal and shape-function weights used in the closest-point projection. A frictionless penalty contact force and Gauss-Newton contact stiffness approximation are then assembled from this Jacobian. This gives a compact contact pipeline in which geometry evaluation and force assembly share the same local surface representation.
 
-We implement the method in a standalone FEM-SDF prototype with internally assembled TET4 stiffness, mass, body-force, constraint, contact, and time-integration components. The core solver does not depend on Abaqus-generated matrices, force files, \texttt{.odb} files, or spreadsheet outputs. Experiments verify the linear TET4 implementation against analytic small-strain stress, strain, and energy references; compare stiffness, displacement, strain, stress, and von Mises fields against an equivalent scikit-fem model; replay a SfePy external contact-solver final state with SFC gap queries; compare contact forces against brute-force closest-point projection; evaluate a frozen material-space SDF baseline under deformation; and report repeated timing results. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions.
+We implement the method in a standalone FEM-SDF prototype with internally assembled TET4 stiffness, mass, body-force, constraint, contact, and time-integration components. The core solver does not depend on Abaqus-generated matrices, force files, \texttt{.odb} files, or spreadsheet outputs. Experiments first verify the non-contact FEM backend against analytic stress/strain references and an equivalent scikit-fem model. The contact evidence then uses external CalculiX outputs: a static C3D8 contact-energy test validates force and energy replay on the deformed current surface, and a dynamic C3D4 block-plane case compares activation time, penetration, normal reaction, contact energy, center-of-mass motion, and contact-zone stress. Brute-force closest-point projection is retained only as an implementation-level geometry oracle and timing baseline. In the final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieves speedups from \(3.58\times\) to \(57.07\times\) over brute-force all-triangle projection for the tested surface resolutions.
 
-In summary, this work makes four contributions. First, it introduces a training-free current-surface-induced distance representation for deformable FEM contact. Second, it derives a consistent contact gap, normal, Jacobian, and penalty force assembly from local current-surface projection. Third, it provides a standalone linear TET4 FEM-SDF implementation independent of Abaqus-generated solver artifacts. Fourth, it presents a reproducible validation and evidence package including analytic stress/strain references, external open-source FEM comparisons, brute-force projection references, material-space SDF baseline comparisons, contact diagnostics, and repeated performance measurements.
+In summary, this work makes four contributions. First, it introduces a training-free current-surface-induced distance representation for deformable FEM contact. Second, it derives a consistent contact gap, normal, Jacobian, and penalty force assembly from local current-surface projection. Third, it provides a standalone linear TET4 FEM-SDF implementation independent of Abaqus-generated solver artifacts. Fourth, it presents a reproducible validation and evidence package in which FEM field correctness is checked against analytic and scikit-fem references, contact correctness is checked against CalculiX contact outputs, and computational benefit is measured against brute-force all-triangle projection.
 
 \section{Related Work}
 
@@ -167,21 +167,41 @@ V_e \mathbf{B}_e^T \mathbf{C} \mathbf{B}_e ,
 \end{equation}
 where \(V_e\) is the TET4 volume, \(\mathbf{B}_e\) is the strain-displacement matrix, and \(\mathbf{C}\) is the isotropic linear-elastic constitutive matrix. Both consistent and lumped mass options are implemented, and gravity/body-force assembly is performed internally.
 
-The broad phase uses a uniform spatial hash over padded triangle AABBs. Candidate triangles are passed to the dynamic surface-distance query. A brute-force all-triangle closest-point projection is retained only as a reference method for validation and timing comparisons.
+The broad phase uses a uniform spatial hash over padded triangle AABBs. Candidate triangles are passed to the dynamic surface-distance query. A brute-force all-triangle closest-point projection is retained only as an implementation-level geometry oracle and timing baseline; external contact-solver outputs provide the main contact-correctness evidence.
 
 The implementation is independent of Abaqus in the core solver. No Abaqus \texttt{.inp} parser, Abaqus-generated global stiffness/mass matrices, \texttt{.mat} force files, \texttt{.odb} files, or spreadsheet outputs are required by the core \texttt{src/sfc} package. The final Phase-6 experiment package confirms that no \texttt{src/sfc} files were changed during final result packaging.
 
 \section{Experiments and Results}
 
-The final paper-scale performance and material-space baseline results are taken from the Phase-6 non-quick experiment package under \path{results/paper_final}. Additional physical-comparison evidence is generated by the Phase-7 validation package under \path{results/phase7}, and external open-source FEM comparison evidence is generated under \path{results/external_fem}. The Phase-6 runtime metadata records Python 3.13.5, NumPy 2.1.3, SciPy 1.15.3, Matplotlib 3.10.0, Windows 11 AMD64, and 24 logical CPUs. Phase-7 adds stress/strain recovery, standard FEM displacement/stress trends, contact force-displacement references, and total-step acceleration checks without changing the core solver physics.
+The experiments are organized to separate mechanics correctness, contact correctness, and acceleration evidence. This separation is important because the proposed contribution is not a replacement for FEM mechanics; it is a current-surface distance query used inside a contact formulation. Therefore, the non-contact displacement and stress fields are first checked against analytic and external FEM references. Contact correctness is then evaluated against external solver contact outputs, primarily CalculiX reaction, contact energy, penetration, active contact count, and stress diagnostics. Brute-force closest-point projection is used only as an implementation-level geometry oracle and as the performance baseline for contact search cost.
 
-\subsection{Verification of finite-element assembly}
+\begin{table}[t]
+\centering
+\caption{Validation roadmap. External solver outputs provide the primary contact-correctness evidence; brute-force closest-point projection is restricted to implementation checks and timing baselines.}
+\label{tab:validation-roadmap}
+\small
+\begin{tabular}{p{0.22\linewidth}p{0.28\linewidth}p{0.36\linewidth}}
+\toprule
+Claim family & Evidence source & Role in the paper \\
+\midrule
+FEM stress/displacement & Analytic patch and scikit-fem & Non-contact mechanics correctness \\
+Static contact law and energy & CalculiX \texttt{contactenergy.inp} & External contact-output reference \\
+Dynamic contact trajectory & CalculiX generated C3D4 block-plane case & External trajectory reference \\
+Current-surface SDF geometry & CalculiX-deformed geometry replay & Gap/force/energy on deformed surface \\
+Query acceleration & Brute-force all-triangle projection & Timing baseline only \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-The linear TET4 implementation was first verified using analytic small-strain linear-elastic references. For the uniaxial affine patch test, the numerical strain energy matched the analytic energy across the tested resolutions. The maximum reported relative energy error in the Phase-6 package was
+The final paper-scale performance and material-space baseline results are taken from the Phase-6 non-quick experiment package under \path{results/paper_final}. Physical-comparison evidence is generated by the Phase-7 package and the locked paper numerical experiments under \path{paper/numerical_experiments}. The recorded Phase-6 runtime metadata is Python 3.13.5, NumPy 2.1.3, SciPy 1.15.3, Matplotlib 3.10.0, Windows 11 AMD64, and 24 logical CPUs.
+
+\subsection{FEM field verification before contact}
+
+We first verify the FEM field quantities before evaluating any contact claim. For an affine uniaxial patch, the TET4 strain energy, engineering strain, and stress are compared against analytic small-strain linear elasticity. The maximum reported relative energy error in the Phase-6 package is
 \begin{equation}
 3.47 \times 10^{-16}.
 \end{equation}
-Phase-7 additionally recovers element strain and stress from the TET4 \(B\) matrix and compares them against the analytic affine field \(u_x = 10^{-3}x\), \(u_y=u_z=0\). For \(E=2.0\times 10^5\) and \(\nu=0.25\), the analytic Voigt strain is \([10^{-3},0,0,0,0,0]\), and the analytic stress is \([240,80,80,0,0,0]\). Table~\ref{tab:stress-strain} shows that the recovered strain and stress match the analytic values to reported precision.
+For \(E=2.0\times 10^5\), \(\nu=0.25\), and affine displacement \(u_x = 10^{-3}x\), \(u_y=u_z=0\), the analytic Voigt strain is \([10^{-3},0,0,0,0,0]\), and the analytic stress is \([240,80,80,0,0,0]\). Table~\ref{tab:stress-strain} shows that the recovered strain and stress match the analytic values to reported precision.
 
 \begin{table}[t]
 \centering
@@ -224,9 +244,7 @@ Resolution & Elements & Max strain error & Max stress error \\
   \label{fig:stress-strain-cloud}
 \end{figure}
 
-\subsection{Standard FEM displacement and stress trend}
-
-To compare against conventional FEM output quantities, we solve a fixed-base linear-elastic cantilever block and report both tip displacement and von Mises stress over mesh refinement. The finest internal TET4 run is used as the reference, so this is a standard FEM refinement comparison rather than an external commercial-solver benchmark. Table~\ref{tab:cantilever} reports the displacement and stress metrics, while Figure~\ref{fig:cantilever} visualizes the corresponding 3D boundary-surface von Mises stress fields. For visualization only, element stresses are averaged to nodes and interpolated over subdivided boundary triangles; quantitative stress comparisons use the element stress values reported in the CSV tables.
+As a second mechanics check, a fixed-base cantilever is solved over mesh refinement and against scikit-fem on the same TET4 mesh. The internal refinement trend in Table~\ref{tab:cantilever} is included to show expected displacement/stress stabilization, while the external scikit-fem comparison in Table~\ref{tab:external-fem} checks the assembled stiffness, displacement, strain, stress, and von Mises fields against an independent implementation. Stress-cloud figures are used only for visual audit; quantitative comparisons use the element stress values in the CSV data.
 
 \begin{table}[t]
 \centering
@@ -250,10 +268,6 @@ Resolution & Elements & Tip \(u_z\) & Max von Mises & Tip rel. error \\
   \caption{Standard FEM cantilever 3D boundary-surface stress comparison. Element von Mises stresses are averaged to nodes and interpolated over subdivided boundary triangles for visualization; the shared color scale is used across mesh resolutions.}
   \label{fig:cantilever}
 \end{figure}
-
-\subsection{External open-source FEM comparison}
-
-To avoid relying only on internal refinement evidence, we compare the same linear TET4 cantilever model against scikit-fem, an independent open-source FEM implementation. Both solvers use the same mesh connectivity, material parameters, fixed boundary at \(x=0\), and distributed tip load in the \(z\) direction. Table~\ref{tab:external-fem} reports the relative errors in displacement, stress, von Mises stress, and stiffness assembly.
 
 \begin{table}[t]
 \centering
@@ -280,44 +294,27 @@ The maximum von Mises relative error in this comparison is \(7.996486\times 10^{
   \label{fig:external-fem}
 \end{figure}
 
-\subsection{External contact-solver state comparison}
+\subsection{External static contact reference: CalculiX C3D8 contact energy}
 
-To add an external contact-solver reference, we run SfePy's open-source two-body nonlinear penalty contact example and replay the final deformed contact state with the SFC current-surface distance query. SfePy performs the contact solve; SFC evaluates the contact gap on the SfePy final geometry. This comparison checks whether the proposed current-surface gap query agrees with an independent contact solver's final contact state, but it is not a claim that the current SFC prototype implements a full nonlinear contact equilibrium solver.
+The first contact-correctness experiment uses CalculiX's official \texttt{contactenergy.inp} surface-to-surface contact test. CalculiX performs the static C3D8 contact solve and prints contact force and contact spring energy quantities. SFC then replays the final CalculiX-deformed geometry with the proposed current-surface dynamic SDF on triangulated C3D8 boundary faces. This is an external contact-output comparison: the reference values are CalculiX force and contact-energy outputs, while brute-force projection is not used as the correctness target.
 
 \begin{table}[t]
 \centering
-\caption{External contact-solver state comparison using SfePy. SFC replays the final SfePy deformed geometry and evaluates current-surface gaps.}
-\label{tab:external-contact}
-\begin{tabular}{rrrrr}
+\caption{Static external contact-output comparison on CalculiX \texttt{contactenergy.inp}. SFC replays the final CalculiX-deformed C3D8 boundary with the current-surface dynamic SDF.}
+\label{tab:calculix-contactenergy}
+\begin{tabular}{lrrr}
 \toprule
-Approach & SfePy mean gap & SFC replay mean gap & Abs. diff. & Active counts \\
+Quantity & CalculiX & SFC dynamic-SDF replay & Relative error \\
 \midrule
-\(0.000000 \times 10^{0}\) & \(0.000000 \times 10^{0}\) & \(1.000000 \times 10^{-4}\) & \(1.000000 \times 10^{-4}\) & 0/0 \\
-\(4.000000 \times 10^{-2}\) & \(-2.107687 \times 10^{-3}\) & \(-2.581917 \times 10^{-3}\) & \(4.742296 \times 10^{-4}\) & 2/1 \\
-\(6.000000 \times 10^{-2}\) & \(-3.164172 \times 10^{-3}\) & \(-3.876110 \times 10^{-3}\) & \(7.119386 \times 10^{-4}\) & 2/1 \\
-\(8.000000 \times 10^{-2}\) & \(-4.220656 \times 10^{-3}\) & \(-5.170304 \times 10^{-3}\) & \(9.496477 \times 10^{-4}\) & 2/1 \\
-\(1.000000 \times 10^{-1}\) & \(-5.277141 \times 10^{-3}\) & \(-6.464498 \times 10^{-3}\) & \(1.187357 \times 10^{-3}\) & 2/1 \\
+Normal force magnitude & \(4.000000\) & \(3.999999848\) & \(3.797933\times 10^{-8}\) \\
+Contact spring energy & \(2.000010\times 10^{-5}\) & \(2.000009924\times 10^{-5}\) & \(3.798346\times 10^{-8}\) \\
+Maximum penetration & -- & \(1.000005\times 10^{-5}\) & -- \\
+Active quadrature rows & -- & 2 & -- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.78\linewidth]{external_contact_gap_comparison.pdf}
-  \caption{External contact-solver gap comparison. SfePy solves the two-body contact problem; SFC replays the final deformed geometry and evaluates current-surface dynamic SDF gaps.}
-  \label{fig:external-contact}
-\end{figure}
-
-As a complementary contact-law reference, we also replay CalculiX's official
-\texttt{contactenergy.inp} C3D8 surface-to-surface contact-energy test. In
-this case CalculiX performs the static C3D8 contact solve, while SFC only
-replays the final deformed geometry with the current-surface dynamic SDF on
-triangulated C3D8 boundary faces. The replay matches the CalculiX total contact
-spring energy with relative error \(3.798346\times 10^{-8}\) and the normal
-force magnitude with relative error \(3.797933\times 10^{-8}\). This supports
-the geometry claim that the dynamic SDF query is induced by the current
-boundary surface and is not tied to TET4 topology; it is not a C3D8 mechanics
-or TET4 trajectory-equivalence claim.
+The replay reproduces the CalculiX normal force and contact spring energy to approximately \(4\times 10^{-8}\) relative error. Because this case uses C3D8 elements, it also checks that the current-surface distance query is not topologically restricted to TET4 boundaries. The C3D8 mechanics solve used for visual comparison is validation-only; the main core solver remains the TET4 FEM-SDF implementation.
 
 \begin{figure}[t]
   \centering
@@ -350,15 +347,61 @@ remaining error from the simplified validation contact discretization.
   \label{fig:calculix-contactenergy-c3d8-error}
 \end{figure}
 
-\subsection{Dynamic surface-distance reference comparison}
+\subsection{External dynamic contact trajectory: CalculiX C3D4 block-plane}
 
-The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.
+The second contact-correctness experiment compares a dynamic block-plane contact trajectory against CalculiX. The model uses a generated C3D4 block with matching material, time step \(dt=0.001\), duration \(1\,\mathrm{s}\), direct dynamics, a hard linear pressure-overclosure law, and the SFC \texttt{persistent\_dynamic\_sdf\_calculix\_f2f} contact mode. The comparison is intentionally scoped: it does not claim source-level equivalence to every private CalculiX branch, but it does compare the main physical trajectory and contact outputs that can be exported reliably.
 
-This confirms that the spatial-hash candidate pipeline and dynamic surface-distance query are consistent with brute-force closest-point projection for the tested geometry. It does not imply global SDF correctness for arbitrary non-manifold or inconsistently oriented geometry.
+\begin{table}[t]
+\centering
+\caption{Dynamic external contact trajectory comparison against CalculiX for the locked 1 s block-plane case.}
+\label{tab:calculix-dynamic-contact}
+\begin{tabular}{lrrr}
+\toprule
+Metric & CalculiX & SFC dynamic-SDF & Relative/absolute error \\
+\midrule
+Contact activation time & \(2.200000\times 10^{-2}\) & \(2.200000\times 10^{-2}\) & \(1.39\times 10^{-17}\) abs. \\
+Maximum penetration & \(1.044401\times 10^{-2}\) & \(1.068598\times 10^{-2}\) & \(2.316794\times 10^{-2}\) \\
+Peak normal force & \(1.071145\times 10^{2}\) & \(1.081660\times 10^{2}\) & \(9.816751\times 10^{-3}\) \\
+Peak contact energy & \(4.391052\times 10^{-1}\) & \(4.479852\times 10^{-1}\) & \(2.022301\times 10^{-2}\) \\
+Maximum CNUM equivalent & 14 & 14 & \(0.000000\) abs. \\
+\(z_\mathrm{cm}\) trajectory & -- & -- & \(2.601493\times 10^{-4}\) L2 rel. \\
+Contact-zone max von Mises & \(4.570907\times 10^{1}\) & \(4.588905\times 10^{1}\) & \(3.937603\times 10^{-3}\) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\subsection{Contact force-displacement reference}
+This dynamic comparison supports the scoped claim that, with the same external contact law and C3D4 face-to-face contact structure, the dynamic-SDF backend preserves the CalculiX contact trajectory to small errors in the tested block-plane case. The active contact lifecycle is also checked: CalculiX and SFC both reach a maximum CNUM-equivalent value of 14, and the replay-on-CalculiX-displacement CNUM sequence matches the CalculiX sequence in the locked diagnostic output.
 
-The previous comparison checks gap and normal consistency. We also compare the actual normal penalty contact force against a brute-force all-triangle closest-point projection reference on the same rigid-plane surface. Both paths use the same penalty law, so the comparison isolates whether the accelerated dynamic SDF contact query produces the same active set and force-displacement response as the direct closest-point projection reference.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{calculix_drop_z_cm.pdf}
+  \caption{Dynamic block-plane center-of-mass trajectory compared against CalculiX for the locked 1 s contact case.}
+  \label{fig:calculix-drop-zcm}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{calculix_drop_min_gap.pdf}
+  \caption{Minimum contact gap history in the dynamic CalculiX comparison. The plot reports the penetration behavior produced by the dynamic-SDF contact backend and the CalculiX reference output.}
+  \label{fig:calculix-drop-gap}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{calculix_drop_force_proxy.pdf}
+  \caption{Normal reaction force history for the locked dynamic block-plane comparison. Force agreement is evaluated using CalculiX reaction/contact output where available.}
+  \label{fig:calculix-drop-force}
+\end{figure}
+
+\subsection{Implementation-level geometry oracle}
+
+The external contact experiments above are the main correctness evidence for contact behavior. Separately, we retain a brute-force all-triangle closest-point projection check as an implementation oracle for the SDF query itself. In the final packaged run, the reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.
+
+This confirms that the spatial-hash candidate pipeline and dynamic surface-distance query reproduce direct closest-point projection for the tested geometry. It does not by itself prove physical contact correctness, and it does not imply global SDF correctness for arbitrary non-manifold or inconsistently oriented geometry.
+
+\subsection{Internal contact force-displacement regression}
+
+We also retain an internal force-displacement regression against brute-force all-triangle projection on a simple rigid-plane penalty case. Both paths use the same penalty law, so the comparison isolates whether the accelerated query produces the same active set and force for this implementation test. This table is not used as the main contact validation claim; the external CalculiX comparisons provide that role.
 
 \begin{table}[t]
 \centering
@@ -413,7 +456,7 @@ For stretch deformation, the maximum gap error was \(5.217391 \times 10^{-3}\). 
 
 \subsection{Contact time-history diagnostics}
 
-The contact experiments record time, minimum gap, maximum penetration, active contact count, normal force, contact energy, and action-reaction imbalance. These diagnostics verify that the contact pipeline produces consistent normal penalty forces and balanced deformable-deformable contact resultants for the tested cases.
+The internal contact diagnostics record time, minimum gap, maximum penetration, active contact count, normal force, contact energy, and action-reaction imbalance. These diagnostics are useful for regression testing and for separating geometry errors from force-assembly errors, but they are not a substitute for the external CalculiX contact-output comparisons above.
 
 \begin{figure}[t]
   \centering
@@ -496,19 +539,19 @@ Fourth, the broad phase is a uniform spatial hash. The reported speedups are mea
 
 Finally, timing results are hardware- and implementation-dependent. The final experiment metadata must accompany any performance table derived from these results. The reported numbers should be interpreted as evidence for the current standalone prototype and not as a universal performance bound.
 
-The physical comparison evidence is also bounded. The stress/strain check is an analytic affine patch test, and the external open-source FEM comparison uses scikit-fem on matching linear TET4 cantilever models. The external contact-solver comparison uses SfePy's two-body penalty contact example and replays the final deformed contact state with SFC gap queries. These results verify consistency of the implemented linear formulation, reported stress quantities, and current-surface contact gap evaluation for the tested cases, but they are not yet comparisons against Abaqus, CalculiX, FEniCS, experimental measurements, nonlinear FEM, or a production contact code.
+The external evidence is also bounded. The stress/strain check is an analytic affine patch test, and the external open-source FEM comparison uses scikit-fem on matching linear TET4 cantilever models. The contact evidence uses CalculiX output for a static C3D8 contact-energy replay and a scoped dynamic C3D4 block-plane trajectory. These cases support the current-surface contact query and force/energy replay in the tested settings, but they do not establish general nonlinear FEM, frictional contact, self-contact, sphere-drop impact, production BVH, or source-level CalculiX equivalence.
 
 \section{Conclusion}
 
 This paper presented a training-free dynamic surface-distance framework for finite-element contact of deformable bodies. Unlike static SDFs or data-driven dynamic SDF reconstruction, the proposed method induces a local oriented distance directly from the current finite-element boundary. The resulting contact gap, normal, Jacobian, and penalty force are assembled consistently from the current FEM geometry.
 
-A standalone implementation was developed without dependence on Abaqus-generated matrices or data files. The prototype supports linear TET4 finite elements, spatial-hash contact candidates, dynamic surface-distance queries, local closest-point projection, and frictionless penalty contact. Validation includes analytic linear-elastic stress/strain references, external scikit-fem displacement/stress comparisons, external SfePy contact-state replay, brute-force closest-point projection references, material-space SDF baseline comparisons, contact force-displacement diagnostics, and repeated performance timing.
+A standalone implementation was developed without dependence on Abaqus-generated matrices or data files. The prototype supports linear TET4 finite elements, spatial-hash contact candidates, dynamic surface-distance queries, local closest-point projection, and frictionless penalty contact. Validation includes analytic linear-elastic stress/strain references, external scikit-fem displacement/stress comparisons, CalculiX static contact-energy replay on a C3D8 surface, a CalculiX dynamic C3D4 block-plane trajectory comparison, material-space SDF baseline comparisons, implementation-level closest-point checks, and repeated performance timing.
 
 In the tested final non-quick experiments, the dynamic FEM-induced surface-distance pipeline achieved \(3.58\times\) to \(57.07\times\) speedup over brute-force all-triangle projection. These results suggest that current-surface-induced dynamic distance queries can provide an efficient and training-free geometric front end for deformable FEM contact. Future work will extend the framework to nonlinear FEM, frictional and self-contact, robust global sign handling, production BVH/GPU acceleration, and barrier or augmented-Lagrangian contact formulations.
 
 \section*{Evidence Package}
 
-The final experiment package is stored under \path{results/paper_final}. Figures are drawn from \path{results/paper_final/figures}, tables from \path{results/paper_final/tables}, and runtime metadata from \path{results/paper_final/metadata}. The added physical-comparison outputs are stored under \path{results/phase7}, and the external open-source FEM comparison is stored under \path{results/external_fem}. The source handoffs are documented in \path{docs/phase6_final_experiment_handoff.md}, \path{docs/phase7_physical_validation_handoff.md}, and \path{docs/external_fem_comparison_handoff.md}.
+The final experiment package is stored under \path{results/paper_final}. Figures are drawn from \path{results/paper_final/figures}, tables from \path{results/paper_final/tables}, and runtime metadata from \path{results/paper_final/metadata}. The added physical-comparison outputs are stored under \path{results/phase7}. The locked external evidence used in this draft is stored under \path{paper/numerical_experiments/scikit_fem_cantilever_external}, \path{paper/numerical_experiments/calculix_contactenergy_c3d8_replay}, and \path{paper/numerical_experiments/block_drop_dynamic_sdf_calculix_1s}. The source handoffs are documented in \path{docs/phase6_final_experiment_handoff.md}, \path{docs/phase7_physical_validation_handoff.md}, and the corresponding numerical-experiment manifests.
 
 \section*{Citation TODO}
 
