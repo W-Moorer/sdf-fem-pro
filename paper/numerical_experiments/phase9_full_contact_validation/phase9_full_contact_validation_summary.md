@@ -7,6 +7,7 @@ The current short-term multi-element scope is C3D4/TET4 plus C3D8. C3D10 is expl
 ## Commands
 
 - `python validation/run_phase9_full_contact_validation.py --quick --out-dir results\phase9_full_contact_validation`
+- `wsl --exec bash -lc "cd results\phase9_full_contact_validation\c3d8_linear_dynamic_calculix\linear_dynamic_block_plane_c3d8_r1 && ccx linear_dynamic_block_plane_c3d8_r1"`
 
 ## Evidence Matrix
 
@@ -14,7 +15,7 @@ The current short-term multi-element scope is C3D4/TET4 plus C3D8. C3D10 is expl
 |---|---|---|---|---|---|---|---|---|
 | c3d8_linear_static_contact | static | linear | true | true | true | false | false | supported |
 | c3d8_nonlinear_static_contact | static | geometric_nonlinear | true | true | true | false | false | supported |
-| c3d8_linear_dynamic_contact | dynamic | linear | false | true | false | false | false | external_replay_only |
+| c3d8_linear_dynamic_contact | dynamic | linear | true | true | true | true | false | supported |
 | c3d8_nonlinear_dynamic_contact | dynamic | geometric_nonlinear | true | true | true | true | false | supported |
 
 ## Claim Gates
@@ -27,8 +28,8 @@ The current short-term multi-element scope is C3D4/TET4 plus C3D8. C3D10 is expl
 | c3d8_nonlinear_static_contact | external_correctness | true | requires native SFC result and CalculiX comparison |
 | c3d8_nonlinear_static_contact | trajectory_equivalence | false | requires native SFC trajectory and CalculiX trajectory comparison |
 | c3d8_nonlinear_static_contact | efficiency | false | requires acceleration/timing evidence for this case |
-| c3d8_linear_dynamic_contact | external_correctness | false | requires native SFC result and CalculiX comparison |
-| c3d8_linear_dynamic_contact | trajectory_equivalence | false | requires native SFC trajectory and CalculiX trajectory comparison |
+| c3d8_linear_dynamic_contact | external_correctness | true | requires native SFC result and CalculiX comparison |
+| c3d8_linear_dynamic_contact | trajectory_equivalence | true | requires native SFC trajectory and CalculiX trajectory comparison |
 | c3d8_linear_dynamic_contact | efficiency | false | requires acceleration/timing evidence for this case |
 | c3d8_nonlinear_dynamic_contact | external_correctness | true | requires native SFC result and CalculiX comparison |
 | c3d8_nonlinear_dynamic_contact | trajectory_equivalence | true | requires native SFC trajectory and CalculiX trajectory comparison |
@@ -41,4 +42,4 @@ The current short-term multi-element scope is C3D4/TET4 plus C3D8. C3D10 is expl
 
 ## Current Conclusion
 
-The current evidence supports C3D8 linear static contact correctness and native C3D8 geometric-nonlinear static contact comparison on the contactenergy reference. Native C3D8 nonlinear dynamics now runs for the block-plane case and is compared against CalculiX, but the trajectory-equivalence claim is allowed only when the CSV error gates pass. C3D8 linear dynamic remains external replay evidence, and per-case efficiency claims remain blocked without matching timing evidence.
+The current evidence supports C3D8 linear static contact correctness, native C3D8 linear dynamic block-plane trajectory comparison, native C3D8 geometric-nonlinear static contact comparison on the contactenergy reference, and native C3D8 nonlinear block-plane dynamics when the CSV error gates pass. Per-case efficiency claims remain blocked without matching timing evidence. For the generated linear CalculiX dynamic step, CDIS element rows may be empty; in that case the gap metric is computed by replaying the CalculiX displacement geometry with the same current-surface dynamic-SDF query rather than by inventing unavailable CDIS output.

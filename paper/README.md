@@ -66,9 +66,10 @@ Scope for the submission draft:
 - Phase-9 stores the full static/dynamic, linear/nonlinear C3D8 claim matrix.
   Its gates prevent external-correctness, trajectory-equivalence, or efficiency
   claims when native SFC, CalculiX, or timing evidence is missing.
-  The locked quick evidence now includes native C3D8 geometric-nonlinear static
-  and block-plane dynamic rows; efficiency remains disabled because no matching
-  timing evidence is attached to those rows.
+  The locked quick evidence now includes native C3D8 linear dynamic,
+  geometric-nonlinear static, and geometric-nonlinear block-plane dynamic rows;
+  efficiency remains disabled because no matching timing evidence is attached
+  to those rows.
 
 Unsupported claims that must not be added without new evidence:
 

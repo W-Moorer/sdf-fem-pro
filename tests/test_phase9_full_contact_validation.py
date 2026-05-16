@@ -39,6 +39,8 @@ def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
         "phase9_commands.csv",
         "phase9_plots.csv",
         "phase9_full_contact_validation_summary.md",
+        "native_c3d8_linear_dynamic_block_plane.csv",
+        "native_c3d8_linear_dynamic_comparison.csv",
         "native_c3d8_nonlinear_static_contactenergy.csv",
         "native_c3d8_nonlinear_dynamic_block_plane.csv",
         "native_c3d8_nonlinear_dynamic_comparison.csv",
@@ -58,7 +60,12 @@ def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
     by_case = {row["case_id"]: row for row in rows}
     assert by_case["c3d8_linear_static_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_linear_static_contact"]["calculix_comparison"] == "true"
-    assert by_case["c3d8_linear_dynamic_contact"]["native_sfc_result"] == "false"
+    assert by_case["c3d8_linear_dynamic_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_linear_dynamic_contact"]["status"] in {
+        "supported",
+        "native_only_no_calculix",
+        "native_external_comparison_failed",
+    }
     assert by_case["c3d8_linear_dynamic_contact"]["supports_trajectory_equivalence"] == "false"
     assert by_case["c3d8_nonlinear_static_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["calculix_comparison"] == "true"

@@ -314,8 +314,11 @@ def test_locked_phase9_full_contact_validation_claim_gates() -> None:
         PHASE9_CASE / "figures" / "phase9_claim_gate_matrix.png",
         PHASE9_CASE / "figures" / "phase9_contact_error_metrics.png",
         PHASE9_CASE / "vtk" / "c3d8_linear_static_contact_0000.vtk",
+        PHASE9_CASE / "vtk" / "c3d8_linear_dynamic_contact_native_block_plane_0000.vtk",
         PHASE9_CASE / "vtk" / "c3d8_nonlinear_static_contact_0000.vtk",
         PHASE9_CASE / "vtk" / "c3d8_nonlinear_dynamic_contact_block_plane_0000.vtk",
+        PHASE9_CASE / "native_c3d8_linear_dynamic_block_plane.csv",
+        PHASE9_CASE / "native_c3d8_linear_dynamic_comparison.csv",
         PHASE9_CASE / "native_c3d8_nonlinear_static_contactenergy.csv",
         PHASE9_CASE / "native_c3d8_nonlinear_dynamic_block_plane.csv",
         PHASE9_CASE / "native_c3d8_nonlinear_dynamic_comparison.csv",
@@ -326,8 +329,8 @@ def test_locked_phase9_full_contact_validation_claim_gates() -> None:
     rows = _rows(PHASE9_CASE / "phase9_full_contact_validation.csv")
     by_case = {row["case_id"]: row for row in rows}
     assert by_case["c3d8_linear_static_contact"]["supports_external_correctness"] == "true"
-    assert by_case["c3d8_linear_dynamic_contact"]["status"] == "external_replay_only"
-    assert by_case["c3d8_linear_dynamic_contact"]["supports_trajectory_equivalence"] == "false"
+    assert by_case["c3d8_linear_dynamic_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_linear_dynamic_contact"]["supports_trajectory_equivalence"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["supports_external_correctness"] == "true"
     assert by_case["c3d8_nonlinear_dynamic_contact"]["native_sfc_result"] == "true"
@@ -345,3 +348,9 @@ def test_locked_phase9_full_contact_validation_claim_gates() -> None:
         if row["case_id"] == "c3d8_nonlinear_dynamic_contact" and row["claim"] == "trajectory_equivalence"
     ][0]
     assert nonlinear_dynamic_trajectory["allowed"] == "true"
+    linear_dynamic_trajectory = [
+        row
+        for row in gates
+        if row["case_id"] == "c3d8_linear_dynamic_contact" and row["claim"] == "trajectory_equivalence"
+    ][0]
+    assert linear_dynamic_trajectory["allowed"] == "true"

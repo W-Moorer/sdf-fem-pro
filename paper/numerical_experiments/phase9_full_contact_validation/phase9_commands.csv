@@ -1,2 +1,3 @@
 command,description
 python validation/run_phase9_full_contact_validation.py --quick --out-dir results\phase9_full_contact_validation,Phase-9 evidence matrix
+"wsl --exec bash -lc ""cd results\phase9_full_contact_validation\c3d8_linear_dynamic_calculix\linear_dynamic_block_plane_c3d8_r1 && ccx linear_dynamic_block_plane_c3d8_r1""",C3D8 linear dynamic CalculiX reference
