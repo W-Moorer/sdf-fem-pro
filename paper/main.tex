@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/paper_final/figures/}{../results/phase7/}{../results/external_fem/}{../results/phase8/}{../results/external_contact_solver/}{results/paper_final/figures/}{results/phase7/}{results/external_fem/}{results/phase8/}{results/external_contact_solver/}}
+\graphicspath{{../results/paper_final/figures/}{../results/phase7/}{../results/external_fem/}{../results/external_contact_solver/}{results/paper_final/figures/}{results/phase7/}{results/external_fem/}{results/external_contact_solver/}}
 
 \title{A Training-Free Dynamic Surface Distance Field for Efficient Finite-Element Contact of Deformable Bodies}
 \author{Anonymous Authors}
@@ -267,31 +267,6 @@ The maximum von Mises relative error in this comparison is \(7.996486\times 10^{
   \includegraphics[width=0.96\linewidth]{external_fem_stress_3d.pdf}
   \caption{External FEM 3D boundary-surface stress comparison against scikit-fem on the finest tested equivalent cantilever model. The first two panels show nodal-averaged interpolated SFC and scikit-fem von Mises stress on the boundary surface; the third panel shows the interpolated absolute error.}
   \label{fig:external-fem}
-\end{figure}
-
-\subsection{Engineering-style validation cases}
-
-Phase-8 adds three engineering-style validation cases to make the evidence closer to practical use while keeping the same physics scope. The first case is a longer 3D cantilever beam solved by both the standalone SFC assembler and scikit-fem on matching TET4 meshes. The second case is a prescribed rigid flat indenter pressing an elastic block; the reported quantities include gap, penetration, active contact count, normal force, contact energy, and a stress cloud. The third case is a two-block deformable-deformable normal contact check, reporting upper/lower contact resultants and action-reaction imbalance together with a two-body stress cloud. These cases are validation examples rather than nonlinear contact equilibrium solves.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.96\linewidth]{phase8_cantilever_external_stress_3d.pdf}
-  \caption{Phase-8 engineering cantilever comparison against scikit-fem. The panels show nodal-averaged interpolated SFC stress, scikit-fem stress, and absolute stress error on the 3D boundary surface.}
-  \label{fig:phase8-cantilever}
-\end{figure}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.82\linewidth]{phase8_rigid_indenter_stress_3d.pdf}
-  \caption{Rigid flat indenter pressing an elastic block. The block color shows nodal-averaged interpolated von Mises stress under the prescribed penalty contact load; the rigid indenter is drawn as a dark plotting primitive above its contact underside.}
-  \label{fig:phase8-indenter}
-\end{figure}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.82\linewidth]{phase8_deformable_deformable_stress_3d.pdf}
-  \caption{Deformable-deformable block contact stress visualization. The Phase-8 CSV outputs report gap, penetration, contact force, contact energy, and action-reaction imbalance for the prescribed approach sequence.}
-  \label{fig:phase8-deformable}
 \end{figure}
 
 \subsection{External contact-solver state comparison}

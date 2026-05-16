@@ -223,17 +223,7 @@ To avoid relying only on internal refinement evidence, we compare the same linea
 
 The maximum von Mises relative error in this comparison is \(7.996486\times 10^{-13}\). These results verify that the linear TET4 stiffness assembly and resulting stress field agree with an external open-source FEM implementation for the tested equivalent model.
 
-### 5.4 Engineering-style validation cases
-
-Phase-8 adds three engineering-style validation cases to make the evidence closer to practical use while keeping the same physics scope. The first case is a longer 3D cantilever beam solved by both the standalone SFC assembler and scikit-fem on matching TET4 meshes. The second case is a prescribed rigid flat indenter pressing an elastic block; the reported quantities include gap, penetration, active contact count, normal force, contact energy, and a stress cloud. The third case is a two-block deformable-deformable normal contact check, reporting upper/lower contact resultants and action-reaction imbalance together with a two-body stress cloud. These cases are validation examples rather than nonlinear contact equilibrium solves.
-
-Paper figures:
-
-- `results/phase8/phase8_cantilever_external_stress_3d.pdf`
-- `results/phase8/phase8_rigid_indenter_stress_3d.pdf`
-- `results/phase8/phase8_deformable_deformable_stress_3d.pdf`
-
-### 5.5 External contact-solver state comparison
+### 5.4 External contact-solver state comparison
 
 To add an external contact-solver reference, we run SfePy's open-source two-body nonlinear penalty contact example and replay the final deformed contact state with the SFC current-surface distance query. SfePy performs the contact solve; SFC evaluates the contact gap on the SfePy final geometry. This comparison checks whether the proposed current-surface gap query agrees with an independent contact solver's final contact state, but it is not a claim that the current SFC prototype implements a full nonlinear contact equilibrium solver.
 
@@ -249,13 +239,13 @@ Paper figure:
 
 - `results/external_contact_solver/external_contact_gap_comparison.pdf`
 
-### 5.6 Dynamic surface-distance reference comparison
+### 5.5 Dynamic surface-distance reference comparison
 
 The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.
 
 This confirms that the spatial-hash candidate pipeline and dynamic surface-distance query are consistent with brute-force closest-point projection for the tested geometry. It does not imply global SDF correctness for arbitrary non-manifold or inconsistently oriented geometry.
 
-### 5.7 Contact force-displacement reference
+### 5.6 Contact force-displacement reference
 
 The previous comparison checks gap and normal consistency. We also compare the actual normal penalty contact force against a brute-force all-triangle closest-point projection reference on the same rigid-plane surface. Both paths use the same penalty law, so the comparison isolates whether the accelerated dynamic SDF contact query produces the same active set and force-displacement response as the direct closest-point projection reference.
 
@@ -267,7 +257,7 @@ The previous comparison checks gap and normal consistency. We also compare the a
 | \(1.000000 \times 10^{-2}\) | 64/64 | \(3.200000 \times 10^{3}\) | \(3.200000 \times 10^{3}\) | \(0.000000 \times 10^{0}\) |
 | \(2.000000 \times 10^{-2}\) | 64/64 | \(6.400000 \times 10^{3}\) | \(6.400000 \times 10^{3}\) | \(0.000000 \times 10^{0}\) |
 
-### 5.8 Material-space SDF baseline
+### 5.7 Material-space SDF baseline
 
 A frozen material-space SDF baseline was evaluated under stretch and shear deformation. This baseline is not the proposed method; it is used only to demonstrate the errors introduced by carrying a reference-space distance function under deformation.
 
@@ -291,11 +281,11 @@ and the maximum normal angle error was
 
 These results support the motivation that a reference/material-space SDF is not sufficient to represent current-configuration distance and normal information under deformation.
 
-### 5.9 Contact time-history diagnostics
+### 5.8 Contact time-history diagnostics
 
 The contact experiments record time, minimum gap, maximum penetration, active contact count, normal force, contact energy, and action-reaction imbalance. These diagnostics verify that the contact pipeline produces consistent normal penalty forces and balanced deformable-deformable contact resultants for the tested cases.
 
-### 5.10 Performance scaling
+### 5.9 Performance scaling
 
 The final non-quick experiments were run with surface sizes 4, 8, 12, and 16, using five timing repeats per row. The dynamic FEM-induced SDF full pipeline achieved the following speedups over brute-force all-triangle projection.
 

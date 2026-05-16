@@ -15,14 +15,11 @@ stress/strain recovery, standard FEM displacement/stress trends, contact
 force-displacement references, and total-step acceleration feasibility. The
 external FEM comparison adds a validation-only scikit-fem reference solve for
 the same linear TET4 cantilever model. None of these phases adds new core
-physics. Phase 8 adds more engineering-style paper examples: a 3D beam
-external FEM comparison, a prescribed rigid flat indenter pressing an elastic
-block, and deformable-deformable block contact with action-reaction and 3D
-stress-cloud evidence. These remain linear TET4, oriented current-surface
-distance, and frictionless normal penalty contact validations. The external
-contact solver comparison adds a SfePy two-body nonlinear penalty contact solve
-and replays its final deformed contact state with SFC current-surface gap
-queries.
+physics. The earlier Phase-8 engineering examples are no longer paper-bound
+validation evidence; the rigid-flat-indenter figure was retired from the
+submission package. The external contact solver comparison adds a SfePy
+two-body nonlinear penalty contact solve and replays its final deformed contact
+state with SFC current-surface gap queries.
 
 ## Phase-3 Validation Case Table
 
@@ -82,15 +79,6 @@ queries.
 | Case | Expected quantities | Current status | Limitations |
 | --- | --- | --- | --- |
 | scikit-fem cantilever reference | Same structured TET4 mesh, material constants, fixed boundary, and nodal tip load are solved by SFC and scikit-fem. Stiffness, displacement, strain, stress, von Mises stress, and projected stress-cloud errors are reported. | Implemented in `validation/run_external_fem_comparison.py`; covered by `tests/test_external_fem_comparison.py`. | External reference is linear TET4 scikit-fem only; not Abaqus, CalculiX, FEniCS, nonlinear FEM, or an industrial contact solver. |
-
-## Phase-8 Engineering Validation Table
-
-| Case | Expected quantities | Current status | Limitations |
-| --- | --- | --- | --- |
-| 3D cantilever beam external FEM | Beam displacement, stiffness, strain, stress, and von Mises stress are compared against scikit-fem on matching 3D structured TET4 beam meshes; 3D boundary-surface stress plots show SFC, external FEM, and absolute error. | Implemented in `validation/run_phase8_engineering_cases.py`; covered by `tests/test_phase8_engineering_cases.py`. | Linear TET4 beam only; not nonlinear bending, experimental data, or commercial FEM. |
-| Rigid flat indenter pressing elastic block | Prescribed indentation, min gap, max penetration, active contact count, normal force, contact energy, action-reaction imbalance, block displacement, and 3D stress cloud are reported. | Implemented in Phase 8. | Validation-only prescribed-displacement contact load; the indenter is a flat rigid underside, not a Hertzian curved punch or nonlinear contact solve. |
-| Deformable-deformable block contact | Prescribed approach, min gap, penetration, active contact count, upper/lower normal forces, action-reaction imbalance, contact energy, and two-body 3D stress cloud are reported. | Implemented in Phase 8. | Frictionless normal penalty contact only; no self-contact, friction, nonlinear equilibrium iteration, or large-deformation material response. |
-| Phase-8 claim gates | External FEM agreement, rigid-indenter response direction/monotonicity, and two-body action-reaction balance must have backing CSV evidence. | Covered by Phase-8 tests. | Gates support the tested engineering cases only and do not broaden the method's physics scope. |
 
 ## External Contact Solver Comparison Table
 

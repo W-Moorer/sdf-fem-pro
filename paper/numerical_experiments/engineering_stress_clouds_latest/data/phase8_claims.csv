@@ -1,4 +1,0 @@
-claim_id,claim_text,evidence_csv,evidence_field,gate_value,claim_status,details
-phase8_external_cantilever_fem_agreement,The 3D cantilever beam solution agrees with an external open-source linear TET4 FEM solver.,phase8_cantilever_external.csv,stress_l2_rel_error,8.069196092611546e-13,supported,scikit-fem comparison on matching 3D beam meshes
-phase8_rigid_indenter_contact_response,"A prescribed rigid flat indenter produces downward normal force, finite stress, and monotone force growth.",phase8_rigid_indenter_history.csv,normal_force_z,-28800.000000000022,supported,normal penalty contact from current-surface local projection; no friction or nonlinear solve
-phase8_deformable_deformable_action_reaction,Two-block normal contact preserves action-reaction balance in the assembled penalty contact forces.,phase8_deformable_deformable_history.csv,action_reaction_imbalance,0.0,supported,slave/master force balance for deformable-deformable contact samples

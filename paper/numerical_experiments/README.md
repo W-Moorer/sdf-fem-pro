@@ -15,14 +15,9 @@ boundary, input/output data, figures, and acceptance thresholds.
 - `scikit_fem_cantilever_external/`: external open-source FEM comparison
   against scikit-fem for a 3D cantilever beam on matching TET4 meshes,
   boundary conditions, material parameters, and loads.
-- `engineering_stress_clouds_latest/`: paper-facing engineering stress-cloud
-  exports for external cantilever, rigid indenter contact, and
-  deformable-deformable contact. These figures use the current nodal-averaged
-  and subdivided boundary-surface stress interpolation scheme.
 
 ## Claim Discipline
 
 These artifacts support only their scoped claims. They do not by themselves
 claim friction, self-contact, production BVH performance, arbitrary nonlinear
 contact equivalence, or robust global signed distance on arbitrary geometry.
-
