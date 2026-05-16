@@ -18,8 +18,9 @@ boundary, input/output data, figures, and acceptance thresholds.
 - `calculix_contactenergy_c3d8_replay/`: official CalculiX C3D8
   contact-energy test replayed with SFC current-surface dynamic SDF on
   triangulated C3D8 boundary faces. This folder also contains 3D stress/strain
-  and contact-pressure figures for the final deformed C3D8 state. This is
-  contact-law/energy evidence, not a TET4 trajectory-equivalence claim.
+  and contact-pressure figures for the final deformed C3D8 state, plus a
+  validation-only SFC C3D8 static solve for direct stress/error plotting. This
+  is contact-law/energy evidence, not a TET4 trajectory-equivalence claim.
 
 ## Claim Discipline
 

@@ -58,6 +58,7 @@ def test_calculix_contactenergy_replay_quick_outputs_dynamic_sdf_c3d8_metrics(tm
         "calculix_contactenergy_raw_cels.csv",
         "calculix_contactenergy_plots.csv",
         "calculix_contactenergy_stress_strain_cloud.csv",
+        "calculix_contactenergy_error_metrics.csv",
         "calculix_contactenergy_summary.md",
     ]
     for name in expected:
@@ -72,6 +73,9 @@ def test_calculix_contactenergy_replay_quick_outputs_dynamic_sdf_c3d8_metrics(tm
     assert row["status"] == "ok"
     assert float(row["contact_force_rel_error"]) <= 1.0e-5
     assert float(row["contact_energy_rel_error"]) <= 1.0e-5
+    assert float(row["sfc_c3d8_displacement_l2_rel_error"]) >= 0.0
+    assert float(row["sfc_c3d8_stress_l2_rel_error"]) >= 0.0
+    assert float(row["sfc_c3d8_von_mises_l2_rel_error"]) >= 0.0
 
     claims = {row["claim"]: row for row in _rows(out_dir / "calculix_contactenergy_claims.csv")}
     assert claims["dynamic_sdf_replays_c3d8_contact_energy"]["supported"] == "true"
@@ -82,11 +86,28 @@ def test_calculix_contactenergy_replay_quick_outputs_dynamic_sdf_c3d8_metrics(tm
         out_dir / "figures" / "calculix_contactenergy_stress_strain_3d.pdf",
         out_dir / "figures" / "calculix_contactenergy_contact_pressure_3d.png",
         out_dir / "figures" / "calculix_contactenergy_contact_pressure_3d.pdf",
+        out_dir / "figures" / "calculix_contactenergy_error_metrics.png",
+        out_dir / "figures" / "calculix_contactenergy_error_metrics.pdf",
+        out_dir / "figures" / "calculix_contactenergy_sfc_c3d8_error_3d.png",
+        out_dir / "figures" / "calculix_contactenergy_sfc_c3d8_error_3d.pdf",
     ]:
         assert figure.exists(), figure
         assert figure.stat().st_size > 0, figure
+
+    plot_names = {row["plot"] for row in _rows(out_dir / "calculix_contactenergy_plots.csv")}
+    assert "calculix_contactenergy_error_metrics" in plot_names
+    assert "calculix_contactenergy_sfc_c3d8_error_3d" in plot_names
 
     cloud = _rows(out_dir / "calculix_contactenergy_stress_strain_cloud.csv")
     assert len(cloud) == 2
     assert max(float(row["von_mises"]) for row in cloud) > 0.0
     assert max(float(row["engineering_strain_norm"]) for row in cloud) > 0.0
+    assert max(float(row["sfc_von_mises"]) for row in cloud) > 0.0
+    assert max(float(row["von_mises_abs_error"]) for row in cloud) >= 0.0
+
+    errors = _rows(out_dir / "calculix_contactenergy_error_metrics.csv")
+    assert {row["quantity"] for row in errors} == {"normal_force_z", "contact_energy", "c3d8_displacement", "c3d8_von_mises"}
+    by_quantity = {row["quantity"]: row for row in errors}
+    assert by_quantity["normal_force_z"]["status"] == "ok"
+    assert by_quantity["contact_energy"]["status"] == "ok"
+    assert max(float(by_quantity[name]["relative_error"]) for name in ["normal_force_z", "contact_energy"]) <= 1.0e-5

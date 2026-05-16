@@ -193,12 +193,17 @@ def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() ->
         CONTACTENERGY_CASE / "data" / "calculix_contactenergy_raw_cels.csv",
         CONTACTENERGY_CASE / "data" / "calculix_contactenergy_plots.csv",
         CONTACTENERGY_CASE / "data" / "calculix_contactenergy_stress_strain_cloud.csv",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_error_metrics.csv",
         CONTACTENERGY_CASE / "data" / "contactenergy.inp",
         CONTACTENERGY_CASE / "data" / "contactenergy.dat",
         CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_stress_strain_3d.png",
         CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_stress_strain_3d.pdf",
         CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_contact_pressure_3d.png",
         CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_contact_pressure_3d.pdf",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_error_metrics.png",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_error_metrics.pdf",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_sfc_c3d8_error_3d.png",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_sfc_c3d8_error_3d.pdf",
         CONTACTENERGY_CASE / "logs" / "calculix_stdout.log",
     ]
     for path in required:
@@ -221,6 +226,9 @@ def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() ->
         "contact_energy_rel_error": float(row["contact_energy_rel_error"]),
         "sfc_dynamic_sdf_master_triangle_count": int(row["sfc_dynamic_sdf_master_triangle_count"]),
         "sfc_dynamic_sdf_slave_quadrature_count": int(row["sfc_dynamic_sdf_slave_quadrature_count"]),
+        "sfc_c3d8_displacement_l2_rel_error": float(row["sfc_c3d8_displacement_l2_rel_error"]),
+        "sfc_c3d8_stress_l2_rel_error": float(row["sfc_c3d8_stress_l2_rel_error"]),
+        "sfc_c3d8_von_mises_l2_rel_error": float(row["sfc_c3d8_von_mises_l2_rel_error"]),
     }
     for gate in _rows(CONTACTENERGY_CASE / "locked_thresholds.csv"):
         _assert_threshold(gate, metrics[gate["metric"]])
@@ -233,3 +241,10 @@ def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() ->
     assert len(stress_cloud) == 2
     assert max(float(row["von_mises"]) for row in stress_cloud) > 0.0
     assert max(float(row["engineering_strain_norm"]) for row in stress_cloud) > 0.0
+    assert max(float(row["sfc_von_mises"]) for row in stress_cloud) > 0.0
+
+    error_rows = _rows(CONTACTENERGY_CASE / "data" / "calculix_contactenergy_error_metrics.csv")
+    assert {row["quantity"] for row in error_rows} == {"normal_force_z", "contact_energy", "c3d8_displacement", "c3d8_von_mises"}
+    by_quantity = {row["quantity"]: row for row in error_rows}
+    assert by_quantity["normal_force_z"]["status"] == "ok"
+    assert by_quantity["contact_energy"]["status"] == "ok"

@@ -253,12 +253,21 @@ Paper-facing figures:
 
 - `paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/calculix_contactenergy_stress_strain_3d.pdf`
 - `paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/calculix_contactenergy_contact_pressure_3d.pdf`
+- `paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/calculix_contactenergy_sfc_c3d8_error_3d.pdf`
+- `paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/calculix_contactenergy_error_metrics.pdf`
 
 The stress/strain figure post-processes the final CalculiX displacement field
 into C3D8 element-center engineering strain and linear elastic stress, averages
 element values to boundary nodes, and interpolates them over the triangulated
 current boundary. The displayed deformed geometry uses a labeled `1000x`
 displacement scale so that the small static deformation is visible.
+
+For direct field comparison, the locked folder also contains a validation-only
+SFC C3D8 static solve using the same input geometry, constraints, nodal loads,
+and linear pressure-overclosure stiffness. The corresponding error figure
+plots SFC C3D8 von Mises stress, CalculiX von Mises stress, and the absolute
+stress error. This is included as C3D8 external evidence only; the main solver
+claim remains TET4 FEM-SDF contact.
 
 ### 5.5 Dynamic surface-distance reference comparison
 

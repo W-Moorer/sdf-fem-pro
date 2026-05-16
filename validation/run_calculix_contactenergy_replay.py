@@ -65,7 +65,10 @@ class ContactEnergyModel:
     element_ids: np.ndarray
     elements: np.ndarray
     elsets: dict[str, list[int]]
+    nsets: dict[str, list[int]]
     surfaces: dict[str, list[tuple[str, str]]]
+    boundaries: list[tuple[str, int, int, float]]
+    cloads: list[tuple[int, int, float]]
     pressure_stiffness: float
     z_load_reference: float
     material_E: float
@@ -170,7 +173,9 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
     nodes: dict[int, list[float]] = {}
     elements: dict[int, list[int]] = {}
     elsets: dict[str, list[int]] = {}
+    nsets: dict[str, list[int]] = {}
     surfaces: dict[str, list[tuple[str, str]]] = {}
+    boundaries: list[tuple[str, int, int, float]] = []
     cloads: list[tuple[int, int, float]] = []
     pressure_stiffness: float | None = None
     material_E: float | None = None
@@ -180,6 +185,7 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
     params: dict[str, str] = {}
     current_surface = ""
     current_elset = ""
+    current_nset = ""
     expect_surface_behavior_value = False
     expect_elastic_value = False
 
@@ -193,6 +199,7 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
             expect_elastic_value = section == "*ELASTIC"
             current_surface = params.get("NAME", "") if section == "*SURFACE" else ""
             current_elset = params.get("ELSET", "") if section == "*ELSET" else params.get("ELSET", "")
+            current_nset = params.get("NSET", "") if section == "*NSET" else params.get("NSET", "") if section == "*NODE" else ""
             continue
 
         if expect_elastic_value:
@@ -209,7 +216,10 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
 
         values = [value.strip() for value in line.split(",") if value.strip()]
         if section == "*NODE":
-            nodes[int(values[0])] = [float(values[1]), float(values[2]), float(values[3])]
+            node_id = int(values[0])
+            nodes[node_id] = [float(values[1]), float(values[2]), float(values[3])]
+            if current_nset:
+                nsets.setdefault(current_nset, []).append(node_id)
         elif section == "*ELEMENT":
             element_id = int(values[0])
             elements[element_id] = [int(value) for value in values[1:]]
@@ -217,8 +227,16 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
                 elsets.setdefault(current_elset, []).append(element_id)
         elif section == "*ELSET":
             elsets.setdefault(current_elset, []).extend(int(value) for value in values)
+        elif section == "*NSET":
+            nsets.setdefault(current_nset, []).extend(int(value) for value in values)
         elif section == "*SURFACE":
             surfaces.setdefault(current_surface, []).append((values[0], values[1].upper()))
+        elif section == "*BOUNDARY":
+            target = values[0]
+            dof1 = int(values[1])
+            dof2 = int(values[2]) if len(values) >= 3 else dof1
+            value = float(values[3]) if len(values) >= 4 else 0.0
+            boundaries.append((target, dof1, dof2, value))
         elif section == "*CLOAD":
             cloads.append((int(values[0]), int(values[1]), float(values[2])))
 
@@ -240,7 +258,10 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
         element_ids=element_ids,
         elements=conn,
         elsets=elsets,
+        nsets=nsets,
         surfaces=surfaces,
+        boundaries=boundaries,
+        cloads=cloads,
         pressure_stiffness=float(pressure_stiffness),
         z_load_reference=float(z_load_reference),
         material_E=float(material_E),
@@ -374,7 +395,7 @@ def replay_contactenergy_with_dynamic_sdf(model: ContactEnergyModel, U: np.ndarr
     }
 
 
-HEX8_CENTER_NATURAL_GRADIENTS = np.array(
+C3D8_NATURAL_NODE_COORDS = np.array(
     [
         [-1.0, -1.0, -1.0],
         [1.0, -1.0, -1.0],
@@ -386,7 +407,182 @@ HEX8_CENTER_NATURAL_GRADIENTS = np.array(
         [-1.0, 1.0, 1.0],
     ],
     dtype=float,
-) / 8.0
+)
+
+HEX8_CENTER_NATURAL_GRADIENTS = C3D8_NATURAL_NODE_COORDS / 8.0
+
+
+def _hex8_natural_gradients(xi: float, eta: float, zeta: float) -> np.ndarray:
+    gradients = np.empty((8, 3), dtype=float)
+    for idx, (r, s, t) in enumerate(C3D8_NATURAL_NODE_COORDS):
+        gradients[idx, 0] = 0.125 * r * (1.0 + s * eta) * (1.0 + t * zeta)
+        gradients[idx, 1] = 0.125 * s * (1.0 + r * xi) * (1.0 + t * zeta)
+        gradients[idx, 2] = 0.125 * t * (1.0 + r * xi) * (1.0 + s * eta)
+    return gradients
+
+
+def _hex8_B_matrix(gradients: np.ndarray) -> np.ndarray:
+    B = np.zeros((6, 24), dtype=float)
+    for local_node, (dndx, dndy, dndz) in enumerate(gradients):
+        col = 3 * local_node
+        B[0, col] = dndx
+        B[1, col + 1] = dndy
+        B[2, col + 2] = dndz
+        B[3, col] = dndy
+        B[3, col + 1] = dndx
+        B[4, col + 1] = dndz
+        B[4, col + 2] = dndy
+        B[5, col] = dndz
+        B[5, col + 2] = dndx
+    return B
+
+
+def _hex8_element_stiffness(Xe: np.ndarray, C: np.ndarray) -> np.ndarray:
+    Ke = np.zeros((24, 24), dtype=float)
+    gp = 1.0 / np.sqrt(3.0)
+    for xi in (-gp, gp):
+        for eta in (-gp, gp):
+            for zeta in (-gp, gp):
+                dN_dnatural = _hex8_natural_gradients(float(xi), float(eta), float(zeta))
+                jacobian = Xe.T @ dN_dnatural
+                detJ = float(np.linalg.det(jacobian))
+                if detJ <= 0.0:
+                    raise ValueError("C3D8 element has non-positive Jacobian determinant")
+                gradients = dN_dnatural @ np.linalg.inv(jacobian)
+                B = _hex8_B_matrix(gradients)
+                Ke += B.T @ C @ B * detJ
+    return Ke
+
+
+def _assemble_c3d8_stiffness(model: ContactEnergyModel) -> np.ndarray:
+    C = isotropic_linear_elasticity_matrix(model.material_E, model.material_nu)
+    ndofs = 3 * model.X.shape[0]
+    K = np.zeros((ndofs, ndofs), dtype=float)
+    for element in model.elements:
+        Ke = _hex8_element_stiffness(model.X[element], C)
+        dofs = np.asarray([3 * node + component for node in element for component in range(3)], dtype=np.int64)
+        K[np.ix_(dofs, dofs)] += Ke
+    return K
+
+
+def _external_force_vector(model: ContactEnergyModel) -> np.ndarray:
+    node_to_index = {int(node_id): idx for idx, node_id in enumerate(model.node_ids)}
+    force = np.zeros(3 * model.X.shape[0], dtype=float)
+    for node_id, dof, value in model.cloads:
+        force[3 * node_to_index[int(node_id)] + int(dof) - 1] += float(value)
+    return force
+
+
+def _fixed_dofs_and_values(model: ContactEnergyModel) -> tuple[np.ndarray, np.ndarray]:
+    node_to_index = {int(node_id): idx for idx, node_id in enumerate(model.node_ids)}
+    fixed: list[int] = []
+    values: list[float] = []
+    for target, dof1, dof2, value in model.boundaries:
+        if target.lstrip("+-").isdigit():
+            node_ids = [int(target)]
+        else:
+            node_ids = model.nsets.get(target, [])
+            if not node_ids:
+                raise ValueError(f"boundary node set {target!r} is not defined")
+        for node_id in node_ids:
+            node_index = node_to_index[int(node_id)]
+            for dof in range(int(dof1), int(dof2) + 1):
+                fixed.append(3 * node_index + dof - 1)
+                values.append(float(value))
+    if not fixed:
+        return np.empty((0,), dtype=np.int64), np.empty((0,), dtype=float)
+    order = np.argsort(np.asarray(fixed, dtype=np.int64))
+    fixed_array = np.asarray(fixed, dtype=np.int64)[order]
+    value_array = np.asarray(values, dtype=float)[order]
+    unique_fixed, unique_indices = np.unique(fixed_array, return_index=True)
+    return unique_fixed, value_array[unique_indices]
+
+
+def _contact_jacobian_rows(model: ContactEnergyModel) -> list[tuple[np.ndarray, float]]:
+    X = model.X
+    master_faces = _triangles_from_quads(X, _surface_quads(model, "Smast"))
+    slave_quads = _surface_quads(model, "Sslav")
+    candidates = np.arange(master_faces.shape[0], dtype=np.int64)
+    rows: list[tuple[np.ndarray, float]] = []
+    ndofs = 3 * X.shape[0]
+    gp = 1.0 / np.sqrt(3.0)
+    for quad, element in slave_quads:
+        face = _orient_quad_outward(X, quad, element)
+        coords = X[face]
+        for xi in (-gp, gp):
+            for eta in (-gp, gp):
+                shape = np.asarray(
+                    [
+                        0.25 * (1.0 - xi) * (1.0 - eta),
+                        0.25 * (1.0 + xi) * (1.0 - eta),
+                        0.25 * (1.0 + xi) * (1.0 + eta),
+                        0.25 * (1.0 - xi) * (1.0 + eta),
+                    ],
+                    dtype=float,
+                )
+                dshape_dxi = np.asarray(
+                    [
+                        -0.25 * (1.0 - eta),
+                        0.25 * (1.0 - eta),
+                        0.25 * (1.0 + eta),
+                        -0.25 * (1.0 + eta),
+                    ],
+                    dtype=float,
+                )
+                dshape_deta = np.asarray(
+                    [
+                        -0.25 * (1.0 - xi),
+                        -0.25 * (1.0 + xi),
+                        0.25 * (1.0 + xi),
+                        0.25 * (1.0 - xi),
+                    ],
+                    dtype=float,
+                )
+                xq = shape @ coords
+                surface_jacobian = np.cross(dshape_dxi @ coords, dshape_deta @ coords)
+                area_weight = float(np.linalg.norm(surface_jacobian))
+                result = dynamic_surface_sdf(xq, X, master_faces, candidates)
+                if float(result.g) > 1.0e-10:
+                    continue
+                J = np.zeros(ndofs, dtype=float)
+                for node, weight in zip(face, shape, strict=True):
+                    J[3 * int(node) : 3 * int(node) + 3] += float(weight) * result.n
+                master_face = master_faces[int(result.face_id)]
+                for node, weight in zip(master_face, result.w, strict=True):
+                    J[3 * int(node) : 3 * int(node) + 3] -= float(weight) * result.n
+                rows.append((J, area_weight))
+    return rows
+
+
+def solve_sfc_c3d8_contactenergy_static(model: ContactEnergyModel) -> tuple[np.ndarray, Row]:
+    """Solve the contactenergy model with a validation-only SFC C3D8 backend."""
+
+    K = _assemble_c3d8_stiffness(model)
+    contact_rows = _contact_jacobian_rows(model)
+    K_contact = np.zeros_like(K)
+    for J, area in contact_rows:
+        K_contact += model.pressure_stiffness * float(area) * np.outer(J, J)
+    K_total = K + K_contact
+    force = _external_force_vector(model)
+    fixed, fixed_values = _fixed_dofs_and_values(model)
+    all_dofs = np.arange(K_total.shape[0], dtype=np.int64)
+    free = np.setdiff1d(all_dofs, fixed)
+    u = np.zeros(K_total.shape[0], dtype=float)
+    u[fixed] = fixed_values
+    rhs = force[free] - K_total[np.ix_(free, fixed)] @ u[fixed]
+    u[free] = np.linalg.solve(K_total[np.ix_(free, free)], rhs)
+    gap_values = np.asarray([float(J @ u) for J, _ in contact_rows], dtype=float)
+    contact_energy = 0.5 * sum(
+        model.pressure_stiffness * float(area) * min(float(gap), 0.0) ** 2
+        for gap, (_, area) in zip(gap_values, contact_rows, strict=True)
+    )
+    metrics = {
+        "sfc_c3d8_static_active_contact_count": int(np.count_nonzero(gap_values <= 0.0)),
+        "sfc_c3d8_static_min_gap": float(np.min(gap_values)) if gap_values.size else float("inf"),
+        "sfc_c3d8_static_contact_energy": float(contact_energy),
+        "sfc_c3d8_static_contact_spring_count": len(contact_rows),
+    }
+    return u.reshape((-1, 3)), metrics
 
 
 def _von_mises(stress: np.ndarray) -> float:
@@ -554,13 +750,17 @@ def _contact_pressure_nodal_values(model: ContactEnergyModel, U: np.ndarray) -> 
     return sums / np.maximum(counts, 1.0)
 
 
-def _write_visualization_artifacts(out_dir: Path, model: ContactEnergyModel, U: np.ndarray) -> tuple[list[Row], list[Row]]:
+def _write_visualization_artifacts(out_dir: Path, model: ContactEnergyModel, U: np.ndarray, U_sfc: np.ndarray) -> tuple[list[Row], list[Row]]:
     figures_dir = out_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     strains, stresses, von_mises_values, strain_norms = _hex8_center_strain_stress(model, U)
+    sfc_strains, sfc_stresses, sfc_von_mises_values, sfc_strain_norms = _hex8_center_strain_stress(model, U_sfc)
     nodal_vm = _nodal_average(model.elements, von_mises_values, model.X.shape[0])
+    nodal_sfc_vm = _nodal_average(model.elements, sfc_von_mises_values, model.X.shape[0])
+    nodal_vm_error = _nodal_average(model.elements, np.abs(sfc_von_mises_values - von_mises_values), model.X.shape[0])
     nodal_strain = _nodal_average(model.elements, strain_norms, model.X.shape[0])
     displacement_magnitude = np.linalg.norm(U, axis=1)
+    displacement_error_magnitude = np.linalg.norm(U_sfc - U, axis=1)
     nodal_pressure = _contact_pressure_nodal_values(model, U)
 
     deformation_scale = 1000.0
@@ -634,25 +834,83 @@ def _write_visualization_artifacts(out_dir: Path, model: ContactEnergyModel, U: 
     fig.savefig(pressure_pdf, bbox_inches="tight")
     plt.close(fig)
 
+    error_norm = Normalize(vmin=0.0, vmax=max(float(np.max(nodal_vm_error)), 1.0e-30))
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.6), subplot_kw={"projection": "3d"})
+    panels = [
+        (nodal_sfc_vm, "SFC C3D8 von Mises", stress_norm, "viridis"),
+        (nodal_vm, "CalculiX von Mises", stress_norm, "viridis"),
+        (nodal_vm_error, "absolute stress error", error_norm, "magma"),
+    ]
+    collections = []
+    for ax, (values, title, norm, cmap) in zip(axes, panels, strict=True):
+        collections.append(
+            _draw_3d_hex_surface(
+                ax,
+                model.X,
+                X_plot,
+                boundary_triangles,
+                values,
+                norm=norm,
+                cmap=cmap,
+                title=title,
+            )
+        )
+    fig.subplots_adjust(left=0.01, right=0.98, bottom=0.04, top=0.80, wspace=0.10)
+    for ax, (collection, label) in zip(axes, [(collections[0], "von Mises"), (collections[1], "von Mises"), (collections[2], "abs. error")], strict=True):
+        fig.colorbar(collection, ax=ax, shrink=0.58, pad=0.02, label=label)
+    fig.suptitle(f"SFC validation C3D8 static solve vs CalculiX, displacement scale {deformation_scale:g}x", fontsize=13)
+    error_png = figures_dir / "calculix_contactenergy_sfc_c3d8_error_3d.png"
+    error_pdf = figures_dir / "calculix_contactenergy_sfc_c3d8_error_3d.pdf"
+    fig.savefig(error_png, dpi=180, bbox_inches="tight")
+    fig.savefig(error_pdf, bbox_inches="tight")
+    plt.close(fig)
+
     cloud_rows: list[Row] = []
-    for element_id, strain, stress, vm, strain_norm_value in zip(model.element_ids, strains, stresses, von_mises_values, strain_norms, strict=True):
+    for element_id, strain, stress, vm, strain_norm_value, sfc_strain, sfc_stress, sfc_vm, sfc_strain_norm in zip(
+        model.element_ids,
+        strains,
+        stresses,
+        von_mises_values,
+        strain_norms,
+        sfc_strains,
+        sfc_stresses,
+        sfc_von_mises_values,
+        sfc_strain_norms,
+        strict=True,
+    ):
         cloud_rows.append(
             {
                 "element_id": int(element_id),
+                "sfc_strain_xx": float(sfc_strain[0]),
+                "sfc_strain_yy": float(sfc_strain[1]),
+                "sfc_strain_zz": float(sfc_strain[2]),
+                "sfc_strain_xy": float(sfc_strain[3]),
+                "sfc_strain_yz": float(sfc_strain[4]),
+                "sfc_strain_xz": float(sfc_strain[5]),
                 "strain_xx": float(strain[0]),
                 "strain_yy": float(strain[1]),
                 "strain_zz": float(strain[2]),
                 "strain_xy": float(strain[3]),
                 "strain_yz": float(strain[4]),
                 "strain_xz": float(strain[5]),
+                "sfc_stress_xx": float(sfc_stress[0]),
+                "sfc_stress_yy": float(sfc_stress[1]),
+                "sfc_stress_zz": float(sfc_stress[2]),
+                "sfc_stress_xy": float(sfc_stress[3]),
+                "sfc_stress_yz": float(sfc_stress[4]),
+                "sfc_stress_xz": float(sfc_stress[5]),
                 "stress_xx": float(stress[0]),
                 "stress_yy": float(stress[1]),
                 "stress_zz": float(stress[2]),
                 "stress_xy": float(stress[3]),
                 "stress_yz": float(stress[4]),
                 "stress_xz": float(stress[5]),
+                "sfc_von_mises": float(sfc_vm),
                 "von_mises": float(vm),
+                "von_mises_abs_error": abs(float(sfc_vm) - float(vm)),
+                "sfc_engineering_strain_norm": float(sfc_strain_norm),
                 "engineering_strain_norm": float(strain_norm_value),
+                "engineering_strain_norm_abs_error": abs(float(sfc_strain_norm) - float(strain_norm_value)),
             }
         )
 
@@ -671,8 +929,128 @@ def _write_visualization_artifacts(out_dir: Path, model: ContactEnergyModel, U: 
             "status": "ok",
             "details": "SFC dynamic-SDF replay pressure on the current triangulated C3D8 boundary",
         },
+        {
+            "plot": "calculix_contactenergy_sfc_c3d8_error_3d",
+            "png": error_png.relative_to(out_dir).as_posix(),
+            "pdf": error_pdf.relative_to(out_dir).as_posix(),
+            "status": "ok",
+            "details": "validation-only SFC C3D8 static solve compared to CalculiX von Mises stress on the same boundary",
+        },
     ]
     return plot_rows, cloud_rows
+
+
+def _relative_vector_error(actual: np.ndarray, expected: np.ndarray) -> float:
+    return float(np.linalg.norm(np.asarray(actual, dtype=float) - np.asarray(expected, dtype=float)) / max(np.linalg.norm(expected), 1.0e-30))
+
+
+def _c3d8_static_comparison_metrics(model: ContactEnergyModel, U_calculix: np.ndarray, U_sfc: np.ndarray) -> Row:
+    strain_calc, stress_calc, vm_calc, strain_norm_calc = _hex8_center_strain_stress(model, U_calculix)
+    strain_sfc, stress_sfc, vm_sfc, strain_norm_sfc = _hex8_center_strain_stress(model, U_sfc)
+    return {
+        "sfc_c3d8_displacement_l2_rel_error": _relative_vector_error(U_sfc.ravel(), U_calculix.ravel()),
+        "sfc_c3d8_displacement_linf_abs_error": float(np.max(np.abs(U_sfc - U_calculix))),
+        "sfc_c3d8_strain_l2_rel_error": _relative_vector_error(strain_sfc.ravel(), strain_calc.ravel()),
+        "sfc_c3d8_stress_l2_rel_error": _relative_vector_error(stress_sfc.ravel(), stress_calc.ravel()),
+        "sfc_c3d8_von_mises_l2_rel_error": _relative_vector_error(vm_sfc, vm_calc),
+        "sfc_c3d8_strain_norm_l2_rel_error": _relative_vector_error(strain_norm_sfc, strain_norm_calc),
+        "sfc_c3d8_max_von_mises_abs_error": float(np.max(np.abs(vm_sfc - vm_calc))),
+        "sfc_c3d8_max_engineering_strain_norm_abs_error": float(np.max(np.abs(strain_norm_sfc - strain_norm_calc))),
+    }
+
+
+def _write_error_artifacts(out_dir: Path, metrics: Row) -> tuple[list[Row], list[Row]]:
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    threshold = 1.0e-5
+    error_rows = [
+        {
+            "quantity": "normal_force_z",
+            "calculix_reference": float(metrics["calculix_force_reference_z_abs"]),
+            "sfc_dynamic_sdf_replay": float(metrics["sfc_dynamic_sdf_contact_force_z"]),
+            "absolute_error": abs(float(metrics["sfc_dynamic_sdf_contact_force_z"]) - float(metrics["calculix_force_reference_z_abs"])),
+            "relative_error": float(metrics["contact_force_rel_error"]),
+            "acceptance_threshold": threshold,
+            "status": "ok" if float(metrics["contact_force_rel_error"]) <= threshold else "check",
+        },
+        {
+            "quantity": "contact_energy",
+            "calculix_reference": float(metrics["calculix_total_contact_spring_energy"]),
+            "sfc_dynamic_sdf_replay": float(metrics["sfc_dynamic_sdf_contact_energy"]),
+            "absolute_error": abs(float(metrics["sfc_dynamic_sdf_contact_energy"]) - float(metrics["calculix_total_contact_spring_energy"])),
+            "relative_error": float(metrics["contact_energy_rel_error"]),
+            "acceptance_threshold": threshold,
+            "status": "ok" if float(metrics["contact_energy_rel_error"]) <= threshold else "check",
+        },
+        {
+            "quantity": "c3d8_displacement",
+            "calculix_reference": 1.0,
+            "sfc_dynamic_sdf_replay": 1.0 + float(metrics["sfc_c3d8_displacement_l2_rel_error"]),
+            "absolute_error": float(metrics["sfc_c3d8_displacement_l2_rel_error"]),
+            "relative_error": float(metrics["sfc_c3d8_displacement_l2_rel_error"]),
+            "acceptance_threshold": float("nan"),
+            "status": "diagnostic",
+        },
+        {
+            "quantity": "c3d8_von_mises",
+            "calculix_reference": 1.0,
+            "sfc_dynamic_sdf_replay": 1.0 + float(metrics["sfc_c3d8_von_mises_l2_rel_error"]),
+            "absolute_error": float(metrics["sfc_c3d8_von_mises_l2_rel_error"]),
+            "relative_error": float(metrics["sfc_c3d8_von_mises_l2_rel_error"]),
+            "acceptance_threshold": float("nan"),
+            "status": "diagnostic",
+        },
+    ]
+
+    labels = ["normal force", "contact energy"]
+    rows_for_bars = error_rows[:2]
+    normalized_reference = np.ones(len(error_rows), dtype=float)
+    normalized_replay = np.asarray(
+        [
+            float(row["sfc_dynamic_sdf_replay"]) / max(abs(float(row["calculix_reference"])), 1.0e-30)
+            for row in rows_for_bars
+        ],
+        dtype=float,
+    )
+    normalized_reference = np.ones(len(rows_for_bars), dtype=float)
+    relative_errors = np.asarray([float(row["relative_error"]) for row in rows_for_bars], dtype=float)
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.0))
+    x = np.arange(len(labels), dtype=float)
+    width = 0.36
+    axes[0].bar(x - width / 2.0, normalized_reference, width, label="CalculiX reference", color="#4c78a8")
+    axes[0].bar(x + width / 2.0, normalized_replay, width, label="SFC replay", color="#f58518")
+    axes[0].set_xticks(x, labels)
+    axes[0].set_ylabel("normalized value")
+    axes[0].set_ylim(0.9999999, 1.0000001)
+    axes[0].grid(True, axis="y", color="0.9", linewidth=0.5)
+    axes[0].legend(frameon=False, fontsize=8)
+
+    axes[1].bar(x, relative_errors, color="#54a24b")
+    axes[1].axhline(threshold, color="#e45756", linestyle="--", linewidth=1.0, label="locked threshold")
+    axes[1].set_xticks(x, labels)
+    axes[1].set_yscale("log")
+    axes[1].set_ylabel("relative error")
+    axes[1].grid(True, axis="y", color="0.9", linewidth=0.5, which="both")
+    axes[1].legend(frameon=False, fontsize=8)
+    fig.suptitle("CalculiX contactenergy replay error")
+    fig.tight_layout()
+    png = figures_dir / "calculix_contactenergy_error_metrics.png"
+    pdf = figures_dir / "calculix_contactenergy_error_metrics.pdf"
+    fig.savefig(png, dpi=180, bbox_inches="tight")
+    fig.savefig(pdf, bbox_inches="tight")
+    plt.close(fig)
+
+    plot_rows = [
+        {
+            "plot": "calculix_contactenergy_error_metrics",
+            "png": png.relative_to(out_dir).as_posix(),
+            "pdf": pdf.relative_to(out_dir).as_posix(),
+            "status": "ok" if all(row["status"] == "ok" for row in error_rows) else "check",
+            "details": "normalized CalculiX-vs-SFC replay values and log-scale relative errors for force and contact energy",
+        }
+    ]
+    return plot_rows, error_rows
 
 
 def _relative_error(actual: float, expected: float) -> float:
@@ -693,9 +1071,11 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
         "",
         "This validation uses the official CalculiX `contactenergy.inp` C3D8",
         "surface-to-surface contact-energy test as an external contact-law",
-        "reference. SFC does not solve the C3D8 mechanics here; it replays the",
-        "final CalculiX deformed geometry with the current-surface dynamic SDF",
-        "query and the same linear pressure-overclosure law.",
+        "reference. The primary SFC evidence replays the final CalculiX",
+        "deformed geometry with the current-surface dynamic SDF query and the",
+        "same linear pressure-overclosure law. A separate validation-only SFC",
+        "C3D8 static backend solves the same input to produce direct field-error",
+        "plots.",
         "",
         "## Command",
         "",
@@ -717,6 +1097,9 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
         f"| max post-processed von Mises stress | {metrics['max_postprocessed_von_mises']} |",
         f"| max post-processed engineering strain norm | {metrics['max_postprocessed_engineering_strain_norm']} |",
         f"| max CalculiX displacement magnitude | {metrics['max_calculix_displacement_magnitude']} |",
+        f"| SFC validation C3D8 displacement L2 relative error | {metrics['sfc_c3d8_displacement_l2_rel_error']} |",
+        f"| SFC validation C3D8 stress L2 relative error | {metrics['sfc_c3d8_stress_l2_rel_error']} |",
+        f"| SFC validation C3D8 von Mises L2 relative error | {metrics['sfc_c3d8_von_mises_l2_rel_error']} |",
         "",
         "## Figures",
         "",
@@ -727,6 +1110,12 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
         "  visible.",
         "- `figures/calculix_contactenergy_contact_pressure_3d.png`: SFC",
         "  dynamic-SDF replay contact pressure on the same current C3D8 boundary.",
+        "- `figures/calculix_contactenergy_error_metrics.png`: normalized",
+        "  CalculiX-vs-SFC replay values and log-scale relative errors for",
+        "  normal force and contact energy.",
+        "- `figures/calculix_contactenergy_sfc_c3d8_error_3d.png`: direct",
+        "  validation-only SFC C3D8 static solve compared with the CalculiX",
+        "  C3D8 stress field on the same boundary.",
         "",
         "## Claims",
         "",
@@ -742,6 +1131,8 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
             "",
             "- This is a C3D8 external contact-law/energy replay, not a TET4 trajectory",
             "  equivalence claim.",
+            "- The validation-only SFC C3D8 static backend is included for direct",
+            "  field-error plotting; it is not the main solver element type.",
             "- Dynamic SDF is evaluated on triangulated current C3D8 boundary faces.",
             "- Friction, self-contact, hard contact, and nonlinear material behavior are",
             "  outside this replay.",
@@ -812,8 +1203,10 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
     model = parse_contactenergy_input(inp_text)
     dat_text = dat_path.read_text(encoding="utf-8")
     U, RF, calculix_contact_energy, cels_rows = parse_contactenergy_dat(dat_text, model.node_ids)
+    U_sfc_c3d8, sfc_c3d8_static_metrics = solve_sfc_c3d8_contactenergy_static(model)
     replay = replay_contactenergy_with_dynamic_sdf(model, U)
-    plot_rows, stress_strain_rows = _write_visualization_artifacts(out_dir, model, U)
+    c3d8_comparison_metrics = _c3d8_static_comparison_metrics(model, U, U_sfc_c3d8)
+    plot_rows, stress_strain_rows = _write_visualization_artifacts(out_dir, model, U, U_sfc_c3d8)
 
     force_error = _relative_error(float(replay["sfc_dynamic_sdf_contact_force_z"]), model.z_load_reference)
     energy_error = _relative_error(float(replay["sfc_dynamic_sdf_contact_energy"]), calculix_contact_energy)
@@ -834,11 +1227,15 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
         "max_postprocessed_engineering_strain_norm": max(float(row["engineering_strain_norm"]) for row in stress_strain_rows),
         "max_calculix_displacement_magnitude": float(np.max(np.linalg.norm(U, axis=1))),
         "visualization_deformation_scale": 1000.0,
+        **sfc_c3d8_static_metrics,
+        **c3d8_comparison_metrics,
         **replay,
         "contact_force_rel_error": force_error,
         "contact_energy_rel_error": energy_error,
         "status": status,
     }
+    error_plot_rows, error_rows = _write_error_artifacts(out_dir, metrics)
+    plot_rows.extend(error_plot_rows)
     claims = [
         {
             "claim": "calculix_contactenergy_c3d8_reference_available",
@@ -874,6 +1271,7 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
     )
     _write_csv(out_dir / "calculix_contactenergy_plots.csv", list(plot_rows[0].keys()), plot_rows)
     _write_csv(out_dir / "calculix_contactenergy_stress_strain_cloud.csv", list(stress_strain_rows[0].keys()), stress_strain_rows)
+    _write_csv(out_dir / "calculix_contactenergy_error_metrics.csv", list(error_rows[0].keys()), error_rows)
     _write_summary(out_dir / "calculix_contactenergy_summary.md", metrics, command_row, claims)
     return {
         "metrics": [metrics],
@@ -882,6 +1280,7 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
         "raw_cels": cels_rows,
         "plots": plot_rows,
         "stress_strain_cloud": stress_strain_rows,
+        "error_metrics": error_rows,
     }
 
 

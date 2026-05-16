@@ -320,6 +320,25 @@ or TET4 trajectory-equivalence claim.
   \label{fig:calculix-contactenergy-stress-strain}
 \end{figure}
 
+For a direct field comparison on the same C3D8 model, we additionally assemble
+a validation-only SFC C3D8 static solve with the same linear elastic material,
+constraints, nodal loads, and linear pressure-overclosure stiffness. This
+backend is used only for the external evidence case. It allows the SFC C3D8
+von Mises field to be plotted against the CalculiX field and exposes the
+remaining error from the simplified validation contact discretization.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{calculix_contactenergy_sfc_c3d8_error_3d.pdf}
+  \caption{Direct validation-only C3D8 comparison on CalculiX
+  \texttt{contactenergy.inp}. The first panel shows the SFC C3D8 static
+  solve, the second shows CalculiX, and the third shows the absolute von
+  Mises stress error. This comparison is included to make the external contact
+  evidence visually auditable; it is not a claim that C3D8 is the main solver
+  element type.}
+  \label{fig:calculix-contactenergy-c3d8-error}
+\end{figure}
+
 \subsection{Dynamic surface-distance reference comparison}
 
 The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.

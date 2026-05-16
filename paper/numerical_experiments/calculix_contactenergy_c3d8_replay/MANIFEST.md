@@ -9,7 +9,9 @@
   available from the selected CalculiX output.
 - `data/calculix_contactenergy_plots.csv`: generated visualization manifest.
 - `data/calculix_contactenergy_stress_strain_cloud.csv`: C3D8 element-center
-  strain and stress values post-processed from CalculiX final displacements.
+  SFC and CalculiX strain/stress values and errors.
+- `data/calculix_contactenergy_error_metrics.csv`: scalar force, energy,
+  displacement, and von Mises error metrics.
 - `data/contactenergy.inp`: copied official CalculiX input used for the run.
 - `data/contactenergy.dat`: CalculiX output used for the replay.
 
@@ -19,6 +21,10 @@
 - `figures/calculix_contactenergy_stress_strain_3d.pdf`
 - `figures/calculix_contactenergy_contact_pressure_3d.png`
 - `figures/calculix_contactenergy_contact_pressure_3d.pdf`
+- `figures/calculix_contactenergy_sfc_c3d8_error_3d.png`
+- `figures/calculix_contactenergy_sfc_c3d8_error_3d.pdf`
+- `figures/calculix_contactenergy_error_metrics.png`
+- `figures/calculix_contactenergy_error_metrics.pdf`
 
 ## Logs
 
