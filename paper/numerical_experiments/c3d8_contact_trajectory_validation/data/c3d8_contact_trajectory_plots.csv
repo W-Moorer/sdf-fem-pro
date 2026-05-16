@@ -1,0 +1,5 @@
+plot,png,pdf,description
+c3d8_contact_trajectory_z_cm,figures\c3d8_contact_trajectory_z_cm.png,figures\c3d8_contact_trajectory_z_cm.pdf,C3D8 CalculiX trajectory center height
+c3d8_contact_trajectory_gap,figures\c3d8_contact_trajectory_gap.png,figures\c3d8_contact_trajectory_gap.pdf,SFC dynamic-SDF gap and CalculiX CDIS where available
+c3d8_contact_trajectory_force_energy,figures\c3d8_contact_trajectory_force_energy.png,figures\c3d8_contact_trajectory_force_energy.pdf,Normal reaction and contact spring energy
+c3d8_contact_trajectory_stress_cloud,figures\c3d8_contact_trajectory_stress_cloud.png,figures\c3d8_contact_trajectory_stress_cloud.pdf,Final C3D8 stress cloud from CalculiX displacement/stress output

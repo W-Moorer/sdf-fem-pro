@@ -29,6 +29,7 @@ Evidence source:
 - `../results/external_fem/`
 - `../results/external_contact_solver/`
 - `../results/calculix_contactenergy_replay/`
+- `../results/c3d8_contact_trajectory_quick/`
 - `../docs/phase6_final_experiment_handoff.md`
 - `../docs/phase7_physical_validation_handoff.md`
 - `../docs/external_fem_comparison_handoff.md`
@@ -57,12 +58,17 @@ Scope for the submission draft:
 - CalculiX `contactenergy.inp` evidence is a C3D8 contact-law/energy replay
   showing that the dynamic SDF query consumes triangulated current boundary
   surfaces and is not inherently TET4-bound.
+- Generated CalculiX C3D8 block-plane and block-block trajectory evidence is
+  an external trajectory replay: CalculiX supplies the deformed states, and SFC
+  replays current-surface dynamic SDF gap, force, energy, and stress-cloud
+  diagnostics on triangulated C3D8 boundaries.
 
 Unsupported claims that must not be added without new evidence:
 
 - Frictional contact.
 - Self-contact.
 - Nonlinear FEM or large-deformation material models.
+- Native nonlinear C3D8 dynamic trajectory equivalence to CalculiX.
 - GPU acceleration.
 - Barrier contact.
 - Production BVH or IPC superiority.

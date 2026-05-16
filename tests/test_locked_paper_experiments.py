@@ -12,6 +12,7 @@ LOCKED_CASE = ROOT / "paper" / "numerical_experiments" / "block_drop_dynamic_sdf
 TET4_PATCH_CASE = ROOT / "paper" / "numerical_experiments" / "tet4_analytic_patch_stress_strain"
 SCIKIT_FEM_CASE = ROOT / "paper" / "numerical_experiments" / "scikit_fem_cantilever_external"
 CONTACTENERGY_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_contactenergy_c3d8_replay"
+C3D8_TRAJECTORY_CASE = ROOT / "paper" / "numerical_experiments" / "c3d8_contact_trajectory_validation"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -258,3 +259,45 @@ def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() ->
     by_quantity = {row["quantity"]: row for row in error_rows}
     assert by_quantity["normal_force_z"]["status"] == "ok"
     assert by_quantity["contact_energy"]["status"] == "ok"
+
+
+def test_locked_c3d8_contact_trajectory_replay_artifacts_and_thresholds() -> None:
+    required = [
+        C3D8_TRAJECTORY_CASE / "README.md",
+        C3D8_TRAJECTORY_CASE / "MANIFEST.md",
+        C3D8_TRAJECTORY_CASE / "locked_thresholds.csv",
+        C3D8_TRAJECTORY_CASE / "runner_summary.md",
+        C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory.csv",
+        C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_summary.csv",
+        C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_stress_cloud.csv",
+        C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_claims.csv",
+        C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_commands.csv",
+        C3D8_TRAJECTORY_CASE / "figures" / "c3d8_contact_trajectory_z_cm.png",
+        C3D8_TRAJECTORY_CASE / "figures" / "c3d8_contact_trajectory_gap.png",
+        C3D8_TRAJECTORY_CASE / "figures" / "c3d8_contact_trajectory_force_energy.png",
+        C3D8_TRAJECTORY_CASE / "figures" / "c3d8_contact_trajectory_stress_cloud.png",
+        C3D8_TRAJECTORY_CASE / "calculix_runs" / "block_plane_c3d8_r1" / "block_plane_c3d8_r1.inp",
+        C3D8_TRAJECTORY_CASE / "calculix_runs" / "block_plane_c3d8_r1" / "block_plane_c3d8_r1.dat",
+        C3D8_TRAJECTORY_CASE / "calculix_runs" / "block_block_c3d8_r1" / "block_block_c3d8_r1.inp",
+        C3D8_TRAJECTORY_CASE / "calculix_runs" / "block_block_c3d8_r1" / "block_block_c3d8_r1.dat",
+    ]
+    for path in required:
+        _assert_file(path)
+
+    readme = (C3D8_TRAJECTORY_CASE / "README.md").read_text(encoding="utf-8")
+    assert "CalculiX solves the trajectory" in readme
+    assert "current-surface dynamic SDF" in readme
+    assert "Native SFC nonlinear C3D8 dynamic trajectory equivalence" in readme
+
+    summaries = _rows(C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_summary.csv")
+    assert {row["case"] for row in summaries} == {"block_plane_c3d8", "block_block_c3d8"}
+    assert {row["reference_source"] for row in summaries} == {"calculix_dat"}
+    assert all(row["status"] == "external_replay" for row in summaries)
+    assert all(float(row["peak_force_rel_error"]) < 1.0e-2 for row in summaries)
+    assert all(float(row["peak_energy_rel_error"]) < 1.0e-2 for row in summaries)
+    assert all(float(row["min_gap_rel_error"]) < 1.0e-2 for row in summaries)
+    assert all(int(row["active_sfc_rows"]) > 0 for row in summaries)
+
+    claims = {row["claim"]: row for row in _rows(C3D8_TRAJECTORY_CASE / "data" / "c3d8_contact_trajectory_claims.csv")}
+    assert claims["c3d8_dynamic_sdf_external_trajectory_replay"]["supported"] == "true"
+    assert claims["native_sfc_nonlinear_c3d8_trajectory_equivalence"]["supported"] == "false"

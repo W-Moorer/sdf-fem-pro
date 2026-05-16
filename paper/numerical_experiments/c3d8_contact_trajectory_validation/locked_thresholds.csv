@@ -1,0 +1,5 @@
+metric,threshold,meaning
+peak_force_rel_error,1.0e-2,SFC dynamic-SDF replay force should match CalculiX RF within 1 percent in the locked quick C3D8 cases
+peak_energy_rel_error,1.0e-2,SFC dynamic-SDF replay CELS should match CalculiX CELS within 1 percent in the locked quick C3D8 cases
+min_gap_rel_error,1.0e-2,SFC dynamic-SDF replay gap should match CalculiX CDIS within 1 percent in the locked quick C3D8 cases
+active_sfc_rows,1,SFC replay should activate contact in each locked C3D8 case

@@ -1,0 +1,4 @@
+case,resolution,element_id,engineering_strain_norm,sfc_von_mises,calculix_von_mises,von_mises_abs_error
+block_plane_c3d8,1,1,1.433074557849831e-05,1.326769743589761,1.3269641999999997,0.00019445641023874138
+block_block_c3d8,1,1,0.0,0.0,0.0,0.0
+block_block_c3d8,1,2,8.13393688596009e-06,0.7560899644970788,0.7560604999999999,2.946449707885712e-05
