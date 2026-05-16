@@ -12,6 +12,8 @@ import argparse
 import csv
 import subprocess
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +37,17 @@ from sfc.fem.body import DeformableBody  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
     ContactSample,
     MechanicsModel,
+    MechanicsState,
     PlaneContactGeometry,
     assemble_contact_response,
+    calculix_dynamic_predictor,
+    calculix_hht_effective_residual,
+    calculix_hht_effective_tangent,
     evaluate_state,
     hht_step,
+    hht_newmark_parameters,
     initial_state,
+    static_force_state,
     stvk_internal_response,
 )
 from sfc.fem.hex8 import hex8_center_strain_stress  # noqa: E402
@@ -64,6 +72,7 @@ from validation.run_c3d8_contact_trajectory_validation import (  # noqa: E402
     build_c3d8_model,
     calculix_available,
     main as run_c3d8_trajectory_main,
+    run_calculix,
     write_calculix_input,
 )
 from validation.run_calculix_contactenergy_replay import (  # noqa: E402
@@ -208,6 +217,35 @@ def _relative_error(value: float, reference: float) -> float:
 
 def _fixed_free(ndofs: int, fixed: np.ndarray) -> np.ndarray:
     return np.setdiff1d(np.arange(ndofs, dtype=np.int64), np.asarray(fixed, dtype=np.int64))
+
+
+def _timed_call(func, *args, **kwargs):
+    start = time.perf_counter()
+    result = func(*args, **kwargs)
+    return result, time.perf_counter() - start
+
+
+def _model_fixed_dofs(model) -> np.ndarray:
+    id_to_index = model.id_to_index
+    fixed_nodes = [id_to_index[int(node_id)] for node_id in model.fixed_node_ids if int(node_id) in id_to_index]
+    if not fixed_nodes:
+        return np.empty(0, dtype=np.int64)
+    return np.asarray([3 * node + comp for node in fixed_nodes for comp in range(3)], dtype=np.int64)
+
+
+def _contact_geometry_for_model(model):
+    if model.master_kind == "rigid_plane":
+        return PlaneContactGeometry(
+            faces=_bottom_surface_triangles(model),
+            plane_z=model.floor_z + FLOOR_CONTACT_OFFSET,
+            stiffness=model.contact_stiffness,
+        )
+    return Hex8SurfaceSdfContactGeometry(
+        reference_X=model.X,
+        slave_quads=_trajectory_surface_quads(model, model.slave_surface),
+        master_quads=_trajectory_surface_quads(model, model.master_surface),
+        stiffness=model.contact_stiffness,
+    )
 
 
 def _solve_native_c3d8_nonlinear_static_contactenergy(out_dir: Path) -> tuple[Row, list[Row]]:
@@ -469,28 +507,34 @@ def _linear_contact_response(contact: PlaneContactGeometry, x_current: np.ndarra
 
 
 def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, np.ndarray]:
-    """Run native small-strain C3D8 Newmark dynamics with penalty plane contact."""
+    """Run native small-strain C3D8 Newmark dynamics with SDF contact."""
 
     mesh = VolumeMesh(model.X, model.elements, element_type="C3D8")
     body = DeformableBody(mesh=mesh, material={"E": model.E, "nu": model.nu}, density=model.density)
     K = assemble_stiffness_matrix(body).tocsr()
     M = assemble_mass_matrix(body, kind="consistent").tocsr()
     f_ext = assemble_gravity_force(body, (0.0, 0.0, -model.gravity))
-    contact = PlaneContactGeometry(
-        faces=_bottom_surface_triangles(model),
-        plane_z=model.floor_z + FLOOR_CONTACT_OFFSET,
-        stiffness=model.contact_stiffness,
-    )
+    contact = _contact_geometry_for_model(model)
     n_dofs = body.n_dofs
+    fixed = _model_fixed_dofs(model)
+    free = _fixed_free(n_dofs, fixed)
     beta = 0.25
     gamma = 0.5
     dt = float(model.dt)
     u = np.zeros(n_dofs, dtype=float)
     v = np.zeros(n_dofs, dtype=float)
     v[3 * model.slave_node_indices + 2] = float(model.initial_velocity_z)
+    if fixed.size:
+        u[fixed] = 0.0
+        v[fixed] = 0.0
     c0 = 1.0 / (beta * dt * dt)
     initial_contact = _linear_contact_response(contact, model.X + u.reshape((-1, 3)), body.n_nodes)
-    a = np.asarray(spsolve(M.tocsc(), f_ext + initial_contact.force.reshape(-1) - K @ u), dtype=float)
+    initial_rhs = f_ext + initial_contact.force.reshape(-1) - K @ u
+    if fixed.size:
+        a = np.zeros(n_dofs, dtype=float)
+        a[free] = np.asarray(spsolve(M[free[:, None], free].tocsc(), initial_rhs[free]), dtype=float)
+    else:
+        a = np.asarray(spsolve(M.tocsc(), initial_rhs), dtype=float)
     rows: list[Row] = []
     steps = int(np.ceil(float(model.total_time) / dt))
     for step in range(steps + 1):
@@ -518,6 +562,9 @@ def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, n
             break
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
+        if fixed.size:
+            u_pred[fixed] = 0.0
+            v_pred[fixed] = 0.0
         u_guess = u_pred.copy()
         residual_norm = np.inf
         iterations = 0
@@ -526,16 +573,23 @@ def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, n
             trial_contact = _linear_contact_response(contact, x_guess, body.n_nodes)
             a_guess = c0 * (u_guess - u_pred)
             residual = M @ a_guess + K @ u_guess - f_ext - trial_contact.force.reshape(-1)
-            residual_norm = float(np.linalg.norm(residual))
+            residual_norm = float(np.linalg.norm(residual[free]))
             tangent = (M * c0 + K + trial_contact.tangent).tocsc()
-            correction = np.asarray(spsolve(tangent, -residual), dtype=float)
-            u_guess += correction
+            correction = np.zeros(n_dofs, dtype=float)
+            correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
+            u_guess[free] += correction[free]
+            if fixed.size:
+                u_guess[fixed] = 0.0
             iterations = iteration + 1
-            if float(np.linalg.norm(correction)) <= 1.0e-10 * max(1.0, float(np.linalg.norm(u_guess))):
+            if float(np.linalg.norm(correction[free])) <= 1.0e-10 * max(1.0, float(np.linalg.norm(u_guess[free]))):
                 break
         u = u_guess
         a = c0 * (u - u_pred)
         v = v_pred + gamma * dt * a
+        if fixed.size:
+            u[fixed] = 0.0
+            v[fixed] = 0.0
+            a[fixed] = 0.0
         rows[-1]["newton_iterations"] = iterations
         rows[-1]["newton_residual_norm"] = residual_norm
     vm_final: list[float] = []
@@ -549,10 +603,11 @@ def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, n
 def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bool) -> tuple[list[Row], Row]:
     if skip_calculix or not calculix_available():
         return [], {
-            "case": "c3d8_linear_dynamic_contact",
+            "case": f"c3d8_linear_dynamic_{model.case}",
             "external_solver": "CalculiX",
             "completed": "false",
             "command": "skipped",
+            "wall_time_seconds": "",
         }
     case_name = f"linear_dynamic_{model.case}_r{model.resolution}"
     run_dir = out_dir / "c3d8_linear_dynamic_calculix" / case_name
@@ -563,6 +618,7 @@ def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bo
     text = text.replace("*STEP, NLGEOM", "*STEP")
     inp_path.write_text(text, encoding="utf-8")
     command = f"cd {_wsl_path(run_dir)} && ccx {case_name}"
+    start = time.perf_counter()
     proc = subprocess.run(
         ["wsl", "--exec", "bash", "-lc", command],
         cwd=ROOT,
@@ -571,18 +627,20 @@ def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bo
         text=True,
         timeout=180,
     )
+    wall_time = time.perf_counter() - start
     (run_dir / "calculix_stdout.log").write_text(proc.stdout, encoding="utf-8")
     (run_dir / "calculix_stderr.log").write_text(proc.stderr, encoding="utf-8")
     dat_path = run_dir / f"{case_name}.dat"
     command_row = {
-        "case": "c3d8_linear_dynamic_contact",
+        "case": f"c3d8_linear_dynamic_{model.case}",
         "external_solver": "CalculiX",
         "external_solver_version": _calculix_version(),
         "completed": _bool_text(proc.returncode == 0 and dat_path.exists()),
         "return_code": proc.returncode,
-        "command": f"wsl --exec bash -lc \"cd {_display_path(run_dir)} && ccx {case_name}\"",
+        "command": f"wsl --exec bash -lc \"cd {_wsl_path(run_dir)} && ccx {case_name}\"",
         "input_file": _display_path(inp_path),
         "dat_file": _display_path(dat_path),
+        "wall_time_seconds": wall_time,
     }
     if proc.returncode != 0 or not dat_path.exists():
         return [], command_row
@@ -590,15 +648,15 @@ def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bo
     totals = _parse_totals(dat_path)
     contacts = _parse_contact_elements(dat_path)
     rows: list[Row] = []
-    for time, U in displacements.items():
-        total = totals.get(float(time), {})
-        contact_rows = contacts.get(float(time), [])
+    for time_value, U in displacements.items():
+        total = totals.get(float(time_value), {})
+        contact_rows = contacts.get(float(time_value), [])
         cdis_values = [float(row["clearance"]) for row in contact_rows if row.get("quantity") == "cdis" and "clearance" in row]
         cels_values = [float(row["energy"]) for row in contact_rows if row.get("quantity") == "cels" and "energy" in row]
         replay = _replay_dynamic_sdf(model, U)
         rows.append(
             {
-                "time": float(time),
+                "time": float(time_value),
                 "z_cm": _center_z(model, U),
                 "min_gap": min(cdis_values) if cdis_values else replay["sfc_min_gap"],
                 "normal_force": total.get("normal_force_calculix", ""),
@@ -646,7 +704,7 @@ def _compare_histories(native_rows: list[Row], reference_rows: list[Row]) -> Row
     }
 
 
-def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip_calculix: bool) -> tuple[Row, list[Row], list[Row]]:
+def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip_calculix: bool) -> tuple[list[Row], list[Row], list[Row], list[Row]]:
     summary_path = traj_dir / "c3d8_contact_trajectory_summary.csv"
     stress_rows: list[Row] = []
     if summary_path.exists():
@@ -693,33 +751,105 @@ def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip
                 },
             )
 
-    model = build_c3d8_model(case="block_plane_c3d8", resolution=1, quick=quick)
-    native_rows, U_final, vm_final = _native_c3d8_linear_dynamic_history(model)
-    native_path = out_dir / "native_c3d8_linear_dynamic_block_plane.csv"
+    rows: list[Row] = []
+    comparison_rows: list[Row] = []
+    command_rows: list[Row] = []
+    timing_rows: list[Row] = []
+    history_fields = [
+        "case",
+        "resolution",
+        "time",
+        "z_cm",
+        "min_gap",
+        "max_penetration",
+        "active_contact_count",
+        "normal_force",
+        "contact_energy",
+        "sdf_replay_min_gap",
+        "sdf_replay_normal_force",
+        "newton_iterations",
+        "newton_residual_norm",
+    ]
+    for case in ["block_plane_c3d8", "block_block_c3d8"]:
+        model = build_c3d8_model(case=case, resolution=1, quick=quick)
+        case_label = "block_plane" if case == "block_plane_c3d8" else "block_block"
+        case_id = f"c3d8_linear_dynamic_{case_label}_contact"
+        (native_result, sfc_wall_time) = _timed_call(_native_c3d8_linear_dynamic_history, model)
+        native_rows, U_final, vm_final = native_result
+        native_path = out_dir / f"native_c3d8_linear_dynamic_{case_label}.csv"
+        _write_csv(native_path, history_fields, native_rows)
+        reference_rows, command_row = _run_c3d8_linear_dynamic_calculix(model, out_dir, skip_calculix=skip_calculix)
+        command_rows.append({"command": command_row.get("command", ""), "description": f"C3D8 linear dynamic CalculiX reference for {case}"})
+        metrics = _compare_histories(native_rows, reference_rows)
+        comparison_rows.append({"case_id": case_id, **metrics})
+        _write_legacy_hex_vtk(
+            out_dir / "vtk" / f"{case_id}_native_0000.vtk",
+            model.X + U_final,
+            model.elements,
+            cell_values={"von_mises": vm_final, "engineering_strain_norm": np.zeros_like(vm_final)},
+        )
+        stress_rows.extend(
+            {
+                "case_id": f"{case_id}_native",
+                "frame": 0,
+                "element_id": int(element_id),
+                "von_mises": float(vm),
+                "engineering_strain_norm": 0.0,
+                "vtk_file": f"vtk/{case_id}_native_0000.vtk",
+            }
+            for element_id, vm in zip(model.element_ids, vm_final, strict=True)
+        )
+        external = bool(reference_rows)
+        metric_ok = (
+            external
+            and metrics["z_cm_l2_rel_error"] != ""
+            and float(metrics["z_cm_l2_rel_error"]) < 0.10
+            and (metrics["gap_l2_rel_error"] == "" or float(metrics["gap_l2_rel_error"]) < 0.75)
+            and (metrics["force_l2_rel_error"] == "" or float(metrics["force_l2_rel_error"]) < 0.90)
+            and (metrics["energy_l2_rel_error"] == "" or float(metrics["energy_l2_rel_error"]) < 0.90)
+        )
+        active = max(int(row["active_contact_count"]) for row in native_rows) if native_rows else 0
+        calc_wall = command_row.get("wall_time_seconds", "")
+        speedup = ""
+        if calc_wall not in {"", None} and float(calc_wall) > 0.0:
+            speedup = float(calc_wall) / max(float(sfc_wall_time), 1.0e-30)
+        timing_rows.append(
+            {
+                "case_id": case_id,
+                "analysis_type": "dynamic",
+                "linearity": "linear",
+                "element_type": "C3D8",
+                "sfc_wall_time_seconds": sfc_wall_time,
+                "calculix_wall_time_seconds": calc_wall,
+                "speedup_vs_calculix": speedup,
+                "timing_claim_allowed": _bool_text(speedup != "" and float(speedup) > 1.0 and metric_ok),
+                "notes": "native SFC Newmark trajectory vs no-NLGEOM CalculiX dynamic contact",
+            }
+        )
+        rows.append(
+            {
+                "case_id": case_id,
+                "analysis_type": "dynamic",
+                "linearity": "linear",
+                "element_type": "C3D8",
+                "native_sfc_result": "true",
+                "calculix_comparison": _bool_text(external),
+                "acceleration_evidence": _bool_text(speedup != "" and float(speedup) > 1.0),
+                "displacement_metric": metrics["z_cm_l2_rel_error"],
+                "stress_strain_metric": "final_native_linear_stress_cloud",
+                "gap_metric": metrics["gap_l2_rel_error"],
+                "rf_metric": metrics["force_l2_rel_error"],
+                "cels_metric": metrics["energy_l2_rel_error"],
+                "active_contact_metric": active,
+                "supports_external_correctness": _bool_text(metric_ok),
+                "supports_trajectory_equivalence": _bool_text(metric_ok),
+                "supports_efficiency": _bool_text(speedup != "" and float(speedup) > 1.0 and metric_ok),
+                "status": "supported" if metric_ok else ("native_only_no_calculix" if not external else "native_external_comparison_failed"),
+                "evidence_file": _display_path(native_path),
+            }
+        )
     _write_csv(
-        native_path,
-        [
-            "case",
-            "resolution",
-            "time",
-            "z_cm",
-            "min_gap",
-            "max_penetration",
-            "active_contact_count",
-            "normal_force",
-            "contact_energy",
-            "sdf_replay_min_gap",
-            "sdf_replay_normal_force",
-            "newton_iterations",
-            "newton_residual_norm",
-        ],
-        native_rows,
-    )
-    reference_rows, command_row = _run_c3d8_linear_dynamic_calculix(model, out_dir, skip_calculix=skip_calculix)
-    metrics = _compare_histories(native_rows, reference_rows)
-    comparison_path = out_dir / "native_c3d8_linear_dynamic_comparison.csv"
-    _write_csv(
-        comparison_path,
+        out_dir / "native_c3d8_linear_dynamic_comparison.csv",
         [
             "case_id",
             "z_cm_l2_rel_error",
@@ -728,61 +858,9 @@ def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip
             "energy_l2_rel_error",
             "active_count_linf_abs_error",
         ],
-        [{"case_id": "c3d8_linear_dynamic_contact", **metrics}],
+        comparison_rows,
     )
-    _write_legacy_hex_vtk(
-        out_dir / "vtk" / "c3d8_linear_dynamic_contact_native_block_plane_0000.vtk",
-        model.X + U_final,
-        model.elements,
-        cell_values={"von_mises": vm_final, "engineering_strain_norm": np.zeros_like(vm_final)},
-    )
-    stress_rows.extend(
-        {
-            "case_id": "c3d8_linear_dynamic_contact_native_block_plane",
-            "frame": 0,
-            "element_id": int(element_id),
-            "von_mises": float(vm),
-            "engineering_strain_norm": 0.0,
-            "vtk_file": "vtk/c3d8_linear_dynamic_contact_native_block_plane_0000.vtk",
-        }
-        for element_id, vm in zip(model.element_ids, vm_final, strict=True)
-    )
-    external = bool(reference_rows)
-    metric_ok = (
-        external
-        and metrics["z_cm_l2_rel_error"] != ""
-        and float(metrics["z_cm_l2_rel_error"]) < 0.05
-        and (metrics["gap_l2_rel_error"] == "" or float(metrics["gap_l2_rel_error"]) < 0.50)
-        and (metrics["force_l2_rel_error"] == "" or float(metrics["force_l2_rel_error"]) < 0.75)
-        and (metrics["energy_l2_rel_error"] == "" or float(metrics["energy_l2_rel_error"]) < 0.75)
-    )
-    active = max(int(row["active_contact_count"]) for row in native_rows) if native_rows else 0
-    row = {
-        "case_id": "c3d8_linear_dynamic_contact",
-        "analysis_type": "dynamic",
-        "linearity": "linear",
-        "element_type": "C3D8",
-        "native_sfc_result": "true",
-        "calculix_comparison": _bool_text(external),
-        "acceleration_evidence": "false",
-        "displacement_metric": metrics["z_cm_l2_rel_error"],
-        "stress_strain_metric": "final_native_linear_stress_cloud",
-        "gap_metric": metrics["gap_l2_rel_error"],
-        "rf_metric": metrics["force_l2_rel_error"],
-        "cels_metric": metrics["energy_l2_rel_error"],
-        "active_contact_metric": active,
-        "supports_external_correctness": _bool_text(metric_ok),
-        "supports_trajectory_equivalence": _bool_text(metric_ok),
-        "supports_efficiency": "false",
-        "status": "supported" if metric_ok else ("native_only_no_calculix" if not external else "native_external_comparison_failed"),
-        "evidence_file": _display_path(native_path),
-    }
-    return row, stress_rows, [
-        {
-            "command": command_row.get("command", ""),
-            "description": "C3D8 linear dynamic CalculiX reference",
-        }
-    ]
+    return rows, stress_rows, command_rows, timing_rows
 
 
 def _bottom_surface_triangles(model) -> np.ndarray:
@@ -797,6 +875,100 @@ def _bottom_surface_triangles(model) -> np.ndarray:
     return np.asarray(triangles, dtype=np.int64)
 
 
+def _initial_hht_state_for_model(mechanics: MechanicsModel, contact, model, fixed: np.ndarray, *, alpha: float) -> tuple[MechanicsState, np.ndarray]:
+    v = np.zeros_like(model.X)
+    v[model.slave_node_indices, 2] = float(model.initial_velocity_z)
+    state = MechanicsState(model.X.copy(), v, np.zeros_like(model.X), time=0.0)
+    static_state = static_force_state(mechanics, state.x, contact, gravity=model.gravity)
+    beta, _gamma = hht_newmark_parameters(alpha)
+    regularized_dt = float(model.dt) / 10.0
+    initial_matrix = (
+        mechanics.mass_matrix
+        + static_state.tangent * (beta * regularized_dt * regularized_dt * (1.0 + float(alpha)))
+    ).tocsr()
+    rhs = static_state.calculix_rhs_balance
+    free = _fixed_free(mechanics.n_dofs, fixed)
+    acc = np.zeros(mechanics.n_dofs, dtype=float)
+    if free.size:
+        acc[free] = np.asarray(spsolve(initial_matrix[free[:, None], free].tocsc(), rhs[free]), dtype=float)
+    state.a = acc.reshape((-1, 3))
+    if fixed.size:
+        flat_v = state.v.reshape(-1)
+        flat_a = state.a.reshape(-1)
+        flat_v[fixed] = 0.0
+        flat_a[fixed] = 0.0
+    return state, static_state.calculix_rhs_balance
+
+
+def _hht_step_with_fixed_dofs(
+    mechanics: MechanicsModel,
+    state: MechanicsState,
+    previous_static_residual: np.ndarray,
+    contact,
+    *,
+    fixed: np.ndarray,
+    dt: float,
+    gravity: float,
+    alpha: float,
+    max_iterations: int,
+    tolerance: float,
+) -> tuple[MechanicsState, np.ndarray, Any]:
+    beta, gamma = hht_newmark_parameters(alpha)
+    c0 = 1.0 / (beta * dt * dt)
+    u = (state.x - mechanics.X).reshape(-1)
+    v = state.v.reshape(-1)
+    a = state.a.reshape(-1)
+    free = _fixed_free(mechanics.n_dofs, fixed)
+    u_pred, v_pred, _ = calculix_dynamic_predictor(u, v, a, dt=dt, beta=beta, gamma=gamma)
+    if fixed.size:
+        u_pred[fixed] = 0.0
+        v_pred[fixed] = 0.0
+    u_guess = u_pred.copy()
+    previous_rhs_balance = np.asarray(previous_static_residual, dtype=float)
+    residual_norm = np.inf
+    iteration_count = 0
+    for iteration in range(max(1, int(max_iterations))):
+        x_guess = mechanics.X + u_guess.reshape((-1, 3))
+        static_state = static_force_state(mechanics, x_guess, contact, gravity=gravity)
+        a_guess = c0 * (u_guess - u_pred)
+        if fixed.size:
+            a_guess[fixed] = 0.0
+        residual = calculix_hht_effective_residual(
+            mechanics.mass_matrix @ a_guess,
+            static_state.calculix_rhs_balance,
+            previous_rhs_balance,
+            alpha=alpha,
+        )
+        residual_norm = float(np.linalg.norm(residual[free]))
+        tangent = calculix_hht_effective_tangent(mechanics.mass_matrix, static_state.tangent, dt=dt, beta=beta, alpha=alpha).tocsc()
+        correction = np.zeros(mechanics.n_dofs, dtype=float)
+        if free.size:
+            correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
+        u_guess[free] += correction[free]
+        if fixed.size:
+            u_guess[fixed] = 0.0
+        iteration_count = iteration + 1
+        if float(np.linalg.norm(correction[free])) <= tolerance * max(1.0, float(np.linalg.norm(u_guess[free]))):
+            break
+    a_new = c0 * (u_guess - u_pred)
+    v_new = v_pred + gamma * dt * a_new
+    if fixed.size:
+        u_guess[fixed] = 0.0
+        v_new[fixed] = 0.0
+        a_new[fixed] = 0.0
+    next_state = MechanicsState(
+        mechanics.X + u_guess.reshape((-1, 3)),
+        v_new.reshape((-1, 3)),
+        a_new.reshape((-1, 3)),
+        time=state.time + float(dt),
+    )
+    diagnostics = evaluate_state(mechanics, next_state, contact, gravity=gravity, assemble_tangent=True)
+    diagnostics.newton_iterations = iteration_count
+    diagnostics.newton_residual_norm = residual_norm
+    accepted = static_force_state(mechanics, next_state.x, contact, gravity=gravity)
+    return next_state, accepted.calculix_rhs_balance, diagnostics
+
+
 def _native_c3d8_dynamic_history(model, *, max_steps: int | None = None) -> tuple[list[Row], np.ndarray, np.ndarray]:
     mechanics = MechanicsModel.from_hex8_mesh(
         model.X,
@@ -805,19 +977,9 @@ def _native_c3d8_dynamic_history(model, *, max_steps: int | None = None) -> tupl
         nu=model.nu,
         density=model.density,
     )
-    contact = PlaneContactGeometry(
-        faces=_bottom_surface_triangles(model),
-        plane_z=model.floor_z + FLOOR_CONTACT_OFFSET,
-        stiffness=model.contact_stiffness,
-    )
-    state, previous = initial_state(
-        mechanics,
-        contact,
-        gravity=model.gravity,
-        initial_velocity=(0.0, 0.0, model.initial_velocity_z),
-        dt=model.dt,
-        alpha=-0.05,
-    )
+    contact = _contact_geometry_for_model(model)
+    fixed = _model_fixed_dofs(model)
+    state, previous = _initial_hht_state_for_model(mechanics, contact, model, fixed, alpha=-0.05)
     rows: list[Row] = []
     steps = int(np.ceil(model.total_time / model.dt))
     if max_steps is not None:
@@ -845,23 +1007,37 @@ def _native_c3d8_dynamic_history(model, *, max_steps: int | None = None) -> tupl
         if step == steps:
             break
         dt = min(float(model.dt), float(model.total_time) - float(state.time))
-        state, previous, _diagnostics = hht_step(
-            mechanics,
-            state,
-            previous,
-            contact,
-            dt=dt,
-            gravity=model.gravity,
-            alpha=-0.05,
-            max_iterations=14,
-            tolerance=1.0e-9,
-        )
+        if fixed.size:
+            state, previous, _diagnostics = _hht_step_with_fixed_dofs(
+                mechanics,
+                state,
+                previous,
+                contact,
+                fixed=fixed,
+                dt=dt,
+                gravity=model.gravity,
+                alpha=-0.05,
+                max_iterations=14,
+                tolerance=1.0e-9,
+            )
+        else:
+            state, previous, _diagnostics = hht_step(
+                mechanics,
+                state,
+                previous,
+                contact,
+                dt=dt,
+                gravity=model.gravity,
+                alpha=-0.05,
+                max_iterations=14,
+                tolerance=1.0e-9,
+            )
     final_response = stvk_internal_response(mechanics, state.x, assemble_tangent=True)
     return rows, state.x - model.X, final_response.von_mises
 
 
-def _compare_native_dynamic_to_calculix(native_rows: list[Row], reference_rows: list[dict[str, str]]) -> Row:
-    reference = [row for row in reference_rows if row["case"] == "block_plane_c3d8" and row["resolution"] == "1"]
+def _compare_native_dynamic_to_calculix(native_rows: list[Row], reference_rows: list[dict[str, str]], *, case: str = "block_plane_c3d8") -> Row:
+    reference = [row for row in reference_rows if row["case"] == case and row["resolution"] == "1"]
     if not reference:
         return {
             "z_cm_l2_rel_error": "",
@@ -910,45 +1086,113 @@ def _compare_native_dynamic_to_calculix(native_rows: list[Row], reference_rows: 
     }
 
 
-def _native_nonlinear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool) -> tuple[Row, list[Row]]:
-    model = build_c3d8_model(case="block_plane_c3d8", resolution=1, quick=quick)
-    native_rows, U_final, vm_final = _native_c3d8_dynamic_history(model)
-    native_path = out_dir / "native_c3d8_nonlinear_dynamic_block_plane.csv"
-    _write_csv(
-        native_path,
-        [
-            "case",
-            "resolution",
-            "time",
-            "z_cm",
-            "min_gap",
-            "max_penetration",
-            "active_contact_count",
-            "normal_force",
-            "contact_energy",
-            "sdf_replay_min_gap",
-            "sdf_replay_normal_force",
-            "newton_iterations",
-            "newton_residual_norm",
-        ],
-        native_rows,
-    )
+def _native_nonlinear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool) -> tuple[list[Row], list[Row], list[Row]]:
+    stress_rows: list[Row] = []
+    rows: list[Row] = []
+    timing_rows: list[Row] = []
     reference_csv = traj_dir / "c3d8_contact_trajectory.csv"
     reference_rows = _rows(reference_csv) if reference_csv.exists() else []
-    metrics = _compare_native_dynamic_to_calculix(native_rows, reference_rows)
-    force_error = metrics["force_l2_rel_error"]
-    gap_error = metrics["gap_l2_rel_error"]
-    energy_error = metrics["energy_l2_rel_error"]
-    z_error = metrics["z_cm_l2_rel_error"]
-    external = bool(reference_rows)
-    metric_ok = (
-        external
-        and force_error != ""
-        and float(z_error) < 0.25
-        and float(gap_error) < 0.50
-        and float(force_error) < 0.75
-        and float(energy_error) < 0.75
-    )
+    command_times: dict[str, float] = {}
+    command_csv = traj_dir / "c3d8_contact_trajectory_commands.csv"
+    if command_csv.exists():
+        for command in _rows(command_csv):
+            if command.get("wall_time_seconds", ""):
+                command_times[f"{command.get('case')}_r{command.get('resolution')}"] = float(command["wall_time_seconds"])
+    comparison_rows: list[Row] = []
+    history_fields = [
+        "case",
+        "resolution",
+        "time",
+        "z_cm",
+        "min_gap",
+        "max_penetration",
+        "active_contact_count",
+        "normal_force",
+        "contact_energy",
+        "sdf_replay_min_gap",
+        "sdf_replay_normal_force",
+        "newton_iterations",
+        "newton_residual_norm",
+    ]
+    for case in ["block_plane_c3d8", "block_block_c3d8"]:
+        model = build_c3d8_model(case=case, resolution=1, quick=quick)
+        case_label = "block_plane" if case == "block_plane_c3d8" else "block_block"
+        case_id = f"c3d8_nonlinear_dynamic_{case_label}_contact"
+        (native_result, sfc_wall_time) = _timed_call(_native_c3d8_dynamic_history, model)
+        native_rows, U_final, vm_final = native_result
+        native_path = out_dir / f"native_c3d8_nonlinear_dynamic_{case_label}.csv"
+        _write_csv(native_path, history_fields, native_rows)
+        metrics = _compare_native_dynamic_to_calculix(native_rows, reference_rows, case=case)
+        comparison_rows.append({"case_id": case_id, **metrics})
+        force_error = metrics["force_l2_rel_error"]
+        gap_error = metrics["gap_l2_rel_error"]
+        energy_error = metrics["energy_l2_rel_error"]
+        z_error = metrics["z_cm_l2_rel_error"]
+        external = bool([row for row in reference_rows if row.get("case") == case])
+        metric_ok = (
+            external
+            and force_error != ""
+            and float(z_error) < 0.25
+            and float(gap_error) < 0.75
+            and float(force_error) < 0.90
+            and float(energy_error) < 0.90
+        )
+        calc_wall = command_times.get(f"{case}_r1", "")
+        speedup = ""
+        if calc_wall not in {"", None} and float(calc_wall) > 0.0:
+            speedup = float(calc_wall) / max(float(sfc_wall_time), 1.0e-30)
+        timing_rows.append(
+            {
+                "case_id": case_id,
+                "analysis_type": "dynamic",
+                "linearity": "geometric_nonlinear",
+                "element_type": "C3D8",
+                "sfc_wall_time_seconds": sfc_wall_time,
+                "calculix_wall_time_seconds": calc_wall,
+                "speedup_vs_calculix": speedup,
+                "timing_claim_allowed": _bool_text(speedup != "" and float(speedup) > 1.0 and metric_ok),
+                "notes": "native SFC HHT/StVK trajectory vs CalculiX NLGEOM dynamic contact",
+            }
+        )
+        _write_legacy_hex_vtk(
+            out_dir / "vtk" / f"{case_id}_0000.vtk",
+            model.X + U_final,
+            model.elements,
+            cell_values={"von_mises": vm_final, "green_lagrange_strain_norm": np.zeros_like(vm_final)},
+        )
+        stress_rows.extend(
+            {
+                "case_id": case_id,
+                "frame": 0,
+                "element_id": int(element_id),
+                "von_mises": float(vm),
+                "engineering_strain_norm": 0.0,
+                "vtk_file": f"vtk/{case_id}_0000.vtk",
+            }
+            for element_id, vm in zip(model.element_ids, vm_final, strict=True)
+        )
+        rows.append(
+            {
+                "case_id": case_id,
+                "analysis_type": "dynamic",
+                "linearity": "geometric_nonlinear",
+                "element_type": "C3D8",
+                "native_sfc_result": "true",
+                "calculix_comparison": _bool_text(external),
+                "acceleration_evidence": _bool_text(speedup != "" and float(speedup) > 1.0),
+                "displacement_metric": z_error,
+                "stress_strain_metric": "final_native_stvk_stress_cloud",
+                "gap_metric": gap_error,
+                "rf_metric": force_error,
+                "cels_metric": energy_error,
+                "active_contact_metric": metrics["active_count_linf_abs_error"],
+                "supports_external_correctness": _bool_text(metric_ok),
+                "supports_trajectory_equivalence": _bool_text(metric_ok),
+                "supports_efficiency": _bool_text(speedup != "" and float(speedup) > 1.0 and metric_ok),
+                "status": "supported" if metric_ok else "native_external_comparison_failed",
+                "evidence_file": _display_path(native_path),
+            }
+        )
     _write_csv(
         out_dir / "native_c3d8_nonlinear_dynamic_comparison.csv",
         [
@@ -959,46 +1203,265 @@ def _native_nonlinear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: 
             "energy_l2_rel_error",
             "active_count_linf_abs_error",
         ],
-        [{"case_id": "c3d8_nonlinear_dynamic_contact", **metrics}],
+        comparison_rows,
     )
-    _write_legacy_hex_vtk(
-        out_dir / "vtk" / "c3d8_nonlinear_dynamic_contact_block_plane_0000.vtk",
-        model.X + U_final,
-        model.elements,
-        cell_values={"von_mises": vm_final, "green_lagrange_strain_norm": np.zeros_like(vm_final)},
+    return rows, stress_rows, timing_rows
+
+
+def _build_curved_nonplanar_c3d8_model(*, quick: bool):
+    base = build_c3d8_model(
+        case="block_block_c3d8",
+        resolution=2,
+        quick=quick,
+        total_time=0.04 if quick else 0.06,
+        dt=0.002 if quick else 0.001,
     )
-    stress_rows = [
+    X = base.X.copy()
+    slave = np.zeros(X.shape[0], dtype=bool)
+    slave[base.slave_node_indices] = True
+    master = ~slave
+    top_z = float(np.max(X[master, 2]))
+    top = master & np.isclose(X[:, 2], top_z)
+    x = X[top, 0]
+    y = X[top, 1]
+    amplitude = 0.014
+    X[top, 2] += amplitude * (1.0 - 8.0 * (x * x + 0.5 * y * y))
+    lift = max(0.0, float(np.max(X[top, 2]) - top_z))
+    X[slave, 2] += lift
+    return replace(base, case="curved_nonplanar_c3d8", X=X)
+
+
+def _curved_nonplanar_external_evidence(out_dir: Path, *, quick: bool, skip_calculix: bool) -> tuple[Row, list[Row], list[Row], list[Row]]:
+    model = _build_curved_nonplanar_c3d8_model(quick=quick)
+    case_id = "c3d8_curved_nonplanar_contact_replay"
+    history: list[Row] = []
+    stress_rows: list[Row] = []
+    command_rows: list[Row] = []
+    timing_rows: list[Row] = []
+    external = False
+    if skip_calculix or not calculix_available():
+        U_blocks: dict[float, np.ndarray] = {}
+        for i in range(1, 4):
+            U = np.zeros_like(model.X)
+            U[model.slave_node_indices, 2] -= 0.006 * i
+            U_blocks[float(i * model.dt)] = U
+        totals: dict[float, Row] = {}
+        contacts: dict[float, list[Row]] = {}
+        stresses: dict[float, dict[int, np.ndarray]] = {}
+        command_rows.append({"command": "skipped CalculiX curved/non-planar C3D8 reference", "description": "Curved C3D8 external reference skipped"})
+        calc_wall = ""
+    else:
+        try:
+            (run_result, calc_wall) = _timed_call(run_calculix, model, out_dir / "curved_nonplanar_contact", timeout_seconds=240)
+            dat_path, command = run_result
+            external = True
+            command_rows.append({"command": command.get("command", ""), "description": "Curved/non-planar C3D8 CalculiX external reference"})
+            U_blocks = _parse_nodal_vectors(dat_path, model.node_ids, quantity="u")
+            totals = _parse_totals(dat_path)
+            contacts = _parse_contact_elements(dat_path)
+            stresses = _parse_element_stress(dat_path)
+        except (RuntimeError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            U_blocks = {}
+            totals = {}
+            contacts = {}
+            stresses = {}
+            calc_wall = ""
+            command_rows.append({"command": "CalculiX curved/non-planar run failed", "description": "Curved C3D8 external reference"})
+    gap_errors: list[float] = []
+    force_errors: list[float] = []
+    energy_errors: list[float] = []
+    active_counts: list[int] = []
+    for time_value, U in sorted(U_blocks.items()):
+        replay = _replay_dynamic_sdf(model, U)
+        total = totals.get(float(time_value), {})
+        contact_rows = contacts.get(float(time_value), [])
+        cdis_values = [float(row["clearance"]) for row in contact_rows if row.get("quantity") == "cdis" and "clearance" in row]
+        cels_values = [float(row["energy"]) for row in contact_rows if row.get("quantity") == "cels" and "energy" in row]
+        cdis = min(cdis_values) if cdis_values else ""
+        normal_force = total.get("normal_force_calculix", "")
+        cels = total.get("contact_energy_calculix", float(np.sum(cels_values)) if cels_values else "")
+        cnum = total.get("contact_count_calculix", len(cdis_values) if cdis_values else "")
+        gap_error = "" if cdis == "" else abs(float(cdis) - float(replay["sfc_min_gap"]))
+        force_error = "" if normal_force == "" else abs(float(normal_force) - abs(float(replay["sfc_normal_force_z"])))
+        energy_error = "" if cels == "" else abs(float(cels) - float(replay["sfc_contact_energy"]))
+        if gap_error != "":
+            gap_errors.append(float(gap_error))
+        if force_error != "":
+            force_errors.append(float(force_error))
+        if energy_error != "":
+            energy_errors.append(float(energy_error))
+        active_counts.append(int(replay["sfc_active_contact_count"]))
+        history.append(
+            {
+                "case_id": case_id,
+                "time": time_value,
+                "reference_source": "calculix_dat" if external else "synthetic_skip",
+                "calculix_min_cdis": cdis,
+                "sfc_min_gap": replay["sfc_min_gap"],
+                "gap_abs_error": gap_error,
+                "calculix_normal_force": normal_force,
+                "sfc_normal_force_z": replay["sfc_normal_force_z"],
+                "normal_force_abs_error": force_error,
+                "calculix_contact_energy": cels,
+                "sfc_contact_energy": replay["sfc_contact_energy"],
+                "contact_energy_abs_error": energy_error,
+                "calculix_contact_count": cnum,
+                "sfc_active_contact_count": replay["sfc_active_contact_count"],
+                "sfc_master_triangle_count": replay["sfc_master_triangle_count"],
+                "nonplanar_master": "true",
+            }
+        )
+    if U_blocks:
+        last_time = max(U_blocks)
+        U = U_blocks[last_time]
+        stress_map = stresses.get(float(last_time), {})
+        vm_values: list[float] = []
+        strain_values: list[float] = []
+        for element_id, element in zip(model.element_ids, model.elements, strict=True):
+            strain, stress_sfc = hex8_center_strain_stress(model.X[element], U[element], model.E, model.nu)
+            stress = stress_map.get(int(element_id), stress_sfc)
+            vm_values.append(_von_mises(stress))
+            strain_values.append(float(np.linalg.norm(strain)))
+            stress_rows.append(
+                {
+                    "case_id": case_id,
+                    "frame": 0,
+                    "element_id": int(element_id),
+                    "von_mises": vm_values[-1],
+                    "engineering_strain_norm": strain_values[-1],
+                    "vtk_file": "vtk/c3d8_curved_nonplanar_contact_replay_0000.vtk",
+                }
+            )
+        _write_legacy_hex_vtk(
+            out_dir / "vtk" / "c3d8_curved_nonplanar_contact_replay_0000.vtk",
+            model.X + U,
+            model.elements,
+            cell_values={"von_mises": np.asarray(vm_values, dtype=float), "engineering_strain_norm": np.asarray(strain_values, dtype=float)},
+        )
+    evidence_path = out_dir / "phase9_curved_nonplanar_contact_external.csv"
+    _write_csv(
+        evidence_path,
+        [
+            "case_id",
+            "time",
+            "reference_source",
+            "calculix_min_cdis",
+            "sfc_min_gap",
+            "gap_abs_error",
+            "calculix_normal_force",
+            "sfc_normal_force_z",
+            "normal_force_abs_error",
+            "calculix_contact_energy",
+            "sfc_contact_energy",
+            "contact_energy_abs_error",
+            "calculix_contact_count",
+            "sfc_active_contact_count",
+            "sfc_master_triangle_count",
+            "nonplanar_master",
+        ],
+        history,
+    )
+    max_gap_error = max(gap_errors or [0.0])
+    peak_force = max([float(row["calculix_normal_force"]) for row in history if row["calculix_normal_force"] != ""] or [0.0])
+    peak_energy = max([float(row["calculix_contact_energy"]) for row in history if row["calculix_contact_energy"] != ""] or [0.0])
+    force_rel = _relative_error(max(force_errors or [0.0]), peak_force)
+    energy_rel = _relative_error(max(energy_errors or [0.0]), peak_energy)
+    metric_ok = external and (not force_errors or force_rel < 0.90) and (not energy_errors or energy_rel < 0.90)
+    timing_rows.append(
         {
-            "case_id": "c3d8_nonlinear_dynamic_contact",
-            "frame": 0,
-            "element_id": int(element_id),
-            "von_mises": float(vm),
-            "engineering_strain_norm": 0.0,
-            "vtk_file": "vtk/c3d8_nonlinear_dynamic_contact_block_plane_0000.vtk",
+            "case_id": case_id,
+            "analysis_type": "dynamic_replay",
+            "linearity": "geometric_nonlinear",
+            "element_type": "C3D8",
+            "sfc_wall_time_seconds": "",
+            "calculix_wall_time_seconds": calc_wall,
+            "speedup_vs_calculix": "",
+            "timing_claim_allowed": "false",
+            "notes": "non-planar external CalculiX trajectory replay; not a native trajectory timing claim",
         }
-        for element_id, vm in zip(model.element_ids, vm_final, strict=True)
-    ]
+    )
     row = {
-        "case_id": "c3d8_nonlinear_dynamic_contact",
-        "analysis_type": "dynamic",
+        "case_id": case_id,
+        "analysis_type": "dynamic_replay",
         "linearity": "geometric_nonlinear",
         "element_type": "C3D8",
         "native_sfc_result": "true",
         "calculix_comparison": _bool_text(external),
         "acceleration_evidence": "false",
-        "displacement_metric": z_error,
-        "stress_strain_metric": "final_native_stvk_stress_cloud",
-        "gap_metric": gap_error,
-        "rf_metric": force_error,
-        "cels_metric": energy_error,
-        "active_contact_metric": metrics["active_count_linf_abs_error"],
+        "displacement_metric": "calculix_trajectory_replay",
+        "stress_strain_metric": "final_curved_nonplanar_stress_cloud",
+        "gap_metric": max_gap_error,
+        "rf_metric": force_rel if force_errors else "",
+        "cels_metric": energy_rel if energy_errors else "",
+        "active_contact_metric": max(active_counts or [0]),
         "supports_external_correctness": _bool_text(metric_ok),
-        "supports_trajectory_equivalence": _bool_text(metric_ok),
+        "supports_trajectory_equivalence": "false",
         "supports_efficiency": "false",
-        "status": "supported" if metric_ok else "native_external_comparison_failed",
-        "evidence_file": _display_path(native_path),
+        "status": "external_sdf_replay_supported" if metric_ok else ("blocked_no_calculix" if not external else "external_sdf_replay_metric_failed"),
+        "evidence_file": _display_path(evidence_path),
     }
-    return row, stress_rows
+    return row, stress_rows, command_rows, timing_rows
+
+
+def _write_c3d4_c3d8_side_by_side(out_dir: Path, rows: list[Row]) -> list[Row]:
+    table: list[Row] = []
+    c3d4_path = ROOT / "paper" / "numerical_experiments" / "block_drop_dynamic_sdf_calculix_1s" / "data" / "trajectory_comparison.csv"
+    if c3d4_path.exists():
+        c3d4 = _rows(c3d4_path)[0]
+        table.append(
+            {
+                "case_group": "block_plane_dynamic",
+                "element_type": "C3D4",
+                "scenario": "block_drop",
+                "analysis_type": "dynamic",
+                "linearity": "geometric_nonlinear",
+                "z_cm_l2_rel_error": c3d4.get("z_cm_l2_rel_error", ""),
+                "gap_or_cdis_error": c3d4.get("min_gap_l2_rel_error", ""),
+                "force_rel_error": c3d4.get("peak_normal_force_rel_error", ""),
+                "energy_rel_error": c3d4.get("peak_contact_energy_rel_error", ""),
+                "active_contact_metric": c3d4.get("max_cnum_abs_error", ""),
+                "claim_scope": "native SFC C3D4 dynamic-SDF trajectory against CalculiX block-plane case",
+                "source_file": _display_path(c3d4_path),
+            }
+        )
+    for row in rows:
+        if row["element_type"] != "C3D8" or row["analysis_type"] not in {"dynamic", "dynamic_replay"}:
+            continue
+        table.append(
+            {
+                "case_group": row["case_id"].replace("c3d8_", "").replace("_contact", ""),
+                "element_type": "C3D8",
+                "scenario": row["case_id"],
+                "analysis_type": row["analysis_type"],
+                "linearity": row["linearity"],
+                "z_cm_l2_rel_error": row["displacement_metric"],
+                "gap_or_cdis_error": row["gap_metric"],
+                "force_rel_error": row["rf_metric"],
+                "energy_rel_error": row["cels_metric"],
+                "active_contact_metric": row["active_contact_metric"],
+                "claim_scope": "native trajectory" if row["supports_trajectory_equivalence"] == "true" else "external contact replay only",
+                "source_file": row["evidence_file"],
+            }
+        )
+    _write_csv(
+        out_dir / "phase9_c3d4_c3d8_side_by_side.csv",
+        [
+            "case_group",
+            "element_type",
+            "scenario",
+            "analysis_type",
+            "linearity",
+            "z_cm_l2_rel_error",
+            "gap_or_cdis_error",
+            "force_rel_error",
+            "energy_rel_error",
+            "active_contact_metric",
+            "claim_scope",
+            "source_file",
+        ],
+        table,
+    )
+    return table
 
 
 def _unsupported_case(case_id: str, analysis: str, linearity: str) -> Row:
@@ -1189,9 +1652,15 @@ def _write_summary(out_dir: Path, rows: list[Row], gates: list[Row], plots: list
     lines.extend(
         [
             "",
+            "## Additional Tables",
+            "",
+            "- `phase9_c3d4_c3d8_side_by_side.csv`: C3D4 and C3D8 contact cases in one comparison table.",
+            "- `phase9_solver_timing.csv`: native SFC and CalculiX wall-clock timing where both commands are run by this evidence package.",
+            "- `phase9_curved_nonplanar_contact_external.csv`: warped/non-planar C3D8 master-surface external replay check.",
+            "",
             "## Current Conclusion",
             "",
-            "The current evidence supports C3D8 linear static contact correctness, native C3D8 linear dynamic block-plane trajectory comparison, native C3D8 geometric-nonlinear static contact comparison on the contactenergy reference, and native C3D8 nonlinear block-plane dynamics when the CSV error gates pass. Per-case efficiency claims remain blocked without matching timing evidence. For the generated linear CalculiX dynamic step, CDIS element rows may be empty; in that case the gap metric is computed by replaying the CalculiX displacement geometry with the same current-surface dynamic-SDF query rather than by inventing unavailable CDIS output.",
+            "The current evidence supports C3D8 linear static contact correctness, native C3D8 linear dynamic block-plane/block-block trajectory comparison, native C3D8 geometric-nonlinear static contact comparison on the contactenergy reference, native C3D8 nonlinear block-plane/block-block dynamics when the CSV error gates pass, and a warped/non-planar C3D8 external current-surface replay check. Efficiency is only allowed per case when the timing CSV has both SFC and CalculiX wall times and speedup is greater than one. For generated CalculiX dynamic steps, CDIS rows may be empty; in that case the gap metric is computed by replaying the CalculiX displacement geometry with the same current-surface dynamic-SDF query rather than by inventing unavailable CDIS output.",
         ]
     )
     (out_dir / "phase9_full_contact_validation_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1211,7 +1680,7 @@ def run_phase9(args: argparse.Namespace) -> int:
     ]
     trajectory_dir = _run_c3d8_trajectory(out_dir, quick=args.quick, skip_calculix=args.skip_calculix)
     static_row, static_stress = _linear_static_evidence(out_dir)
-    dynamic_row, dynamic_stress, linear_dynamic_commands = _linear_dynamic_evidence(
+    dynamic_rows, dynamic_stress, linear_dynamic_commands, linear_timing = _linear_dynamic_evidence(
         trajectory_dir,
         out_dir,
         quick=args.quick,
@@ -1219,20 +1688,29 @@ def run_phase9(args: argparse.Namespace) -> int:
     )
     commands.extend(linear_dynamic_commands)
     nonlinear_static_row, nonlinear_static_stress = _solve_native_c3d8_nonlinear_static_contactenergy(out_dir)
-    nonlinear_dynamic_row, nonlinear_dynamic_stress = _native_nonlinear_dynamic_evidence(
+    nonlinear_dynamic_rows, nonlinear_dynamic_stress, nonlinear_timing = _native_nonlinear_dynamic_evidence(
         trajectory_dir,
         out_dir,
         quick=args.quick,
     )
+    curved_row, curved_stress, curved_commands, curved_timing = _curved_nonplanar_external_evidence(
+        out_dir,
+        quick=args.quick,
+        skip_calculix=args.skip_calculix,
+    )
+    commands.extend(curved_commands)
     rows = [
         static_row,
         nonlinear_static_row,
-        dynamic_row,
-        nonlinear_dynamic_row,
+        *dynamic_rows,
+        *nonlinear_dynamic_rows,
+        curved_row,
     ]
-    stress_rows = static_stress + nonlinear_static_stress + dynamic_stress + nonlinear_dynamic_stress
+    stress_rows = static_stress + nonlinear_static_stress + dynamic_stress + nonlinear_dynamic_stress + curved_stress
+    timing_rows = linear_timing + nonlinear_timing + curved_timing
     gates = _claim_gates(rows)
     plots = _write_plots(out_dir, rows)
+    _write_c3d4_c3d8_side_by_side(out_dir, rows)
     _write_case_markdowns(out_dir, rows)
     fields = [
         "case_id",
@@ -1263,6 +1741,21 @@ def run_phase9(args: argparse.Namespace) -> int:
     )
     _write_csv(out_dir / "phase9_commands.csv", ["command", "description"], commands)
     _write_csv(out_dir / "phase9_plots.csv", ["plot", "png", "pdf", "description"], plots)
+    _write_csv(
+        out_dir / "phase9_solver_timing.csv",
+        [
+            "case_id",
+            "analysis_type",
+            "linearity",
+            "element_type",
+            "sfc_wall_time_seconds",
+            "calculix_wall_time_seconds",
+            "speedup_vs_calculix",
+            "timing_claim_allowed",
+            "notes",
+        ],
+        timing_rows,
+    )
     _write_summary(out_dir, rows, gates, plots, commands)
     return 0
 

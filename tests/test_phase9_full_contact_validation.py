@@ -38,11 +38,16 @@ def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
         "phase9_stress_strain_cloud.csv",
         "phase9_commands.csv",
         "phase9_plots.csv",
+        "phase9_solver_timing.csv",
+        "phase9_c3d4_c3d8_side_by_side.csv",
+        "phase9_curved_nonplanar_contact_external.csv",
         "phase9_full_contact_validation_summary.md",
         "native_c3d8_linear_dynamic_block_plane.csv",
+        "native_c3d8_linear_dynamic_block_block.csv",
         "native_c3d8_linear_dynamic_comparison.csv",
         "native_c3d8_nonlinear_static_contactenergy.csv",
         "native_c3d8_nonlinear_dynamic_block_plane.csv",
+        "native_c3d8_nonlinear_dynamic_block_block.csv",
         "native_c3d8_nonlinear_dynamic_comparison.csv",
     ]
     for name in expected:
@@ -54,27 +59,37 @@ def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
     assert {row["case_id"] for row in rows} == {
         "c3d8_linear_static_contact",
         "c3d8_nonlinear_static_contact",
-        "c3d8_linear_dynamic_contact",
-        "c3d8_nonlinear_dynamic_contact",
+        "c3d8_linear_dynamic_block_plane_contact",
+        "c3d8_linear_dynamic_block_block_contact",
+        "c3d8_nonlinear_dynamic_block_plane_contact",
+        "c3d8_nonlinear_dynamic_block_block_contact",
+        "c3d8_curved_nonplanar_contact_replay",
     }
     by_case = {row["case_id"]: row for row in rows}
     assert by_case["c3d8_linear_static_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_linear_static_contact"]["calculix_comparison"] == "true"
-    assert by_case["c3d8_linear_dynamic_contact"]["native_sfc_result"] == "true"
-    assert by_case["c3d8_linear_dynamic_contact"]["status"] in {
+    assert by_case["c3d8_linear_dynamic_block_plane_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_linear_dynamic_block_plane_contact"]["status"] in {
         "supported",
         "native_only_no_calculix",
         "native_external_comparison_failed",
     }
-    assert by_case["c3d8_linear_dynamic_contact"]["supports_trajectory_equivalence"] == "false"
+    assert by_case["c3d8_linear_dynamic_block_plane_contact"]["supports_trajectory_equivalence"] == "false"
+    assert by_case["c3d8_linear_dynamic_block_block_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["calculix_comparison"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["status"] == "supported"
-    assert by_case["c3d8_nonlinear_dynamic_contact"]["native_sfc_result"] == "true"
-    assert by_case["c3d8_nonlinear_dynamic_contact"]["status"] in {
+    assert by_case["c3d8_nonlinear_dynamic_block_plane_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_nonlinear_dynamic_block_plane_contact"]["status"] in {
         "supported",
         "native_external_comparison_failed",
     }
+    assert by_case["c3d8_nonlinear_dynamic_block_block_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_nonlinear_dynamic_block_block_contact"]["status"] in {
+        "supported",
+        "native_external_comparison_failed",
+    }
+    assert by_case["c3d8_curved_nonplanar_contact_replay"]["native_sfc_result"] == "true"
 
     gates = _rows(out_dir / "phase9_claim_gates.csv")
     assert all(
@@ -85,7 +100,7 @@ def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
     dynamic_trajectory = [
         row
         for row in gates
-        if row["case_id"] == "c3d8_linear_dynamic_contact" and row["claim"] == "trajectory_equivalence"
+        if row["case_id"] == "c3d8_linear_dynamic_block_plane_contact" and row["claim"] == "trajectory_equivalence"
     ][0]
     assert dynamic_trajectory["allowed"] == "false"
     nonlinear_static_external = [
@@ -103,5 +118,16 @@ def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
         assert figure.stat().st_size > 0, figure
 
     vtk_files = list((out_dir / "vtk").glob("*.vtk"))
-    assert len(vtk_files) >= 5
+    side_by_side = _rows(out_dir / "phase9_c3d4_c3d8_side_by_side.csv")
+    assert {"C3D4", "C3D8"} <= {row["element_type"] for row in side_by_side}
+    timings = _rows(out_dir / "phase9_solver_timing.csv")
+    assert {row["case_id"] for row in timings} >= {
+        "c3d8_linear_dynamic_block_plane_contact",
+        "c3d8_linear_dynamic_block_block_contact",
+        "c3d8_nonlinear_dynamic_block_plane_contact",
+        "c3d8_nonlinear_dynamic_block_block_contact",
+    }
+
+    vtk_files = list((out_dir / "vtk").glob("*.vtk"))
+    assert len(vtk_files) >= 7
     assert all(path.stat().st_size > 0 for path in vtk_files)

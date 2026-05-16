@@ -1,4 +1,4 @@
-# c3d8_nonlinear_dynamic_contact
+# c3d8_nonlinear_dynamic_block_block_contact
 
 - Analysis: `dynamic`
 - Linearity: `geometric_nonlinear`
@@ -10,9 +10,9 @@
 
 ## Metrics
 
-- Displacement: `0.0011151587957023248`
+- Displacement: `0.0002521191019555606`
 - Stress/strain: `final_native_stvk_stress_cloud`
-- Gap/CDIS: `0.01956588919875981`
+- Gap/CDIS: `0.009778893729201741`
 - RF/contact force: `0.0`
 - CELS/contact energy: `0.0`
 - Active contact: `0.0`

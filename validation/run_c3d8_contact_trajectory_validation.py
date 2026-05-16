@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,12 @@ def _write_hex_block_input_lines(lines: list[str], model: C3D8TrajectoryModel) -
             lines.append(", ".join(str(int(value)) for value in floor_element))
 
 
+def _append_id_list(lines: list[str], values: np.ndarray, *, per_line: int = 12) -> None:
+    ids = [str(int(value)) for value in np.asarray(values).ravel()]
+    for start in range(0, len(ids), per_line):
+        lines.append(", ".join(ids[start : start + per_line]))
+
+
 def write_calculix_input(model: C3D8TrajectoryModel, path: Path) -> None:
     """Write the C3D8 dynamic contact case as a CalculiX input file."""
 
@@ -193,9 +200,17 @@ def write_calculix_input(model: C3D8TrajectoryModel, path: Path) -> None:
     lines.extend(
         [
             "*NSET, NSET=NSLAVE",
-            ", ".join(str(int(model.node_ids[idx])) for idx in model.slave_node_indices),
+        ]
+    )
+    _append_id_list(lines, model.node_ids[model.slave_node_indices])
+    lines.extend(
+        [
             "*NSET, NSET=NFIXED",
-            ", ".join(str(int(node_id)) for node_id in model.fixed_node_ids),
+        ]
+    )
+    _append_id_list(lines, model.fixed_node_ids)
+    lines.extend(
+        [
             "*MATERIAL, NAME=MAT",
             "*ELASTIC",
             f"{model.E:.12e}, {model.nu:.12e}",
@@ -466,6 +481,7 @@ def run_calculix(model: C3D8TrajectoryModel, out_dir: Path, *, timeout_seconds: 
     write_calculix_input(model, inp_path)
     wsl_run_dir = _wsl_path(run_dir)
     command = f"cd {wsl_run_dir} && ccx {case_name}"
+    start = time.perf_counter()
     try:
         proc = subprocess.run(
             ["wsl", "--exec", "bash", "-lc", command],
@@ -484,10 +500,11 @@ def run_calculix(model: C3D8TrajectoryModel, out_dir: Path, *, timeout_seconds: 
         timed_out = True
         stdout = exc.stdout.decode("utf-8", errors="ignore") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         stderr = exc.stderr.decode("utf-8", errors="ignore") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+    wall_time = time.perf_counter() - start
     (run_dir / "calculix_stdout.log").write_text(stdout, encoding="utf-8")
     (run_dir / "calculix_stderr.log").write_text(stderr, encoding="utf-8")
     dat_path = run_dir / f"{case_name}.dat"
-    if not dat_path.exists():
+    if return_code != 0 or not dat_path.exists() or dat_path.stat().st_size == 0:
         raise RuntimeError(f"CalculiX did not produce {dat_path}")
     return dat_path, {
         "case": model.case,
@@ -502,6 +519,7 @@ def run_calculix(model: C3D8TrajectoryModel, out_dir: Path, *, timeout_seconds: 
         "return_code": return_code,
         "timed_out": str(timed_out).lower(),
         "completed": str(return_code == 0).lower(),
+        "wall_time_seconds": wall_time,
     }
 
 
@@ -863,6 +881,7 @@ def _synthetic_reference(model: C3D8TrajectoryModel) -> tuple[dict[float, np.nda
         "return_code": "not_run",
         "timed_out": "false",
         "completed": "false",
+        "wall_time_seconds": "",
     }
     return displacements, velocities, accelerations, totals, contact_rows, stresses, command_row
 

@@ -54,17 +54,12 @@ You are using an executable made on Thu Jul 23 21:43:50 CEST 2020
        the following default will be used:   1.4285714285714286     
        the user is advised to analyze the results
        carefully
- *INFO reading *STEP: nonlinear geometric
-       effects are turned on
-
 
  STEP            1
 
  Dynamic analysis was selected
 
  Newton-Raphson iterative procedure is active
-
- Nonlinear geometric effects are taken into account
 
  Decascading the MPC's
 
@@ -121,9 +116,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 6.088045e-04
- largest correction to disp= 1.081553e-05 in node 16 and dof 3
+ largest correction to disp= 1.081553e-05 in node 10 and dof 3
 
  no convergence
 
@@ -146,9 +141,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 15 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 6.088045e-04
- largest correction to disp= 8.622880e-20 in node 16 and dof 3
+ largest correction to disp= 8.846771e-20 in node 16 and dof 3
 
  convergence
 
@@ -160,7 +155,7 @@ maximal possible contact elements =
  netto work = 3.951007e-04
 
  actual energy: 
- internal energy = 4.932029e-34
+ internal energy = 2.528594e-34
  kinetic energy = 3.320101e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -208,7 +203,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
  largest increment of disp= 6.480445e-04
  largest correction to disp= 1.081553e-05 in node 15 and dof 3
 
@@ -233,9 +228,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 6.480445e-04
- largest correction to disp= 2.635368e-19 in node 14 and dof 3
+ largest correction to disp= 1.920786e-19 in node 10 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -249,7 +244,7 @@ maximal possible contact elements =
  netto work = 8.152228e-04
 
  actual energy: 
- internal energy = 6.284940e-34
+ internal energy = 1.050428e-33
  kinetic energy = 3.740223e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -257,7 +252,7 @@ maximal possible contact elements =
 
  energy increase = 8.152228e-04
 
- energy balance (absolute) = -8.673617e-19 
+ energy balance (absolute) = -4.336809e-19 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=2
@@ -297,7 +292,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 9 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 6.872845e-04
  largest correction to disp= 1.081553e-05 in node 10 and dof 3
 
@@ -322,9 +317,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 6.872845e-04
- largest correction to disp= 2.829025e-19 in node 9 and dof 3
+ largest correction to disp= 4.286797e-19 in node 15 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -338,7 +333,7 @@ maximal possible contact elements =
  netto work = 1.260366e-03
 
  actual energy: 
- internal energy = 2.861097e-33
+ internal energy = 2.504595e-33
  kinetic energy = 4.185366e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -346,7 +341,7 @@ maximal possible contact elements =
 
  energy increase = 1.260366e-03
 
- energy balance (absolute) = -2.168404e-18 
+ energy balance (absolute) = -1.301043e-18 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=3
@@ -386,7 +381,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 7.265245e-04
  largest correction to disp= 1.081553e-05 in node 14 and dof 3
 
@@ -411,9 +406,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 16 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 7.265245e-04
- largest correction to disp= 3.292906e-19 in node 9 and dof 3
+ largest correction to disp= 3.829618e-19 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -427,7 +422,7 @@ maximal possible contact elements =
  netto work = 1.730531e-03
 
  actual energy: 
- internal energy = 1.357045e-32
+ internal energy = 1.419114e-32
  kinetic energy = 4.655531e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -435,7 +430,7 @@ maximal possible contact elements =
 
  energy increase = 1.730531e-03
 
- energy balance (absolute) = -1.951564e-18 
+ energy balance (absolute) = 4.336809e-19 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=4
@@ -475,9 +470,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 10 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 7.657645e-04
- largest correction to disp= 1.081553e-05 in node 10 and dof 3
+ largest correction to disp= 1.081553e-05 in node 11 and dof 3
 
  no convergence
 
@@ -500,9 +495,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 11 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 7.657645e-04
- largest correction to disp= 5.698499e-19 in node 10 and dof 3
+ largest correction to disp= 8.444852e-19 in node 14 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -516,7 +511,7 @@ maximal possible contact elements =
  netto work = 2.225717e-03
 
  actual energy: 
- internal energy = 4.956967e-33
+ internal energy = 8.011626e-33
  kinetic energy = 5.150717e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -524,7 +519,7 @@ maximal possible contact elements =
 
  energy increase = 2.225717e-03
 
- energy balance (absolute) = -8.673617e-19 
+ energy balance (absolute) = 8.673617e-19 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=5
@@ -564,9 +559,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
  largest increment of disp= 8.050045e-04
- largest correction to disp= 1.081553e-05 in node 12 and dof 3
+ largest correction to disp= 1.081553e-05 in node 15 and dof 3
 
  no convergence
 
@@ -589,9 +584,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 11 and dof 3
+ largest residual force= 0.000000 in node 13 and dof 3
  largest increment of disp= 8.050045e-04
- largest correction to disp= 1.312743e-18 in node 10 and dof 3
+ largest correction to disp= 1.047344e-18 in node 14 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -605,7 +600,7 @@ maximal possible contact elements =
  netto work = 2.745925e-03
 
  actual energy: 
- internal energy = 5.288138e-32
+ internal energy = 2.179893e-32
  kinetic energy = 5.670925e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -613,7 +608,7 @@ maximal possible contact elements =
 
  energy increase = 2.745925e-03
 
- energy balance (absolute) = -1.734723e-18 
+ energy balance (absolute) = 0.000000e+00 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=6
@@ -653,7 +648,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 15 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 8.442445e-04
  largest correction to disp= 1.081553e-05 in node 14 and dof 3
 
@@ -678,9 +673,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 16 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 8.442445e-04
- largest correction to disp= 7.368856e-19 in node 15 and dof 3
+ largest correction to disp= 9.099251e-19 in node 12 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -694,7 +689,7 @@ maximal possible contact elements =
  netto work = 3.291154e-03
 
  actual energy: 
- internal energy = 5.892863e-33
+ internal energy = 1.713451e-32
  kinetic energy = 6.216154e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -742,7 +737,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 10 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 8.834845e-04
  largest correction to disp= 1.081553e-05 in node 10 and dof 3
 
@@ -767,9 +762,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 10 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 8.834845e-04
- largest correction to disp= 9.785731e-19 in node 14 and dof 3
+ largest correction to disp= 5.738284e-19 in node 11 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -783,7 +778,7 @@ maximal possible contact elements =
  netto work = 3.861404e-03
 
  actual energy: 
- internal energy = 1.828588e-32
+ internal energy = 4.006860e-32
  kinetic energy = 6.786404e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -791,7 +786,7 @@ maximal possible contact elements =
 
  energy increase = 3.861404e-03
 
- energy balance (absolute) = -3.035766e-18 
+ energy balance (absolute) = -4.336809e-19 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=8
@@ -831,7 +826,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 9.227245e-04
  largest correction to disp= 1.081553e-05 in node 14 and dof 3
 
@@ -856,9 +851,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 9.227245e-04
- largest correction to disp= 5.401124e-19 in node 12 and dof 3
+ largest correction to disp= 1.059548e-18 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -872,7 +867,7 @@ maximal possible contact elements =
  netto work = 4.456676e-03
 
  actual energy: 
- internal energy = 6.005881e-32
+ internal energy = 5.945577e-32
  kinetic energy = 7.381676e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -880,7 +875,7 @@ maximal possible contact elements =
 
  energy increase = 4.456676e-03
 
- energy balance (absolute) = -8.673617e-19 
+ energy balance (absolute) = 0.000000e+00 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=9
@@ -920,7 +915,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
  largest increment of disp= 9.619645e-04
  largest correction to disp= 1.081553e-05 in node 10 and dof 3
 
@@ -945,9 +940,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 15 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 9.619645e-04
- largest correction to disp= 1.035092e-18 in node 13 and dof 3
+ largest correction to disp= 9.014326e-19 in node 10 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -961,7 +956,7 @@ maximal possible contact elements =
  netto work = 5.076969e-03
 
  actual energy: 
- internal energy = 4.740275e-32
+ internal energy = 1.679973e-32
  kinetic energy = 8.001969e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1009,9 +1004,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 10 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 1.001204e-03
- largest correction to disp= 1.081553e-05 in node 12 and dof 3
+ largest correction to disp= 1.081553e-05 in node 14 and dof 3
 
  no convergence
 
@@ -1034,9 +1029,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 1.001204e-03
- largest correction to disp= 3.263064e-18 in node 13 and dof 3
+ largest correction to disp= 3.074178e-18 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -1050,7 +1045,7 @@ maximal possible contact elements =
  netto work = 5.722284e-03
 
  actual energy: 
- internal energy = 1.663368e-31
+ internal energy = 1.657750e-31
  kinetic energy = 8.647284e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1058,7 +1053,7 @@ maximal possible contact elements =
 
  energy increase = 5.722284e-03
 
- energy balance (absolute) = -2.602085e-18 
+ energy balance (absolute) = 8.673617e-19 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=11
@@ -1098,9 +1093,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 9 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 1.040444e-03
- largest correction to disp= 1.081553e-05 in node 13 and dof 3
+ largest correction to disp= 1.081553e-05 in node 10 and dof 3
 
  no convergence
 
@@ -1123,9 +1118,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
  largest increment of disp= 1.040444e-03
- largest correction to disp= 1.499245e-18 in node 9 and dof 3
+ largest correction to disp= 1.851331e-18 in node 15 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -1139,7 +1134,7 @@ maximal possible contact elements =
  netto work = 6.392620e-03
 
  actual energy: 
- internal energy = 1.468818e-31
+ internal energy = 3.528152e-32
  kinetic energy = 9.317620e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1147,7 +1142,7 @@ maximal possible contact elements =
 
  energy increase = 6.392620e-03
 
- energy balance (absolute) = 0.000000e+00 
+ energy balance (absolute) = 1.734723e-18 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=12
@@ -1187,9 +1182,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 1.079684e-03
- largest correction to disp= 1.081553e-05 in node 9 and dof 3
+ largest correction to disp= 1.081553e-05 in node 14 and dof 3
 
  no convergence
 
@@ -1212,9 +1207,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 9 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 1.079684e-03
- largest correction to disp= 1.231553e-18 in node 13 and dof 3
+ largest correction to disp= 2.563183e-18 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -1228,7 +1223,7 @@ maximal possible contact elements =
  netto work = 7.087977e-03
 
  actual energy: 
- internal energy = 1.460267e-31
+ internal energy = 1.844997e-31
  kinetic energy = 1.001298e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1276,7 +1271,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 15 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 1.118924e-03
  largest correction to disp= 1.081553e-05 in node 10 and dof 3
 
@@ -1301,9 +1296,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 11 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 1.118924e-03
- largest correction to disp= 1.335627e-18 in node 16 and dof 3
+ largest correction to disp= 1.568515e-18 in node 14 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -1317,7 +1312,7 @@ maximal possible contact elements =
  netto work = 7.808356e-03
 
  actual energy: 
- internal energy = 9.075570e-32
+ internal energy = 1.117582e-31
  kinetic energy = 1.073336e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1365,9 +1360,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 1.158164e-03
- largest correction to disp= 1.081553e-05 in node 15 and dof 3
+ largest correction to disp= 1.081553e-05 in node 12 and dof 3
 
  no convergence
 
@@ -1390,9 +1385,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 1.158164e-03
- largest correction to disp= 1.812144e-18 in node 14 and dof 3
+ largest correction to disp= 1.376351e-18 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -1406,7 +1401,7 @@ maximal possible contact elements =
  netto work = 8.553756e-03
 
  actual energy: 
- internal energy = 8.595727e-32
+ internal energy = 9.293906e-32
  kinetic energy = 1.147876e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1454,9 +1449,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 1.197404e-03
- largest correction to disp= 1.081553e-05 in node 9 and dof 3
+ largest correction to disp= 1.081553e-05 in node 16 and dof 3
 
  no convergence
 
@@ -1479,9 +1474,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 15 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 1.197404e-03
- largest correction to disp= 2.779163e-18 in node 14 and dof 3
+ largest correction to disp= 2.064308e-18 in node 12 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -1495,7 +1490,7 @@ maximal possible contact elements =
  netto work = 9.324177e-03
 
  actual energy: 
- internal energy = 1.270193e-31
+ internal energy = 2.564426e-31
  kinetic energy = 1.224918e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1503,7 +1498,7 @@ maximal possible contact elements =
 
  energy increase = 9.324177e-03
 
- energy balance (absolute) = 3.469447e-18 
+ energy balance (absolute) = 0.000000e+00 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=16
@@ -1543,9 +1538,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 9 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 1.081553e-05 in node 14 and dof 3
+ largest correction to disp= 1.081553e-05 in node 12 and dof 3
 
  no convergence
 
@@ -1566,11 +1561,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.036831
- time avg. forc= 0.036831
- largest residual force= 0.000275 in node 14 and dof 3
+ average force= 0.036835
+ time avg. forc= 0.036835
+ largest residual force= 0.000000 in node 10 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 1.634854e-04 in node 9 and dof 3
+ largest correction to disp= 1.634854e-04 in node 10 and dof 3
 
  no convergence
 
@@ -1591,11 +1586,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.036834
- time avg. forc= 0.036834
- largest residual force= 0.000000 in node 16 and dof 3
+ average force= 0.036835
+ time avg. forc= 0.036835
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 5.631583e-09 in node 14 and dof 3
+ largest correction to disp= 4.024520e-18 in node 10 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -1641,9 +1636,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 9 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 1.081553e-05 in node 14 and dof 3
+ largest correction to disp= 1.081553e-05 in node 12 and dof 3
 
  no convergence
 
@@ -1666,9 +1661,9 @@ maximal possible contact elements =
 
  average force= 0.000453
  time avg. forc= 0.000453
- largest residual force= 0.000000 in node 10 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 2.008412e-06 in node 9 and dof 3
+ largest correction to disp= 2.008412e-06 in node 10 and dof 3
 
  no convergence
 
@@ -1691,9 +1686,9 @@ maximal possible contact elements =
 
  average force= 0.000453
  time avg. forc= 0.000453
- largest residual force= 0.000000 in node 15 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 7.469993e-13 in node 14 and dof 3
+ largest correction to disp= 2.618243e-18 in node 12 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -1717,37 +1712,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.036831
- time avg. forc= 0.036831
- largest residual force= 0.000268 in node 16 and dof 3
+ average force= 0.036835
+ time avg. forc= 0.036835
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 1.236644e-03
- largest correction to disp= 1.614771e-04 in node 10 and dof 3
-
-divergence allowed: number of contact elements stabilized
- no convergence
-
- iteration 5
-
- Number of contact spring elements=28
-
- Using up to 1 cpu(s) for the stress calculation.
-
- Using up to 1 cpu(s) for the energy calculation.
-
- Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
-
- Factoring the system of equations using the symmetric spooles solver
- Using up to 1 cpu(s) for spooles.
-
- Using up to 1 cpu(s) for the stress calculation.
-
- Using up to 1 cpu(s) for the energy calculation.
-
- average force= 0.036834
- time avg. forc= 0.036834
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.236644e-03
- largest correction to disp= 5.494120e-09 in node 14 and dof 3
+ largest correction to disp= 1.614770e-04 in node 12 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -1793,9 +1762,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 3.075103e-04
- largest correction to disp= 6.759703e-07 in node 14 and dof 3
+ largest correction to disp= 6.759703e-07 in node 12 and dof 3
 
  no convergence
 
@@ -1818,9 +1787,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 3.075103e-04
- largest correction to disp= 1.637584e-18 in node 12 and dof 3
+ largest correction to disp= 4.032601e-19 in node 9 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -1846,9 +1815,9 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 3.075103e-04
- largest correction to disp= 3.438379e-19 in node 12 and dof 3
+ largest correction to disp= 2.246913e-19 in node 15 and dof 3
 
  convergence
 
@@ -1860,7 +1829,7 @@ maximal possible contact elements =
  netto work = 9.520692e-03
 
  actual energy: 
- internal energy = 1.090665e-31
+ internal energy = 7.345871e-32
  kinetic energy = 1.244569e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
@@ -1868,7 +1837,7 @@ maximal possible contact elements =
 
  energy increase = 9.520692e-03
 
- energy balance (absolute) = -1.734723e-18 
+ energy balance (absolute) = 1.734723e-18 
  energy balance (relative) = 0.000000 % 
 
 nonlingeo iinc=17
@@ -1908,7 +1877,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 11 and dof 3
+ largest residual force= 0.000000 in node 13 and dof 3
  largest increment of disp= 3.099628e-04
  largest correction to disp= 6.759703e-07 in node 13 and dof 3
 
@@ -1933,7 +1902,7 @@ maximal possible contact elements =
 
  average force= 0.011279
  time avg. forc= 0.011279
- largest residual force= 0.000009 in node 13 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 3.099628e-04
  largest correction to disp= 6.634166e-06 in node 10 and dof 3
 
@@ -1960,7 +1929,7 @@ maximal possible contact elements =
  time avg. forc= 0.011279
  largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 3.099628e-04
- largest correction to disp= 9.176332e-11 in node 13 and dof 3
+ largest correction to disp= 1.120229e-18 in node 12 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2006,7 +1975,7 @@ maximal possible contact elements =
 
  average force= 0.000000
  time avg. forc= 0.010000
- largest residual force= 0.000000 in node 11 and dof 3
+ largest residual force= 0.000000 in node 13 and dof 3
  largest increment of disp= 3.099628e-04
  largest correction to disp= 6.759703e-07 in node 13 and dof 3
 
@@ -2031,9 +2000,9 @@ maximal possible contact elements =
 
  average force= 0.000116
  time avg. forc= 0.000116
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 3.099628e-04
- largest correction to disp= 6.819597e-08 in node 9 and dof 3
+ largest correction to disp= 6.819597e-08 in node 12 and dof 3
 
  no convergence
 
@@ -2056,9 +2025,9 @@ maximal possible contact elements =
 
  average force= 0.000116
  time avg. forc= 0.000116
- largest residual force= 0.000000 in node 11 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 3.099628e-04
- largest correction to disp= 9.726094e-15 in node 13 and dof 3
+ largest correction to disp= 2.041094e-18 in node 12 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -2084,35 +2053,9 @@ maximal possible contact elements =
 
  average force= 0.011279
  time avg. forc= 0.011279
- largest residual force= 0.000009 in node 13 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
  largest increment of disp= 3.099628e-04
- largest correction to disp= 6.565972e-06 in node 10 and dof 3
-
-divergence allowed: number of contact elements stabilized
- no convergence
-
- iteration 5
-
- Number of contact spring elements=28
-
- Using up to 1 cpu(s) for the stress calculation.
-
- Using up to 1 cpu(s) for the energy calculation.
-
- Using up to 1 cpu(s) for the symmetric stiffness/mass contributions.
-
- Factoring the system of equations using the symmetric spooles solver
- Using up to 1 cpu(s) for spooles.
-
- Using up to 1 cpu(s) for the stress calculation.
-
- Using up to 1 cpu(s) for the energy calculation.
-
- average force= 0.011279
- time avg. forc= 0.011279
- largest residual force= 0.000000 in node 16 and dof 3
- largest increment of disp= 3.099628e-04
- largest correction to disp= 8.988653e-11 in node 15 and dof 3
+ largest correction to disp= 6.565970e-06 in node 12 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2160,7 +2103,7 @@ maximal possible contact elements =
  time avg. forc= 0.010000
  largest residual force= 0.000000 in node 14 and dof 3
  largest increment of disp= 7.738752e-05
- largest correction to disp= 4.224814e-08 in node 13 and dof 3
+ largest correction to disp= 4.224814e-08 in node 10 and dof 3
 
  no convergence
 
@@ -2183,7 +2126,7 @@ maximal possible contact elements =
 
  average force= 0.000003
  time avg. forc= 0.000003
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 7.738752e-05
  largest correction to disp= 2.449666e-10 in node 10 and dof 3
 
@@ -2208,9 +2151,9 @@ maximal possible contact elements =
 
  average force= 0.000003
  time avg. forc= 0.000003
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
  largest increment of disp= 7.738752e-05
- largest correction to disp= 1.357309e-19 in node 12 and dof 3
+ largest correction to disp= 1.726988e-19 in node 9 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -2236,7 +2179,7 @@ maximal possible contact elements =
 
  average force= 0.000307
  time avg. forc= 0.000307
- largest residual force= 0.000000 in node 14 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 7.738752e-05
  largest correction to disp= 2.418064e-08 in node 10 and dof 3
 
@@ -2253,7 +2196,7 @@ maximal possible contact elements =
  netto work = 9.570061e-03
 
  actual energy: 
- internal energy = 8.129604e-11
+ internal energy = 8.129605e-11
  kinetic energy = 1.249086e-02
  elastic contact energy = 4.317658e-07
  energy lost due to friction = 0.000000e+00
@@ -2301,9 +2244,9 @@ maximal possible contact elements =
 
  average force= 0.003223
  time avg. forc= 0.001765
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 7.757268e-05
- largest correction to disp= 2.044885e-07 in node 10 and dof 3
+ largest correction to disp= 2.044885e-07 in node 9 and dof 3
 
  no convergence
 
@@ -2326,9 +2269,9 @@ maximal possible contact elements =
 
  average force= 0.003223
  time avg. forc= 0.001765
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 11 and dof 3
  largest increment of disp= 7.757268e-05
- largest correction to disp= 3.255091e-14 in node 13 and dof 3
+ largest correction to disp= 2.622806e-19 in node 11 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2345,7 +2288,7 @@ maximal possible contact elements =
  netto work = 9.619477e-03
 
  actual energy: 
- internal energy = 1.545184e-08
+ internal energy = 1.545187e-08
  kinetic energy = 1.249342e-02
  elastic contact energy = 4.577383e-05
  energy lost due to friction = 0.000000e+00
@@ -2393,9 +2336,9 @@ maximal possible contact elements =
 
  average force= 0.007133
  time avg. forc= 0.003554
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
  largest increment of disp= 8.586675e-05
- largest correction to disp= 4.669199e-07 in node 12 and dof 3
+ largest correction to disp= 4.669183e-07 in node 11 and dof 3
 
  no convergence
 
@@ -2418,9 +2361,9 @@ maximal possible contact elements =
 
  average force= 0.007133
  time avg. forc= 0.003554
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
  largest increment of disp= 8.586675e-05
- largest correction to disp= 1.470070e-13 in node 13 and dof 3
+ largest correction to disp= 1.548974e-19 in node 9 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2437,7 +2380,7 @@ maximal possible contact elements =
  netto work = 9.673748e-03
 
  actual energy: 
- internal energy = 3.830314e-07
+ internal energy = 3.830338e-07
  kinetic energy = 1.241294e-02
  elastic contact energy = 1.799828e-04
  energy lost due to friction = 0.000000e+00
@@ -2445,7 +2388,7 @@ maximal possible contact elements =
 
  energy increase = 9.668308e-03
 
- energy balance (absolute) = -5.440524e-06 
+ energy balance (absolute) = -5.440525e-06 
  energy balance (relative) = 0.043644 % 
 
 nonlingeo iinc=20
@@ -2485,9 +2428,9 @@ maximal possible contact elements =
 
  average force= 0.012614
  time avg. forc= 0.005819
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 13 and dof 3
  largest increment of disp= 9.537599e-05
- largest correction to disp= 6.619520e-07 in node 11 and dof 3
+ largest correction to disp= 6.619342e-07 in node 9 and dof 3
 
  no convergence
 
@@ -2510,9 +2453,9 @@ maximal possible contact elements =
 
  average force= 0.012614
  time avg. forc= 0.005819
- largest residual force= 0.000000 in node 12 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
  largest increment of disp= 9.537599e-05
- largest correction to disp= 2.288914e-13 in node 16 and dof 3
+ largest correction to disp= 2.469798e-19 in node 13 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2529,15 +2472,15 @@ maximal possible contact elements =
  netto work = 9.733119e-03
 
  actual energy: 
- internal energy = 3.271427e-06
+ internal energy = 3.271474e-06
  kinetic energy = 1.222549e-02
- elastic contact energy = 4.237088e-04
+ elastic contact energy = 4.237089e-04
  energy lost due to friction = 0.000000e+00
  total energy  = 1.265247e-02
 
  energy increase = 9.727473e-03
 
- energy balance (absolute) = -5.645404e-06 
+ energy balance (absolute) = -5.645421e-06 
  energy balance (relative) = 0.045507 % 
 
 nonlingeo iinc=21
@@ -2575,11 +2518,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.019668
+ average force= 0.019669
  time avg. forc= 0.008589
- largest residual force= 0.000000 in node 13 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 1.056977e-04
- largest correction to disp= 6.841925e-07 in node 11 and dof 3
+ largest correction to disp= 6.841057e-07 in node 9 and dof 3
 
  no convergence
 
@@ -2600,11 +2543,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.019668
+ average force= 0.019669
  time avg. forc= 0.008589
  largest residual force= 0.000000 in node 15 and dof 3
  largest increment of disp= 1.056977e-04
- largest correction to disp= 7.619494e-14 in node 13 and dof 3
+ largest correction to disp= 2.197880e-19 in node 15 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2621,16 +2564,16 @@ maximal possible contact elements =
  netto work = 9.797734e-03
 
  actual energy: 
- internal energy = 1.426090e-05
+ internal energy = 1.426112e-05
  kinetic energy = 1.190360e-02
- elastic contact energy = 7.989830e-04
+ elastic contact energy = 7.989838e-04
  energy lost due to friction = 0.000000e+00
  total energy  = 1.271684e-02
 
  energy increase = 9.791841e-03
 
- energy balance (absolute) = -5.893273e-06 
- energy balance (relative) = 0.047892 % 
+ energy balance (absolute) = -5.893372e-06 
+ energy balance (relative) = 0.047893 % 
 
 nonlingeo iinc=22
  Using up to 1 cpu(s) for the stress calculation.
@@ -2667,11 +2610,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.027275
- time avg. forc= 0.011703
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.158082e-04
- largest correction to disp= 8.731600e-07 in node 13 and dof 3
+ average force= 0.027276
+ time avg. forc= 0.011704
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 1.158078e-04
+ largest correction to disp= 8.733952e-07 in node 14 and dof 3
 
  no convergence
 
@@ -2692,11 +2635,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.027275
- time avg. forc= 0.011703
+ average force= 0.027276
+ time avg. forc= 0.011704
  largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.158082e-04
- largest correction to disp= 1.018181e-13 in node 13 and dof 3
+ largest increment of disp= 1.158078e-04
+ largest correction to disp= 3.484003e-19 in node 14 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2713,16 +2656,16 @@ maximal possible contact elements =
  netto work = 9.867593e-03
 
  actual energy: 
- internal energy = 3.814453e-05
+ internal energy = 3.814387e-05
  kinetic energy = 1.141588e-02
- elastic contact energy = 1.332416e-03
+ elastic contact energy = 1.332420e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.278644e-02
 
  energy increase = 9.861440e-03
 
- energy balance (absolute) = -6.152809e-06 
- energy balance (relative) = 0.050611 % 
+ energy balance (absolute) = -6.153067e-06 
+ energy balance (relative) = 0.050613 % 
 
 nonlingeo iinc=23
  Using up to 1 cpu(s) for the stress calculation.
@@ -2759,11 +2702,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.033636
+ average force= 0.033637
  time avg. forc= 0.014837
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 1.243933e-04
- largest correction to disp= 1.598081e-06 in node 16 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.243921e-04
+ largest correction to disp= 1.598413e-06 in node 16 and dof 3
 
  no convergence
 
@@ -2784,11 +2727,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.033636
+ average force= 0.033637
  time avg. forc= 0.014837
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.243933e-04
- largest correction to disp= 7.247887e-13 in node 13 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.243921e-04
+ largest correction to disp= 3.999950e-19 in node 11 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2805,16 +2748,16 @@ maximal possible contact elements =
  netto work = 9.942467e-03
 
  actual energy: 
- internal energy = 7.017439e-05
- kinetic energy = 1.073331e-02
- elastic contact energy = 2.057570e-03
+ internal energy = 7.016630e-05
+ kinetic energy = 1.073330e-02
+ elastic contact energy = 2.057587e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.286106e-02
 
- energy increase = 9.936057e-03
+ energy increase = 9.936056e-03
 
- energy balance (absolute) = -6.410032e-06 
- energy balance (relative) = 0.053624 % 
+ energy balance (absolute) = -6.410427e-06 
+ energy balance (relative) = 0.053627 % 
 
 nonlingeo iinc=24
  Using up to 1 cpu(s) for the stress calculation.
@@ -2851,11 +2794,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.037591
+ average force= 0.037590
  time avg. forc= 0.017681
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.307994e-04
- largest correction to disp= 1.976926e-06 in node 16 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.307967e-04
+ largest correction to disp= 1.977032e-06 in node 13 and dof 3
 
  no convergence
 
@@ -2876,11 +2819,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.037591
+ average force= 0.037590
  time avg. forc= 0.017681
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 1.307994e-04
- largest correction to disp= 3.325105e-13 in node 16 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.307967e-04
+ largest correction to disp= 4.271995e-19 in node 10 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2897,16 +2840,16 @@ maximal possible contact elements =
  netto work = 1.002180e-02
 
  actual energy: 
- internal energy = 1.020776e-04
- kinetic energy = 9.829747e-03
- elastic contact energy = 3.008260e-03
+ internal energy = 1.020498e-04
+ kinetic energy = 9.829730e-03
+ elastic contact energy = 3.008304e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.294008e-02
 
  energy increase = 1.001508e-02
 
- energy balance (absolute) = -6.714632e-06 
- energy balance (relative) = 0.057330 % 
+ energy balance (absolute) = -6.715077e-06 
+ energy balance (relative) = 0.057334 % 
 
 nonlingeo iinc=25
  Using up to 1 cpu(s) for the stress calculation.
@@ -2945,9 +2888,9 @@ maximal possible contact elements =
 
  average force= 0.043537
  time avg. forc= 0.020554
- largest residual force= 0.000000 in node 11 and dof 3
- largest increment of disp= 1.358515e-04
- largest correction to disp= 2.747457e-06 in node 10 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 1.358478e-04
+ largest correction to disp= 2.747834e-06 in node 11 and dof 3
 
  no convergence
 
@@ -2970,9 +2913,9 @@ maximal possible contact elements =
 
  average force= 0.043537
  time avg. forc= 0.020554
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 1.358515e-04
- largest correction to disp= 5.276356e-13 in node 15 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.358478e-04
+ largest correction to disp= 1.261343e-18 in node 14 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -2989,16 +2932,16 @@ maximal possible contact elements =
  netto work = 1.010457e-02
 
  actual energy: 
- internal energy = 1.417182e-04
- kinetic energy = 8.682710e-03
- elastic contact energy = 4.198184e-03
+ internal energy = 1.416620e-04
+ kinetic energy = 8.682682e-03
+ elastic contact energy = 4.198268e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.302261e-02
 
  energy increase = 1.009761e-02
 
- energy balance (absolute) = -6.956253e-06 
- energy balance (relative) = 0.060313 % 
+ energy balance (absolute) = -6.956647e-06 
+ energy balance (relative) = 0.060317 % 
 
 nonlingeo iinc=26
  Using up to 1 cpu(s) for the stress calculation.
@@ -3037,9 +2980,9 @@ maximal possible contact elements =
 
  average force= 0.051403
  time avg. forc= 0.023639
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.407719e-04
- largest correction to disp= 3.955721e-06 in node 12 and dof 3
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 1.407688e-04
+ largest correction to disp= 3.955905e-06 in node 9 and dof 3
 
  no convergence
 
@@ -3062,9 +3005,9 @@ maximal possible contact elements =
 
  average force= 0.051403
  time avg. forc= 0.023639
- largest residual force= 0.000000 in node 16 and dof 3
- largest increment of disp= 1.407719e-04
- largest correction to disp= 1.856437e-12 in node 14 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 1.407688e-04
+ largest correction to disp= 1.035025e-18 in node 13 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3081,16 +3024,16 @@ maximal possible contact elements =
  netto work = 1.018913e-02
 
  actual energy: 
- internal energy = 2.068360e-04
- kinetic energy = 7.297074e-03
- elastic contact energy = 5.603163e-03
+ internal energy = 2.067481e-04
+ kinetic energy = 7.297033e-03
+ elastic contact energy = 5.603290e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.310707e-02
 
  energy increase = 1.018207e-02
 
- energy balance (absolute) = -7.054875e-06 
- energy balance (relative) = 0.061890 % 
+ energy balance (absolute) = -7.055356e-06 
+ energy balance (relative) = 0.061894 % 
 
 nonlingeo iinc=27
  Using up to 1 cpu(s) for the stress calculation.
@@ -3127,11 +3070,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.059096
+ average force= 0.059097
  time avg. forc= 0.026862
- largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 1.436694e-04
- largest correction to disp= 5.339847e-06 in node 14 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 1.436667e-04
+ largest correction to disp= 5.340853e-06 in node 16 and dof 3
 
  no convergence
 
@@ -3152,11 +3095,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.059096
+ average force= 0.059097
  time avg. forc= 0.026862
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.436694e-04
- largest correction to disp= 1.214648e-12 in node 15 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 1.436667e-04
+ largest correction to disp= 1.019258e-18 in node 9 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3173,16 +3116,16 @@ maximal possible contact elements =
  netto work = 1.027301e-02
 
  actual energy: 
- internal energy = 2.979081e-04
- kinetic energy = 5.715891e-03
- elastic contact energy = 7.177113e-03
+ internal energy = 2.977781e-04
+ kinetic energy = 5.715836e-03
+ elastic contact energy = 7.177297e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.319091e-02
 
  energy increase = 1.026591e-02
 
- energy balance (absolute) = -7.096758e-06 
- energy balance (relative) = 0.062821 % 
+ energy balance (absolute) = -7.097637e-06 
+ energy balance (relative) = 0.062829 % 
 
 nonlingeo iinc=28
  Using up to 1 cpu(s) for the stress calculation.
@@ -3219,11 +3162,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.065035
- time avg. forc= 0.030043
- largest residual force= 0.000003 in node 11 and dof 3
- largest increment of disp= 1.379895e-04
- largest correction to disp= 8.417711e-06 in node 15 and dof 3
+ average force= 0.065036
+ time avg. forc= 0.030044
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 1.379834e-04
+ largest correction to disp= 8.418105e-06 in node 16 and dof 3
 
  no convergence
 
@@ -3244,11 +3187,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.065035
- time avg. forc= 0.030043
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 1.379895e-04
- largest correction to disp= 1.903485e-11 in node 13 and dof 3
+ average force= 0.065036
+ time avg. forc= 0.030044
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 1.379834e-04
+ largest correction to disp= 1.115830e-18 in node 15 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3265,16 +3208,16 @@ maximal possible contact elements =
  netto work = 1.035270e-02
 
  actual energy: 
- internal energy = 3.678583e-04
- kinetic energy = 4.022754e-03
- elastic contact energy = 8.880158e-03
+ internal energy = 3.676419e-04
+ kinetic energy = 4.022689e-03
+ elastic contact energy = 8.880437e-03
  energy lost due to friction = 0.000000e+00
  total energy  = 1.327077e-02
 
  energy increase = 1.034577e-02
 
- energy balance (absolute) = -6.928644e-06 
- energy balance (relative) = 0.061763 % 
+ energy balance (absolute) = -6.929669e-06 
+ energy balance (relative) = 0.061772 % 
 
 nonlingeo iinc=29
  Using up to 1 cpu(s) for the stress calculation.
@@ -3311,11 +3254,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.068579
- time avg. forc= 0.033007
+ average force= 0.068576
+ time avg. forc= 0.033008
  largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.192581e-04
- largest correction to disp= 9.061541e-06 in node 16 and dof 3
+ largest increment of disp= 1.192651e-04
+ largest correction to disp= 9.058468e-06 in node 13 and dof 3
 
  no convergence
 
@@ -3336,11 +3279,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.068579
- time avg. forc= 0.033007
- largest residual force= 0.000000 in node 16 and dof 3
- largest increment of disp= 1.192581e-04
- largest correction to disp= 2.294114e-12 in node 14 and dof 3
+ average force= 0.068576
+ time avg. forc= 0.033008
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.192651e-04
+ largest correction to disp= 1.702997e-18 in node 10 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3352,21 +3295,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 1.042337e-02
+ external work = 1.042336e-02
  work performed by the damping forces = 0.000000e+00
- netto work = 1.042337e-02
+ netto work = 1.042336e-02
 
  actual energy: 
- internal energy = 3.561645e-04
- kinetic energy = 2.366217e-03
- elastic contact energy = 1.061930e-02
+ internal energy = 3.558674e-04
+ kinetic energy = 2.366148e-03
+ elastic contact energy = 1.061966e-02
  energy lost due to friction = 0.000000e+00
- total energy  = 1.334168e-02
+ total energy  = 1.334167e-02
 
- energy increase = 1.041668e-02
+ energy increase = 1.041667e-02
 
- energy balance (absolute) = -6.687672e-06 
- energy balance (relative) = 0.059942 % 
+ energy balance (absolute) = -6.688994e-06 
+ energy balance (relative) = 0.059954 % 
 
 nonlingeo iinc=30
  Using up to 1 cpu(s) for the stress calculation.
@@ -3403,11 +3346,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.071365
+ average force= 0.071366
  time avg. forc= 0.035747
- largest residual force= 0.000004 in node 9 and dof 3
- largest increment of disp= 1.019268e-04
- largest correction to disp= 1.332991e-05 in node 10 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.019239e-04
+ largest correction to disp= 1.333174e-05 in node 12 and dof 3
 
  no convergence
 
@@ -3428,11 +3371,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.071365
+ average force= 0.071366
  time avg. forc= 0.035747
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 1.019268e-04
- largest correction to disp= 3.173571e-11 in node 13 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.019239e-04
+ largest correction to disp= 1.724905e-18 in node 10 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3449,16 +3392,16 @@ maximal possible contact elements =
  netto work = 1.047860e-02
 
  actual energy: 
- internal energy = 3.246028e-04
- kinetic energy = 9.609190e-04
- elastic contact energy = 1.211191e-02
+ internal energy = 3.243534e-04
+ kinetic energy = 9.608569e-04
+ elastic contact energy = 1.211222e-02
  energy lost due to friction = 0.000000e+00
  total energy  = 1.339743e-02
 
  energy increase = 1.047243e-02
 
- energy balance (absolute) = -6.168764e-06 
- energy balance (relative) = 0.055532 % 
+ energy balance (absolute) = -6.169969e-06 
+ energy balance (relative) = 0.055543 % 
 
 nonlingeo iinc=31
  Using up to 1 cpu(s) for the stress calculation.
@@ -3495,11 +3438,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.076035
- time avg. forc= 0.038433
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 6.561641e-05
- largest correction to disp= 1.461180e-05 in node 12 and dof 3
+ average force= 0.076042
+ time avg. forc= 0.038434
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 6.562376e-05
+ largest correction to disp= 1.460577e-05 in node 9 and dof 3
 
  no convergence
 
@@ -3520,11 +3463,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.076035
- time avg. forc= 0.038433
+ average force= 0.076042
+ time avg. forc= 0.038434
  largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 6.561641e-05
- largest correction to disp= 3.440762e-12 in node 16 and dof 3
+ largest increment of disp= 6.562376e-05
+ largest correction to disp= 8.956198e-19 in node 10 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3541,16 +3484,16 @@ maximal possible contact elements =
  netto work = 1.051034e-02
 
  actual energy: 
- internal energy = 3.767468e-04
- kinetic energy = 1.151288e-04
- elastic contact energy = 1.293769e-02
+ internal energy = 3.765648e-04
+ kinetic energy = 1.151034e-04
+ elastic contact energy = 1.293789e-02
  energy lost due to friction = 0.000000e+00
- total energy  = 1.342956e-02
+ total energy  = 1.342955e-02
 
- energy increase = 1.050456e-02
+ energy increase = 1.050455e-02
 
- energy balance (absolute) = -5.781773e-06 
- energy balance (relative) = 0.052236 % 
+ energy balance (absolute) = -5.783677e-06 
+ energy balance (relative) = 0.052253 % 
 
 nonlingeo iinc=32
  Using up to 1 cpu(s) for the stress calculation.
@@ -3588,10 +3531,10 @@ maximal possible contact elements =
  Using up to 1 cpu(s) for the energy calculation.
 
  average force= 0.076999
- time avg. forc= 0.040843
- largest residual force= 0.000008 in node 14 and dof 3
- largest increment of disp= 2.243414e-05
- largest correction to disp= 1.975023e-05 in node 16 and dof 3
+ time avg. forc= 0.040844
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 2.242398e-05
+ largest correction to disp= 1.975098e-05 in node 16 and dof 3
 
  no convergence
 
@@ -3613,10 +3556,10 @@ maximal possible contact elements =
  Using up to 1 cpu(s) for the energy calculation.
 
  average force= 0.076999
- time avg. forc= 0.040843
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 2.243414e-05
- largest correction to disp= 7.782690e-11 in node 14 and dof 3
+ time avg. forc= 0.040844
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 2.242398e-05
+ largest correction to disp= 2.472544e-18 in node 9 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3633,16 +3576,16 @@ maximal possible contact elements =
  netto work = 1.050902e-02
 
  actual energy: 
- internal energy = 4.605137e-04
- kinetic energy = 1.522007e-04
- elastic contact energy = 1.281531e-02
+ internal energy = 4.601970e-04
+ kinetic energy = 1.522397e-04
+ elastic contact energy = 1.281560e-02
  energy lost due to friction = 0.000000e+00
- total energy  = 1.342802e-02
+ total energy  = 1.342804e-02
 
- energy increase = 1.050302e-02
+ energy increase = 1.050304e-02
 
- energy balance (absolute) = -6.001133e-06 
- energy balance (relative) = 0.054389 % 
+ energy balance (absolute) = -5.977132e-06 
+ energy balance (relative) = 0.054172 % 
 
 nonlingeo iinc=33
  Using up to 1 cpu(s) for the stress calculation.
@@ -3679,11 +3622,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.073726
+ average force= 0.073724
  time avg. forc= 0.042778
- largest residual force= 0.000001 in node 15 and dof 2
- largest increment of disp= 5.200707e-05
- largest correction to disp= 1.990589e-05 in node 15 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 5.202770e-05
+ largest correction to disp= 1.989441e-05 in node 15 and dof 3
 
  no convergence
 
@@ -3704,11 +3647,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.073726
+ average force= 0.073724
  time avg. forc= 0.042778
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 5.200707e-05
- largest correction to disp= 1.794479e-11 in node 16 and dof 1
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 5.202770e-05
+ largest correction to disp= 1.375275e-18 in node 14 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3720,21 +3663,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 1.046407e-02
+ external work = 1.046406e-02
  work performed by the damping forces = 0.000000e+00
- netto work = 1.046407e-02
+ netto work = 1.046406e-02
 
  actual energy: 
- internal energy = 4.378220e-04
- kinetic energy = 1.335147e-03
- elastic contact energy = 1.160863e-02
+ internal energy = 4.374342e-04
+ kinetic energy = 1.335272e-03
+ elastic contact energy = 1.160889e-02
  energy lost due to friction = 0.000000e+00
- total energy  = 1.338160e-02
+ total energy  = 1.338159e-02
 
- energy increase = 1.045660e-02
+ energy increase = 1.045659e-02
 
- energy balance (absolute) = -7.467611e-06 
- energy balance (relative) = 0.067887 % 
+ energy balance (absolute) = -7.468007e-06 
+ energy balance (relative) = 0.067890 % 
 
 nonlingeo iinc=34
  Using up to 1 cpu(s) for the stress calculation.
@@ -3771,11 +3714,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.065334
+ average force= 0.065333
  time avg. forc= 0.044031
- largest residual force= 0.000002 in node 12 and dof 1
- largest increment of disp= 1.420277e-04
- largest correction to disp= 2.140322e-05 in node 12 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 1.420148e-04
+ largest correction to disp= 2.139762e-05 in node 10 and dof 3
 
  no convergence
 
@@ -3796,11 +3739,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.065334
+ average force= 0.065333
  time avg. forc= 0.044031
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.420277e-04
- largest correction to disp= 3.891816e-11 in node 12 and dof 1
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 1.420148e-04
+ largest correction to disp= 1.126523e-18 in node 14 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3812,21 +3755,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 1.036491e-02
+ external work = 1.036489e-02
  work performed by the damping forces = 0.000000e+00
- netto work = 1.036491e-02
+ netto work = 1.036489e-02
 
  actual energy: 
- internal energy = 3.349017e-04
- kinetic energy = 3.742417e-03
- elastic contact energy = 9.201605e-03
+ internal energy = 3.347249e-04
+ kinetic energy = 3.742642e-03
+ elastic contact energy = 9.201542e-03
  energy lost due to friction = 0.000000e+00
- total energy  = 1.327892e-02
+ total energy  = 1.327891e-02
 
- energy increase = 1.035392e-02
+ energy increase = 1.035391e-02
 
- energy balance (absolute) = -1.098374e-05 
- energy balance (relative) = 0.100172 % 
+ energy balance (absolute) = -1.098418e-05 
+ energy balance (relative) = 0.100176 % 
 
 nonlingeo iinc=35
  Using up to 1 cpu(s) for the stress calculation.
@@ -3863,11 +3806,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.052984
- time avg. forc= 0.044502
- largest residual force= 0.000012 in node 10 and dof 3
- largest increment of disp= 2.399581e-04
- largest correction to disp= 2.347965e-05 in node 14 and dof 3
+ average force= 0.052988
+ time avg. forc= 0.044503
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 2.399489e-04
+ largest correction to disp= 2.348774e-05 in node 16 and dof 3
 
  no convergence
 
@@ -3888,11 +3831,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.052985
- time avg. forc= 0.044502
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 2.399581e-04
- largest correction to disp= 1.433874e-10 in node 14 and dof 3
+ average force= 0.052988
+ time avg. forc= 0.044503
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 2.399489e-04
+ largest correction to disp= 7.341346e-19 in node 11 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3904,21 +3847,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 1.020294e-02
+ external work = 1.020292e-02
  work performed by the damping forces = 0.000000e+00
- netto work = 1.020294e-02
+ netto work = 1.020292e-02
 
  actual energy: 
- internal energy = 1.988376e-04
- kinetic energy = 7.044967e-03
- elastic contact energy = 5.866030e-03
+ internal energy = 1.987637e-04
+ kinetic energy = 7.045233e-03
+ elastic contact energy = 5.865821e-03
  energy lost due to friction = 0.000000e+00
- total energy  = 1.310983e-02
+ total energy  = 1.310982e-02
 
- energy increase = 1.018483e-02
+ energy increase = 1.018482e-02
 
- energy balance (absolute) = -1.810733e-05 
- energy balance (relative) = 0.165746 % 
+ energy balance (absolute) = -1.810781e-05 
+ energy balance (relative) = 0.165751 % 
 
 nonlingeo iinc=36
  Using up to 1 cpu(s) for the stress calculation.
@@ -3955,11 +3898,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.033751
+ average force= 0.033743
  time avg. forc= 0.043965
- largest residual force= 0.000003 in node 14 and dof 3
- largest increment of disp= 3.598753e-04
- largest correction to disp= 1.757773e-05 in node 9 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 3.598973e-04
+ largest correction to disp= 1.759417e-05 in node 12 and dof 3
 
  no convergence
 
@@ -3980,11 +3923,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.033751
+ average force= 0.033743
  time avg. forc= 0.043965
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 3.598753e-04
- largest correction to disp= 3.742708e-11 in node 10 and dof 2
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 3.598973e-04
+ largest correction to disp= 1.805976e-18 in node 9 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -3996,21 +3939,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.974805e-03
+ external work = 9.974784e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.974805e-03
+ netto work = 9.974784e-03
 
  actual energy: 
- internal energy = 5.911078e-05
- kinetic energy = 1.036458e-02
- elastic contact energy = 2.448046e-03
+ internal energy = 5.905038e-05
+ kinetic energy = 1.036480e-02
+ elastic contact energy = 2.447862e-03
  energy lost due to friction = 0.000000e+00
- total energy  = 1.287174e-02
+ total energy  = 1.287172e-02
 
- energy increase = 9.946736e-03
+ energy increase = 9.946716e-03
 
- energy balance (absolute) = -2.806940e-05 
- energy balance (relative) = 0.257595 % 
+ energy balance (absolute) = -2.806830e-05 
+ energy balance (relative) = 0.257584 % 
 
 nonlingeo iinc=37
  Using up to 1 cpu(s) for the stress calculation.
@@ -4049,9 +3992,9 @@ maximal possible contact elements =
 
  average force= 0.009898
  time avg. forc= 0.042342
- largest residual force= 0.000013 in node 15 and dof 3
- largest increment of disp= 4.619395e-04
- largest correction to disp= 8.752406e-06 in node 12 and dof 3
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 4.619168e-04
+ largest correction to disp= 8.736944e-06 in node 10 and dof 3
 
  no convergence
 
@@ -4074,9 +4017,9 @@ maximal possible contact elements =
 
  average force= 0.009898
  time avg. forc= 0.042342
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 4.619395e-04
- largest correction to disp= 1.672310e-10 in node 15 and dof 3
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 4.619168e-04
+ largest correction to disp= 2.161627e-18 in node 14 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -4088,21 +4031,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.686981e-03
+ external work = 9.686958e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.686981e-03
+ netto work = 9.686958e-03
 
  actual energy: 
- internal energy = 6.807890e-06
- kinetic energy = 1.234912e-02
- elastic contact energy = 2.162157e-04
+ internal energy = 6.814283e-06
+ kinetic energy = 1.234918e-02
+ elastic contact energy = 2.161246e-04
  energy lost due to friction = 0.000000e+00
- total energy  = 1.257214e-02
+ total energy  = 1.257212e-02
 
- energy increase = 9.647141e-03
+ energy increase = 9.647121e-03
 
- energy balance (absolute) = -3.983988e-05 
- energy balance (relative) = 0.363307 % 
+ energy balance (absolute) = -3.983658e-05 
+ energy balance (relative) = 0.363277 % 
 
 nonlingeo iinc=38
  Using up to 1 cpu(s) for the stress calculation.
@@ -4141,9 +4084,9 @@ maximal possible contact elements =
 
  average force= 0.015948
  time avg. forc= 0.041143
- largest residual force= 0.000058 in node 12 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 2.228564e-05 in node 12 and dof 3
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 2.229211e-05 in node 12 and dof 3
 
  no convergence
 
@@ -4164,11 +4107,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012686
- time avg. forc= 0.040994
- largest residual force= 0.000032 in node 13 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 1.824458e-05 in node 12 and dof 3
+ average force= 0.012692
+ time avg. forc= 0.040995
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 1.824659e-05 in node 11 and dof 3
 
  no convergence
 
@@ -4189,11 +4132,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012689
- time avg. forc= 0.040994
- largest residual force= 0.000000 in node 16 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 4.645452e-10 in node 14 and dof 3
+ average force= 0.012692
+ time avg. forc= 0.040995
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 2.159879e-18 in node 12 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -4240,11 +4183,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.000924
+ average force= 0.000925
  time avg. forc= 0.040460
- largest residual force= 0.000004 in node 14 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 4.233620e-06 in node 12 and dof 3
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 4.238510e-06 in node 12 and dof 3
 
  no convergence
 
@@ -4265,11 +4208,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012689
- time avg. forc= 0.040994
- largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 1.930278e-07 in node 10 and dof 3
+ average force= 0.012692
+ time avg. forc= 0.040995
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 1.929921e-07 in node 10 and dof 3
 
  no convergence
 
@@ -4290,11 +4233,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012689
- time avg. forc= 0.040994
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 5.204891e-14 in node 12 and dof 3
+ average force= 0.012692
+ time avg. forc= 0.040995
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 2.174800e-18 in node 12 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -4318,11 +4261,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012689
- time avg. forc= 0.040994
+ average force= 0.012692
+ time avg. forc= 0.040995
  largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 5.251026e-04
- largest correction to disp= 1.691965e-18 in node 12 and dof 3
+ largest increment of disp= 5.251005e-04
+ largest correction to disp= 1.898401e-18 in node 13 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -4366,11 +4309,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.001908
- time avg. forc= 0.040504
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 2.623116e-04
- largest correction to disp= 1.522347e-06 in node 10 and dof 3
+ average force= 0.001909
+ time avg. forc= 0.040505
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 2.623074e-04
+ largest correction to disp= 1.526710e-06 in node 12 and dof 3
 
  no convergence
 
@@ -4391,11 +4334,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.028306
- time avg. forc= 0.041704
- largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 2.623116e-04
- largest correction to disp= 1.569258e-08 in node 9 and dof 3
+ average force= 0.028327
+ time avg. forc= 0.041705
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 2.623074e-04
+ largest correction to disp= 1.569508e-08 in node 11 and dof 3
 
  no convergence
 
@@ -4416,11 +4359,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.028306
- time avg. forc= 0.041704
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 2.623116e-04
- largest correction to disp= 5.167286e-16 in node 10 and dof 3
+ average force= 0.028327
+ time avg. forc= 0.041705
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 2.623074e-04
+ largest correction to disp= 1.071643e-18 in node 12 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -4444,11 +4387,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.028306
- time avg. forc= 0.041704
- largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 2.623116e-04
- largest correction to disp= 9.628447e-19 in node 13 and dof 3
+ average force= 0.028327
+ time avg. forc= 0.041705
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 2.623074e-04
+ largest correction to disp= 9.350969e-19 in node 12 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -4492,11 +4435,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.002683
+ average force= 0.002685
  time avg. forc= 0.040540
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.310959e-04
- largest correction to disp= 6.103572e-07 in node 10 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 1.310929e-04
+ largest correction to disp= 6.118511e-07 in node 12 and dof 3
 
  no convergence
 
@@ -4517,11 +4460,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.002683
+ average force= 0.002685
  time avg. forc= 0.040540
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 1.310959e-04
- largest correction to disp= 5.721299e-13 in node 16 and dof 3
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 1.310929e-04
+ largest correction to disp= 4.249372e-19 in node 16 and dof 3
 
 
  restoring the elastic contact stifnesses to their original values 
@@ -4545,11 +4488,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.004782
+ average force= 0.004783
  time avg. forc= 0.040635
- largest residual force= 0.000000 in node 11 and dof 3
- largest increment of disp= 1.310959e-04
- largest correction to disp= 4.259947e-07 in node 12 and dof 3
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 1.310929e-04
+ largest correction to disp= 4.256868e-07 in node 12 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -4559,21 +4502,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.604137e-03
+ external work = 9.604114e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.604137e-03
+ netto work = 9.604114e-03
 
  actual energy: 
- internal energy = 4.428662e-06
- kinetic energy = 1.247560e-02
- elastic contact energy = 2.066250e-05
+ internal energy = 4.434177e-06
+ kinetic energy = 1.247561e-02
+ elastic contact energy = 2.063313e-05
  energy lost due to friction = 0.000000e+00
- total energy  = 1.250069e-02
+ total energy  = 1.250067e-02
 
- energy increase = 9.575693e-03
+ energy increase = 9.575674e-03
 
- energy balance (absolute) = -2.844449e-05 
- energy balance (relative) = 0.257778 % 
+ energy balance (absolute) = -2.844085e-05 
+ energy balance (relative) = 0.257744 % 
 
 nonlingeo iinc=39
  Using up to 1 cpu(s) for the stress calculation.
@@ -4610,11 +4553,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.004071
- time avg. forc= 0.039045
- largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 1.318441e-04
- largest correction to disp= 9.016174e-07 in node 12 and dof 3
+ average force= 0.004073
+ time avg. forc= 0.039046
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.318465e-04
+ largest correction to disp= 9.024661e-07 in node 12 and dof 3
 
  no convergence
 
@@ -4635,11 +4578,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.026727
- time avg. forc= 0.040030
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 1.318441e-04
- largest correction to disp= 5.261952e-07 in node 12 and dof 3
+ average force= 0.026739
+ time avg. forc= 0.040031
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 1.318465e-04
+ largest correction to disp= 5.264723e-07 in node 10 and dof 3
 
  no convergence
 
@@ -4660,11 +4603,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.026727
- time avg. forc= 0.040030
+ average force= 0.026739
+ time avg. forc= 0.040031
  largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 1.318441e-04
- largest correction to disp= 3.352332e-13 in node 13 and dof 3
+ largest increment of disp= 1.318465e-04
+ largest correction to disp= 6.669548e-19 in node 16 and dof 3
 
  *INFO in checkimpacts: due to impact rules the
        maximum allowed time increment has been
@@ -4678,21 +4621,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.521139e-03
+ external work = 9.521116e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.521139e-03
+ netto work = 9.521116e-03
 
  actual energy: 
- internal energy = 1.973114e-06
- kinetic energy = 1.244373e-02
+ internal energy = 1.974096e-06
+ kinetic energy = 1.244371e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.244571e-02
+ total energy  = 1.244568e-02
 
- energy increase = 9.520705e-03
+ energy increase = 9.520683e-03
 
- energy balance (absolute) = -4.343378e-07 
- energy balance (relative) = 0.003914 % 
+ energy balance (absolute) = -4.338049e-07 
+ energy balance (relative) = 0.003910 % 
 
 nonlingeo iinc=40
  Using up to 1 cpu(s) for the stress calculation.
@@ -4729,11 +4672,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.024867
- time avg. forc= 0.039399
- largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 1.259120e-05
- largest correction to disp= 3.091496e-09 in node 12 and dof 3
+ average force= 0.024876
+ time avg. forc= 0.039400
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.259167e-05
+ largest correction to disp= 3.094783e-09 in node 12 and dof 3
 
  no convergence
 
@@ -4754,32 +4697,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.024867
- time avg. forc= 0.039399
+ average force= 0.024876
+ time avg. forc= 0.039400
  largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.259120e-05
- largest correction to disp= 9.315682e-20 in node 12 and dof 3
+ largest increment of disp= 1.259167e-05
+ largest correction to disp= 4.679136e-21 in node 15 and dof 3
 
  convergence; the increment size is increased to 3.000000e-05
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.513250e-03
+ external work = 9.513227e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.513250e-03
+ netto work = 9.513227e-03
 
  actual energy: 
- internal energy = 1.753354e-06
- kinetic energy = 1.243626e-02
+ internal energy = 1.754054e-06
+ kinetic energy = 1.243624e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.243802e-02
+ total energy  = 1.243799e-02
 
- energy increase = 9.513015e-03
+ energy increase = 9.512993e-03
 
- energy balance (absolute) = -2.347289e-07 
- energy balance (relative) = 0.002105 % 
+ energy balance (absolute) = -2.343327e-07 
+ energy balance (relative) = 0.002101 % 
 
 nonlingeo iinc=41
  Using up to 1 cpu(s) for the stress calculation.
@@ -4816,11 +4759,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.021952
- time avg. forc= 0.038701
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.889295e-05
- largest correction to disp= 5.601169e-09 in node 12 and dof 3
+ average force= 0.021956
+ time avg. forc= 0.038702
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 1.889367e-05
+ largest correction to disp= 5.603945e-09 in node 12 and dof 3
 
  no convergence
 
@@ -4841,32 +4784,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.021952
- time avg. forc= 0.038701
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.889295e-05
- largest correction to disp= 4.909639e-19 in node 16 and dof 3
+ average force= 0.021956
+ time avg. forc= 0.038702
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 1.889367e-05
+ largest correction to disp= 1.072436e-20 in node 15 and dof 3
 
  convergence; the increment size is increased to 4.500000e-05
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.501421e-03
+ external work = 9.501398e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.501421e-03
+ netto work = 9.501398e-03
 
  actual energy: 
- internal energy = 1.444813e-06
- kinetic energy = 1.242474e-02
+ internal energy = 1.445222e-06
+ kinetic energy = 1.242472e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.242619e-02
+ total energy  = 1.242616e-02
 
- energy increase = 9.501186e-03
+ energy increase = 9.501163e-03
 
- energy balance (absolute) = -2.351002e-07 
- energy balance (relative) = 0.002099 % 
+ energy balance (absolute) = -2.347053e-07 
+ energy balance (relative) = 0.002095 % 
 
 nonlingeo iinc=42
  Using up to 1 cpu(s) for the stress calculation.
@@ -4903,11 +4846,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.017361
- time avg. forc= 0.037880
- largest residual force= 0.000000 in node 9 and dof 2
- largest increment of disp= 2.834553e-05
- largest correction to disp= 9.632304e-09 in node 11 and dof 1
+ average force= 0.017359
+ time avg. forc= 0.037881
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 2.834663e-05
+ largest correction to disp= 9.636063e-09 in node 13 and dof 2
 
  no convergence
 
@@ -4928,32 +4871,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.017361
- time avg. forc= 0.037880
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 2.834553e-05
- largest correction to disp= 2.517195e-18 in node 9 and dof 2
+ average force= 0.017359
+ time avg. forc= 0.037881
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 2.834663e-05
+ largest correction to disp= 4.073662e-20 in node 11 and dof 3
 
  convergence; the increment size is increased to 6.750000e-05
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.483688e-03
+ external work = 9.483665e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.483688e-03
+ netto work = 9.483665e-03
 
  actual energy: 
- internal energy = 1.044041e-06
- kinetic energy = 1.240741e-02
+ internal energy = 1.044340e-06
+ kinetic energy = 1.240738e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.240845e-02
+ total energy  = 1.240843e-02
 
- energy increase = 9.483452e-03
+ energy increase = 9.483429e-03
 
- energy balance (absolute) = -2.360082e-07 
- energy balance (relative) = 0.002098 % 
+ energy balance (absolute) = -2.356162e-07 
+ energy balance (relative) = 0.002095 % 
 
 nonlingeo iinc=43
  Using up to 1 cpu(s) for the stress calculation.
@@ -4990,11 +4933,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.017571
- time avg. forc= 0.037128
- largest residual force= 0.000000 in node 11 and dof 3
- largest increment of disp= 4.250591e-05
- largest correction to disp= 2.180186e-08 in node 13 and dof 3
+ average force= 0.017613
+ time avg. forc= 0.037130
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 4.250752e-05
+ largest correction to disp= 2.187255e-08 in node 15 and dof 3
 
  no convergence
 
@@ -5015,32 +4958,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.017571
- time avg. forc= 0.037128
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 4.250591e-05
- largest correction to disp= 5.530055e-17 in node 11 and dof 3
+ average force= 0.017613
+ time avg. forc= 0.037130
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 4.250752e-05
+ largest correction to disp= 6.114628e-20 in node 16 and dof 3
 
  convergence; the increment size is increased to 1.012500e-04
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.457111e-03
+ external work = 9.457089e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.457111e-03
+ netto work = 9.457089e-03
 
  actual energy: 
- internal energy = 6.116041e-07
- kinetic energy = 1.238126e-02
+ internal energy = 6.124138e-07
+ kinetic energy = 1.238124e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.238187e-02
+ total energy  = 1.238185e-02
 
- energy increase = 9.456873e-03
+ energy increase = 9.456851e-03
 
- energy balance (absolute) = -2.381036e-07 
- energy balance (relative) = 0.002109 % 
+ energy balance (absolute) = -2.377168e-07 
+ energy balance (relative) = 0.002105 % 
 
 nonlingeo iinc=44
  Using up to 1 cpu(s) for the stress calculation.
@@ -5077,11 +5020,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.020363
- time avg. forc= 0.036529
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 6.364541e-05
- largest correction to disp= 9.072505e-08 in node 14 and dof 3
+ average force= 0.020434
+ time avg. forc= 0.036534
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 6.364746e-05
+ largest correction to disp= 9.100986e-08 in node 16 and dof 3
 
  no convergence
 
@@ -5102,32 +5045,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.020363
- time avg. forc= 0.036529
- largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 6.364541e-05
- largest correction to disp= 3.217918e-15 in node 12 and dof 3
+ average force= 0.020434
+ time avg. forc= 0.036534
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 6.364746e-05
+ largest correction to disp= 1.658606e-19 in node 13 and dof 3
 
  convergence; the increment size is increased to 1.518750e-04
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.417301e-03
+ external work = 9.417278e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.417301e-03
+ netto work = 9.417278e-03
 
  actual energy: 
- internal energy = 3.506587e-07
- kinetic energy = 1.234171e-02
+ internal energy = 3.530086e-07
+ kinetic energy = 1.234168e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.234206e-02
+ total energy  = 1.234204e-02
 
- energy increase = 9.417058e-03
+ energy increase = 9.417036e-03
 
- energy balance (absolute) = -2.423362e-07 
- energy balance (relative) = 0.002139 % 
+ energy balance (absolute) = -2.419532e-07 
+ energy balance (relative) = 0.002136 % 
 
 nonlingeo iinc=45
  Using up to 1 cpu(s) for the stress calculation.
@@ -5164,11 +5107,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.015461
- time avg. forc= 0.035803
- largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 9.497015e-05
- largest correction to disp= 2.691184e-07 in node 14 and dof 3
+ average force= 0.015541
+ time avg. forc= 0.035810
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 9.497165e-05
+ largest correction to disp= 2.698701e-07 in node 16 and dof 3
 
  no convergence
 
@@ -5189,32 +5132,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.015461
- time avg. forc= 0.035803
- largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 9.497015e-05
- largest correction to disp= 6.267419e-14 in node 10 and dof 3
+ average force= 0.015541
+ time avg. forc= 0.035810
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 9.497165e-05
+ largest correction to disp= 3.441769e-19 in node 10 and dof 3
 
  convergence; the increment size is increased to 2.278125e-04
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.357705e-03
+ external work = 9.357682e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.357705e-03
+ netto work = 9.357682e-03
 
  actual energy: 
- internal energy = 6.379041e-07
- kinetic energy = 1.228182e-02
+ internal energy = 6.413748e-07
+ kinetic energy = 1.228179e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.228245e-02
+ total energy  = 1.228243e-02
 
- energy increase = 9.357454e-03
+ energy increase = 9.357432e-03
 
- energy balance (absolute) = -2.503334e-07 
- energy balance (relative) = 0.002203 % 
+ energy balance (absolute) = -2.499515e-07 
+ energy balance (relative) = 0.002200 % 
 
 nonlingeo iinc=46
  Using up to 1 cpu(s) for the stress calculation.
@@ -5251,11 +5194,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.027616
- time avg. forc= 0.035530
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 1.409061e-04
- largest correction to disp= 4.563772e-07 in node 14 and dof 3
+ average force= 0.027633
+ time avg. forc= 0.035538
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 1.409040e-04
+ largest correction to disp= 4.570124e-07 in node 16 and dof 3
 
  no convergence
 
@@ -5276,32 +5219,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.027616
- time avg. forc= 0.035530
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.409061e-04
- largest correction to disp= 2.228504e-13 in node 9 and dof 3
+ average force= 0.027633
+ time avg. forc= 0.035538
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 1.409040e-04
+ largest correction to disp= 2.666537e-19 in node 12 and dof 3
 
  convergence; the increment size is increased to 3.417188e-04
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.268581e-03
+ external work = 9.268559e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.268581e-03
+ netto work = 9.268559e-03
 
  actual energy: 
- internal energy = 2.126230e-06
- kinetic energy = 1.219119e-02
+ internal energy = 2.128148e-06
+ kinetic energy = 1.219116e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.219331e-02
+ total energy  = 1.219329e-02
 
- energy increase = 9.268313e-03
+ energy increase = 9.268290e-03
 
- energy balance (absolute) = -2.687762e-07 
- energy balance (relative) = 0.002360 % 
+ energy balance (absolute) = -2.684822e-07 
+ energy balance (relative) = 0.002357 % 
 
 nonlingeo iinc=47
  Using up to 1 cpu(s) for the stress calculation.
@@ -5338,11 +5281,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.038412
- time avg. forc= 0.035623
- largest residual force= 0.000000 in node 11 and dof 1
- largest increment of disp= 2.096141e-04
- largest correction to disp= 1.217753e-06 in node 14 and dof 1
+ average force= 0.038494
+ time avg. forc= 0.035633
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 2.096220e-04
+ largest correction to disp= 1.218998e-06 in node 13 and dof 2
 
  no convergence
 
@@ -5363,32 +5306,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.038412
- time avg. forc= 0.035623
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 2.096141e-04
- largest correction to disp= 2.007806e-12 in node 11 and dof 2
+ average force= 0.038494
+ time avg. forc= 0.035633
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 2.096220e-04
+ largest correction to disp= 7.011021e-19 in node 14 and dof 3
 
  convergence; the increment size is increased to 5.125781e-04
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 9.135505e-03
+ external work = 9.135482e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 9.135505e-03
+ netto work = 9.135482e-03
 
  actual energy: 
- internal energy = 4.376156e-06
- kinetic energy = 1.205586e-02
+ internal energy = 4.381036e-06
+ kinetic energy = 1.205583e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.206023e-02
+ total energy  = 1.206021e-02
 
- energy increase = 9.135234e-03
+ energy increase = 9.135212e-03
 
- energy balance (absolute) = -2.710507e-07 
- energy balance (relative) = 0.002375 % 
+ energy balance (absolute) = -2.708452e-07 
+ energy balance (relative) = 0.002374 % 
 
 nonlingeo iinc=48
  Using up to 1 cpu(s) for the stress calculation.
@@ -5425,11 +5368,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.014377
- time avg. forc= 0.034959
- largest residual force= 0.000000 in node 16 and dof 1
- largest increment of disp= 3.124393e-04
- largest correction to disp= 1.139729e-06 in node 13 and dof 2
+ average force= 0.014373
+ time avg. forc= 0.034969
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 3.124386e-04
+ largest correction to disp= 1.140321e-06 in node 10 and dof 2
 
  no convergence
 
@@ -5450,31 +5393,31 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.014377
- time avg. forc= 0.034959
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 3.124393e-04
- largest correction to disp= 2.949649e-12 in node 11 and dof 1
+ average force= 0.014373
+ time avg. forc= 0.034969
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 3.124386e-04
+ largest correction to disp= 1.900316e-18 in node 11 and dof 3
 
  convergence; the increment size is increased to 7.688672e-04
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 8.937260e-03
+ external work = 8.937238e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 8.937260e-03
+ netto work = 8.937238e-03
 
  actual energy: 
- internal energy = 7.287439e-07
- kinetic energy = 1.186115e-02
+ internal energy = 7.288410e-07
+ kinetic energy = 1.186113e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.186188e-02
+ total energy  = 1.186185e-02
 
- energy increase = 8.936877e-03
+ energy increase = 8.936855e-03
 
- energy balance (absolute) = -3.827811e-07 
+ energy balance (absolute) = -3.828285e-07 
  energy balance (relative) = 0.003351 % 
 
 nonlingeo iinc=49
@@ -5512,11 +5455,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.034231
- time avg. forc= 0.034937
- largest residual force= 0.000004 in node 16 and dof 1
- largest increment of disp= 4.646162e-04
- largest correction to disp= 5.101758e-06 in node 14 and dof 1
+ average force= 0.034306
+ time avg. forc= 0.034948
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 4.645981e-04
+ largest correction to disp= 5.107783e-06 in node 10 and dof 2
 
  no convergence
 
@@ -5537,32 +5480,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.034229
- time avg. forc= 0.034937
- largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 4.646162e-04
- largest correction to disp= 9.711162e-11 in node 13 and dof 2
+ average force= 0.034306
+ time avg. forc= 0.034948
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 4.645981e-04
+ largest correction to disp= 2.339894e-18 in node 13 and dof 3
 
  convergence; the increment size is increased to 1.153301e-03
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 8.642974e-03
+ external work = 8.642952e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 8.642974e-03
+ netto work = 8.642952e-03
 
  actual energy: 
- internal energy = 3.238261e-06
- kinetic energy = 1.156418e-02
+ internal energy = 3.242731e-06
+ kinetic energy = 1.156415e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.156742e-02
+ total energy  = 1.156739e-02
 
- energy increase = 8.642416e-03
+ energy increase = 8.642394e-03
 
- energy balance (absolute) = -5.576570e-07 
- energy balance (relative) = 0.004879 % 
+ energy balance (absolute) = -5.577146e-07 
+ energy balance (relative) = 0.004880 % 
 
 nonlingeo iinc=50
  Using up to 1 cpu(s) for the stress calculation.
@@ -5599,11 +5542,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012973
- time avg. forc= 0.034291
- largest residual force= 0.000061 in node 11 and dof 3
- largest increment of disp= 6.940765e-04
- largest correction to disp= 1.291541e-05 in node 9 and dof 3
+ average force= 0.013054
+ time avg. forc= 0.034305
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 6.941124e-04
+ largest correction to disp= 1.294517e-05 in node 12 and dof 3
 
  no convergence
 
@@ -5624,32 +5567,32 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012985
- time avg. forc= 0.034291
+ average force= 0.013054
+ time avg. forc= 0.034305
  largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 6.940765e-04
- largest correction to disp= 1.004156e-09 in node 11 and dof 3
+ largest increment of disp= 6.941124e-04
+ largest correction to disp= 1.818021e-18 in node 13 and dof 3
 
  convergence; the increment size is increased to 1.729951e-03
 
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 8.208479e-03
+ external work = 8.208457e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 8.208479e-03
+ netto work = 8.208457e-03
 
  actual energy: 
- internal energy = 4.232292e-07
- kinetic energy = 1.113220e-02
+ internal energy = 4.252328e-07
+ kinetic energy = 1.113218e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.113262e-02
+ total energy  = 1.113260e-02
 
- energy increase = 8.207623e-03
+ energy increase = 8.207600e-03
 
- energy balance (absolute) = -8.558757e-07 
- energy balance (relative) = 0.007495 % 
+ energy balance (absolute) = -8.567970e-07 
+ energy balance (relative) = 0.007503 % 
 
 nonlingeo iinc=51
  Using up to 1 cpu(s) for the stress calculation.
@@ -5686,11 +5629,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.032695
- time avg. forc= 0.034245
- largest residual force= 0.000314 in node 9 and dof 3
- largest increment of disp= 1.033419e-03
- largest correction to disp= 3.120830e-05 in node 15 and dof 3
+ average force= 0.032679
+ time avg. forc= 0.034258
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 1.033472e-03
+ largest correction to disp= 3.126155e-05 in node 16 and dof 3
 
  no convergence
 
@@ -5711,11 +5654,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.032660
- time avg. forc= 0.034244
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.033419e-03
- largest correction to disp= 5.278349e-09 in node 14 and dof 3
+ average force= 0.032679
+ time avg. forc= 0.034258
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 1.033472e-03
+ largest correction to disp= 1.308198e-18 in node 14 and dof 3
 
  convergence; the increment size is increased to 2.594927e-03
 
@@ -5724,21 +5667,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 7.572336e-03
+ external work = 7.572316e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 7.572336e-03
+ netto work = 7.572316e-03
 
  actual energy: 
- internal energy = 2.841445e-06
- kinetic energy = 1.049347e-02
+ internal energy = 2.843740e-06
+ kinetic energy = 1.049345e-02
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.049631e-02
+ total energy  = 1.049629e-02
 
- energy increase = 7.571314e-03
+ energy increase = 7.571292e-03
 
- energy balance (absolute) = -1.022539e-06 
- energy balance (relative) = 0.008975 % 
+ energy balance (absolute) = -1.023978e-06 
+ energy balance (relative) = 0.008987 % 
 
 nonlingeo iinc=52
  Using up to 1 cpu(s) for the stress calculation.
@@ -5775,11 +5718,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.029804
- time avg. forc= 0.034121
- largest residual force= 0.000239 in node 10 and dof 3
- largest increment of disp= 1.154236e-03
- largest correction to disp= 3.171142e-05 in node 11 and dof 3
+ average force= 0.029837
+ time avg. forc= 0.034135
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 1.154269e-03
+ largest correction to disp= 3.173785e-05 in node 9 and dof 3
 
  no convergence
 
@@ -5800,11 +5743,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.029822
- time avg. forc= 0.034122
- largest residual force= 0.000000 in node 14 and dof 3
- largest increment of disp= 1.154236e-03
- largest correction to disp= 3.393127e-09 in node 10 and dof 3
+ average force= 0.029837
+ time avg. forc= 0.034135
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 1.154269e-03
+ largest correction to disp= 2.226948e-18 in node 14 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -5813,21 +5756,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 6.860223e-03
+ external work = 6.860203e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 6.860223e-03
+ netto work = 6.860203e-03
 
  actual energy: 
- internal energy = 2.523604e-06
- kinetic energy = 9.780874e-03
+ internal energy = 2.525580e-06
+ kinetic energy = 9.780850e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 9.783397e-03
+ total energy  = 9.783376e-03
 
- energy increase = 6.858397e-03
+ energy increase = 6.858376e-03
 
- energy balance (absolute) = -1.825241e-06 
- energy balance (relative) = 0.016083 % 
+ energy balance (absolute) = -1.827276e-06 
+ energy balance (relative) = 0.016101 % 
 
 nonlingeo iinc=53
  Using up to 1 cpu(s) for the stress calculation.
@@ -5864,11 +5807,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.010587
- time avg. forc= 0.033485
- largest residual force= 0.000010 in node 13 and dof 2
- largest increment of disp= 1.095111e-03
- largest correction to disp= 1.404884e-05 in node 15 and dof 3
+ average force= 0.010595
+ time avg. forc= 0.033499
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 1.095107e-03
+ largest correction to disp= 1.404333e-05 in node 13 and dof 3
 
  no convergence
 
@@ -5889,11 +5832,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.010590
- time avg. forc= 0.033486
+ average force= 0.010595
+ time avg. forc= 0.033499
  largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 1.095111e-03
- largest correction to disp= 4.388367e-10 in node 13 and dof 2
+ largest increment of disp= 1.095107e-03
+ largest correction to disp= 1.016531e-18 in node 12 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -5902,21 +5845,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 6.173131e-03
+ external work = 6.173112e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 6.173131e-03
+ netto work = 6.173112e-03
 
  actual energy: 
- internal energy = 3.604192e-07
- kinetic energy = 9.095433e-03
+ internal energy = 3.608468e-07
+ kinetic energy = 9.095411e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 9.095793e-03
+ total energy  = 9.095772e-03
 
- energy increase = 6.170793e-03
+ energy increase = 6.170772e-03
 
- energy balance (absolute) = -2.337599e-06 
- energy balance (relative) = 0.020709 % 
+ energy balance (absolute) = -2.340077e-06 
+ energy balance (relative) = 0.020731 % 
 
 nonlingeo iinc=54
  Using up to 1 cpu(s) for the stress calculation.
@@ -5953,11 +5896,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012325
- time avg. forc= 0.032929
- largest residual force= 0.000127 in node 16 and dof 3
- largest increment of disp= 1.063890e-03
- largest correction to disp= 2.524341e-05 in node 13 and dof 3
+ average force= 0.012316
+ time avg. forc= 0.032942
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 1.063925e-03
+ largest correction to disp= 2.528100e-05 in node 16 and dof 3
 
  no convergence
 
@@ -5978,11 +5921,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012309
- time avg. forc= 0.032928
+ average force= 0.012316
+ time avg. forc= 0.032942
  largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 1.063890e-03
- largest correction to disp= 2.288525e-09 in node 12 and dof 3
+ largest increment of disp= 1.063925e-03
+ largest correction to disp= 9.785191e-19 in node 9 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -5991,21 +5934,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 5.511060e-03
+ external work = 5.511042e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 5.511060e-03
+ netto work = 5.511042e-03
 
  actual energy: 
- internal energy = 3.915932e-07
- kinetic energy = 8.433326e-03
+ internal energy = 3.918864e-07
+ kinetic energy = 8.433305e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 8.433718e-03
+ total energy  = 8.433697e-03
 
- energy increase = 5.508718e-03
+ energy increase = 5.508697e-03
 
- energy balance (absolute) = -2.342031e-06 
- energy balance (relative) = 0.020887 % 
+ energy balance (absolute) = -2.344560e-06 
+ energy balance (relative) = 0.020910 % 
 
 nonlingeo iinc=55
  Using up to 1 cpu(s) for the stress calculation.
@@ -6042,11 +5985,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.025666
- time avg. forc= 0.032742
- largest residual force= 0.000364 in node 9 and dof 3
- largest increment of disp= 1.038286e-03
- largest correction to disp= 3.559303e-05 in node 9 and dof 3
+ average force= 0.025724
+ time avg. forc= 0.032756
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 1.038343e-03
+ largest correction to disp= 3.564151e-05 in node 12 and dof 3
 
  no convergence
 
@@ -6067,11 +6010,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.025708
- time avg. forc= 0.032743
- largest residual force= 0.000000 in node 11 and dof 3
- largest increment of disp= 1.038286e-03
- largest correction to disp= 6.287254e-09 in node 9 and dof 3
+ average force= 0.025724
+ time avg. forc= 0.032756
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 1.038343e-03
+ largest correction to disp= 4.987353e-19 in node 13 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6080,21 +6023,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 4.874011e-03
+ external work = 4.873993e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 4.874011e-03
+ netto work = 4.873993e-03
 
  actual energy: 
- internal energy = 1.760356e-06
- kinetic energy = 7.794708e-03
+ internal energy = 1.761856e-06
+ kinetic energy = 7.794686e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 7.796468e-03
+ total energy  = 7.796448e-03
 
- energy increase = 4.871468e-03
+ energy increase = 4.871448e-03
 
- energy balance (absolute) = -2.542395e-06 
- energy balance (relative) = 0.022853 % 
+ energy balance (absolute) = -2.545110e-06 
+ energy balance (relative) = 0.022877 % 
 
 nonlingeo iinc=56
  Using up to 1 cpu(s) for the stress calculation.
@@ -6131,11 +6074,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.023510
- time avg. forc= 0.032512
- largest residual force= 0.000372 in node 11 and dof 3
- largest increment of disp= 1.000004e-03
- largest correction to disp= 3.546683e-05 in node 13 and dof 3
+ average force= 0.023481
+ time avg. forc= 0.032525
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 1.000069e-03
+ largest correction to disp= 3.553486e-05 in node 16 and dof 3
 
  no convergence
 
@@ -6156,11 +6099,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.023463
- time avg. forc= 0.032511
+ average force= 0.023481
+ time avg. forc= 0.032525
  largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 1.000004e-03
- largest correction to disp= 6.662965e-09 in node 11 and dof 3
+ largest increment of disp= 1.000069e-03
+ largest correction to disp= 5.873231e-19 in node 14 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6169,21 +6112,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 4.261983e-03
+ external work = 4.261966e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 4.261983e-03
+ netto work = 4.261966e-03
 
  actual energy: 
- internal energy = 1.433246e-06
- kinetic energy = 7.182494e-03
+ internal energy = 1.434989e-06
+ kinetic energy = 7.182473e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 7.183927e-03
+ total energy  = 7.183908e-03
 
- energy increase = 4.258927e-03
+ energy increase = 4.258908e-03
 
- energy balance (absolute) = -3.055210e-06 
- energy balance (relative) = 0.027708 % 
+ energy balance (absolute) = -3.058449e-06 
+ energy balance (relative) = 0.027737 % 
 
 nonlingeo iinc=57
  Using up to 1 cpu(s) for the stress calculation.
@@ -6220,11 +6163,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.009027
- time avg. forc= 0.031938
- largest residual force= 0.000185 in node 11 and dof 3
- largest increment of disp= 9.510225e-04
- largest correction to disp= 2.711324e-05 in node 10 and dof 3
+ average force= 0.009067
+ time avg. forc= 0.031952
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 9.510821e-04
+ largest correction to disp= 2.716567e-05 in node 12 and dof 3
 
  no convergence
 
@@ -6245,11 +6188,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.009053
- time avg. forc= 0.031939
- largest residual force= 0.000000 in node 9 and dof 3
- largest increment of disp= 9.510225e-04
- largest correction to disp= 3.454627e-09 in node 15 and dof 3
+ average force= 0.009067
+ time avg. forc= 0.031952
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 9.510821e-04
+ largest correction to disp= 1.128717e-18 in node 9 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6258,21 +6201,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 3.674976e-03
+ external work = 3.674961e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 3.674976e-03
+ netto work = 3.674961e-03
 
  actual energy: 
- internal energy = 2.195022e-07
- kinetic energy = 6.596408e-03
+ internal energy = 2.203688e-07
+ kinetic energy = 6.596388e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 6.596627e-03
+ total energy  = 6.596608e-03
 
- energy increase = 3.671627e-03
+ energy increase = 3.671608e-03
 
- energy balance (absolute) = -3.348760e-06 
- energy balance (relative) = 0.030671 % 
+ energy balance (absolute) = -3.352487e-06 
+ energy balance (relative) = 0.030705 % 
 
 nonlingeo iinc=58
  Using up to 1 cpu(s) for the stress calculation.
@@ -6309,11 +6252,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.013067
- time avg. forc= 0.031490
- largest residual force= 0.000042 in node 16 and dof 3
- largest increment of disp= 8.981188e-04
- largest correction to disp= 1.613636e-05 in node 14 and dof 3
+ average force= 0.013083
+ time avg. forc= 0.031503
+ largest residual force= 0.000000 in node 12 and dof 3
+ largest increment of disp= 8.981632e-04
+ largest correction to disp= 1.617851e-05 in node 16 and dof 3
 
  no convergence
 
@@ -6334,11 +6277,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.013052
- time avg. forc= 0.031489
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 8.981188e-04
- largest correction to disp= 8.343120e-10 in node 11 and dof 1
+ average force= 0.013083
+ time avg. forc= 0.031503
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 8.981632e-04
+ largest correction to disp= 3.357968e-19 in node 11 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6347,21 +6290,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 3.112991e-03
+ external work = 3.112976e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 3.112991e-03
+ netto work = 3.112976e-03
 
  actual energy: 
- internal energy = 3.412287e-07
- kinetic energy = 6.034281e-03
+ internal energy = 3.417342e-07
+ kinetic energy = 6.034263e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 6.034623e-03
+ total energy  = 6.034604e-03
 
- energy increase = 3.109623e-03
+ energy increase = 3.109604e-03
 
- energy balance (absolute) = -3.368221e-06 
- energy balance (relative) = 0.031181 % 
+ energy balance (absolute) = -3.372166e-06 
+ energy balance (relative) = 0.031217 % 
 
 nonlingeo iinc=59
  Using up to 1 cpu(s) for the stress calculation.
@@ -6398,11 +6341,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.016919
- time avg. forc= 0.031150
- largest residual force= 0.000043 in node 12 and dof 2
- largest increment of disp= 8.572674e-04
- largest correction to disp= 1.783919e-05 in node 11 and dof 2
+ average force= 0.016930
+ time avg. forc= 0.031164
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 8.572399e-04
+ largest correction to disp= 1.784954e-05 in node 9 and dof 2
 
  no convergence
 
@@ -6424,10 +6367,10 @@ maximal possible contact elements =
  Using up to 1 cpu(s) for the energy calculation.
 
  average force= 0.016930
- time avg. forc= 0.031151
- largest residual force= 0.000000 in node 15 and dof 2
- largest increment of disp= 8.572674e-04
- largest correction to disp= 1.988802e-09 in node 11 and dof 2
+ time avg. forc= 0.031164
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 8.572399e-04
+ largest correction to disp= 9.281194e-19 in node 10 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6436,21 +6379,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 2.576027e-03
+ external work = 2.576014e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 2.576027e-03
+ netto work = 2.576014e-03
 
  actual energy: 
- internal energy = 1.041200e-06
- kinetic energy = 5.496471e-03
+ internal energy = 1.041919e-06
+ kinetic energy = 5.496453e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 5.497513e-03
+ total energy  = 5.497495e-03
 
- energy increase = 2.572513e-03
+ energy increase = 2.572495e-03
 
- energy balance (absolute) = -3.514349e-06 
- energy balance (relative) = 0.032910 % 
+ energy balance (absolute) = -3.518477e-06 
+ energy balance (relative) = 0.032948 % 
 
 nonlingeo iinc=60
  Using up to 1 cpu(s) for the stress calculation.
@@ -6487,11 +6430,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.014657
- time avg. forc= 0.030776
- largest residual force= 0.000023 in node 13 and dof 2
- largest increment of disp= 8.211827e-04
- largest correction to disp= 1.587923e-05 in node 12 and dof 3
+ average force= 0.014656
+ time avg. forc= 0.030789
+ largest residual force= 0.000000 in node 10 and dof 3
+ largest increment of disp= 8.211743e-04
+ largest correction to disp= 1.587296e-05 in node 10 and dof 3
 
  no convergence
 
@@ -6512,11 +6455,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.014652
- time avg. forc= 0.030776
- largest residual force= 0.000000 in node 12 and dof 2
- largest increment of disp= 8.211827e-04
- largest correction to disp= 1.002786e-09 in node 15 and dof 1
+ average force= 0.014656
+ time avg. forc= 0.030789
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 8.211743e-04
+ largest correction to disp= 4.249498e-19 in node 13 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6525,21 +6468,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 2.064085e-03
+ external work = 2.064072e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 2.064085e-03
+ netto work = 2.064072e-03
 
  actual energy: 
- internal energy = 7.086043e-07
- kinetic energy = 4.984575e-03
+ internal energy = 7.091684e-07
+ kinetic energy = 4.984557e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 4.985284e-03
+ total energy  = 4.985267e-03
 
- energy increase = 2.060284e-03
+ energy increase = 2.060267e-03
 
- energy balance (absolute) = -3.801041e-06 
- energy balance (relative) = 0.036031 % 
+ energy balance (absolute) = -3.805346e-06 
+ energy balance (relative) = 0.036072 % 
 
 nonlingeo iinc=61
  Using up to 1 cpu(s) for the stress calculation.
@@ -6576,11 +6519,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.003971
- time avg. forc= 0.030180
- largest residual force= 0.000005 in node 10 and dof 3
- largest increment of disp= 7.789642e-04
- largest correction to disp= 1.381284e-05 in node 16 and dof 3
+ average force= 0.003975
+ time avg. forc= 0.030193
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 7.789713e-04
+ largest correction to disp= 1.382080e-05 in node 14 and dof 3
 
  no convergence
 
@@ -6601,11 +6544,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.003971
- time avg. forc= 0.030180
- largest residual force= 0.000000 in node 16 and dof 3
- largest increment of disp= 7.789642e-04
- largest correction to disp= 8.866130e-11 in node 10 and dof 3
+ average force= 0.003975
+ time avg. forc= 0.030193
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 7.789713e-04
+ largest correction to disp= 2.200220e-19 in node 11 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6614,21 +6557,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 1.577164e-03
+ external work = 1.577152e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 1.577164e-03
+ netto work = 1.577152e-03
 
  actual energy: 
- internal energy = 4.386069e-08
- kinetic energy = 4.498189e-03
+ internal energy = 4.393581e-08
+ kinetic energy = 4.498173e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 4.498233e-03
+ total energy  = 4.498217e-03
 
- energy increase = 1.573233e-03
+ energy increase = 1.573217e-03
 
- energy balance (absolute) = -3.930948e-06 
- energy balance (relative) = 0.037743 % 
+ energy balance (absolute) = -3.935368e-06 
+ energy balance (relative) = 0.037786 % 
 
 nonlingeo iinc=62
  Using up to 1 cpu(s) for the stress calculation.
@@ -6665,11 +6608,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.007631
- time avg. forc= 0.029690
- largest residual force= 0.000011 in node 10 and dof 1
- largest increment of disp= 7.354483e-04
- largest correction to disp= 1.088935e-05 in node 15 and dof 3
+ average force= 0.007649
+ time avg. forc= 0.029703
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 7.354279e-04
+ largest correction to disp= 1.087124e-05 in node 13 and dof 3
 
  no convergence
 
@@ -6690,11 +6633,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.007635
- time avg. forc= 0.029690
- largest residual force= 0.000000 in node 9 and dof 2
- largest increment of disp= 7.354483e-04
- largest correction to disp= 5.165202e-10 in node 11 and dof 2
+ average force= 0.007649
+ time avg. forc= 0.029703
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 7.354279e-04
+ largest correction to disp= 2.529176e-19 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6703,21 +6646,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 1.115264e-03
+ external work = 1.115253e-03
  work performed by the damping forces = 0.000000e+00
- netto work = 1.115264e-03
+ netto work = 1.115253e-03
 
  actual energy: 
- internal energy = 2.223822e-07
- kinetic energy = 4.036116e-03
+ internal energy = 2.225101e-07
+ kinetic energy = 4.036100e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 4.036338e-03
+ total energy  = 4.036323e-03
 
- energy increase = 1.111338e-03
+ energy increase = 1.111323e-03
 
- energy balance (absolute) = -3.925728e-06 
- energy balance (relative) = 0.038202 % 
+ energy balance (absolute) = -3.930155e-06 
+ energy balance (relative) = 0.038245 % 
 
 nonlingeo iinc=63
  Using up to 1 cpu(s) for the stress calculation.
@@ -6754,11 +6697,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012911
- time avg. forc= 0.029333
- largest residual force= 0.000027 in node 9 and dof 2
- largest increment of disp= 6.983595e-04
- largest correction to disp= 1.405182e-05 in node 14 and dof 1
+ average force= 0.012904
+ time avg. forc= 0.029346
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 6.983330e-04
+ largest correction to disp= 1.406435e-05 in node 14 and dof 2
 
  no convergence
 
@@ -6779,11 +6722,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.012905
- time avg. forc= 0.029333
- largest residual force= 0.000000 in node 13 and dof 1
- largest increment of disp= 6.983595e-04
- largest correction to disp= 1.259564e-09 in node 9 and dof 2
+ average force= 0.012904
+ time avg. forc= 0.029346
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 6.983330e-04
+ largest correction to disp= 3.021502e-19 in node 15 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6792,21 +6735,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 6.783857e-04
+ external work = 6.783758e-04
  work performed by the damping forces = 0.000000e+00
- netto work = 6.783857e-04
+ netto work = 6.783758e-04
 
  actual energy: 
- internal energy = 6.243889e-07
- kinetic energy = 3.598741e-03
+ internal energy = 6.248971e-07
+ kinetic energy = 3.598726e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 3.599365e-03
+ total energy  = 3.599351e-03
 
- energy increase = 6.743653e-04
+ energy increase = 6.743509e-04
 
- energy balance (absolute) = -4.020414e-06 
- energy balance (relative) = 0.039672 % 
+ energy balance (absolute) = -4.024901e-06 
+ energy balance (relative) = 0.039716 % 
 
 nonlingeo iinc=64
  Using up to 1 cpu(s) for the stress calculation.
@@ -6843,11 +6786,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.010894
- time avg. forc= 0.028949
- largest residual force= 0.000019 in node 15 and dof 2
- largest increment of disp= 6.568173e-04
- largest correction to disp= 1.232261e-05 in node 9 and dof 3
+ average force= 0.010924
+ time avg. forc= 0.028962
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 6.567886e-04
+ largest correction to disp= 1.234869e-05 in node 12 and dof 3
 
  no convergence
 
@@ -6868,11 +6811,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.010902
- time avg. forc= 0.028949
- largest residual force= 0.000000 in node 16 and dof 2
- largest increment of disp= 6.568173e-04
- largest correction to disp= 7.970084e-10 in node 14 and dof 2
+ average force= 0.010924
+ time avg. forc= 0.028962
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 6.567886e-04
+ largest correction to disp= 1.100951e-19 in node 11 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6881,21 +6824,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = 2.665289e-04
+ external work = 2.665198e-04
  work performed by the damping forces = 0.000000e+00
- netto work = 2.665289e-04
+ netto work = 2.665198e-04
 
  actual energy: 
- internal energy = 3.879966e-07
- kinetic energy = 3.186951e-03
+ internal energy = 3.884581e-07
+ kinetic energy = 3.186937e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 3.187339e-03
+ total energy  = 3.187325e-03
 
- energy increase = 2.623390e-04
+ energy increase = 2.623252e-04
 
- energy balance (absolute) = -4.189909e-06 
- energy balance (relative) = 0.041943 % 
+ energy balance (absolute) = -4.194572e-06 
+ energy balance (relative) = 0.041990 % 
 
 nonlingeo iinc=65
  Using up to 1 cpu(s) for the stress calculation.
@@ -6932,11 +6875,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.005666
- time avg. forc= 0.028474
- largest residual force= 0.000027 in node 16 and dof 3
- largest increment of disp= 6.225607e-04
- largest correction to disp= 1.648357e-05 in node 14 and dof 3
+ average force= 0.005679
+ time avg. forc= 0.028487
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 6.225854e-04
+ largest correction to disp= 1.650868e-05 in node 16 and dof 3
 
  no convergence
 
@@ -6957,11 +6900,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.005660
- time avg. forc= 0.028474
- largest residual force= 0.000000 in node 10 and dof 3
- largest increment of disp= 6.225607e-04
- largest correction to disp= 4.596382e-10 in node 16 and dof 3
+ average force= 0.005679
+ time avg. forc= 0.028487
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 6.225854e-04
+ largest correction to disp= 3.502752e-20 in node 16 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -6970,21 +6913,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = -1.203066e-04
+ external work = -1.203148e-04
  work performed by the damping forces = 0.000000e+00
- netto work = -1.203066e-04
+ netto work = -1.203148e-04
 
  actual energy: 
- internal energy = 3.041313e-08
- kinetic energy = 2.800402e-03
+ internal energy = 3.059348e-08
+ kinetic energy = 2.800389e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 2.800433e-03
+ total energy  = 2.800420e-03
 
- energy increase = -1.245673e-04
+ energy increase = -1.245803e-04
 
- energy balance (absolute) = -4.260701e-06 
- energy balance (relative) = 0.043288 % 
+ energy balance (absolute) = -4.265479e-06 
+ energy balance (relative) = 0.043336 % 
 
 nonlingeo iinc=66
  Using up to 1 cpu(s) for the stress calculation.
@@ -7021,11 +6964,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.007974
- time avg. forc= 0.028064
- largest residual force= 0.000047 in node 14 and dof 3
- largest increment of disp= 5.878384e-04
- largest correction to disp= 1.956099e-05 in node 10 and dof 3
+ average force= 0.007984
+ time avg. forc= 0.028077
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 5.878589e-04
+ largest correction to disp= 1.958042e-05 in node 12 and dof 3
 
  no convergence
 
@@ -7046,11 +6989,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.007980
- time avg. forc= 0.028064
- largest residual force= 0.000000 in node 12 and dof 3
- largest increment of disp= 5.878384e-04
- largest correction to disp= 8.291704e-10 in node 14 and dof 3
+ average force= 0.007984
+ time avg. forc= 0.028077
+ largest residual force= 0.000000 in node 16 and dof 3
+ largest increment of disp= 5.878589e-04
+ largest correction to disp= 1.224497e-19 in node 12 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -7059,21 +7002,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = -4.821207e-04
+ external work = -4.821280e-04
  work performed by the damping forces = 0.000000e+00
- netto work = -4.821207e-04
+ netto work = -4.821280e-04
 
  actual energy: 
- internal energy = 1.650800e-07
- kinetic energy = 2.438451e-03
+ internal energy = 1.652238e-07
+ kinetic energy = 2.438439e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 2.438616e-03
+ total energy  = 2.438604e-03
 
- energy increase = -4.863842e-04
+ energy increase = -4.863963e-04
 
- energy balance (absolute) = -4.263446e-06 
- energy balance (relative) = 0.043977 % 
+ energy balance (absolute) = -4.268269e-06 
+ energy balance (relative) = 0.044027 % 
 
 nonlingeo iinc=67
  Using up to 1 cpu(s) for the stress calculation.
@@ -7110,11 +7053,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.011337
- time avg. forc= 0.027736
- largest residual force= 0.000040 in node 15 and dof 3
- largest increment of disp= 5.493167e-04
- largest correction to disp= 1.933693e-05 in node 14 and dof 3
+ average force= 0.011339
+ time avg. forc= 0.027749
+ largest residual force= 0.000000 in node 11 and dof 3
+ largest increment of disp= 5.493302e-04
+ largest correction to disp= 1.935085e-05 in node 13 and dof 3
 
  no convergence
 
@@ -7135,11 +7078,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.011334
- time avg. forc= 0.027736
- largest residual force= 0.000000 in node 13 and dof 3
- largest increment of disp= 5.493167e-04
- largest correction to disp= 6.022562e-10 in node 15 and dof 3
+ average force= 0.011339
+ time avg. forc= 0.027749
+ largest residual force= 0.000000 in node 15 and dof 3
+ largest increment of disp= 5.493302e-04
+ largest correction to disp= 9.186184e-20 in node 15 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -7148,21 +7091,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = -8.189134e-04
+ external work = -8.189198e-04
  work performed by the damping forces = 0.000000e+00
- netto work = -8.189134e-04
+ netto work = -8.189198e-04
 
  actual energy: 
- internal energy = 3.604967e-07
- kinetic energy = 2.101399e-03
+ internal energy = 3.607391e-07
+ kinetic energy = 2.101388e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 2.101760e-03
+ total energy  = 2.101748e-03
 
- energy increase = -8.232404e-04
+ energy increase = -8.232516e-04
 
- energy balance (absolute) = -4.326953e-06 
- energy balance (relative) = 0.045329 % 
+ energy balance (absolute) = -4.331827e-06 
+ energy balance (relative) = 0.045380 % 
 
 nonlingeo iinc=68
  Using up to 1 cpu(s) for the stress calculation.
@@ -7199,11 +7142,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.007965
- time avg. forc= 0.027355
- largest residual force= 0.000012 in node 14 and dof 3
- largest increment of disp= 5.062148e-04
- largest correction to disp= 1.556380e-05 in node 11 and dof 3
+ average force= 0.007969
+ time avg. forc= 0.027368
+ largest residual force= 0.000000 in node 9 and dof 3
+ largest increment of disp= 5.062193e-04
+ largest correction to disp= 1.556851e-05 in node 9 and dof 3
 
  no convergence
 
@@ -7224,11 +7167,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.007965
- time avg. forc= 0.027355
- largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 5.062148e-04
- largest correction to disp= 1.342346e-10 in node 14 and dof 3
+ average force= 0.007969
+ time avg. forc= 0.027368
+ largest residual force= 0.000000 in node 14 and dof 3
+ largest increment of disp= 5.062193e-04
+ largest correction to disp= 2.047606e-19 in node 9 and dof 3
 
  convergence; the increment size is increased to 3.000000e-03
 
@@ -7239,21 +7182,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = -1.130685e-03
+ external work = -1.130690e-03
  work performed by the damping forces = 0.000000e+00
- netto work = -1.130685e-03
+ netto work = -1.130690e-03
 
  actual energy: 
- internal energy = 1.862312e-07
- kinetic energy = 1.789709e-03
+ internal energy = 1.863845e-07
+ kinetic energy = 1.789698e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.789895e-03
+ total energy  = 1.789885e-03
 
- energy increase = -1.135105e-03
+ energy increase = -1.135115e-03
 
- energy balance (absolute) = -4.420007e-06 
- energy balance (relative) = 0.047038 % 
+ energy balance (absolute) = -4.424944e-06 
+ energy balance (relative) = 0.047091 % 
 
 nonlingeo iinc=69
  pressure ratio (smallest/largest pressure over all contact areas) =0.000000e+00
@@ -7292,11 +7235,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.008060
- time avg. forc= 0.026991
- largest residual force= 0.000000 in node 11 and dof 3
- largest increment of disp= 1.513857e-04
- largest correction to disp= 1.941948e-06 in node 9 and dof 3
+ average force= 0.008064
+ time avg. forc= 0.027004
+ largest residual force= 0.000000 in node 13 and dof 3
+ largest increment of disp= 1.513871e-04
+ largest correction to disp= 1.943604e-06 in node 12 and dof 3
 
  no convergence
 
@@ -7317,11 +7260,11 @@ maximal possible contact elements =
 
  Using up to 1 cpu(s) for the energy calculation.
 
- average force= 0.008060
- time avg. forc= 0.026991
+ average force= 0.008064
+ time avg. forc= 0.027004
  largest residual force= 0.000000 in node 15 and dof 3
- largest increment of disp= 1.513857e-04
- largest correction to disp= 4.556478e-12 in node 11 and dof 3
+ largest increment of disp= 1.513871e-04
+ largest correction to disp= 2.410974e-19 in node 13 and dof 3
 
  convergence; the increment size is increased to 9.679542e-04
 
@@ -7330,21 +7273,21 @@ maximal possible contact elements =
  initial energy (at start of step) = 2.925000e-03
 
  since start of the step: 
- external work = -1.225939e-03
+ external work = -1.225944e-03
  work performed by the damping forces = 0.000000e+00
- netto work = -1.225939e-03
+ netto work = -1.225944e-03
 
  actual energy: 
- internal energy = 1.752533e-07
- kinetic energy = 1.694465e-03
+ internal energy = 1.753717e-07
+ kinetic energy = 1.694454e-03
  elastic contact energy = 0.000000e+00
  energy lost due to friction = 0.000000e+00
- total energy  = 1.694640e-03
+ total energy  = 1.694630e-03
 
- energy increase = -1.230360e-03
+ energy increase = -1.230370e-03
 
- energy balance (absolute) = -4.420894e-06 
- energy balance (relative) = 0.047787 % 
+ energy balance (absolute) = -4.425834e-06 
+ energy balance (relative) = 0.047840 % 
 
 nonlingeo iinc=70
  pressure ratio (smallest/largest pressure over all contact areas) =-nan
@@ -7356,5 +7299,5 @@ nonlingeo iinc=70
 
 ________________________________________
 
-Total CalculiX Time: 0.979353
+Total CalculiX Time: 1.013719
 ________________________________________

@@ -1,0 +1,6 @@
+case_id,analysis_type,linearity,element_type,sfc_wall_time_seconds,calculix_wall_time_seconds,speedup_vs_calculix,timing_claim_allowed,notes
+c3d8_linear_dynamic_block_plane_contact,dynamic,linear,C3D8,0.16131570003926754,0.9104602998122573,5.643965835877306,true,native SFC Newmark trajectory vs no-NLGEOM CalculiX dynamic contact
+c3d8_linear_dynamic_block_block_contact,dynamic,linear,C3D8,0.31098080007359385,1.1000084998086095,3.537223196892836,true,native SFC Newmark trajectory vs no-NLGEOM CalculiX dynamic contact
+c3d8_nonlinear_dynamic_block_plane_contact,dynamic,geometric_nonlinear,C3D8,4.073682599700987,1.7916211998090148,0.43980382760810127,false,native SFC HHT/StVK trajectory vs CalculiX NLGEOM dynamic contact
+c3d8_nonlinear_dynamic_block_block_contact,dynamic,geometric_nonlinear,C3D8,9.378789099864662,1.0721398000605404,0.11431537575314618,false,native SFC HHT/StVK trajectory vs CalculiX NLGEOM dynamic contact
+c3d8_curved_nonplanar_contact_replay,dynamic_replay,geometric_nonlinear,C3D8,,9.47156640002504,,false,non-planar external CalculiX trajectory replay; not a native trajectory timing claim

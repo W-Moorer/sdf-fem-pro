@@ -4,8 +4,8 @@ This validation generates C3D8 block-plane and block-block transient contact cas
 
 ## Commands
 
-- `wsl --exec bash -lc "cd /mnt/e/workspace/sdf-fem-pro/results/phase9_full_contact_validation/c3d8_dynamic_trajectory/calculix_runs/block_plane_c3d8_r1 && ccx block_plane_c3d8_r1"`
-- `wsl --exec bash -lc "cd /mnt/e/workspace/sdf-fem-pro/results/phase9_full_contact_validation/c3d8_dynamic_trajectory/calculix_runs/block_block_c3d8_r1 && ccx block_block_c3d8_r1"`
+- `wsl --exec bash -lc "cd /mnt/e/workspace/sdf-fem-pro/paper/numerical_experiments/phase9_full_contact_validation/c3d8_dynamic_trajectory/calculix_runs/block_plane_c3d8_r1 && ccx block_plane_c3d8_r1"`
+- `wsl --exec bash -lc "cd /mnt/e/workspace/sdf-fem-pro/paper/numerical_experiments/phase9_full_contact_validation/c3d8_dynamic_trajectory/calculix_runs/block_block_c3d8_r1 && ccx block_block_c3d8_r1"`
 
 ## Summary
 

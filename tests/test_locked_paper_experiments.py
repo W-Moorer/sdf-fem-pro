@@ -310,17 +310,25 @@ def test_locked_phase9_full_contact_validation_claim_gates() -> None:
         PHASE9_CASE / "phase9_full_contact_validation.csv",
         PHASE9_CASE / "phase9_claim_gates.csv",
         PHASE9_CASE / "phase9_stress_strain_cloud.csv",
+        PHASE9_CASE / "phase9_c3d4_c3d8_side_by_side.csv",
+        PHASE9_CASE / "phase9_solver_timing.csv",
+        PHASE9_CASE / "phase9_curved_nonplanar_contact_external.csv",
         PHASE9_CASE / "phase9_full_contact_validation_summary.md",
         PHASE9_CASE / "figures" / "phase9_claim_gate_matrix.png",
         PHASE9_CASE / "figures" / "phase9_contact_error_metrics.png",
         PHASE9_CASE / "vtk" / "c3d8_linear_static_contact_0000.vtk",
-        PHASE9_CASE / "vtk" / "c3d8_linear_dynamic_contact_native_block_plane_0000.vtk",
+        PHASE9_CASE / "vtk" / "c3d8_linear_dynamic_block_plane_contact_native_0000.vtk",
+        PHASE9_CASE / "vtk" / "c3d8_linear_dynamic_block_block_contact_native_0000.vtk",
         PHASE9_CASE / "vtk" / "c3d8_nonlinear_static_contact_0000.vtk",
-        PHASE9_CASE / "vtk" / "c3d8_nonlinear_dynamic_contact_block_plane_0000.vtk",
+        PHASE9_CASE / "vtk" / "c3d8_nonlinear_dynamic_block_plane_contact_0000.vtk",
+        PHASE9_CASE / "vtk" / "c3d8_nonlinear_dynamic_block_block_contact_0000.vtk",
+        PHASE9_CASE / "vtk" / "c3d8_curved_nonplanar_contact_replay_0000.vtk",
         PHASE9_CASE / "native_c3d8_linear_dynamic_block_plane.csv",
+        PHASE9_CASE / "native_c3d8_linear_dynamic_block_block.csv",
         PHASE9_CASE / "native_c3d8_linear_dynamic_comparison.csv",
         PHASE9_CASE / "native_c3d8_nonlinear_static_contactenergy.csv",
         PHASE9_CASE / "native_c3d8_nonlinear_dynamic_block_plane.csv",
+        PHASE9_CASE / "native_c3d8_nonlinear_dynamic_block_block.csv",
         PHASE9_CASE / "native_c3d8_nonlinear_dynamic_comparison.csv",
     ]
     for path in required:
@@ -329,28 +337,34 @@ def test_locked_phase9_full_contact_validation_claim_gates() -> None:
     rows = _rows(PHASE9_CASE / "phase9_full_contact_validation.csv")
     by_case = {row["case_id"]: row for row in rows}
     assert by_case["c3d8_linear_static_contact"]["supports_external_correctness"] == "true"
-    assert by_case["c3d8_linear_dynamic_contact"]["native_sfc_result"] == "true"
-    assert by_case["c3d8_linear_dynamic_contact"]["supports_trajectory_equivalence"] == "true"
+    assert by_case["c3d8_linear_dynamic_block_plane_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_linear_dynamic_block_plane_contact"]["supports_trajectory_equivalence"] == "true"
+    assert by_case["c3d8_linear_dynamic_block_block_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_linear_dynamic_block_block_contact"]["supports_trajectory_equivalence"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["native_sfc_result"] == "true"
     assert by_case["c3d8_nonlinear_static_contact"]["supports_external_correctness"] == "true"
-    assert by_case["c3d8_nonlinear_dynamic_contact"]["native_sfc_result"] == "true"
-    assert by_case["c3d8_nonlinear_dynamic_contact"]["supports_trajectory_equivalence"] == "true"
+    assert by_case["c3d8_nonlinear_dynamic_block_plane_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_nonlinear_dynamic_block_plane_contact"]["supports_trajectory_equivalence"] == "true"
+    assert by_case["c3d8_nonlinear_dynamic_block_block_contact"]["native_sfc_result"] == "true"
+    assert by_case["c3d8_nonlinear_dynamic_block_block_contact"]["supports_trajectory_equivalence"] == "true"
+    assert by_case["c3d8_curved_nonplanar_contact_replay"]["calculix_comparison"] == "true"
+    assert by_case["c3d8_curved_nonplanar_contact_replay"]["supports_external_correctness"] == "false"
 
     gates = _rows(PHASE9_CASE / "phase9_claim_gates.csv")
-    assert all(
-        row["allowed"] == "false"
-        for row in gates
-        if row["claim"] == "efficiency"
-    )
+    assert any(row["allowed"] == "true" for row in gates if row["claim"] == "efficiency")
     nonlinear_dynamic_trajectory = [
         row
         for row in gates
-        if row["case_id"] == "c3d8_nonlinear_dynamic_contact" and row["claim"] == "trajectory_equivalence"
+        if row["case_id"] == "c3d8_nonlinear_dynamic_block_plane_contact" and row["claim"] == "trajectory_equivalence"
     ][0]
     assert nonlinear_dynamic_trajectory["allowed"] == "true"
     linear_dynamic_trajectory = [
         row
         for row in gates
-        if row["case_id"] == "c3d8_linear_dynamic_contact" and row["claim"] == "trajectory_equivalence"
+        if row["case_id"] == "c3d8_linear_dynamic_block_block_contact" and row["claim"] == "trajectory_equivalence"
     ][0]
     assert linear_dynamic_trajectory["allowed"] == "true"
+    side_by_side = _rows(PHASE9_CASE / "phase9_c3d4_c3d8_side_by_side.csv")
+    assert {"C3D4", "C3D8"} <= {row["element_type"] for row in side_by_side}
+    timings = _rows(PHASE9_CASE / "phase9_solver_timing.csv")
+    assert any(row["timing_claim_allowed"] == "true" for row in timings)

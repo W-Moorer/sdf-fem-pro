@@ -1,24 +1,24 @@
-# c3d8_linear_dynamic_contact
+# c3d8_linear_dynamic_block_block_contact
 
 - Analysis: `dynamic`
 - Linearity: `linear`
 - Element: `C3D8`
 - Native SFC result: `true`
 - CalculiX comparison: `true`
-- Acceleration evidence: `false`
+- Acceleration evidence: `true`
 - Status: `supported`
 
 ## Metrics
 
-- Displacement: `0.000806967218936577`
+- Displacement: `0.0001937555023783764`
 - Stress/strain: `final_native_linear_stress_cloud`
-- Gap/CDIS: `0.015717214297516935`
-- RF/contact force: `2.189529e-17`
+- Gap/CDIS: `0.0074899220340451005`
+- RF/contact force: `0.0`
 - CELS/contact energy: `0.0`
-- Active contact: `6`
+- Active contact: `4`
 
 ## Claim Gate
 
 - External correctness: `true`
 - Trajectory equivalence: `true`
-- Efficiency: `false`
+- Efficiency: `true`

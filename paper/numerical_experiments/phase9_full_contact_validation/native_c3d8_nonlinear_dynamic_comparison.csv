@@ -1,2 +1,3 @@
 case_id,z_cm_l2_rel_error,gap_l2_rel_error,force_l2_rel_error,energy_l2_rel_error,active_count_linf_abs_error
-c3d8_nonlinear_dynamic_contact,0.0011151587957023248,0.01956588919875981,0.0,0.0,0.0
+c3d8_nonlinear_dynamic_block_plane_contact,0.0011151587957023248,0.01956588919875981,0.0,0.0,0.0
+c3d8_nonlinear_dynamic_block_block_contact,0.0002521191019555606,0.009778893729201741,0.0,0.0,0.0
