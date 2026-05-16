@@ -17,11 +17,30 @@ dynamics validation case.
 python validation/run_phase7_physical_validation.py --out-dir results/phase7
 ```
 
-## Primary Data and Figure
+## Primary Data and Figures
 
 - `data/stress_strain_patch.csv`
+- `data/stress_strain_patch_cloud.csv`
 - `figures/stress_strain_error.png`
 - `figures/stress_strain_error.pdf`
+- `figures/stress_strain_patch_3d.png`
+- `figures/stress_strain_patch_3d.pdf`
+
+## Stress/Strain Cloud Scheme
+
+The 3D cloud figure uses the current paper-facing engineering visualization
+scheme:
+
+1. recovered TET4 element stress and strain are compared against the analytic
+   affine reference;
+2. element von Mises stress and engineering strain norm are averaged to nodes;
+3. boundary triangles interpolate the nodal values and are subdivided for a
+   smoother 3D surface rendering;
+4. the error panels show the absolute von Mises and strain-norm errors.
+
+Because this is an affine patch, the correct SFC and analytic fields are
+spatially uniform. The stress/strain cloud should therefore appear as uniform
+surface color, while the error panels should be near zero.
 
 ## Locked Metrics
 
@@ -45,4 +64,3 @@ strain and stress to the locked numerical tolerance.
 
 This case does not validate contact, time integration, geometric nonlinearity,
 or non-affine stress convergence.
-

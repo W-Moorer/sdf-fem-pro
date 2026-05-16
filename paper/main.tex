@@ -213,6 +213,17 @@ Resolution & Elements & Max strain error & Max stress error \\
   \label{fig:stress-strain}
 \end{figure}
 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{phase7_stress_strain_patch_3d.pdf}
+  \caption{Analytic affine TET4 patch stress/strain cloud on the finest tested
+  resolution. The first row compares SFC and analytic von Mises stress and
+  shows the absolute stress error; the second row compares engineering strain
+  norm and its absolute error. The uniform fields and near-zero error panels
+  are expected for the affine patch.}
+  \label{fig:stress-strain-cloud}
+\end{figure}
+
 \subsection{Standard FEM displacement and stress trend}
 
 To compare against conventional FEM output quantities, we solve a fixed-base linear-elastic cantilever block and report both tip displacement and von Mises stress over mesh refinement. The finest internal TET4 run is used as the reference, so this is a standard FEM refinement comparison rather than an external commercial-solver benchmark. Table~\ref{tab:cantilever} reports the displacement and stress metrics, while Figure~\ref{fig:cantilever} visualizes the corresponding 3D boundary-surface von Mises stress fields. For visualization only, element stresses are averaged to nodes and interpolated over subdivided boundary triangles; quantitative stress comparisons use the element stress values reported in the CSV tables.

@@ -199,6 +199,15 @@ The linear TET4 implementation was first verified using analytic small-strain li
 
 Phase-7 additionally recovers element strain and stress from the TET4 \(B\) matrix and compares them against the analytic affine field \(u_x = 10^{-3}x\), \(u_y=u_z=0\). For \(E=2.0\times 10^5\) and \(\nu=0.25\), the analytic Voigt strain is \([10^{-3},0,0,0,0,0]\), and the analytic stress is \([240,80,80,0,0,0]\). The maximum strain and stress errors are zero to reported precision for resolutions 1, 2, 3, and 4.
 
+Paper-facing cloud figure:
+
+- `paper/numerical_experiments/tet4_analytic_patch_stress_strain/figures/stress_strain_patch_3d.pdf`
+
+This figure shows SFC and analytic von Mises stress, SFC and analytic
+engineering strain norm, and the corresponding absolute error panels. Because
+the patch deformation is affine, the correct stress and strain fields are
+spatially uniform.
+
 ### 5.2 Standard FEM displacement and stress trend
 
 To compare against conventional FEM output quantities, we solve a fixed-base linear-elastic cantilever block and report both tip displacement and von Mises stress over mesh refinement. The finest internal TET4 run is used as the reference, so this is a standard FEM refinement comparison rather than an external commercial-solver benchmark. The paper-facing visualization averages element stresses to nodes and interpolates them over subdivided 3D boundary-surface triangles; quantitative stress comparisons use the element stress values reported in the CSV tables.

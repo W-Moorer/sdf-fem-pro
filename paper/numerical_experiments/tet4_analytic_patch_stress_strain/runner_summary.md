@@ -22,6 +22,15 @@ This validation adds stress/strain, standard FEM reference, contact force refere
 | 3 | 135 | 0.000000e+00 | 0.000000e+00 |
 | 4 | 320 | 0.000000e+00 | 0.000000e+00 |
 
+## Stress/Strain Patch Cloud
+
+| Resolution | Samples | Max VM error | Max strain-norm error |
+| ---: | ---: | ---: | ---: |
+| 1 | 5 | 0.000000e+00 | 0.000000e+00 |
+| 2 | 40 | 0.000000e+00 | 0.000000e+00 |
+| 3 | 135 | 0.000000e+00 | 0.000000e+00 |
+| 4 | 320 | 0.000000e+00 | 0.000000e+00 |
+
 ## Cantilever Standard FEM Reference
 
 | Resolution | Tip uz | Max von Mises | Tip rel. error to finest | Max VM rel. error to finest |
@@ -64,6 +73,7 @@ This validation adds stress/strain, standard FEM reference, contact force refere
 ## Plots
 
 - `phase7_stress_strain_error.png` and `phase7_stress_strain_error.pdf`
+- `phase7_stress_strain_patch_3d.png` and `phase7_stress_strain_patch_3d.pdf`
 - `phase7_cantilever_fem_reference.png` and `phase7_cantilever_fem_reference.pdf`
 - `phase7_cantilever_stress_cloud.png` and `phase7_cantilever_stress_cloud.pdf`
 - `phase7_cantilever_stress_3d.png` and `phase7_cantilever_stress_3d.pdf`
@@ -73,6 +83,7 @@ This validation adds stress/strain, standard FEM reference, contact force refere
 ## Interpretation
 
 - The stress/strain patch validates element recovery for affine small-strain linear elasticity.
+- The stress/strain patch cloud uses the same node-averaged, subdivided 3D boundary-surface visualization as the other paper-facing stress clouds.
 - The cantilever study is a standard FEM mesh-refinement reference, not an external commercial-solver benchmark.
 - The cantilever stress plots average element von Mises stress to nodes and interpolate over subdivided boundary triangles for visualization.
 - The contact force-displacement curve validates dynamic SDF contact against brute-force closest-point projection contact.

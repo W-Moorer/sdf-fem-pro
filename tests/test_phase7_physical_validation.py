@@ -13,6 +13,7 @@ RUNNER = ROOT / "validation" / "run_phase7_physical_validation.py"
 
 EXPECTED_FILES = {
     "phase7_stress_strain.csv",
+    "phase7_stress_strain_patch_cloud.csv",
     "phase7_cantilever_reference.csv",
     "phase7_cantilever_stress_cloud.csv",
     "phase7_contact_reference.csv",
@@ -24,6 +25,8 @@ EXPECTED_FILES = {
     "phase7_cantilever_stress_cloud.pdf",
     "phase7_cantilever_stress_3d.png",
     "phase7_cantilever_stress_3d.pdf",
+    "phase7_stress_strain_patch_3d.png",
+    "phase7_stress_strain_patch_3d.pdf",
 }
 
 
@@ -59,6 +62,18 @@ def test_phase7_stress_strain_matches_analytic_reference(phase7_output: Path) ->
     assert all(row["status"] == "ok" for row in rows)
     assert max(float(row["max_strain_l2_error"]) for row in rows) < 1.0e-14
     assert max(float(row["max_stress_l2_error"]) for row in rows) < 1.0e-8
+
+
+def test_phase7_stress_strain_patch_cloud_has_zero_error_and_figures(phase7_output: Path) -> None:
+    rows = _rows(phase7_output / "phase7_stress_strain_patch_cloud.csv")
+    resolutions = {int(row["resolution"]) for row in rows}
+
+    assert len(resolutions) >= 3
+    assert {row["status"] for row in rows} == {"ok"}
+    assert max(float(row["von_mises_abs_error"]) for row in rows) < 1.0e-8
+    assert max(float(row["engineering_strain_norm_abs_error"]) for row in rows) < 1.0e-14
+    assert (phase7_output / "phase7_stress_strain_patch_3d.png").stat().st_size > 0
+    assert (phase7_output / "phase7_stress_strain_patch_3d.pdf").stat().st_size > 0
 
 
 def test_phase7_cantilever_reports_displacement_and_stress_trends(phase7_output: Path) -> None:

@@ -11,7 +11,8 @@ boundary, input/output data, figures, and acceptance thresholds.
   block-plane drop case.
 - `tet4_analytic_patch_stress_strain/`: analytic affine TET4 stress-strain
   patch test. This verifies element strain and stress recovery against a
-  closed-form small-strain linear-elastic reference.
+  closed-form small-strain linear-elastic reference and includes a 3D
+  stress/strain cloud comparing SFC and analytic fields.
 - `scikit_fem_cantilever_external/`: external open-source FEM comparison
   against scikit-fem for a 3D cantilever beam on matching TET4 meshes,
   boundary conditions, material parameters, and loads.

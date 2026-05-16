@@ -132,6 +132,72 @@ def analytic_stress_strain_patch(resolutions: Iterable[int]) -> list[Row]:
     return rows
 
 
+def analytic_stress_strain_cloud(resolutions: Iterable[int]) -> list[Row]:
+    """Return element stress/strain cloud data for the analytic affine patch."""
+
+    E, nu, eps = 2.0e5, 0.25, 1.0e-3
+    analytic_strain = np.array([eps, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
+    analytic_stress = isotropic_linear_elasticity_matrix(E, nu) @ analytic_strain
+    analytic_vm = float(_von_mises(analytic_stress.reshape(1, -1))[0])
+    analytic_strain_tensor = np.array(
+        [
+            [analytic_strain[0], 0.5 * analytic_strain[3], 0.5 * analytic_strain[5]],
+            [0.5 * analytic_strain[3], analytic_strain[1], 0.5 * analytic_strain[4]],
+            [0.5 * analytic_strain[5], 0.5 * analytic_strain[4], analytic_strain[2]],
+        ],
+        dtype=float,
+    )
+    analytic_strain_norm = float(np.linalg.norm(analytic_strain_tensor))
+
+    rows: list[Row] = []
+    for resolution in resolutions:
+        mesh = structured_tet_block(int(resolution), int(resolution), int(resolution))
+        u_nodes = np.zeros_like(mesh.X)
+        u_nodes[:, 0] = eps * mesh.X[:, 0]
+        strain, stress, vm = _element_strain_stress(mesh, u_nodes.ravel(), E, nu)
+        centroids = np.mean(mesh.X[mesh.elements], axis=1)
+        strain_norms = np.asarray(
+            [
+                np.linalg.norm(
+                    np.array(
+                        [
+                            [s[0], 0.5 * s[3], 0.5 * s[5]],
+                            [0.5 * s[3], s[1], 0.5 * s[4]],
+                            [0.5 * s[5], 0.5 * s[4], s[2]],
+                        ],
+                        dtype=float,
+                    )
+                )
+                for s in strain
+            ],
+            dtype=float,
+        )
+        for element_id, centroid in enumerate(centroids):
+            stress_error = float(np.linalg.norm(stress[element_id] - analytic_stress))
+            strain_error = float(np.linalg.norm(strain[element_id] - analytic_strain))
+            rows.append(
+                {
+                    "case": "analytic_uniaxial_stress_strain_patch_cloud",
+                    "resolution": int(resolution),
+                    "element_id": int(element_id),
+                    "centroid_x": float(centroid[0]),
+                    "centroid_y": float(centroid[1]),
+                    "centroid_z": float(centroid[2]),
+                    "sfc_von_mises": float(vm[element_id]),
+                    "analytic_von_mises": analytic_vm,
+                    "von_mises_abs_error": abs(float(vm[element_id]) - analytic_vm),
+                    "sfc_engineering_strain_norm": float(strain_norms[element_id]),
+                    "analytic_engineering_strain_norm": analytic_strain_norm,
+                    "engineering_strain_norm_abs_error": abs(float(strain_norms[element_id]) - analytic_strain_norm),
+                    "stress_l2_error": stress_error,
+                    "strain_l2_error": strain_error,
+                    "status": "ok" if stress_error < 1.0e-8 and strain_error < 1.0e-14 else "check",
+                    "details": "element stress/strain cloud for affine analytic TET4 patch",
+                }
+            )
+    return rows
+
+
 def _cantilever_solve(resolution: int) -> tuple[Any, np.ndarray, np.ndarray]:
     E, nu = 1.0e5, 0.3
     mesh = structured_tet_block(resolution, resolution, resolution, size=(1.0, 0.2, 0.2))
@@ -609,9 +675,58 @@ def _save_stress_3d_plot(out_dir: Path, cloud_rows: list[Row]) -> Row:
     return {"plot": "phase7_cantilever_stress_3d", "png": png.name, "pdf": pdf.name, "status": "ok"}
 
 
+def _save_patch_stress_strain_3d_plot(out_dir: Path, patch_cloud_rows: list[Row]) -> Row:
+    finest = max(int(row["resolution"]) for row in patch_cloud_rows)
+    subset = [row for row in patch_cloud_rows if int(row["resolution"]) == finest]
+    mesh = structured_tet_block(finest, finest, finest)
+    by_element = {int(row["element_id"]): row for row in subset}
+    sfc_vm = np.asarray([float(by_element[element_id]["sfc_von_mises"]) for element_id in range(mesh.elements.shape[0])], dtype=float)
+    analytic_vm = np.asarray([float(by_element[element_id]["analytic_von_mises"]) for element_id in range(mesh.elements.shape[0])], dtype=float)
+    vm_error = np.asarray([float(by_element[element_id]["von_mises_abs_error"]) for element_id in range(mesh.elements.shape[0])], dtype=float)
+    sfc_strain = np.asarray([float(by_element[element_id]["sfc_engineering_strain_norm"]) for element_id in range(mesh.elements.shape[0])], dtype=float)
+    analytic_strain = np.asarray([float(by_element[element_id]["analytic_engineering_strain_norm"]) for element_id in range(mesh.elements.shape[0])], dtype=float)
+    strain_error = np.asarray([float(by_element[element_id]["engineering_strain_norm_abs_error"]) for element_id in range(mesh.elements.shape[0])], dtype=float)
+
+    nodal_sfc_vm = _nodal_average(mesh, sfc_vm)
+    nodal_analytic_vm = _nodal_average(mesh, analytic_vm)
+    nodal_vm_error = _nodal_average(mesh, vm_error)
+    nodal_sfc_strain = _nodal_average(mesh, sfc_strain)
+    nodal_analytic_strain = _nodal_average(mesh, analytic_strain)
+    nodal_strain_error = _nodal_average(mesh, strain_error)
+
+    stress_norm = Normalize(vmin=0.0, vmax=max(float(np.max(sfc_vm)), float(np.max(analytic_vm)), 1.0e-30))
+    strain_norm = Normalize(vmin=0.0, vmax=max(float(np.max(sfc_strain)), float(np.max(analytic_strain)), 1.0e-30))
+    stress_error_norm = Normalize(vmin=0.0, vmax=max(float(np.max(vm_error)), 1.0e-10))
+    strain_error_norm = Normalize(vmin=0.0, vmax=max(float(np.max(strain_error)), 1.0e-14))
+
+    fig, axes = plt.subplots(2, 3, figsize=(10.8, 6.0), subplot_kw={"projection": "3d"})
+    panels = [
+        (nodal_sfc_vm, "SFC von Mises", stress_norm, "viridis", "von Mises"),
+        (nodal_analytic_vm, "analytic von Mises", stress_norm, "viridis", "von Mises"),
+        (nodal_vm_error, "absolute stress error", stress_error_norm, "magma", "abs. error"),
+        (nodal_sfc_strain, "SFC strain norm", strain_norm, "plasma", "strain"),
+        (nodal_analytic_strain, "analytic strain norm", strain_norm, "plasma", "strain"),
+        (nodal_strain_error, "absolute strain error", strain_error_norm, "magma", "abs. error"),
+    ]
+    collections: list[Poly3DCollection] = []
+    for ax, (values, title, norm, cmap, _) in zip(axes.ravel(), panels, strict=True):
+        collections.append(_draw_3d_body_stress(ax, mesh, values, norm=norm, cmap=cmap, title=title))
+    for ax, collection, (_, _, _, _, label) in zip(axes.ravel(), collections, panels, strict=True):
+        fig.colorbar(collection, ax=ax, shrink=0.50, pad=0.02, label=label)
+    fig.subplots_adjust(left=0.01, right=0.98, bottom=0.04, top=0.88, wspace=0.08, hspace=0.10)
+    fig.suptitle(f"Analytic TET4 affine patch stress/strain cloud, resolution {finest}", fontsize=13)
+    png = out_dir / "phase7_stress_strain_patch_3d.png"
+    pdf = out_dir / "phase7_stress_strain_patch_3d.pdf"
+    fig.savefig(png, dpi=180, bbox_inches="tight")
+    fig.savefig(pdf, bbox_inches="tight")
+    plt.close(fig)
+    return {"plot": "phase7_stress_strain_patch_3d", "png": png.name, "pdf": pdf.name, "status": "ok"}
+
+
 def write_plots(
     out_dir: Path,
     stress_rows: list[Row],
+    patch_cloud_rows: list[Row],
     cantilever_rows: list[Row],
     cantilever_cloud_rows: list[Row],
     contact_rows: list[Row],
@@ -626,6 +741,7 @@ def write_plots(
         plt.ylabel("max stress L2 error")
 
     plots.append(_save_plot(out_dir, "phase7_stress_strain_error", stress_plot))
+    plots.append(_save_patch_stress_strain_3d_plot(out_dir, patch_cloud_rows))
 
     def cantilever_plot() -> None:
         plt.plot([row["resolution"] for row in cantilever_rows], [abs(float(row["tip_displacement_z"])) for row in cantilever_rows], marker="o", label="|tip uz|")
@@ -664,6 +780,7 @@ def write_plots(
 def write_markdown(
     path: Path,
     stress_rows: list[Row],
+    patch_cloud_rows: list[Row],
     cantilever_rows: list[Row],
     cantilever_cloud_rows: list[Row],
     contact_rows: list[Row],
@@ -687,6 +804,14 @@ def write_markdown(
     lines.extend(["", "## Stress/Strain Patch", "", "| Resolution | Elements | Max strain error | Max stress error |", "| ---: | ---: | ---: | ---: |"])
     for row in stress_rows:
         lines.append(f"| {row['resolution']} | {row['elements']} | {_format_float(row['max_strain_l2_error'])} | {_format_float(row['max_stress_l2_error'])} |")
+    lines.extend(["", "## Stress/Strain Patch Cloud", "", "| Resolution | Samples | Max VM error | Max strain-norm error |", "| ---: | ---: | ---: | ---: |"])
+    for resolution in sorted({int(row["resolution"]) for row in patch_cloud_rows}):
+        subset = [row for row in patch_cloud_rows if int(row["resolution"]) == resolution]
+        lines.append(
+            f"| {resolution} | {len(subset)} | "
+            f"{_format_float(max(float(row['von_mises_abs_error']) for row in subset))} | "
+            f"{_format_float(max(float(row['engineering_strain_norm_abs_error']) for row in subset))} |"
+        )
     lines.extend(["", "## Cantilever Standard FEM Reference", "", "| Resolution | Tip uz | Max von Mises | Tip rel. error to finest | Max VM rel. error to finest |", "| ---: | ---: | ---: | ---: | ---: |"])
     for row in cantilever_rows:
         lines.append(f"| {row['resolution']} | {_format_float(row['tip_displacement_z'])} | {_format_float(row['max_von_mises'])} | {_format_float(row['relative_tip_error_to_finest'])} | {_format_float(row['relative_max_vm_error_to_finest'])} |")
@@ -711,6 +836,7 @@ def write_markdown(
             "## Interpretation",
             "",
             "- The stress/strain patch validates element recovery for affine small-strain linear elasticity.",
+            "- The stress/strain patch cloud uses the same node-averaged, subdivided 3D boundary-surface visualization as the other paper-facing stress clouds.",
             "- The cantilever study is a standard FEM mesh-refinement reference, not an external commercial-solver benchmark.",
             "- The cantilever stress plots average element von Mises stress to nodes and interpolate over subdivided boundary triangles for visualization.",
             "- The contact force-displacement curve validates dynamic SDF contact against brute-force closest-point projection contact.",
@@ -727,14 +853,16 @@ def run_phase7(*, quick: bool, out_dir: Path) -> dict[str, list[Row]]:
     repeats = 1 if quick else 3
     penetrations = [0.0, 0.0025, 0.005, 0.01] if quick else [0.0, 0.0025, 0.005, 0.01, 0.02]
     stress_rows = analytic_stress_strain_patch(resolutions)
+    patch_cloud_rows = analytic_stress_strain_cloud(resolutions)
     cantilever_rows = cantilever_reference_study(resolutions)
     cantilever_cloud_rows = cantilever_stress_cloud(resolutions)
     contact_rows = contact_force_displacement_reference(contact_resolution, penetrations)
     acceleration_rows = acceleration_feasibility(surface_sizes, repeats)
     claims = claim_rows(stress_rows, contact_rows, acceleration_rows)
-    plots = write_plots(out_dir, stress_rows, cantilever_rows, cantilever_cloud_rows, contact_rows, acceleration_rows)
+    plots = write_plots(out_dir, stress_rows, patch_cloud_rows, cantilever_rows, cantilever_cloud_rows, contact_rows, acceleration_rows)
     return {
         "stress": stress_rows,
+        "patch_cloud": patch_cloud_rows,
         "cantilever": cantilever_rows,
         "cantilever_cloud": cantilever_cloud_rows,
         "contact": contact_rows,
@@ -766,6 +894,28 @@ def main() -> int:
         outputs["cantilever"],
     )
     _write_csv(
+        args.out_dir / "phase7_stress_strain_patch_cloud.csv",
+        [
+            "case",
+            "resolution",
+            "element_id",
+            "centroid_x",
+            "centroid_y",
+            "centroid_z",
+            "sfc_von_mises",
+            "analytic_von_mises",
+            "von_mises_abs_error",
+            "sfc_engineering_strain_norm",
+            "analytic_engineering_strain_norm",
+            "engineering_strain_norm_abs_error",
+            "stress_l2_error",
+            "strain_l2_error",
+            "status",
+            "details",
+        ],
+        outputs["patch_cloud"],
+    )
+    _write_csv(
         args.out_dir / "phase7_cantilever_stress_cloud.csv",
         ["case", "resolution", "element_id", "centroid_x", "centroid_y", "centroid_z", "von_mises", "status", "details"],
         outputs["cantilever_cloud"],
@@ -789,6 +939,7 @@ def main() -> int:
     write_markdown(
         args.out_dir / "phase7_summary.md",
         outputs["stress"],
+        outputs["patch_cloud"],
         outputs["cantilever"],
         outputs["cantilever_cloud"],
         outputs["contact"],
@@ -798,6 +949,7 @@ def main() -> int:
     )
     for name in [
         "phase7_stress_strain.csv",
+        "phase7_stress_strain_patch_cloud.csv",
         "phase7_cantilever_reference.csv",
         "phase7_cantilever_stress_cloud.csv",
         "phase7_contact_reference.csv",

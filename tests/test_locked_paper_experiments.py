@@ -115,9 +115,12 @@ def test_locked_tet4_analytic_patch_artifacts_and_thresholds() -> None:
         TET4_PATCH_CASE / "locked_thresholds.csv",
         TET4_PATCH_CASE / "runner_summary.md",
         TET4_PATCH_CASE / "data" / "stress_strain_patch.csv",
+        TET4_PATCH_CASE / "data" / "stress_strain_patch_cloud.csv",
         TET4_PATCH_CASE / "data" / "phase7_claims.csv",
         TET4_PATCH_CASE / "figures" / "stress_strain_error.png",
         TET4_PATCH_CASE / "figures" / "stress_strain_error.pdf",
+        TET4_PATCH_CASE / "figures" / "stress_strain_patch_3d.png",
+        TET4_PATCH_CASE / "figures" / "stress_strain_patch_3d.pdf",
     ]
     for path in required:
         _assert_file(path)
@@ -127,6 +130,13 @@ def test_locked_tet4_analytic_patch_artifacts_and_thresholds() -> None:
     assert {row["case"] for row in rows} == {"analytic_uniaxial_stress_strain_patch"}
     assert {row["reference"] for row in rows} == {"analytic_affine_small_strain"}
     assert {row["status"] for row in rows} == {"ok"}
+
+    cloud_rows = _rows(TET4_PATCH_CASE / "data" / "stress_strain_patch_cloud.csv")
+    assert len(cloud_rows) >= 4
+    assert {row["case"] for row in cloud_rows} == {"analytic_uniaxial_stress_strain_patch_cloud"}
+    assert {row["status"] for row in cloud_rows} == {"ok"}
+    assert max(float(row["von_mises_abs_error"]) for row in cloud_rows) < 1.0e-8
+    assert max(float(row["engineering_strain_norm_abs_error"]) for row in cloud_rows) < 1.0e-14
 
     metrics: dict[str, object] = {
         "resolution_count": len(rows),
