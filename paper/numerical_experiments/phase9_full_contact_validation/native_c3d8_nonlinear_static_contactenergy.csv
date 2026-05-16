@@ -1,0 +1,2 @@
+case_id,converged,iterations,residual_norm,correction_norm,displacement_l2_rel_error,strain_l2_rel_error,stress_l2_rel_error,von_mises_l2_rel_error,contact_force_rel_error,contact_energy_rel_error,active_contact_count,min_gap,max_penetration
+c3d8_nonlinear_static_contact,true,1,1.3096724086149926e-09,1.404901447791905e-07,0.37118691737523685,0.01434984064529299,0.00720159777719206,0.0020158286465311605,0.16190939057922427,4.553591170734636e-08,4,-1.000005042377485e-05,1.000005042377485e-05

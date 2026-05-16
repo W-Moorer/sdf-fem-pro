@@ -66,13 +66,17 @@ Scope for the submission draft:
 - Phase-9 stores the full static/dynamic, linear/nonlinear C3D8 claim matrix.
   Its gates prevent external-correctness, trajectory-equivalence, or efficiency
   claims when native SFC, CalculiX, or timing evidence is missing.
+  The locked quick evidence now includes native C3D8 geometric-nonlinear static
+  and block-plane dynamic rows; efficiency remains disabled because no matching
+  timing evidence is attached to those rows.
 
 Unsupported claims that must not be added without new evidence:
 
 - Frictional contact.
 - Self-contact.
 - Nonlinear FEM or large-deformation material models.
-- Native nonlinear C3D8 dynamic trajectory equivalence to CalculiX.
+- Native nonlinear C3D8 dynamic trajectory equivalence beyond the locked
+  block-plane benchmark.
 - GPU acceleration.
 - Barrier contact.
 - Production BVH or IPC superiority.

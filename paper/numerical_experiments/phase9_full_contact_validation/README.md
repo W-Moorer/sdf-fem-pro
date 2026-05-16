@@ -1,27 +1,20 @@
-# Phase-9 Full Contact Validation
+﻿# Phase-9 Full Contact Validation
 
-This locked package records the claim-gated validation matrix for C3D8 contact
-evidence.
+This locked package is generated from `validation/run_phase9_full_contact_validation.py` in quick mode with the local CalculiX reference enabled.
 
-## Reproduce
+Scope:
+- Short-term multi-element scope is C3D4/TET4 plus C3D8. C3D10 is explicitly excluded.
+- C3D8 linear static contact uses the existing contactenergy replay evidence.
+- C3D8 geometric-nonlinear static contact uses native SFC C3D8 StVK mechanics and CalculiX `contactenergy` output.
+- C3D8 geometric-nonlinear dynamic contact uses native SFC C3D8 HHT/Newmark block-plane dynamics and CalculiX trajectory output.
+- Efficiency claims remain blocked unless case-specific timing evidence is generated.
 
-```bash
-python validation/run_phase9_full_contact_validation.py --quick --out-dir results/phase9_full_contact_validation
-```
-
-## Scope
-
-The intended short-term multi-element scope is C3D4/TET4 and C3D8. C3D10 is
-not included because no C3D10 backend is registered.
-
-## Claim Gate Meaning
-
-- `external_correctness` is allowed only when both a native SFC result and a
-  CalculiX comparison exist.
-- `trajectory_equivalence` is allowed only when a native SFC trajectory is
-  compared against a CalculiX trajectory.
-- `efficiency` is allowed only when that case has timing/acceleration evidence.
-
-The current package supports C3D8 linear static contact correctness. It also
-contains C3D8 dynamic external replay evidence, but the dynamic replay is not
-allowed to become a native trajectory-equivalence claim.
+Primary files:
+- `phase9_full_contact_validation.csv`
+- `phase9_claim_gates.csv`
+- `phase9_full_contact_validation_summary.md`
+- `native_c3d8_nonlinear_static_contactenergy.csv`
+- `native_c3d8_nonlinear_dynamic_block_plane.csv`
+- `native_c3d8_nonlinear_dynamic_comparison.csv`
+- `figures/`
+- `vtk/`

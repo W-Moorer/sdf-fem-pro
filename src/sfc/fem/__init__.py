@@ -19,6 +19,7 @@ from .calculix_aligned import (
     assemble_calculix_c3d4_mass,
     assemble_consistent_mass,
     assemble_contact_response,
+    assemble_hex8_mass,
     calculix_apply_acceleration_increment,
     calculix_dynamic_predictor,
     calculix_hht_effective_residual,
@@ -30,6 +31,7 @@ from .calculix_aligned import (
     static_force_state,
     static_residual_and_tangent,
     stvk_internal_response,
+    hex8_reference_data,
 )
 from .constraints import (
     eliminate_fixed_dofs,
@@ -84,6 +86,7 @@ __all__ = [
     "StepDiagnostics",
     "assemble_calculix_c3d4_mass",
     "assemble_consistent_mass",
+    "assemble_hex8_mass",
     "assemble_gravity_force",
     "assemble_contact_response",
     "calculix_apply_acceleration_increment",
@@ -104,6 +107,7 @@ __all__ = [
     "get_element_backend",
     "hht_newmark_parameters",
     "hht_step",
+    "hex8_reference_data",
     "C3D8_NATURAL_NODE_COORDS",
     "HEX8_CENTER_NATURAL_GRADIENTS",
     "hex8_center_strain_stress",

@@ -24,6 +24,8 @@ import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve
 
+from sfc.fem.hex8 import hex8_mass, hex8_natural_gradients
+
 TRIANGLE_QUADRATURE_BARYCENTRIC = np.asarray(
     [
         [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
@@ -45,6 +47,8 @@ class ContactSample:
     normal: np.ndarray
     area: float
     stiffness: float
+    master_node_ids: np.ndarray | None = None
+    master_shape_weights: np.ndarray | None = None
 
 
 class ContactGeometry(Protocol):
@@ -97,7 +101,11 @@ class PlaneContactGeometry:
 
 @dataclass(frozen=True, slots=True)
 class MechanicsModel:
-    """Reference TET4 model data for the aligned backend."""
+    """Reference model data for the aligned nonlinear backend.
+
+    The first target was C3D4/TET4.  C3D8/HEX8 uses the same total-Lagrangian
+    StVK response, but evaluates the response over 2x2x2 Gauss points.
+    """
 
     X: np.ndarray
     elements: np.ndarray
@@ -107,6 +115,9 @@ class MechanicsModel:
     volumes: np.ndarray
     shape_grads: np.ndarray
     mass_matrix: csr_matrix
+    quadrature_weights: np.ndarray | None = None
+    quadrature_shape_grads: np.ndarray | None = None
+    element_type: str = "c3d4"
 
     @classmethod
     def from_tet4_mesh(
@@ -122,7 +133,43 @@ class MechanicsModel:
         elements_arr = np.asarray(elements, dtype=np.int64)
         volumes, grads = tet4_reference_data(X_arr, elements_arr)
         mass = assemble_calculix_c3d4_mass(X_arr.shape[0], elements_arr, volumes, density)
-        return cls(X_arr, elements_arr, float(E), float(nu), float(density), volumes, grads, mass)
+        return cls(X_arr, elements_arr, float(E), float(nu), float(density), volumes, grads, mass, element_type="c3d4")
+
+    @classmethod
+    def from_hex8_mesh(
+        cls,
+        X: np.ndarray,
+        elements: np.ndarray,
+        *,
+        E: float,
+        nu: float,
+        density: float,
+        mass_kind: str = "consistent",
+    ) -> "MechanicsModel":
+        """Build a C3D8/HEX8 nonlinear mechanics model.
+
+        The response uses full 2x2x2 Gauss integration.  This is the standard
+        clean-room C3D8 path used for Phase-9 native nonlinear validation.
+        """
+
+        X_arr = np.asarray(X, dtype=float)
+        elements_arr = np.asarray(elements, dtype=np.int64)
+        volumes, qp_weights, qp_grads = hex8_reference_data(X_arr, elements_arr)
+        mass = assemble_hex8_mass(X_arr, elements_arr, density, kind=mass_kind)
+        center_grads = qp_grads[:, 0, :, :] if qp_grads.size else np.empty((0, 8, 3), dtype=float)
+        return cls(
+            X_arr,
+            elements_arr,
+            float(E),
+            float(nu),
+            float(density),
+            volumes,
+            center_grads,
+            mass,
+            quadrature_weights=qp_weights,
+            quadrature_shape_grads=qp_grads,
+            element_type="c3d8",
+        )
 
     @property
     def n_nodes(self) -> int:
@@ -413,6 +460,59 @@ def assemble_calculix_c3d4_mass(n_nodes: int, elements: np.ndarray, volumes: np.
     ).tocsr()
 
 
+_HEX8_GAUSS_POINTS = (-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0))
+
+
+def hex8_reference_data(X: np.ndarray, elements: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return C3D8 volumes, Gauss weights, and reference gradients.
+
+    ``quadrature_weights[e, q]`` is the physical integration weight
+    ``det(dX/dxi)`` because all 2x2x2 Gauss weights are one.
+    """
+
+    X_arr = np.asarray(X, dtype=float)
+    elements_arr = np.asarray(elements, dtype=np.int64)
+    volumes = np.zeros(elements_arr.shape[0], dtype=float)
+    weights = np.zeros((elements_arr.shape[0], 8), dtype=float)
+    grads = np.zeros((elements_arr.shape[0], 8, 8, 3), dtype=float)
+    points = [(xi, eta, zeta) for xi in _HEX8_GAUSS_POINTS for eta in _HEX8_GAUSS_POINTS for zeta in _HEX8_GAUSS_POINTS]
+    for e, element in enumerate(elements_arr):
+        Xe = X_arr[element]
+        for q, (xi, eta, zeta) in enumerate(points):
+            natural_gradients = hex8_natural_gradients(xi, eta, zeta)
+            jacobian = Xe.T @ natural_gradients
+            det_j = float(np.linalg.det(jacobian))
+            if det_j <= 0.0:
+                raise ValueError("C3D8 reference element must have positive Jacobian determinant")
+            weights[e, q] = det_j
+            grads[e, q] = natural_gradients @ np.linalg.inv(jacobian)
+            volumes[e] += det_j
+    return volumes, weights, grads
+
+
+def assemble_hex8_mass(X: np.ndarray, elements: np.ndarray, density: float, *, kind: str = "consistent") -> csr_matrix:
+    """Assemble the C3D8 translational mass matrix from element kernels."""
+
+    X_arr = np.asarray(X, dtype=float)
+    elements_arr = np.asarray(elements, dtype=np.int64)
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    data: list[np.ndarray] = []
+    for element in elements_arr:
+        dofs = _element_dofs(element)
+        Me = hex8_mass(X_arr[element], density, kind=kind)
+        rr, cc = np.meshgrid(dofs, dofs, indexing="ij")
+        rows.append(rr.ravel())
+        cols.append(cc.ravel())
+        data.append(Me.ravel())
+    if not data:
+        return csr_matrix((3 * X_arr.shape[0], 3 * X_arr.shape[0]), dtype=float)
+    return coo_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(3 * X_arr.shape[0], 3 * X_arr.shape[0]),
+    ).tocsr()
+
+
 def stvk_internal_response(model: MechanicsModel, x_current: np.ndarray, *, assemble_tangent: bool = True) -> InternalResponse:
     """Return total-Lagrangian StVK internal force and tangent."""
 
@@ -432,35 +532,51 @@ def stvk_internal_response(model: MechanicsModel, x_current: np.ndarray, *, asse
     geo_data: list[float] = []
     for e, element in enumerate(model.elements):
         xe = x[element]
-        grad = model.shape_grads[e]
-        F = xe.T @ grad
-        green = 0.5 * (F.T @ F - identity)
-        second_piola = lam * float(np.trace(green)) * identity + 2.0 * mu * green
-        first_piola = F @ second_piola
-        for a in range(4):
-            force[int(element[a])] += model.volumes[e] * (first_piola @ grad[a])
-        if assemble_tangent:
-            _append_stvk_tangent_blocks(
-                model.elements[e],
-                model.volumes[e],
-                grad,
-                F,
-                second_piola,
-                lam,
-                mu,
-                mat_rows,
-                mat_cols,
-                mat_data,
-                geo_rows,
-                geo_cols,
-                geo_data,
-            )
-        J = max(float(np.linalg.det(F)), 1.0e-12)
-        cauchy = (first_piola @ F.T) / J
-        strains[e] = green
-        stresses[e] = cauchy
-        vm[e] = von_mises(cauchy)
-        energy += model.volumes[e] * 0.5 * float(_voigt_strain(green) @ _voigt_stress(second_piola))
+        if model.quadrature_shape_grads is None or model.quadrature_weights is None:
+            element_grads = model.shape_grads[e][None, :, :]
+            element_weights = np.asarray([model.volumes[e]], dtype=float)
+        else:
+            element_grads = model.quadrature_shape_grads[e]
+            element_weights = model.quadrature_weights[e]
+        strain_acc = np.zeros((3, 3), dtype=float)
+        stress_acc = np.zeros((3, 3), dtype=float)
+        weight_sum = 0.0
+        for grad, weight in zip(element_grads, element_weights, strict=True):
+            w = float(weight)
+            if w <= 0.0:
+                continue
+            F = xe.T @ grad
+            green = 0.5 * (F.T @ F - identity)
+            second_piola = lam * float(np.trace(green)) * identity + 2.0 * mu * green
+            first_piola = F @ second_piola
+            for a in range(len(element)):
+                force[int(element[a])] += w * (first_piola @ grad[a])
+            if assemble_tangent:
+                _append_stvk_tangent_blocks(
+                    model.elements[e],
+                    w,
+                    grad,
+                    F,
+                    second_piola,
+                    lam,
+                    mu,
+                    mat_rows,
+                    mat_cols,
+                    mat_data,
+                    geo_rows,
+                    geo_cols,
+                    geo_data,
+                )
+            J = max(float(np.linalg.det(F)), 1.0e-12)
+            cauchy = (first_piola @ F.T) / J
+            strain_acc += w * green
+            stress_acc += w * cauchy
+            weight_sum += w
+            energy += w * 0.5 * float(_voigt_strain(green) @ _voigt_stress(second_piola))
+        if weight_sum > 0.0:
+            strains[e] = strain_acc / weight_sum
+            stresses[e] = stress_acc / weight_sum
+        vm[e] = von_mises(stresses[e])
     material = coo_matrix((mat_data, (mat_rows, mat_cols)), shape=(model.n_dofs, model.n_dofs)).tocsr()
     geometric = coo_matrix((geo_data, (geo_rows, geo_cols)), shape=(model.n_dofs, model.n_dofs)).tocsr()
     return InternalResponse(force, strains, stresses, vm, float(energy), material, geometric)
@@ -492,15 +608,31 @@ def assemble_contact_response(samples: Iterable[ContactSample], n_nodes: int) ->
         stiffness = float(sample.stiffness)
         lam = stiffness * area * penetration
         tangent_scale = stiffness * area
+        master_ids = (
+            np.asarray(sample.master_node_ids, dtype=np.int64)
+            if sample.master_node_ids is not None
+            else np.empty((0,), dtype=np.int64)
+        )
+        master_weights = (
+            np.asarray(sample.master_shape_weights, dtype=float)
+            if sample.master_shape_weights is not None
+            else np.empty((0,), dtype=float)
+        )
+        if master_ids.size != master_weights.size:
+            raise ValueError("master_node_ids and master_shape_weights must have the same length")
+        jac_nodes = np.concatenate([node_ids, master_ids])
+        jac_weights = np.concatenate([weights, -master_weights])
         active_count += 1
         normal_force += lam
         max_penetration = max(max_penetration, penetration)
         energy += 0.5 * stiffness * area * penetration * penetration
         for local, node in enumerate(node_ids):
             force[int(node)] += weights[local] * lam * normal
-        for a, node_a in enumerate(node_ids):
-            for b, node_b in enumerate(node_ids):
-                block = weights[a] * weights[b] * tangent_scale * np.outer(normal, normal)
+        for local, node in enumerate(master_ids):
+            force[int(node)] -= master_weights[local] * lam * normal
+        for a, node_a in enumerate(jac_nodes):
+            for b, node_b in enumerate(jac_nodes):
+                block = jac_weights[a] * jac_weights[b] * tangent_scale * np.outer(normal, normal)
                 for i in range(3):
                     row = 3 * int(node_a) + i
                     for j in range(3):
@@ -923,7 +1055,7 @@ def _element_dofs(element: np.ndarray) -> np.ndarray:
 def _nodal_gravity_loads(model: MechanicsModel, gravity: float) -> np.ndarray:
     f = np.zeros(model.n_dofs, dtype=float)
     for element, volume in zip(model.elements, model.volumes, strict=True):
-        nodal = model.density * float(volume) * np.asarray([0.0, 0.0, -float(gravity)], dtype=float) / 4.0
+        nodal = model.density * float(volume) * np.asarray([0.0, 0.0, -float(gravity)], dtype=float) / float(len(element))
         for node in element:
             start = 3 * int(node)
             f[start : start + 3] += nodal
@@ -946,10 +1078,10 @@ def _append_stvk_tangent_blocks(
     geo_data: list[float],
 ) -> None:
     fft = F @ F.T
-    for a in range(4):
+    for a in range(len(element)):
         ga = grad[a]
         Fga = F @ ga
-        for b in range(4):
+        for b in range(len(element)):
             gb = grad[b]
             Fgb = F @ gb
             material_block = volume * (lam * np.outer(Fga, Fgb) + mu * np.outer(Fgb, Fga) + mu * float(ga @ gb) * fft)

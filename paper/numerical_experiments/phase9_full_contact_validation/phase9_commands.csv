@@ -1,2 +1,2 @@
 command,description
-python validation/run_phase9_full_contact_validation.py --quick --out-dir E:\workspace\sdf-fem-pro\results\phase9_full_contact_validation,Phase-9 evidence matrix
+python validation/run_phase9_full_contact_validation.py --quick --out-dir results\phase9_full_contact_validation,Phase-9 evidence matrix

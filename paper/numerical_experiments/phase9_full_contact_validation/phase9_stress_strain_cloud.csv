@@ -1,6 +1,9 @@
 case_id,frame,element_id,von_mises,engineering_strain_norm,vtk_file
 c3d8_linear_static_contact,0,1,4.000000140395199,1.904761971616761e-05,vtk/c3d8_linear_static_contact_0000.vtk
 c3d8_linear_static_contact,0,2,100.0004565,0.00047619265000000007,vtk/c3d8_linear_static_contact_0000.vtk
+c3d8_nonlinear_static_contact,0,1,4.188624494211626,1.9651451107592096e-05,vtk/c3d8_nonlinear_static_contact_0000.vtk
+c3d8_nonlinear_static_contact,0,2,100.0720238984445,0.00047653344713514815,vtk/c3d8_nonlinear_static_contact_0000.vtk
 c3d8_linear_dynamic_contact_block_plane_c3d8,0,1,1.3269641999999997,1.433074557849831e-05,vtk/c3d8_linear_dynamic_contact_block_plane_c3d8_0000.vtk
 c3d8_linear_dynamic_contact_block_block_c3d8,0,1,0.0,0.0,vtk/c3d8_linear_dynamic_contact_block_block_c3d8_0000.vtk
 c3d8_linear_dynamic_contact_block_block_c3d8,0,2,0.7560604999999999,8.13393688596009e-06,vtk/c3d8_linear_dynamic_contact_block_block_c3d8_0000.vtk
+c3d8_nonlinear_dynamic_contact,0,1,0.12045473939376874,0.0,vtk/c3d8_nonlinear_dynamic_contact_block_plane_0000.vtk
