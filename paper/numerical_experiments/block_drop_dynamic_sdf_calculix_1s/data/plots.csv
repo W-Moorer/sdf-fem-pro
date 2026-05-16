@@ -1,0 +1,6 @@
+plot,case,resolution,png,pdf,status
+calculix_drop_z_cm,block_drop,1,calculix_drop_z_cm.png,calculix_drop_z_cm.pdf,ok
+calculix_drop_min_gap,block_drop,1,calculix_drop_min_gap.png,calculix_drop_min_gap.pdf,ok
+calculix_drop_force_proxy,block_drop,1,calculix_drop_force_proxy.png,calculix_drop_force_proxy.pdf,ok
+calculix_drop_contact_energy,block_drop,1,calculix_drop_contact_energy.png,calculix_drop_contact_energy.pdf,ok
+calculix_drop_total_energy,block_drop,1,calculix_drop_total_energy.png,calculix_drop_total_energy.pdf,ok

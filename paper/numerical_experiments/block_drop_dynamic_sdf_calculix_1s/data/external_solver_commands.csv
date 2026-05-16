@@ -1,0 +1,2 @@
+case,resolution,external_solver,external_solver_version,command,input_file,dat_file,stdout_log,stderr_log,return_code,completed
+block_drop,1,CalculiX,This is Version 2.17,"wsl --exec bash -lc ""cd /mnt/e/workspace/sdf-fem-pro/results/dynamic_sdf_full_trajectory_block_drop_1s_dt001/calculix_runs/block_drop_r1_dt0p001 && ccx block_drop_r1""",calculix_runs\block_drop_r1_dt0p001\block_drop_r1.inp,calculix_runs\block_drop_r1_dt0p001\block_drop_r1.dat,calculix_runs\block_drop_r1_dt0p001\calculix_stdout.log,calculix_runs\block_drop_r1_dt0p001\calculix_stderr.log,0,true

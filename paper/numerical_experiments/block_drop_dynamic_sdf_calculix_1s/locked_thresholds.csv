@@ -1,0 +1,13 @@
+metric,actual,operator,threshold,status
+calculix_completed,true,eq,true,pass
+acceptance_status,passed_scoped_gate,eq,passed_scoped_gate,pass
+contact_mode,persistent_dynamic_sdf_calculix_f2f,eq,persistent_dynamic_sdf_calculix_f2f,pass
+dt,0.001,eq,0.001,pass
+duration,1.0,eq,1.0,pass
+contact_activation_abs_error,1.3877787807814457e-17,le,1.0e-12,pass
+z_cm_l2_rel_error,2.6014929027548756e-04,le,5.0e-04,pass
+max_penetration_rel_error,2.3167937699955544e-02,le,3.0e-02,pass
+peak_normal_force_rel_error,9.816750590013102e-03,le,2.0e-02,pass
+peak_contact_energy_rel_error,2.0223011325782192e-02,le,3.0e-02,pass
+max_cnum_abs_error,0.0,eq,0.0,pass
+contact_zone_max_vm_rel_error,3.937602844759979e-03,le,1.0e-02,pass
