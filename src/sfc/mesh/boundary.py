@@ -6,6 +6,8 @@ from collections import defaultdict
 
 import numpy as np
 
+from .topology import canonical_mesh_element_type
+
 
 _TET4_LOCAL_FACES = np.array(
     [
@@ -31,6 +33,7 @@ _HEX8_LOCAL_FACES = np.array(
 
 
 def _as_connectivity(elements: np.ndarray, *, element_type: str) -> np.ndarray:
+    element_type = canonical_mesh_element_type(element_type)
     conn = np.asarray(elements, dtype=np.int64)
     nodes_per_element = 4 if element_type == "tet4" else 8
     if conn.ndim != 2 or conn.shape[1] != nodes_per_element:
@@ -100,9 +103,7 @@ def extract_boundary_triangles(
     not leak two coincident boundary triangles.
     """
 
-    element_type = element_type.lower()
-    if element_type not in {"tet4", "hex8"}:
-        raise ValueError("element_type must be 'tet4' or 'hex8'")
+    element_type = canonical_mesh_element_type(element_type)
 
     conn = _as_connectivity(elements, element_type=element_type)
     coords = _as_coordinates(X, conn)

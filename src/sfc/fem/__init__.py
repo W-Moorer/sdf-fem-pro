@@ -37,6 +37,14 @@ from .constraints import (
     free_dofs,
     project_fixed_dofs,
 )
+from .elements import (
+    C3D4_TET4_BACKEND,
+    ElementBackend,
+    available_element_backends,
+    canonical_fem_element_type,
+    get_element_backend,
+    register_element_backend,
+)
 from .integrator import newmark_beta_step
 from .material import isotropic_linear_elasticity_matrix
 from .tet4 import (
@@ -74,11 +82,17 @@ __all__ = [
     "eliminate_fixed_dofs",
     "fixed_dofs_from_node_set",
     "free_dofs",
+    "C3D4_TET4_BACKEND",
+    "ElementBackend",
+    "available_element_backends",
+    "canonical_fem_element_type",
+    "get_element_backend",
     "hht_newmark_parameters",
     "hht_step",
     "initial_state",
     "newmark_beta_step",
     "project_fixed_dofs",
+    "register_element_backend",
     "isotropic_linear_elasticity_matrix",
     "static_force_state",
     "static_residual_and_tangent",

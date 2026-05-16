@@ -2,8 +2,8 @@
 
 ## Scope
 
-The standalone solver is validated in layers: mesh topology, TET4 element
-kernels, global assembly, time integration, local projection, dynamic
+The standalone solver is validated in layers: mesh topology, registered
+C3D4/TET4 element kernels, global assembly, time integration, local projection, dynamic
 surface-SDF contact, broad phase, and penalty contact force/Jacobian assembly.
 Phase 3 focuses on validation infrastructure for the current standalone
 prototype. Phase 4 adds reduced paper-scale evidence gates for mesh-resolution
@@ -20,6 +20,11 @@ validation evidence; the rigid-flat-indenter figure was retired from the
 submission package. The external contact solver comparison adds a SfePy
 two-body nonlinear penalty contact solve and replays its final deformed contact
 state with SFC current-surface gap queries.
+
+The core FEM assembly now goes through an element-backend registry. The only
+registered mechanics backend is C3D4/TET4. HEX8/C3D8 remains supported as mesh
+topology for current-surface dynamic-SDF replay, but no C3D8 or C3D10 mechanics
+backend is currently registered.
 
 ## Phase-3 Validation Case Table
 

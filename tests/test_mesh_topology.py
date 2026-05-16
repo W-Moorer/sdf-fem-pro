@@ -27,12 +27,30 @@ def test_volume_mesh_accepts_tet4_arrays() -> None:
 
 
 def test_volume_mesh_rejects_non_tet4_element_type() -> None:
-    with pytest.raises(ValueError, match="tet4.*hex8"):
+    with pytest.raises(ValueError, match="tet4.*c3d4.*hex8.*c3d8"):
         VolumeMesh(
             X=np.zeros((4, 3)),
             elements=np.array([[0, 1, 2, 3]]),
             element_type="wedge6",
         )
+
+
+def test_volume_mesh_accepts_c3d4_alias() -> None:
+    mesh = VolumeMesh(
+        X=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        ),
+        elements=np.array([[0, 1, 2, 3]]),
+        element_type="C3D4",
+    )
+
+    assert mesh.element_type == "tet4"
+    assert mesh.elements.shape == (1, 4)
 
 
 def test_volume_mesh_accepts_hex8_for_surface_sdf_geometry() -> None:
@@ -51,6 +69,28 @@ def test_volume_mesh_accepts_hex8_for_surface_sdf_geometry() -> None:
         ),
         elements=np.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
         element_type="hex8",
+    )
+
+    assert mesh.elements.shape == (1, 8)
+    assert mesh.element_type == "hex8"
+
+
+def test_volume_mesh_accepts_c3d8_alias_for_surface_sdf_geometry() -> None:
+    mesh = VolumeMesh(
+        X=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ]
+        ),
+        elements=np.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
+        element_type="C3D8",
     )
 
     assert mesh.elements.shape == (1, 8)

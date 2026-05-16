@@ -120,6 +120,18 @@ def test_hex8_boundary_triangles_are_oriented_outward() -> None:
         assert np.dot(normal, face_centroid - element_centroid) > 0.0
 
 
+def test_c3d8_alias_boundary_triangles_are_oriented_outward() -> None:
+    mesh = _unit_hex_mesh()
+    triangles, _ = extract_boundary_triangles(mesh.elements, mesh.X, element_type="C3D8")
+    element_centroid = mesh.X[mesh.elements[0]].mean(axis=0)
+
+    for triangle_ids in triangles:
+        triangle = mesh.X[triangle_ids]
+        normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+        face_centroid = triangle.mean(axis=0)
+        assert np.dot(normal, face_centroid - element_centroid) > 0.0
+
+
 def test_two_hex8_sharing_one_quad_have_twenty_boundary_triangles() -> None:
     X = np.array(
         [

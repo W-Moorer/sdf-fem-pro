@@ -7,6 +7,24 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+_ELEMENT_TYPE_ALIASES = {
+    "tet4": "tet4",
+    "c3d4": "tet4",
+    "hex8": "hex8",
+    "c3d8": "hex8",
+}
+
+
+def canonical_mesh_element_type(element_type: str) -> str:
+    """Return the canonical mesh topology name for supported aliases."""
+
+    normalized = str(element_type).lower()
+    try:
+        return _ELEMENT_TYPE_ALIASES[normalized]
+    except KeyError as exc:
+        raise ValueError("element_type must be one of 'tet4', 'c3d4', 'hex8', or 'c3d8'") from exc
+
+
 def signed_tet4_jacobian_determinants(X: np.ndarray, elements: np.ndarray) -> np.ndarray:
     """Return signed Jacobian determinants for TET4 elements."""
 
@@ -43,11 +61,11 @@ def orient_tet4_connectivity(X: np.ndarray, elements: np.ndarray) -> np.ndarray:
 class VolumeMesh:
     """Reference-domain volume mesh.
 
-    The FEM assembler currently supports only ``tet4``. The mesh container also
-    accepts ``hex8`` so validation-only current-surface distance queries can be
-    built from C3D8/HEX8 element boundaries without tying the dynamic SDF to
-    tetrahedral topology. Node and face sets store integer indices into the
-    mesh arrays and are copied to NumPy arrays on construction.
+    The mesh container accepts ``tet4``/``c3d4`` and ``hex8``/``c3d8`` aliases.
+    The FEM assembler currently has a registered backend only for C3D4/TET4,
+    while HEX8/C3D8 remains usable for validation-only current-surface distance
+    queries. Node and face sets store integer indices into the mesh arrays and
+    are copied to NumPy arrays on construction.
     """
 
     X: np.ndarray
@@ -57,9 +75,7 @@ class VolumeMesh:
     face_sets: dict[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        element_type = self.element_type.lower()
-        if element_type not in {"tet4", "hex8"}:
-            raise ValueError("element_type must be 'tet4' or 'hex8'")
+        element_type = canonical_mesh_element_type(self.element_type)
 
         X = np.asarray(self.X, dtype=float)
         if X.ndim != 2 or X.shape[1] != 3:

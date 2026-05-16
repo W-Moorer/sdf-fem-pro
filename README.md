@@ -13,8 +13,9 @@ python -m pip install -e ".[dev]"
 
 ## Implemented Modules
 
-- TET4 volume mesh validation and boundary face extraction.
-- TET4 small-strain linear elastic stiffness and mass matrices.
+- TET4/C3D4 volume mesh validation and boundary face extraction.
+- TET4/C3D4 small-strain linear elastic stiffness and mass matrices through a
+  registered element backend interface.
 - Sparse global stiffness, mass, and gravity force assembly.
 - Dirichlet DOF utilities and a linear Newmark-beta step.
 - Point-triangle closest projection and oriented local dynamic surface distance.
@@ -92,9 +93,17 @@ contactenergy replay is a validation-only C3D8 contact-law/energy reference
 showing that dynamic SDF queries operate on triangulated current boundary
 surfaces rather than on TET4 topology specifically.
 
+## Element Backends
+
+FEM assembly uses a small element-backend registry. The currently registered
+mechanics backend is C3D4/TET4. `tet4` and `C3D4` are accepted as aliases for
+that backend. `hex8`/`C3D8` meshes are accepted for boundary-surface dynamic-SDF
+queries, but C3D8 and C3D10 mechanics backends are not implemented yet.
+
 ## Current Limitations
 
-- TET4 only.
+- Registered FEM mechanics backend is C3D4/TET4 only.
+- C3D8/C3D10 mechanics backends are not implemented yet.
 - Small-strain linear FEM only.
 - Penalty contact only.
 - No friction.
