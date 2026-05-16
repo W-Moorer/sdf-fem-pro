@@ -41,11 +41,13 @@ def orient_tet4_connectivity(X: np.ndarray, elements: np.ndarray) -> np.ndarray:
 
 @dataclass(slots=True)
 class VolumeMesh:
-    """Reference-domain tetrahedral volume mesh.
+    """Reference-domain volume mesh.
 
-    Only linear tetrahedra are supported at this stage. Node and face sets store
-    integer indices into the mesh arrays and are copied to NumPy arrays on
-    construction.
+    The FEM assembler currently supports only ``tet4``. The mesh container also
+    accepts ``hex8`` so validation-only current-surface distance queries can be
+    built from C3D8/HEX8 element boundaries without tying the dynamic SDF to
+    tetrahedral topology. Node and face sets store integer indices into the
+    mesh arrays and are copied to NumPy arrays on construction.
     """
 
     X: np.ndarray
@@ -56,25 +58,26 @@ class VolumeMesh:
 
     def __post_init__(self) -> None:
         element_type = self.element_type.lower()
-        if element_type != "tet4":
-            raise ValueError("only element_type='tet4' is currently supported")
+        if element_type not in {"tet4", "hex8"}:
+            raise ValueError("element_type must be 'tet4' or 'hex8'")
 
         X = np.asarray(self.X, dtype=float)
         if X.ndim != 2 or X.shape[1] != 3:
             raise ValueError("X must have shape (n, 3)")
 
         elements = np.asarray(self.elements, dtype=np.int64)
-        if elements.ndim != 2 or elements.shape[1] != 4:
-            raise ValueError("elements must have shape (m, 4) for tet4 meshes")
+        nodes_per_element = 4 if element_type == "tet4" else 8
+        if elements.ndim != 2 or elements.shape[1] != nodes_per_element:
+            raise ValueError(f"elements must have shape (m, {nodes_per_element}) for {element_type} meshes")
         if np.any(elements < 0):
             raise ValueError("elements cannot contain negative node indices")
         if elements.size and int(elements.max()) >= X.shape[0]:
             raise ValueError("elements reference node indices outside X")
         if elements.size and np.any(np.diff(np.sort(elements, axis=1), axis=1) == 0):
-            raise ValueError("each tet4 element must reference four distinct nodes")
+            raise ValueError(f"each {element_type} element must reference {nodes_per_element} distinct nodes")
 
         self.X = X
-        self.elements = orient_tet4_connectivity(X, elements)
+        self.elements = orient_tet4_connectivity(X, elements) if element_type == "tet4" else elements
         self.element_type = element_type
         self.node_sets = {
             str(name): np.asarray(indices, dtype=np.int64)

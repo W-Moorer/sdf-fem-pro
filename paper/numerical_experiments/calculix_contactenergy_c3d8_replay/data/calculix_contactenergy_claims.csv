@@ -1,0 +1,4 @@
+claim,supported,evidence_csv,evidence_field,details
+calculix_contactenergy_c3d8_reference_available,true,calculix_contactenergy_replay.csv,status,official CalculiX contactenergy C3D8 reference parsed
+dynamic_sdf_replays_c3d8_contact_energy,true,calculix_contactenergy_replay.csv,contact_energy_rel_error,current-surface dynamic SDF on triangulated C3D8 faces matches CalculiX total CELS
+dynamic_sdf_is_not_tet4_bound,true,calculix_contactenergy_replay.csv,dynamic_sdf_backend,replay uses C3D8 boundary quads triangulated into current surface triangles

@@ -17,15 +17,28 @@ _TET4_LOCAL_FACES = np.array(
     dtype=np.int64,
 )
 
+_HEX8_LOCAL_FACES = np.array(
+    [
+        [0, 3, 2, 1],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ],
+    dtype=np.int64,
+)
 
-def _as_tet4_connectivity(elements: np.ndarray) -> np.ndarray:
+
+def _as_connectivity(elements: np.ndarray, *, element_type: str) -> np.ndarray:
     conn = np.asarray(elements, dtype=np.int64)
-    if conn.ndim != 2 or conn.shape[1] != 4:
-        raise ValueError("tet4 connectivity must have shape (m, 4)")
+    nodes_per_element = 4 if element_type == "tet4" else 8
+    if conn.ndim != 2 or conn.shape[1] != nodes_per_element:
+        raise ValueError(f"{element_type} connectivity must have shape (m, {nodes_per_element})")
     if np.any(conn < 0):
-        raise ValueError("tet4 connectivity cannot contain negative node indices")
+        raise ValueError(f"{element_type} connectivity cannot contain negative node indices")
     if conn.size and np.any(np.diff(np.sort(conn, axis=1), axis=1) == 0):
-        raise ValueError("each tet4 element must reference four distinct nodes")
+        raise ValueError(f"each {element_type} element must reference {nodes_per_element} distinct nodes")
     return conn
 
 
@@ -40,14 +53,22 @@ def _as_coordinates(X: np.ndarray | None, elements: np.ndarray) -> np.ndarray | 
     return coords
 
 
-def _orient_face_outward(face: np.ndarray, tet: np.ndarray, X: np.ndarray) -> np.ndarray:
-    triangle = X[face]
-    normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
-    face_centroid = triangle.mean(axis=0)
-    tet_centroid = X[tet].mean(axis=0)
-    if float(np.dot(normal, face_centroid - tet_centroid)) < 0.0:
-        return face[[0, 2, 1]]
+def _orient_polygon_outward(face: np.ndarray, element: np.ndarray, X: np.ndarray) -> np.ndarray:
+    polygon = X[face]
+    normal = np.cross(polygon[1] - polygon[0], polygon[2] - polygon[0])
+    face_centroid = polygon.mean(axis=0)
+    element_centroid = X[element].mean(axis=0)
+    if float(np.dot(normal, face_centroid - element_centroid)) < 0.0:
+        return face[::-1]
     return face
+
+
+def _triangulate_face(face: np.ndarray) -> list[np.ndarray]:
+    if face.size == 3:
+        return [face]
+    if face.size == 4:
+        return [face[[0, 1, 2]], face[[0, 2, 3]]]
+    raise ValueError("only triangular and quadrilateral boundary faces can be triangulated")
 
 
 def extract_boundary_faces(
@@ -62,30 +83,52 @@ def extract_boundary_faces(
     supplied, in which case each boundary face is oriented outward.
     """
 
-    conn = _as_tet4_connectivity(elements)
-    coords = _as_coordinates(X, conn)
-    occurrences: dict[tuple[int, int, int], list[tuple[np.ndarray, int]]] = defaultdict(list)
+    return extract_boundary_triangles(elements, X, element_type="tet4")
 
-    for elem_id, tet in enumerate(conn):
-        for local_face in _TET4_LOCAL_FACES:
-            face = tet[local_face].copy()
+
+def extract_boundary_triangles(
+    elements: np.ndarray,
+    X: np.ndarray | None = None,
+    *,
+    element_type: str = "tet4",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return boundary triangles and adjacent element ids for supported elements.
+
+    ``tet4`` boundary faces are returned as one triangle per exposed face.
+    ``hex8`` boundary quads are split into two triangles. Duplicate detection is
+    orientation independent at the parent face level, so shared HEX8 quads do
+    not leak two coincident boundary triangles.
+    """
+
+    element_type = element_type.lower()
+    if element_type not in {"tet4", "hex8"}:
+        raise ValueError("element_type must be 'tet4' or 'hex8'")
+
+    conn = _as_connectivity(elements, element_type=element_type)
+    coords = _as_coordinates(X, conn)
+    local_faces = _TET4_LOCAL_FACES if element_type == "tet4" else _HEX8_LOCAL_FACES
+    occurrences: dict[tuple[int, ...], list[tuple[np.ndarray, int]]] = defaultdict(list)
+    for elem_id, element in enumerate(conn):
+        for local_face in local_faces:
+            face = element[local_face].copy()
             key = tuple(sorted(int(node) for node in face))
             occurrences[key].append((face, elem_id))
 
-    boundary_faces: list[np.ndarray] = []
+    boundary_triangles: list[np.ndarray] = []
     adjacent_element_ids: list[int] = []
     for face_occurrences in occurrences.values():
         if len(face_occurrences) == 1:
             face, elem_id = face_occurrences[0]
             if coords is not None:
-                face = _orient_face_outward(face, conn[elem_id], coords)
-            boundary_faces.append(face)
-            adjacent_element_ids.append(elem_id)
+                face = _orient_polygon_outward(face, conn[elem_id], coords)
+            for triangle in _triangulate_face(face):
+                boundary_triangles.append(triangle)
+                adjacent_element_ids.append(elem_id)
 
-    if not boundary_faces:
+    if not boundary_triangles:
         return np.empty((0, 3), dtype=np.int64), np.empty((0,), dtype=np.int64)
 
     return (
-        np.asarray(boundary_faces, dtype=np.int64),
+        np.asarray(boundary_triangles, dtype=np.int64),
         np.asarray(adjacent_element_ids, dtype=np.int64),
     )

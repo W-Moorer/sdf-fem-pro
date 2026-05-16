@@ -28,6 +28,7 @@ Evidence source:
 - `../results/phase7/`
 - `../results/external_fem/`
 - `../results/external_contact_solver/`
+- `../results/calculix_contactenergy_replay/`
 - `../docs/phase6_final_experiment_handoff.md`
 - `../docs/phase7_physical_validation_handoff.md`
 - `../docs/external_fem_comparison_handoff.md`
@@ -53,6 +54,9 @@ Scope for the submission draft:
 - External contact solver evidence uses SfePy to solve a two-body penalty
   contact problem and replays the final deformed geometry with SFC
   current-surface gap queries.
+- CalculiX `contactenergy.inp` evidence is a C3D8 contact-law/energy replay
+  showing that the dynamic SDF query consumes triangulated current boundary
+  surfaces and is not inherently TET4-bound.
 
 Unsupported claims that must not be added without new evidence:
 

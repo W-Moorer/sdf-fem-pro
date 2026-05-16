@@ -239,6 +239,16 @@ Paper figure:
 
 - `results/external_contact_solver/external_contact_gap_comparison.pdf`
 
+As a complementary contact-law reference, we also replay CalculiX's official
+`contactenergy.inp` C3D8 surface-to-surface contact-energy test. CalculiX
+performs the static C3D8 contact solve; SFC replays the final deformed geometry
+with the current-surface dynamic SDF on triangulated C3D8 boundary faces. The
+replay matches the CalculiX total contact spring energy with relative error
+`3.798346e-08` and the normal force magnitude with relative error
+`3.797933e-08`. This supports the geometry claim that the dynamic SDF query is
+induced by the current boundary surface and is not tied to TET4 topology. It is
+not a C3D8 mechanics or TET4 trajectory-equivalence claim.
+
 ### 5.5 Dynamic surface-distance reference comparison
 
 The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.

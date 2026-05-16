@@ -297,6 +297,17 @@ Approach & SfePy mean gap & SFC replay mean gap & Abs. diff. & Active counts \\
   \label{fig:external-contact}
 \end{figure}
 
+As a complementary contact-law reference, we also replay CalculiX's official
+\texttt{contactenergy.inp} C3D8 surface-to-surface contact-energy test. In
+this case CalculiX performs the static C3D8 contact solve, while SFC only
+replays the final deformed geometry with the current-surface dynamic SDF on
+triangulated C3D8 boundary faces. The replay matches the CalculiX total contact
+spring energy with relative error \(3.798346\times 10^{-8}\) and the normal
+force magnitude with relative error \(3.797933\times 10^{-8}\). This supports
+the geometry claim that the dynamic SDF query is induced by the current
+boundary surface and is not tied to TET4 topology; it is not a C3D8 mechanics
+or TET4 trajectory-equivalence claim.
+
 \subsection{Dynamic surface-distance reference comparison}
 
 The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.

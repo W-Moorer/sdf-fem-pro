@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import sfc.sdf as sdf
-from sfc.mesh import extract_boundary_faces
+from sfc.mesh import extract_boundary_faces, extract_boundary_triangles
 from sfc.mesh.topology import VolumeMesh
 from sfc.sdf.dynamic_surface_sdf import (
     _slow_reference_dynamic_surface_sdf,
@@ -107,6 +107,30 @@ def test_closed_tetrahedron_sign_near_face_edge_and_vertex_features() -> None:
         assert _slow_reference_dynamic_surface_sdf(point, X, faces).g < 0.0
     for point in outside_points:
         assert _slow_reference_dynamic_surface_sdf(point, X, faces).g > 0.0
+
+
+def test_dynamic_surface_sdf_accepts_triangulated_hex8_boundary() -> None:
+    X = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+    )
+    mesh = VolumeMesh(X=X, elements=np.array([[0, 1, 2, 3, 4, 5, 6, 7]], dtype=np.int64), element_type="hex8")
+    faces, _ = extract_boundary_triangles(mesh.elements, mesh.X, element_type=mesh.element_type)
+
+    inside = _slow_reference_dynamic_surface_sdf(np.array([0.5, 0.5, 0.5]), mesh.X, faces)
+    outside = _slow_reference_dynamic_surface_sdf(np.array([0.5, 0.5, 1.25]), mesh.X, faces)
+
+    assert faces.shape == (12, 3)
+    assert inside.g < 0.0
+    assert outside.g > 0.0
 
 
 def test_dynamic_surface_sdf_requires_candidate_face_ids() -> None:

@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 LOCKED_CASE = ROOT / "paper" / "numerical_experiments" / "block_drop_dynamic_sdf_calculix_1s"
 TET4_PATCH_CASE = ROOT / "paper" / "numerical_experiments" / "tet4_analytic_patch_stress_strain"
 SCIKIT_FEM_CASE = ROOT / "paper" / "numerical_experiments" / "scikit_fem_cantilever_external"
+CONTACTENERGY_CASE = ROOT / "paper" / "numerical_experiments" / "calculix_contactenergy_c3d8_replay"
 
 
 def _rows(path: Path) -> list[dict[str, str]]:
@@ -178,3 +179,46 @@ def test_locked_scikit_fem_cantilever_artifacts_and_latest_stress_cloud_scheme()
     }
     for gate in _rows(SCIKIT_FEM_CASE / "locked_thresholds.csv"):
         _assert_threshold(gate, metrics[gate["metric"]])
+
+
+def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() -> None:
+    required = [
+        CONTACTENERGY_CASE / "README.md",
+        CONTACTENERGY_CASE / "MANIFEST.md",
+        CONTACTENERGY_CASE / "locked_thresholds.csv",
+        CONTACTENERGY_CASE / "runner_summary.md",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_replay.csv",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_claims.csv",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_commands.csv",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_raw_cels.csv",
+        CONTACTENERGY_CASE / "data" / "contactenergy.inp",
+        CONTACTENERGY_CASE / "data" / "contactenergy.dat",
+        CONTACTENERGY_CASE / "logs" / "calculix_stdout.log",
+    ]
+    for path in required:
+        _assert_file(path)
+    assert (CONTACTENERGY_CASE / "logs" / "calculix_stderr.log").exists()
+
+    readme = (CONTACTENERGY_CASE / "README.md").read_text(encoding="utf-8")
+    assert "C3D8 static" in readme
+    assert "contact-law/energy replay" in readme
+    assert "not a TET4 trajectory-equivalence claim" in readme
+    assert "triangulated" in readme
+    assert "C3D8 boundary faces" in readme
+
+    row = _rows(CONTACTENERGY_CASE / "data" / "calculix_contactenergy_replay.csv")[0]
+    metrics: dict[str, object] = {
+        "element_type": row["element_type"],
+        "dynamic_sdf_backend": row["dynamic_sdf_backend"],
+        "status": row["status"],
+        "contact_force_rel_error": float(row["contact_force_rel_error"]),
+        "contact_energy_rel_error": float(row["contact_energy_rel_error"]),
+        "sfc_dynamic_sdf_master_triangle_count": int(row["sfc_dynamic_sdf_master_triangle_count"]),
+        "sfc_dynamic_sdf_slave_quadrature_count": int(row["sfc_dynamic_sdf_slave_quadrature_count"]),
+    }
+    for gate in _rows(CONTACTENERGY_CASE / "locked_thresholds.csv"):
+        _assert_threshold(gate, metrics[gate["metric"]])
+
+    claims = {row["claim"]: row for row in _rows(CONTACTENERGY_CASE / "data" / "calculix_contactenergy_claims.csv")}
+    assert claims["dynamic_sdf_replays_c3d8_contact_energy"]["supported"] == "true"
+    assert claims["dynamic_sdf_is_not_tet4_bound"]["supported"] == "true"

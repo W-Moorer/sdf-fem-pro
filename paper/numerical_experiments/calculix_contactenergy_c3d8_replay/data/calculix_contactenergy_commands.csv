@@ -1,0 +1,2 @@
+case,external_solver,external_solver_version,command,input_source,inp,dat,completed,used_dat_ref
+contactenergy,CalculiX,This is Version 2.17,"wsl --exec bash -lc ""cd '/mnt/e/workspace/sdf-fem-pro/results/calculix_contactenergy_replay/calculix_run' && ccx contactenergy""",/tmp/sfc_calculix_source/test/contactenergy.inp,calculix_run\contactenergy.inp,calculix_run\contactenergy.dat,true,false

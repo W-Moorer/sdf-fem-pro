@@ -15,6 +15,10 @@ boundary, input/output data, figures, and acceptance thresholds.
 - `scikit_fem_cantilever_external/`: external open-source FEM comparison
   against scikit-fem for a 3D cantilever beam on matching TET4 meshes,
   boundary conditions, material parameters, and loads.
+- `calculix_contactenergy_c3d8_replay/`: official CalculiX C3D8
+  contact-energy test replayed with SFC current-surface dynamic SDF on
+  triangulated C3D8 boundary faces. This is contact-law/energy evidence, not a
+  TET4 trajectory-equivalence claim.
 
 ## Claim Discipline
 

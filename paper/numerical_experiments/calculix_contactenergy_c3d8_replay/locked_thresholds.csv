@@ -1,0 +1,9 @@
+metric,actual,operator,threshold,status
+element_type,c3d8,eq,c3d8,pass
+dynamic_sdf_backend,current_surface_triangulated_c3d8_faces,eq,current_surface_triangulated_c3d8_faces,pass
+status,ok,eq,ok,pass
+contact_force_rel_error,3.797932679461269e-08,le,1.0e-5,pass
+contact_energy_rel_error,3.798346405165345e-08,le,1.0e-5,pass
+sfc_dynamic_sdf_master_triangle_count,2,eq,2,pass
+sfc_dynamic_sdf_slave_quadrature_count,2,eq,2,pass
+

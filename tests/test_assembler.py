@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from sfc.fem import (
     DeformableBody,
@@ -57,3 +58,26 @@ def test_total_gravity_force_equals_total_mass_times_g() -> None:
     resultant = F.reshape(-1, 3).sum(axis=0)
 
     assert np.allclose(resultant, total_mass * gravity)
+
+
+def test_fem_assembler_rejects_hex8_mesh_with_clear_message() -> None:
+    mesh = VolumeMesh(
+        X=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ]
+        ),
+        elements=np.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
+        element_type="hex8",
+    )
+    body = DeformableBody(mesh=mesh, material={"E": 1000.0, "nu": 0.25}, density=1.0)
+
+    with pytest.raises(ValueError, match="only tet4"):
+        assemble_stiffness_matrix(body)

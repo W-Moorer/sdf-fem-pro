@@ -1,4 +1,9 @@
-"""FEM-induced oriented local surface-distance queries."""
+"""FEM-induced oriented local surface-distance queries.
+
+The query operates on current boundary triangles. Those triangles may come from
+TET4 faces, triangulated HEX8/C3D8 faces, or any other finite-element boundary
+that has been converted to oriented triangles by the caller.
+"""
 
 from __future__ import annotations
 
@@ -77,7 +82,7 @@ def dynamic_surface_sdf(
     boundary_faces: np.ndarray,
     candidate_face_ids: np.ndarray,
 ) -> SurfaceSDFResult:
-    """Query oriented local signed distance against supplied candidate faces.
+    """Query oriented local signed distance against supplied candidate triangles.
 
     This is the final local query API. Candidate face ids must be supplied by a
     broad phase; this function intentionally does not fall back to a global

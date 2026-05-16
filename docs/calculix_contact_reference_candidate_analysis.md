@@ -50,8 +50,9 @@ primary external contact trajectory evidence because it directly compares the
 native SFC `persistent_dynamic_sdf_calculix_f2f` path against CalculiX on the
 scoped block-plane benchmark.
 
-If another external CalculiX contact proof case is added, the first target
-should be a new validation runner based on `contactenergy.inp`:
+The `contactenergy.inp` path has now been implemented as
+`validation/run_calculix_contactenergy_replay.py` and locked under
+`paper/numerical_experiments/calculix_contactenergy_c3d8_replay/`. The runner:
 
 1. run the original CalculiX `contactenergy.inp`;
 2. parse nodal `U/RF`, total internal energy, raw `CELS`, and total contact
@@ -60,7 +61,7 @@ should be a new validation runner based on `contactenergy.inp`:
    projection;
 4. compare signed gaps, contact force resultants, contact energy, and active
    contact rows;
-5. label it clearly as a C3D8 CalculiX external contact-law/energy reference,
+5. labels it clearly as a C3D8 CalculiX external contact-law/energy reference,
    not as a TET4 trajectory-equivalence claim.
 
 If a strict TET4 paper contact reference is required, the better route is to
@@ -78,4 +79,3 @@ The contact claims should remain tied to:
 - SFC/scikit-fem agreement for non-contact linear FEM stress and displacement;
 - analytic TET4 stress-strain patch correctness;
 - optional future `contactenergy.inp` replay if it is implemented and gated.
-

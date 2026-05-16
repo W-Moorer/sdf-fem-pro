@@ -81,12 +81,16 @@ package:
 python validation/run_phase7_physical_validation.py --quick --out-dir results/phase7
 python validation/run_external_fem_comparison.py --quick --out-dir results/external_fem
 python validation/run_external_contact_solver_comparison.py --quick --out-dir results/external_contact_solver
+python validation/run_calculix_contactenergy_replay.py --quick --skip-calculix --out-dir results/calculix_contactenergy_replay_quick
 ```
 
 The external FEM comparison uses `scikit-fem` as a validation-only open-source
 reference for equivalent linear TET4 cantilever models. The external contact
 comparison uses SfePy as a validation-only open-source contact solver and
-replays its final deformed contact state with SFC gap queries.
+replays its final deformed contact state with SFC gap queries. The CalculiX
+contactenergy replay is a validation-only C3D8 contact-law/energy reference
+showing that dynamic SDF queries operate on triangulated current boundary
+surfaces rather than on TET4 topology specifically.
 
 ## Current Limitations
 
