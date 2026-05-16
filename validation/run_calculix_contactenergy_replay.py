@@ -25,6 +25,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+import matplotlib  # noqa: E402
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import Normalize  # noqa: E402
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
+
+from sfc.fem.material import isotropic_linear_elasticity_matrix  # noqa: E402
+from sfc.mesh import extract_boundary_triangles  # noqa: E402
 from sfc.sdf.dynamic_surface_sdf import dynamic_surface_sdf  # noqa: E402
 
 
@@ -59,6 +68,8 @@ class ContactEnergyModel:
     surfaces: dict[str, list[tuple[str, str]]]
     pressure_stiffness: float
     z_load_reference: float
+    material_E: float
+    material_nu: float
 
 
 def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -162,12 +173,15 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
     surfaces: dict[str, list[tuple[str, str]]] = {}
     cloads: list[tuple[int, int, float]] = []
     pressure_stiffness: float | None = None
+    material_E: float | None = None
+    material_nu: float | None = None
 
     section = ""
     params: dict[str, str] = {}
     current_surface = ""
     current_elset = ""
     expect_surface_behavior_value = False
+    expect_elastic_value = False
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -176,8 +190,16 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
         if line.startswith("*"):
             section, params = _parse_keyword(line)
             expect_surface_behavior_value = section == "*SURFACE BEHAVIOR"
+            expect_elastic_value = section == "*ELASTIC"
             current_surface = params.get("NAME", "") if section == "*SURFACE" else ""
             current_elset = params.get("ELSET", "") if section == "*ELSET" else params.get("ELSET", "")
+            continue
+
+        if expect_elastic_value:
+            values = [value.strip() for value in line.split(",") if value.strip()]
+            material_E = float(values[0])
+            material_nu = float(values[1])
+            expect_elastic_value = False
             continue
 
         if expect_surface_behavior_value:
@@ -202,6 +224,8 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
 
     if pressure_stiffness is None:
         raise ValueError("failed to parse pressure-overclosure stiffness from contactenergy input")
+    if material_E is None or material_nu is None:
+        raise ValueError("failed to parse elastic material from contactenergy input")
 
     node_ids = np.asarray(sorted(nodes), dtype=np.int64)
     node_to_index = {int(node_id): idx for idx, node_id in enumerate(node_ids)}
@@ -219,6 +243,8 @@ def parse_contactenergy_input(text: str) -> ContactEnergyModel:
         surfaces=surfaces,
         pressure_stiffness=float(pressure_stiffness),
         z_load_reference=float(z_load_reference),
+        material_E=float(material_E),
+        material_nu=float(material_nu),
     )
 
 
@@ -348,6 +374,307 @@ def replay_contactenergy_with_dynamic_sdf(model: ContactEnergyModel, U: np.ndarr
     }
 
 
+HEX8_CENTER_NATURAL_GRADIENTS = np.array(
+    [
+        [-1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+    ],
+    dtype=float,
+) / 8.0
+
+
+def _von_mises(stress: np.ndarray) -> float:
+    sxx, syy, szz, txy, tyz, txz = np.asarray(stress, dtype=float)
+    return float(np.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3.0 * (txy**2 + tyz**2 + txz**2)))
+
+
+def _hex8_center_strain_stress(model: ContactEnergyModel, U: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Recover one-point C3D8 engineering strain and linear stress.
+
+    This is a validation-only post-process of the CalculiX final displacement
+    field. SFC does not solve C3D8 mechanics in this replay.
+    """
+
+    C = isotropic_linear_elasticity_matrix(model.material_E, model.material_nu)
+    strains: list[np.ndarray] = []
+    stresses: list[np.ndarray] = []
+    von_mises_values: list[float] = []
+    strain_norms: list[float] = []
+    for element in model.elements:
+        Xe = model.X[element]
+        Ue = U[element]
+        jacobian = Xe.T @ HEX8_CENTER_NATURAL_GRADIENTS
+        gradients = HEX8_CENTER_NATURAL_GRADIENTS @ np.linalg.inv(jacobian)
+        displacement_gradient = Ue.T @ gradients
+        engineering_strain = np.asarray(
+            [
+                displacement_gradient[0, 0],
+                displacement_gradient[1, 1],
+                displacement_gradient[2, 2],
+                displacement_gradient[0, 1] + displacement_gradient[1, 0],
+                displacement_gradient[1, 2] + displacement_gradient[2, 1],
+                displacement_gradient[0, 2] + displacement_gradient[2, 0],
+            ],
+            dtype=float,
+        )
+        stress = C @ engineering_strain
+        strain_tensor = np.asarray(
+            [
+                [engineering_strain[0], 0.5 * engineering_strain[3], 0.5 * engineering_strain[5]],
+                [0.5 * engineering_strain[3], engineering_strain[1], 0.5 * engineering_strain[4]],
+                [0.5 * engineering_strain[5], 0.5 * engineering_strain[4], engineering_strain[2]],
+            ],
+            dtype=float,
+        )
+        strains.append(engineering_strain)
+        stresses.append(stress)
+        von_mises_values.append(_von_mises(stress))
+        strain_norms.append(float(np.linalg.norm(strain_tensor)))
+    return (
+        np.asarray(strains, dtype=float),
+        np.asarray(stresses, dtype=float),
+        np.asarray(von_mises_values, dtype=float),
+        np.asarray(strain_norms, dtype=float),
+    )
+
+
+def _nodal_average(elements: np.ndarray, values: np.ndarray, n_nodes: int) -> np.ndarray:
+    sums = np.zeros(n_nodes, dtype=float)
+    counts = np.zeros(n_nodes, dtype=float)
+    for element, value in zip(elements, np.asarray(values, dtype=float), strict=True):
+        sums[element] += float(value)
+        counts[element] += 1.0
+    return sums / np.maximum(counts, 1.0)
+
+
+def _subdivide_triangle(vertices: np.ndarray, vertex_values: np.ndarray, *, subdivisions: int = 5) -> tuple[list[np.ndarray], list[float]]:
+    n = max(1, int(subdivisions))
+
+    def point(i: int, j: int) -> np.ndarray:
+        w1 = i / n
+        w2 = j / n
+        w0 = 1.0 - w1 - w2
+        return w0 * vertices[0] + w1 * vertices[1] + w2 * vertices[2]
+
+    def value(i: int, j: int) -> float:
+        w1 = i / n
+        w2 = j / n
+        w0 = 1.0 - w1 - w2
+        return float(w0 * vertex_values[0] + w1 * vertex_values[1] + w2 * vertex_values[2])
+
+    polygons: list[np.ndarray] = []
+    values: list[float] = []
+    for i in range(n):
+        for j in range(n - i):
+            tri = np.asarray([point(i, j), point(i + 1, j), point(i, j + 1)], dtype=float)
+            polygons.append(tri)
+            values.append((value(i, j) + value(i + 1, j) + value(i, j + 1)) / 3.0)
+            if i + j < n - 1:
+                tri = np.asarray([point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)], dtype=float)
+                polygons.append(tri)
+                values.append((value(i + 1, j) + value(i + 1, j + 1) + value(i, j + 1)) / 3.0)
+    return polygons, values
+
+
+def _draw_reference_wireframe(ax, X_ref: np.ndarray, triangles: np.ndarray) -> None:
+    collection = Poly3DCollection(
+        [X_ref[face] for face in triangles],
+        facecolors=(0.72, 0.72, 0.72, 0.03),
+        edgecolors=(0.08, 0.08, 0.08, 0.18),
+        linewidths=0.25,
+    )
+    ax.add_collection3d(collection)
+
+
+def _draw_3d_hex_surface(
+    ax,
+    X_ref: np.ndarray,
+    X_plot: np.ndarray,
+    triangles: np.ndarray,
+    nodal_values: np.ndarray,
+    *,
+    norm: Normalize,
+    cmap: str,
+    title: str,
+) -> Poly3DCollection:
+    _draw_reference_wireframe(ax, X_ref, triangles)
+    polygons: list[np.ndarray] = []
+    values: list[float] = []
+    node_values = np.asarray(nodal_values, dtype=float)
+    for face in triangles:
+        sub_polygons, sub_values = _subdivide_triangle(X_plot[face], node_values[face])
+        polygons.extend(sub_polygons)
+        values.extend(sub_values)
+    collection = Poly3DCollection(
+        polygons,
+        cmap=cmap,
+        norm=norm,
+        edgecolors=(0.16, 0.16, 0.16, 0.16),
+        linewidths=0.05,
+    )
+    collection.set_array(np.asarray(values, dtype=float))
+    ax.add_collection3d(collection)
+    bounds = np.vstack([X_ref, X_plot])
+    mins = np.min(bounds, axis=0)
+    maxs = np.max(bounds, axis=0)
+    padding = np.maximum(0.05 * (maxs - mins), 1.0e-4)
+    ax.set_xlim(float(mins[0] - padding[0]), float(maxs[0] + padding[0]))
+    ax.set_ylim(float(mins[1] - padding[1]), float(maxs[1] + padding[1]))
+    ax.set_zlim(float(mins[2] - padding[2]), float(maxs[2] + padding[2]))
+    ax.set_box_aspect((maxs - mins + 2.0 * padding).clip(min=1.0e-12))
+    ax.view_init(elev=22.0, azim=-52.0)
+    try:
+        ax.set_proj_type("ortho")
+    except AttributeError:
+        pass
+    ax.set_title(title, pad=0.0)
+    ax.set_axis_off()
+    return collection
+
+
+def _contact_pressure_nodal_values(model: ContactEnergyModel, U: np.ndarray) -> np.ndarray:
+    X_current = model.X + U
+    master_faces = _triangles_from_quads(X_current, _surface_quads(model, "Smast"))
+    slave_faces = _triangles_from_quads(X_current, _surface_quads(model, "Sslav"))
+    candidates = np.arange(master_faces.shape[0], dtype=np.int64)
+    sums = np.zeros(model.X.shape[0], dtype=float)
+    counts = np.zeros(model.X.shape[0], dtype=float)
+    for face in slave_faces:
+        triangle = X_current[face]
+        result = dynamic_surface_sdf(triangle.mean(axis=0), X_current, master_faces, candidates)
+        pressure = model.pressure_stiffness * max(-float(result.g), 0.0)
+        sums[face] += pressure
+        counts[face] += 1.0
+    return sums / np.maximum(counts, 1.0)
+
+
+def _write_visualization_artifacts(out_dir: Path, model: ContactEnergyModel, U: np.ndarray) -> tuple[list[Row], list[Row]]:
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    strains, stresses, von_mises_values, strain_norms = _hex8_center_strain_stress(model, U)
+    nodal_vm = _nodal_average(model.elements, von_mises_values, model.X.shape[0])
+    nodal_strain = _nodal_average(model.elements, strain_norms, model.X.shape[0])
+    displacement_magnitude = np.linalg.norm(U, axis=1)
+    nodal_pressure = _contact_pressure_nodal_values(model, U)
+
+    deformation_scale = 1000.0
+    X_plot = model.X + deformation_scale * U
+    boundary_triangles, _ = extract_boundary_triangles(model.elements, model.X, element_type="hex8")
+
+    stress_norm = Normalize(vmin=0.0, vmax=max(float(np.max(nodal_vm)), 1.0e-30))
+    strain_norm = Normalize(vmin=0.0, vmax=max(float(np.max(nodal_strain)), 1.0e-30))
+    displacement_norm = Normalize(vmin=0.0, vmax=max(float(np.max(displacement_magnitude)), 1.0e-30))
+    pressure_norm = Normalize(vmin=0.0, vmax=max(float(np.max(nodal_pressure)), 1.0e-30))
+
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.6), subplot_kw={"projection": "3d"})
+    panels = [
+        (nodal_vm, "von Mises stress", stress_norm, "viridis"),
+        (nodal_strain, "engineering strain norm", strain_norm, "plasma"),
+        (displacement_magnitude, "displacement magnitude", displacement_norm, "cividis"),
+    ]
+    collections: list[Poly3DCollection] = []
+    for ax, (values, title, norm, cmap) in zip(axes, panels, strict=True):
+        collections.append(
+            _draw_3d_hex_surface(
+                ax,
+                model.X,
+                X_plot,
+                boundary_triangles,
+                values,
+                norm=norm,
+                cmap=cmap,
+                title=title,
+            )
+        )
+    fig.subplots_adjust(left=0.01, right=0.98, bottom=0.04, top=0.80, wspace=0.10)
+    colorbar_specs = [(collections[0], "stress"), (collections[1], "strain"), (collections[2], "|U|")]
+    for ax, (collection, label) in zip(axes, colorbar_specs, strict=True):
+        fig.colorbar(collection, ax=ax, shrink=0.58, pad=0.02, label=label)
+    fig.suptitle(f"CalculiX C3D8 contactenergy final state, displacement scale {deformation_scale:g}x", fontsize=13)
+    stress_png = figures_dir / "calculix_contactenergy_stress_strain_3d.png"
+    stress_pdf = figures_dir / "calculix_contactenergy_stress_strain_3d.pdf"
+    fig.savefig(stress_png, dpi=180, bbox_inches="tight")
+    fig.savefig(stress_pdf, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(8.2, 3.6), subplot_kw={"projection": "3d"})
+    pressure_collection = _draw_3d_hex_surface(
+        axes[0],
+        model.X,
+        X_plot,
+        boundary_triangles,
+        nodal_pressure,
+        norm=pressure_norm,
+        cmap="magma",
+        title="SFC dynamic-SDF pressure",
+    )
+    vm_collection = _draw_3d_hex_surface(
+        axes[1],
+        model.X,
+        X_plot,
+        boundary_triangles,
+        nodal_vm,
+        norm=stress_norm,
+        cmap="viridis",
+        title="CalculiX-displacement stress",
+    )
+    fig.subplots_adjust(left=0.01, right=0.98, bottom=0.04, top=0.80, wspace=0.08)
+    fig.colorbar(pressure_collection, ax=axes[0], shrink=0.58, pad=0.02, label="pressure")
+    fig.colorbar(vm_collection, ax=axes[1], shrink=0.58, pad=0.02, label="von Mises")
+    fig.suptitle(f"Dynamic-SDF contact replay on deformed C3D8 boundary, {deformation_scale:g}x", fontsize=12)
+    pressure_png = figures_dir / "calculix_contactenergy_contact_pressure_3d.png"
+    pressure_pdf = figures_dir / "calculix_contactenergy_contact_pressure_3d.pdf"
+    fig.savefig(pressure_png, dpi=180, bbox_inches="tight")
+    fig.savefig(pressure_pdf, bbox_inches="tight")
+    plt.close(fig)
+
+    cloud_rows: list[Row] = []
+    for element_id, strain, stress, vm, strain_norm_value in zip(model.element_ids, strains, stresses, von_mises_values, strain_norms, strict=True):
+        cloud_rows.append(
+            {
+                "element_id": int(element_id),
+                "strain_xx": float(strain[0]),
+                "strain_yy": float(strain[1]),
+                "strain_zz": float(strain[2]),
+                "strain_xy": float(strain[3]),
+                "strain_yz": float(strain[4]),
+                "strain_xz": float(strain[5]),
+                "stress_xx": float(stress[0]),
+                "stress_yy": float(stress[1]),
+                "stress_zz": float(stress[2]),
+                "stress_xy": float(stress[3]),
+                "stress_yz": float(stress[4]),
+                "stress_xz": float(stress[5]),
+                "von_mises": float(vm),
+                "engineering_strain_norm": float(strain_norm_value),
+            }
+        )
+
+    plot_rows = [
+        {
+            "plot": "calculix_contactenergy_stress_strain_3d",
+            "png": stress_png.relative_to(out_dir).as_posix(),
+            "pdf": stress_pdf.relative_to(out_dir).as_posix(),
+            "status": "ok",
+            "details": "C3D8 stress/strain post-processed from CalculiX final displacements; deformed geometry plotted with scale factor",
+        },
+        {
+            "plot": "calculix_contactenergy_contact_pressure_3d",
+            "png": pressure_png.relative_to(out_dir).as_posix(),
+            "pdf": pressure_pdf.relative_to(out_dir).as_posix(),
+            "status": "ok",
+            "details": "SFC dynamic-SDF replay pressure on the current triangulated C3D8 boundary",
+        },
+    ]
+    return plot_rows, cloud_rows
+
+
 def _relative_error(actual: float, expected: float) -> float:
     return abs(actual - expected) / max(abs(expected), 1.0e-30)
 
@@ -387,6 +714,19 @@ def _write_summary(path: Path, metrics: Row, command_row: Row, claims: list[Row]
         f"| SFC dynamic-SDF replay force z | {metrics['sfc_dynamic_sdf_contact_force_z']} |",
         f"| contact force relative error | {metrics['contact_force_rel_error']} |",
         f"| SFC min gap | {metrics['sfc_dynamic_sdf_min_gap']} |",
+        f"| max post-processed von Mises stress | {metrics['max_postprocessed_von_mises']} |",
+        f"| max post-processed engineering strain norm | {metrics['max_postprocessed_engineering_strain_norm']} |",
+        f"| max CalculiX displacement magnitude | {metrics['max_calculix_displacement_magnitude']} |",
+        "",
+        "## Figures",
+        "",
+        "- `figures/calculix_contactenergy_stress_strain_3d.png`: C3D8",
+        "  stress, strain, and displacement clouds post-processed from the final",
+        "  CalculiX displacement field. The deformed shape is plotted with a",
+        "  labeled magnification factor so that the small static displacement is",
+        "  visible.",
+        "- `figures/calculix_contactenergy_contact_pressure_3d.png`: SFC",
+        "  dynamic-SDF replay contact pressure on the same current C3D8 boundary.",
         "",
         "## Claims",
         "",
@@ -473,6 +813,7 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
     dat_text = dat_path.read_text(encoding="utf-8")
     U, RF, calculix_contact_energy, cels_rows = parse_contactenergy_dat(dat_text, model.node_ids)
     replay = replay_contactenergy_with_dynamic_sdf(model, U)
+    plot_rows, stress_strain_rows = _write_visualization_artifacts(out_dir, model, U)
 
     force_error = _relative_error(float(replay["sfc_dynamic_sdf_contact_force_z"]), model.z_load_reference)
     energy_error = _relative_error(float(replay["sfc_dynamic_sdf_contact_energy"]), calculix_contact_energy)
@@ -489,6 +830,10 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
         "calculix_total_contact_spring_energy": calculix_contact_energy,
         "calculix_raw_cels_row_count": len(cels_rows),
         "calculix_rf_z_sum": float(np.sum(RF[:, 2])),
+        "max_postprocessed_von_mises": max(float(row["von_mises"]) for row in stress_strain_rows),
+        "max_postprocessed_engineering_strain_norm": max(float(row["engineering_strain_norm"]) for row in stress_strain_rows),
+        "max_calculix_displacement_magnitude": float(np.max(np.linalg.norm(U, axis=1))),
+        "visualization_deformation_scale": 1000.0,
         **replay,
         "contact_force_rel_error": force_error,
         "contact_energy_rel_error": energy_error,
@@ -527,8 +872,17 @@ def run_contactenergy_replay(*, out_dir: Path, skip_calculix: bool, timeout: int
         ["slave_element", "slave_face", "cels"],
         cels_rows,
     )
+    _write_csv(out_dir / "calculix_contactenergy_plots.csv", list(plot_rows[0].keys()), plot_rows)
+    _write_csv(out_dir / "calculix_contactenergy_stress_strain_cloud.csv", list(stress_strain_rows[0].keys()), stress_strain_rows)
     _write_summary(out_dir / "calculix_contactenergy_summary.md", metrics, command_row, claims)
-    return {"metrics": [metrics], "claims": claims, "commands": [command_row], "raw_cels": cels_rows}
+    return {
+        "metrics": [metrics],
+        "claims": claims,
+        "commands": [command_row],
+        "raw_cels": cels_rows,
+        "plots": plot_rows,
+        "stress_strain_cloud": stress_strain_rows,
+    }
 
 
 def main() -> None:

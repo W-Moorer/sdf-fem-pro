@@ -191,8 +191,14 @@ def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() ->
         CONTACTENERGY_CASE / "data" / "calculix_contactenergy_claims.csv",
         CONTACTENERGY_CASE / "data" / "calculix_contactenergy_commands.csv",
         CONTACTENERGY_CASE / "data" / "calculix_contactenergy_raw_cels.csv",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_plots.csv",
+        CONTACTENERGY_CASE / "data" / "calculix_contactenergy_stress_strain_cloud.csv",
         CONTACTENERGY_CASE / "data" / "contactenergy.inp",
         CONTACTENERGY_CASE / "data" / "contactenergy.dat",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_stress_strain_3d.png",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_stress_strain_3d.pdf",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_contact_pressure_3d.png",
+        CONTACTENERGY_CASE / "figures" / "calculix_contactenergy_contact_pressure_3d.pdf",
         CONTACTENERGY_CASE / "logs" / "calculix_stdout.log",
     ]
     for path in required:
@@ -222,3 +228,8 @@ def test_locked_calculix_contactenergy_c3d8_replay_artifacts_and_thresholds() ->
     claims = {row["claim"]: row for row in _rows(CONTACTENERGY_CASE / "data" / "calculix_contactenergy_claims.csv")}
     assert claims["dynamic_sdf_replays_c3d8_contact_energy"]["supported"] == "true"
     assert claims["dynamic_sdf_is_not_tet4_bound"]["supported"] == "true"
+
+    stress_cloud = _rows(CONTACTENERGY_CASE / "data" / "calculix_contactenergy_stress_strain_cloud.csv")
+    assert len(stress_cloud) == 2
+    assert max(float(row["von_mises"]) for row in stress_cloud) > 0.0
+    assert max(float(row["engineering_strain_norm"]) for row in stress_cloud) > 0.0

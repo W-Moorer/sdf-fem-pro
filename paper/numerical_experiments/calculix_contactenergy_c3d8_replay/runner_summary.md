@@ -23,6 +23,19 @@ python validation/run_calculix_contactenergy_replay.py --out-dir results/calculi
 | SFC dynamic-SDF replay force z | 3.999999848082693 |
 | contact force relative error | 3.797932679461269e-08 |
 | SFC min gap | -1.0000049999958627e-05 |
+| max post-processed von Mises stress | 100.0004565 |
+| max post-processed engineering strain norm | 0.00047619265000000007 |
+| max CalculiX displacement magnitude | 0.0001242862 |
+
+## Figures
+
+- `figures/calculix_contactenergy_stress_strain_3d.png`: C3D8
+  stress, strain, and displacement clouds post-processed from the final
+  CalculiX displacement field. The deformed shape is plotted with a
+  labeled magnification factor so that the small static displacement is
+  visible.
+- `figures/calculix_contactenergy_contact_pressure_3d.png`: SFC
+  dynamic-SDF replay contact pressure on the same current C3D8 boundary.
 
 ## Claims
 

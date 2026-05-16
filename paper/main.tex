@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/paper_final/figures/}{../results/phase7/}{../results/external_fem/}{../results/external_contact_solver/}{results/paper_final/figures/}{results/phase7/}{results/external_fem/}{results/external_contact_solver/}}
+\graphicspath{{../results/paper_final/figures/}{../results/phase7/}{../results/external_fem/}{../results/external_contact_solver/}{results/paper_final/figures/}{results/phase7/}{results/external_fem/}{results/external_contact_solver/}{numerical_experiments/calculix_contactenergy_c3d8_replay/figures/}{paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/}}
 
 \title{A Training-Free Dynamic Surface Distance Field for Efficient Finite-Element Contact of Deformable Bodies}
 \author{Anonymous Authors}
@@ -307,6 +307,18 @@ force magnitude with relative error \(3.797933\times 10^{-8}\). This supports
 the geometry claim that the dynamic SDF query is induced by the current
 boundary surface and is not tied to TET4 topology; it is not a C3D8 mechanics
 or TET4 trajectory-equivalence claim.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{calculix_contactenergy_stress_strain_3d.pdf}
+  \caption{CalculiX \texttt{contactenergy.inp} C3D8 final-state visualization.
+  The stress and strain fields are post-processed from the final CalculiX
+  displacement field, averaged to boundary nodes, and interpolated over
+  triangulated C3D8 boundary faces. The deformed shape is plotted with a
+  labeled displacement scale factor to make the small static deformation
+  visible.}
+  \label{fig:calculix-contactenergy-stress-strain}
+\end{figure}
 
 \subsection{Dynamic surface-distance reference comparison}
 

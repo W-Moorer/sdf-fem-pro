@@ -249,6 +249,17 @@ replay matches the CalculiX total contact spring energy with relative error
 induced by the current boundary surface and is not tied to TET4 topology. It is
 not a C3D8 mechanics or TET4 trajectory-equivalence claim.
 
+Paper-facing figures:
+
+- `paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/calculix_contactenergy_stress_strain_3d.pdf`
+- `paper/numerical_experiments/calculix_contactenergy_c3d8_replay/figures/calculix_contactenergy_contact_pressure_3d.pdf`
+
+The stress/strain figure post-processes the final CalculiX displacement field
+into C3D8 element-center engineering strain and linear elastic stress, averages
+element values to boundary nodes, and interpolates them over the triangulated
+current boundary. The displayed deformed geometry uses a labeled `1000x`
+displacement scale so that the small static deformation is visible.
+
 ### 5.5 Dynamic surface-distance reference comparison
 
 The dynamic surface-distance query was compared against a high-resolution brute-force closest-point projection reference. In the final packaged run, the contact reference used surface resolution 12, with 288 triangles and 144 reference rows. The maximum reported gap error and normal error were both zero for the tested configuration.

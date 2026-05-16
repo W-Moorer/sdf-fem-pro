@@ -1,0 +1,3 @@
+plot,png,pdf,status,details
+calculix_contactenergy_stress_strain_3d,figures/calculix_contactenergy_stress_strain_3d.png,figures/calculix_contactenergy_stress_strain_3d.pdf,ok,C3D8 stress/strain post-processed from CalculiX final displacements; deformed geometry plotted with scale factor
+calculix_contactenergy_contact_pressure_3d,figures/calculix_contactenergy_contact_pressure_3d.png,figures/calculix_contactenergy_contact_pressure_3d.pdf,ok,SFC dynamic-SDF replay pressure on the current triangulated C3D8 boundary

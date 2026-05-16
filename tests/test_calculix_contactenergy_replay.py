@@ -56,6 +56,8 @@ def test_calculix_contactenergy_replay_quick_outputs_dynamic_sdf_c3d8_metrics(tm
         "calculix_contactenergy_claims.csv",
         "calculix_contactenergy_commands.csv",
         "calculix_contactenergy_raw_cels.csv",
+        "calculix_contactenergy_plots.csv",
+        "calculix_contactenergy_stress_strain_cloud.csv",
         "calculix_contactenergy_summary.md",
     ]
     for name in expected:
@@ -74,3 +76,17 @@ def test_calculix_contactenergy_replay_quick_outputs_dynamic_sdf_c3d8_metrics(tm
     claims = {row["claim"]: row for row in _rows(out_dir / "calculix_contactenergy_claims.csv")}
     assert claims["dynamic_sdf_replays_c3d8_contact_energy"]["supported"] == "true"
     assert claims["dynamic_sdf_is_not_tet4_bound"]["supported"] == "true"
+
+    for figure in [
+        out_dir / "figures" / "calculix_contactenergy_stress_strain_3d.png",
+        out_dir / "figures" / "calculix_contactenergy_stress_strain_3d.pdf",
+        out_dir / "figures" / "calculix_contactenergy_contact_pressure_3d.png",
+        out_dir / "figures" / "calculix_contactenergy_contact_pressure_3d.pdf",
+    ]:
+        assert figure.exists(), figure
+        assert figure.stat().st_size > 0, figure
+
+    cloud = _rows(out_dir / "calculix_contactenergy_stress_strain_cloud.csv")
+    assert len(cloud) == 2
+    assert max(float(row["von_mises"]) for row in cloud) > 0.0
+    assert max(float(row["engineering_strain_norm"]) for row in cloud) > 0.0
