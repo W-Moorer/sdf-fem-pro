@@ -11,34 +11,51 @@ against the current lower-block master surface with `dynamic_surface_sdf`.
 This is a geometry replay validation. It is not a claim that the full native
 SFC two-body nonlinear contact trajectory is identical to CalculiX.
 
-## Command
+## Paper Command
 
 ```bash
-python validation/run_calculix_deformable_sdf_contact_validation.py --quick --resolution 1 --timeout 180 --out-dir results/calculix_deformable_sdf_contact_quick
+python validation/run_calculix_deformable_sdf_contact_validation.py --timeout 240 --out-dir results/calculix_deformable_sdf_contact_paper
 ```
 
 ## Outputs
 
-- `results/calculix_deformable_sdf_contact_quick/calculix_deformable_sdf_contact_comparison.csv`
-- `results/calculix_deformable_sdf_contact_quick/calculix_deformable_sdf_contact_claims.csv`
-- `results/calculix_deformable_sdf_contact_quick/calculix_deformable_sdf_contact_commands.csv`
-- `results/calculix_deformable_sdf_contact_quick/calculix_deformable_sdf_contact_summary.md`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_comparison.csv`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_claims.csv`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_commands.csv`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_paper_metrics.csv`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_plots.csv`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_summary.md`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_gap_error.png`
+- `results/calculix_deformable_sdf_contact_paper/calculix_deformable_sdf_contact_gap_error.pdf`
 
-## Latest Quick Result
+## Latest Paper Result
 
-The latest quick run completed both external CalculiX cases:
+The latest paper run completed all nine external CalculiX cases: three mesh
+resolutions `r1/r2/r3` and three prescribed approaches `0.02/0.04/0.06`.
 
-| Approach | CalculiX min CDIS | SFC min dynamic-SDF gap | Difference | Status |
-| ---: | ---: | ---: | ---: | --- |
-| 0.02 | no contact rows | `1.500000e-02` | n/a | sign agreement |
-| 0.06 | `-2.039199e-02` | `-2.039200e-02` | `7.0e-09` | gap agreement |
+| Resolution | Master faces | Approach | CalculiX min CDIS | SFC min dynamic-SDF gap | Difference | Status |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 2 | 0.02 | no contact rows | `1.500000e-02` | n/a | sign agreement |
+| 1 | 2 | 0.04 | `-4.086740e-03` | `-4.086740e-03` | `1.0e-10` | gap agreement |
+| 1 | 2 | 0.06 | `-2.039199e-02` | `-2.039200e-02` | `7.0e-09` | gap agreement |
+| 2 | 8 | 0.02 | no contact rows | `1.500000e-02` | n/a | sign agreement |
+| 2 | 8 | 0.04 | `-4.086740e-03` | `-4.086740e-03` | `1.0e-10` | gap agreement |
+| 2 | 8 | 0.06 | `-2.039199e-02` | `-2.039200e-02` | `7.0e-09` | gap agreement |
+| 3 | 18 | 0.02 | no contact rows | `1.500000e-02` | n/a | sign agreement |
+| 3 | 18 | 0.04 | `-4.086740e-03` | `-4.086740e-03` | `1.0e-10` | gap agreement |
+| 3 | 18 | 0.06 | `-2.039199e-02` | `-2.039200e-02` | `7.0e-09` | gap agreement |
 
 Supported gates:
 
-- CalculiX completes the scoped two-deformable-block reference.
+- CalculiX completes the scoped two-deformable-block references: `9/9`.
 - SFC dynamic-SDF replay agrees with CalculiX contact/no-contact sign.
 - In this lateral-constrained normal-compression replay, SFC minimum gap agrees
-  with CalculiX minimum `CDIS` to output precision.
+  with CalculiX minimum `CDIS` to output precision, with maximum difference
+  `7.000000024071085e-09`.
+- The evidence includes three mesh resolutions and six completed contact cases.
+
+No convergence order is claimed. The evidence supports a paper statement about
+external deformed-state SDF replay across the tested mesh resolutions.
 
 ## Important Parser Fix
 

@@ -76,6 +76,15 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[Row]) -> None:
         writer.writerows(rows)
 
 
+def _parse_int_list(text: str) -> list[int]:
+    values = [int(part.strip()) for part in str(text).split(",") if part.strip()]
+    if not values:
+        raise ValueError("at least one resolution is required")
+    if any(value < 1 for value in values):
+        raise ValueError("resolutions must be positive integers")
+    return values
+
+
 def _format_id_list(ids: np.ndarray, *, per_line: int = 12) -> list[str]:
     values = [str(int(value)) for value in ids]
     return [", ".join(values[i : i + per_line]) for i in range(0, len(values), per_line)]
@@ -352,87 +361,100 @@ def run_validation(
     *,
     quick: bool = False,
     resolution: int = 1,
+    resolutions: list[int] | None = None,
     timeout: int = 180,
 ) -> dict[str, Path]:
     """Run the scoped CalculiX/SFC deformable-SDF contact replay validation."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
     approaches = [0.02, 0.06] if quick else [0.02, 0.04, 0.06]
+    resolution_values = [int(resolution)] if resolutions is None else [int(value) for value in resolutions]
     comparison_rows: list[Row] = []
     command_rows: list[Row] = []
-    for approach in approaches:
-        model = build_two_block_model(resolution=int(resolution), approach=float(approach))
-        dat, command = _run_calculix(model, out_dir, timeout=timeout)
-        command_rows.append(command)
-        if dat is None or command["completed"] != "true":
+    for resolution_value in resolution_values:
+        for approach in approaches:
+            model = build_two_block_model(resolution=int(resolution_value), approach=float(approach))
+            dat, command = _run_calculix(model, out_dir, timeout=timeout)
+            command_rows.append(command)
+            if dat is None or command["completed"] != "true":
+                comparison_rows.append(
+                    {
+                        "case": model.case_name,
+                        "resolution": int(resolution_value),
+                        "approach": float(approach),
+                        "master_face_count": int(model.lower_top_faces.shape[0]),
+                        "slave_face_count": int(model.upper_bottom_faces.shape[0]),
+                        "calculix_completed": command["completed"],
+                        "final_time": "",
+                        "calculix_cdis_min": "",
+                        "calculix_cdis_mean": "",
+                        "calculix_contact_row_count": "",
+                        "calculix_cnum": "",
+                        "calculix_contact_energy": "",
+                        "sfc_query_count": "",
+                        "sfc_gap_min": "",
+                        "sfc_gap_mean": "",
+                        "sfc_active_count": "",
+                        "sfc_max_penetration": "",
+                        "contact_sign_agreement": "false",
+                        "gap_min_abs_difference": "",
+                        "status": "not_available",
+                        "details": "CalculiX did not complete or did not produce a dat file.",
+                    }
+                )
+                continue
+            displacements = _parse_calculix_dat_displacements(dat, model.node_ids)
+            if not displacements:
+                raise RuntimeError(f"No displacement blocks found in {dat}")
+            final_disp_time = max(displacements)
+            final_time, contact = _final_contact_metrics(dat)
+            replay = _sfc_replay_on_calculix_state(model, displacements[final_disp_time])
+            calc_min = contact["calculix_cdis_min"]
+            sfc_min = replay["sfc_gap_min"]
+            calc_active = calc_min != "" and float(calc_min) < 0.0
+            sfc_active = float(sfc_min) < 0.0
+            sign_agreement = bool(calc_active == sfc_active)
+            gap_diff: float | str = "" if calc_min == "" else abs(float(calc_min) - float(sfc_min))
+            status = "passed_replay_gate" if sign_agreement and replay["sfc_query_count"] > 0 else "check"
             comparison_rows.append(
                 {
                     "case": model.case_name,
-                    "resolution": int(resolution),
+                    "resolution": int(resolution_value),
                     "approach": float(approach),
+                    "master_face_count": int(model.lower_top_faces.shape[0]),
+                    "slave_face_count": int(model.upper_bottom_faces.shape[0]),
                     "calculix_completed": command["completed"],
-                    "final_time": "",
-                    "calculix_cdis_min": "",
-                    "calculix_cdis_mean": "",
-                    "calculix_contact_row_count": "",
-                    "calculix_cnum": "",
-                    "calculix_contact_energy": "",
-                    "sfc_query_count": "",
-                    "sfc_gap_min": "",
-                    "sfc_gap_mean": "",
-                    "sfc_active_count": "",
-                    "sfc_max_penetration": "",
-                    "contact_sign_agreement": "false",
-                    "gap_min_abs_difference": "",
-                    "status": "not_available",
-                    "details": "CalculiX did not complete or did not produce a dat file.",
+                    "final_time": final_time if final_time is not None else final_disp_time,
+                    **contact,
+                    **replay,
+                    "contact_sign_agreement": str(sign_agreement).lower(),
+                    "gap_min_abs_difference": gap_diff,
+                    "status": status,
+                    "details": (
+                        "CalculiX solves two-deformable-block contact; SFC replays the final deformed geometry with "
+                        "current lower-block dynamic SDF. The reference fixes lateral DOFs so this is a scoped normal "
+                        "compression check of external deformed-surface SDF gap evaluation."
+                    ),
                 }
             )
-            continue
-        displacements = _parse_calculix_dat_displacements(dat, model.node_ids)
-        if not displacements:
-            raise RuntimeError(f"No displacement blocks found in {dat}")
-        final_disp_time = max(displacements)
-        final_time, contact = _final_contact_metrics(dat)
-        replay = _sfc_replay_on_calculix_state(model, displacements[final_disp_time])
-        calc_min = contact["calculix_cdis_min"]
-        sfc_min = replay["sfc_gap_min"]
-        calc_active = calc_min != "" and float(calc_min) < 0.0
-        sfc_active = float(sfc_min) < 0.0
-        sign_agreement = bool(calc_active == sfc_active)
-        gap_diff: float | str = "" if calc_min == "" else abs(float(calc_min) - float(sfc_min))
-        status = "passed_replay_gate" if sign_agreement and replay["sfc_query_count"] > 0 else "check"
-        comparison_rows.append(
-            {
-                "case": model.case_name,
-                "resolution": int(resolution),
-                "approach": float(approach),
-                "calculix_completed": command["completed"],
-                "final_time": final_time if final_time is not None else final_disp_time,
-                **contact,
-                **replay,
-                "contact_sign_agreement": str(sign_agreement).lower(),
-                "gap_min_abs_difference": gap_diff,
-                "status": status,
-            "details": (
-                "CalculiX solves two-deformable-block contact; SFC replays the final deformed geometry with "
-                "current lower-block dynamic SDF. The reference fixes lateral DOFs so this is a scoped normal "
-                "compression check of external deformed-surface SDF gap evaluation."
-            ),
-        }
-    )
 
     claims = _claim_rows(comparison_rows)
+    paper_rows = _paper_metric_rows(comparison_rows)
+    plots = _write_plots(out_dir, comparison_rows)
     outputs = {
         "comparison": out_dir / "calculix_deformable_sdf_contact_comparison.csv",
         "commands": out_dir / "calculix_deformable_sdf_contact_commands.csv",
         "claims": out_dir / "calculix_deformable_sdf_contact_claims.csv",
+        "paper_metrics": out_dir / "calculix_deformable_sdf_contact_paper_metrics.csv",
+        "plots": out_dir / "calculix_deformable_sdf_contact_plots.csv",
         "summary": out_dir / "calculix_deformable_sdf_contact_summary.md",
     }
     _write_csv(outputs["comparison"], _comparison_fields(), comparison_rows)
     _write_csv(outputs["commands"], _command_fields(), command_rows)
     _write_csv(outputs["claims"], _claim_fields(), claims)
-    _write_markdown(outputs["summary"], comparison_rows, claims, quick=quick, resolution=resolution)
+    _write_csv(outputs["paper_metrics"], _paper_metric_fields(), paper_rows)
+    _write_csv(outputs["plots"], _plot_fields(), plots)
+    _write_markdown(outputs["summary"], comparison_rows, claims, paper_rows, plots, quick=quick, resolutions=resolution_values)
     return outputs
 
 
@@ -441,6 +463,8 @@ def _comparison_fields() -> list[str]:
         "case",
         "resolution",
         "approach",
+        "master_face_count",
+        "slave_face_count",
         "calculix_completed",
         "final_time",
         "calculix_cdis_min",
@@ -479,6 +503,14 @@ def _claim_fields() -> list[str]:
     return ["claim_id", "claim_text", "evidence_csv", "evidence_field", "gate_value", "claim_status", "details"]
 
 
+def _paper_metric_fields() -> list[str]:
+    return ["metric", "value", "status", "evidence_csv", "details"]
+
+
+def _plot_fields() -> list[str]:
+    return ["plot", "png", "pdf", "status", "details"]
+
+
 def _claim_rows(rows: list[Row]) -> list[Row]:
     completed = [row for row in rows if row["calculix_completed"] == "true"]
     sign_ok = bool(completed) and all(row["contact_sign_agreement"] == "true" for row in completed)
@@ -492,6 +524,13 @@ def _claim_rows(rows: list[Row]) -> list[Row]:
         default=0.0,
     )
     gap_scale_ok = bool(completed) and max_gap_diff <= 1.0e-6
+    completed_resolutions = sorted({int(row["resolution"]) for row in completed})
+    contact_completed = [
+        row
+        for row in completed
+        if row.get("calculix_contact_row_count") not in ("", None) and int(row["calculix_contact_row_count"]) > 0
+    ]
+    paper_scale_ok = len(completed_resolutions) >= 3 and len(contact_completed) >= len(completed_resolutions)
     return [
         {
             "claim_id": "calculix_two_deformable_contact_reference_completed",
@@ -520,6 +559,134 @@ def _claim_rows(rows: list[Row]) -> list[Row]:
             "claim_status": "supported" if gap_scale_ok else "not_supported",
             "details": "strict only for this controlled normal-compression replay; it is not a full trajectory equivalence claim",
         },
+        {
+            "claim_id": "paper_level_multiresolution_calculix_sdf_replay",
+            "claim_text": "The external CalculiX dynamic-SDF replay evidence includes at least three mesh resolutions with completed contact cases.",
+            "evidence_csv": "calculix_deformable_sdf_contact_comparison.csv",
+            "evidence_field": "resolution;calculix_contact_row_count",
+            "gate_value": f"resolutions={completed_resolutions}; contact_rows={len(contact_completed)}",
+            "claim_status": "supported" if paper_scale_ok and gap_scale_ok and sign_ok else "not_supported",
+            "details": "supports a paper statement about external deformed-state SDF replay across the tested mesh resolutions; no convergence order is claimed",
+        },
+    ]
+
+
+def _paper_metric_rows(rows: list[Row]) -> list[Row]:
+    completed = [row for row in rows if row["calculix_completed"] == "true"]
+    contact_rows = [
+        row
+        for row in completed
+        if row.get("calculix_contact_row_count") not in ("", None) and int(row["calculix_contact_row_count"]) > 0
+    ]
+    gap_diffs = [float(row["gap_min_abs_difference"]) for row in contact_rows if row.get("gap_min_abs_difference") not in ("", None)]
+    sign_ok = bool(completed) and all(row["contact_sign_agreement"] == "true" for row in completed)
+    max_gap_diff = max(gap_diffs, default=0.0)
+    resolutions = sorted({int(row["resolution"]) for row in completed})
+    rows_out: list[Row] = [
+        {
+            "metric": "completed_case_count",
+            "value": len(completed),
+            "status": "supported" if len(completed) == len(rows) and rows else "not_supported",
+            "evidence_csv": "calculix_deformable_sdf_contact_comparison.csv",
+            "details": "number of completed CalculiX replay cases",
+        },
+        {
+            "metric": "completed_resolution_count",
+            "value": len(resolutions),
+            "status": "supported" if len(resolutions) >= 3 else "not_supported",
+            "evidence_csv": "calculix_deformable_sdf_contact_comparison.csv",
+            "details": f"completed resolutions: {resolutions}",
+        },
+        {
+            "metric": "max_contact_gap_min_abs_difference",
+            "value": max_gap_diff,
+            "status": "supported" if gap_diffs and max_gap_diff <= 1.0e-6 else "not_supported",
+            "evidence_csv": "calculix_deformable_sdf_contact_comparison.csv",
+            "details": "maximum absolute difference between minimum CalculiX CDIS and minimum SFC dynamic-SDF gap over contact cases",
+        },
+        {
+            "metric": "contact_sign_agreement_all_cases",
+            "value": str(sign_ok).lower(),
+            "status": "supported" if sign_ok else "not_supported",
+            "evidence_csv": "calculix_deformable_sdf_contact_comparison.csv",
+            "details": "contact/no-contact sign agreement over completed cases",
+        },
+        {
+            "metric": "convergence_order_claim",
+            "value": "not_claimed",
+            "status": "not_claimed",
+            "evidence_csv": "calculix_deformable_sdf_contact_comparison.csv",
+            "details": "gap replay is compared to external output precision across resolutions; no theoretical convergence order is claimed",
+        },
+    ]
+    return rows_out
+
+
+def _write_plots(out_dir: Path, rows: list[Row]) -> list[Row]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional plotting dependency
+        return [
+            {
+                "plot": "calculix_deformable_sdf_contact_gap_error",
+                "png": "",
+                "pdf": "",
+                "status": "skipped",
+                "details": f"matplotlib unavailable: {exc}",
+            }
+        ]
+
+    contact_rows = [
+        row
+        for row in rows
+        if row["calculix_completed"] == "true"
+        and row.get("gap_min_abs_difference") not in ("", None)
+        and row.get("calculix_contact_row_count") not in ("", None)
+        and int(row["calculix_contact_row_count"]) > 0
+    ]
+    if not contact_rows:
+        return [
+            {
+                "plot": "calculix_deformable_sdf_contact_gap_error",
+                "png": "",
+                "pdf": "",
+                "status": "skipped",
+                "details": "no completed contact rows",
+            }
+        ]
+
+    png = out_dir / "calculix_deformable_sdf_contact_gap_error.png"
+    pdf = out_dir / "calculix_deformable_sdf_contact_gap_error.pdf"
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    approaches = sorted({float(row["approach"]) for row in contact_rows})
+    for approach in approaches:
+        subset = sorted((row for row in contact_rows if float(row["approach"]) == approach), key=lambda row: int(row["resolution"]))
+        ax.plot(
+            [int(row["resolution"]) for row in subset],
+            [float(row["gap_min_abs_difference"]) for row in subset],
+            marker="o",
+            label=f"approach={approach:g}",
+        )
+    ax.set_xlabel("Mesh resolution")
+    ax.set_ylabel("|min CDIS - min dynamic-SDF gap|")
+    ax.set_yscale("log")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(png, dpi=200)
+    fig.savefig(pdf)
+    plt.close(fig)
+    return [
+        {
+            "plot": "calculix_deformable_sdf_contact_gap_error",
+            "png": png.name,
+            "pdf": pdf.name,
+            "status": "ok",
+            "details": "minimum-gap agreement against CalculiX CDIS over completed contact rows",
+        }
     ]
 
 
@@ -530,10 +697,19 @@ def _fmt(value: Any) -> str:
         return str(value)
 
 
-def _write_markdown(path: Path, rows: list[Row], claims: list[Row], *, quick: bool, resolution: int) -> None:
+def _write_markdown(
+    path: Path,
+    rows: list[Row],
+    claims: list[Row],
+    paper_metrics: list[Row],
+    plots: list[Row],
+    *,
+    quick: bool,
+    resolutions: list[int],
+) -> None:
     command = (
         "python validation/run_calculix_deformable_sdf_contact_validation.py "
-        f"--resolution {int(resolution)} --out-dir {path.parent.as_posix()}"
+        f"--resolutions {','.join(str(value) for value in resolutions)} --out-dir {path.parent.as_posix()}"
     )
     if quick:
         command += " --quick"
@@ -558,18 +734,46 @@ def _write_markdown(path: Path, rows: list[Row], claims: list[Row], *, quick: bo
     lines.extend(
         [
             "",
+            "## Paper Metrics",
+            "",
+            "| Metric | Status | Value | Details |",
+            "| --- | --- | ---: | --- |",
+        ]
+    )
+    for metric in paper_metrics:
+        lines.append(f"| {metric['metric']} | {metric['status']} | `{metric['value']}` | {metric['details']} |")
+    lines.extend(
+        [
+            "",
             "## Comparison Rows",
             "",
-            "| Approach | CalculiX completed | CalculiX min CDIS | SFC min gap | SFC active | Sign agreement | Status |",
-            "| ---: | --- | ---: | ---: | ---: | --- | --- |",
+            "| Resolution | Approach | Master faces | CalculiX completed | CalculiX min CDIS | SFC min gap | Gap diff | SFC active | Sign agreement | Status |",
+            "| ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for row in rows:
         lines.append(
-            f"| {_fmt(row['approach'])} | {row['calculix_completed']} | {_fmt(row['calculix_cdis_min'])} | {_fmt(row['sfc_gap_min'])} | {row['sfc_active_count']} | {row['contact_sign_agreement']} | {row['status']} |"
+            f"| {row['resolution']} | {_fmt(row['approach'])} | {row['master_face_count']} | {row['calculix_completed']} | {_fmt(row['calculix_cdis_min'])} | {_fmt(row['sfc_gap_min'])} | {_fmt(row['gap_min_abs_difference'])} | {row['sfc_active_count']} | {row['contact_sign_agreement']} | {row['status']} |"
         )
     lines.extend(
         [
+            "",
+            "## Figures",
+            "",
+            "| Plot | Status | PNG | PDF |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for plot in plots:
+        lines.append(
+            f"| {plot['plot']} | {plot['status']} | `{plot['png']}` | `{plot['pdf']}` |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Paper-Use Statement",
+            "",
+            "The supported paper-level claim is limited to external deformed-state gap replay: for the lateral-constrained two-deformable-block normal-compression cases tested here, SFC current-surface dynamic SDF reproduces the CalculiX contact/no-contact sign and the minimum normal clearance reported by `CDIS` across the tested mesh resolutions.",
             "",
             "## Interpretation",
             "",
@@ -577,6 +781,7 @@ def _write_markdown(path: Path, rows: list[Row], claims: list[Row], *, quick: bo
             "- Lateral DOFs are fixed in the external model so the comparison isolates normal gap evaluation rather than lateral contact-mode drift.",
             "- It does not prove full native SFC two-body trajectory equivalence to CalculiX.",
             "- In this scoped normal-compression replay, the minimum CalculiX `CDIS` and SFC dynamic-SDF minimum gap are expected to agree to parser/output precision.",
+            "- No convergence order is claimed from this evidence.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -586,6 +791,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--resolution", type=int, default=1)
+    parser.add_argument(
+        "--resolutions",
+        type=str,
+        default=None,
+        help="Comma-separated mesh resolutions. Defaults to 1 in quick mode and 1,2,3 in non-quick mode.",
+    )
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "calculix_deformable_sdf_contact")
     return parser.parse_args()
@@ -593,7 +804,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    outputs = run_validation(args.out_dir, quick=bool(args.quick), resolution=int(args.resolution), timeout=int(args.timeout))
+    if args.resolutions is None:
+        resolutions = [int(args.resolution)] if bool(args.quick) else [1, 2, 3]
+    else:
+        resolutions = _parse_int_list(args.resolutions)
+    outputs = run_validation(
+        args.out_dir,
+        quick=bool(args.quick),
+        resolution=int(args.resolution),
+        resolutions=resolutions,
+        timeout=int(args.timeout),
+    )
     print("CalculiX deformable SDF contact validation complete.")
     for name, path in outputs.items():
         print(f"{name}: {path}")

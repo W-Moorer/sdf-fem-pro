@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from validation.run_calculix_deformable_sdf_contact_validation import (  # noqa: E402
+    _parse_int_list,
     build_two_block_model,
     run_validation,
     write_calculix_input,
@@ -70,6 +71,17 @@ def test_two_block_calculix_input_uses_lateral_stabilization(tmp_path: Path) -> 
     assert "Lateral DOFs are fixed for this scoped normal-contact replay." in text
 
 
+def test_nonquick_paper_mode_defaults_are_multiresolution() -> None:
+    assert _parse_int_list("1,2,3") == [1, 2, 3]
+
+    models = [build_two_block_model(resolution=resolution, approach=0.06) for resolution in [1, 2, 3]]
+
+    assert [model.lower_top_faces.shape[0] for model in models] == [2, 8, 18]
+    assert [model.upper_bottom_faces.shape[0] for model in models] == [2, 8, 18]
+    assert all(model.lower_top_refs for model in models)
+    assert all(model.upper_bottom_refs for model in models)
+
+
 @pytest.mark.skipif(not calculix_available(), reason="CalculiX/ccx is unavailable through WSL")
 def test_calculix_deformable_sdf_quick_validation_supports_gap_gate(tmp_path: Path) -> None:
     outputs = run_validation(tmp_path, quick=True, resolution=1, timeout=180)
@@ -79,11 +91,16 @@ def test_calculix_deformable_sdf_quick_validation_supports_gap_gate(tmp_path: Pa
 
     comparison = _rows(outputs["comparison"])
     claims = {row["claim_id"]: row for row in _rows(outputs["claims"])}
+    paper_metrics = {row["metric"]: row for row in _rows(outputs["paper_metrics"])}
+    plots = _rows(outputs["plots"])
 
     assert all(row["calculix_completed"] == "true" for row in comparison)
     assert all(row["contact_sign_agreement"] == "true" for row in comparison)
     assert claims["sfc_dynamic_sdf_replay_matches_calculix_contact_sign"]["claim_status"] == "supported"
     assert claims["sfc_dynamic_sdf_replay_gap_scale_reported"]["claim_status"] == "supported"
+    assert claims["paper_level_multiresolution_calculix_sdf_replay"]["claim_status"] == "not_supported"
+    assert paper_metrics["convergence_order_claim"]["status"] == "not_claimed"
+    assert plots
     gap_diffs = [float(row["gap_min_abs_difference"]) for row in comparison if row["gap_min_abs_difference"]]
     assert gap_diffs
     assert max(gap_diffs) < 1.0e-6

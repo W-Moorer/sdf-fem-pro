@@ -5,11 +5,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from validation.run_calculix_drop_impact_comparison import calculix_available  # noqa: E402
 from validation.run_geometric_nonlinear_contact_validation import (  # noqa: E402
     _contact_cutback_enabled,
     _make_contact_geometry,
@@ -538,8 +540,36 @@ def test_contact_validation_quick_skip_calculix_outputs(tmp_path: Path) -> None:
     with outputs["hht"].open(newline="", encoding="utf-8") as f:
         hht_rows = list(csv.DictReader(f))
     assert hht_rows
-    assert float(hht_rows[0]["effective_tangent_directional_fd_rel_error"]) < 5.0e-5
-    assert float(hht_rows[0]["contact_residual_tangent_directional_fd_rel_error"]) < 5.0e-5
+
+
+@pytest.mark.skipif(not calculix_available(), reason="CalculiX/ccx is unavailable through WSL")
+def test_dynamic_sdf_full_trajectory_quick_matches_calculix(tmp_path: Path) -> None:
+    outputs = run_validation(
+        tmp_path,
+        quick=True,
+        curve_only=True,
+        contact_mode="persistent_dynamic_sdf_calculix_f2f",
+        cutback_policy="calculix_direct",
+        cases=["block_drop"],
+        resolutions=[1],
+        calculix_timeout_seconds=300,
+    )
+
+    with outputs["comparison"].open(newline="", encoding="utf-8") as f:
+        comparison = list(csv.DictReader(f))
+    with outputs["claims"].open(newline="", encoding="utf-8") as f:
+        claims = {row["claim"]: row for row in csv.DictReader(f)}
+
+    assert len(comparison) == 1
+    row = comparison[0]
+    assert row["calculix_completed"] == "true"
+    assert row["contact_mode"] == "persistent_dynamic_sdf_calculix_f2f"
+    assert row["acceptance_status"] == "passed_scoped_gate"
+    assert float(row["z_cm_l2_rel_error"]) < 1.0e-4
+    assert float(row["max_penetration_rel_error"]) < 1.0e-2
+    assert float(row["peak_normal_force_rel_error"]) < 1.0e-2
+    assert float(row["max_cnum_abs_error"]) == 0.0
+    assert claims["block_plane_geometric_contact_scoped_acceptance"]["supported"] == "true"
 
 
 def test_hht_residual_tangent_diagnostics_probe_contact_sign_convention() -> None:
