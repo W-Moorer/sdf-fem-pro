@@ -27,6 +27,7 @@ Important options:
 - `--contact-stiffness-scale`
 - `--analysis dynamic|static-preload|preload-dynamic`
 - `--contact-adjust VALUE`
+- `--contact-init-distance VALUE`
 
 ## RMD Mapping
 
@@ -65,7 +66,7 @@ Rigid gear motion:
 Initial distance/contact-law diagnostic after applying PART/MARKER transforms:
 
 ```bash
-python validation/run_recurdyn_gear_calculix.py --quick --skip-calculix --drive-mode prescribed-surface --slave-surface-mode element-face --analysis preload-dynamic --contact-adjust 0.0 --gap-candidate-count 16 --out-dir results/recurdyn_gear_transform_diagnostics_quick
+python validation/run_recurdyn_gear_calculix.py --quick --skip-calculix --drive-mode prescribed-surface --slave-surface-mode element-face --analysis preload-dynamic --contact-adjust 0.0 --gap-candidate-count 16 --out-dir results/recurdyn_gear_contact_initialization_quick
 ```
 
 Parser/deck smoke:
@@ -142,6 +143,21 @@ Initial geometry diagnostic after applying the RMD PART/MARKER transform:
 
 The unsigned closest distance is the geometric proximity metric. The local signed gap only indicates which side of the nearest oriented open rigid-surface triangle the sample lies on; it is not a robust penetration classifier for this open gear surface. Therefore the old wording "initial penetration" was too strong. The updated evidence supports "near-contact / local overclosure-side samples" rather than a confirmed large geometric interpenetration.
 
+Contact initialization from unsigned distance and the parsed RecurDyn law:
+
+| Quantity | Value |
+|---|---:|
+| Activation band | `BPEN = 0.01 mm` |
+| Active unsigned-distance candidates | 153 / 16,109 |
+| Local-negative active candidates | 68 |
+| Maximum initialization overclosure | 9.9958e-3 mm |
+| Maximum RecurDyn `KORDER=2` force proxy | 9.9916 |
+| Sum RecurDyn `KORDER=2` force proxy | 639.095 |
+| Recommended initialization | `static_preload_then_dynamic_restart` |
+| CONTACT ADJUST recommended | false |
+
+Interpretation: the initialization uses unsigned closest distance to decide which samples enter the RecurDyn `BPEN` activation band, then applies the parsed `K=100000`, `KORDER=2` law as a sample-level force proxy. This is not an integrated physical resultant. It is a start-up strategy diagnostic. Because the evidence indicates near-contact candidates but not robust closed-surface penetration, the recommended next run is static preload followed by dynamic restart/continuation, not geometry adjustment with `CONTACT ADJUST`.
+
 Contact-law proxy diagnostic:
 
 | Fit | Linear slope | Relative RMS error |
@@ -159,6 +175,7 @@ The least-squares proxy slope corresponds to `--contact-stiffness-scale 0.045223
 | Prescribed-surface explicit | Failed in CalculiX explicit contact path due invalid NaN energy behavior; not acceptable as a validation run. |
 | Prescribed-surface face-to-face automatic | Generated 5 real CalculiX `.dat`-derived VTK frames before timeout; reached about 0.000494 s of the requested 0.002 s smoke. |
 | Static preload with fitted law | Passed. Completed 10 static increments, generated stress/strain VTK frames, and contact totals. |
+| Unsigned-distance + RecurDyn-law initialization | Passed as a diagnostic. It found 153 candidates inside `BPEN=0.01 mm`, recommends `static_preload_then_dynamic_restart`, and does not recommend `CONTACT ADJUST`. |
 | Two-step preload-to-dynamic smoke | Passed for `T=0.002s`. It completed the static preload step and two dynamic increments, and generated 8 `.dat`-derived VTK frames. The dynamic step is still an engineering prescribed-surface mapping, and the energy output must be treated as a diagnostic rather than final validation evidence. |
 | Rigid-body two-step preload-to-dynamic smoke | Failed in CalculiX with `*ERROR in add_sm_st: coefficient should be 0`; the faithful rigid-body contact/MPC mapping is blocked for this model. |
 | Dynamic smoke with `CONTACT PAIR ADJUST=0.0` | Timed out at 450 s. It produced partial VTK/contact rows but only advanced to about `6.37e-4 s` of a `0.002 s` target, so CalculiX-side adjustment of local overclosure-side samples alone does not make the transient acceptable. |
@@ -215,6 +232,15 @@ Evidence:
 - Tests cover parser counts and generated deck structure.
 
 Static preload stress/strain cloud after contact-law proxy alignment: **PASS**.
+
+Unsigned-distance contact initialization: **PASS**.
+
+Reason:
+
+- The contact initialization now uses unsigned closest distance as the geometric metric.
+- The activation band defaults to the parsed RecurDyn `BPEN=0.01 mm`.
+- The initialization force proxy uses the parsed RecurDyn `K=100000`, `KORDER=2` law rather than the linear CalculiX proxy.
+- The diagnostic recommends static preload before dynamic continuation and does not recommend `CONTACT ADJUST` from the current evidence.
 
 Two-step preload-to-dynamic smoke: **PARTIAL PASS**.
 

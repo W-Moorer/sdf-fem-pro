@@ -729,6 +729,124 @@ def _write_contact_law_plot(path: Path, rows: list[Row]) -> Row:
     return {"figure_path": str(path), "source": "contact_law_alignment_proxy", "sample_count": len(rows)}
 
 
+def _recurdyn_korder_force(model: RecurDynGearModel, overclosure: np.ndarray | float) -> np.ndarray:
+    values = np.asarray(overclosure, dtype=float)
+    order = max(1, int(model.contact.order))
+    clipped = np.clip(values, 0.0, max(float(model.contact.max_penetration), 1.0e-12))
+    return float(model.contact.stiffness) * clipped**order
+
+
+def evaluate_contact_initialization(
+    model: RecurDynGearModel,
+    gap_rows: list[Row],
+    *,
+    activation_distance: float | None = None,
+) -> tuple[list[Row], list[Row]]:
+    """Initialize contact candidates from unsigned distance and the parsed RecurDyn law."""
+
+    distance_limit = float(model.contact.bpen if activation_distance is None else activation_distance)
+    distance_limit = max(distance_limit, 0.0)
+    max_pen = max(float(model.contact.max_penetration), 1.0e-12)
+    rows: list[Row] = []
+    for row in gap_rows:
+        unsigned_distance = float(row["unsigned_distance"])
+        local_signed_gap = float(row["signed_gap"])
+        overclosure = max(distance_limit - unsigned_distance, 0.0)
+        clamped_overclosure = min(overclosure, max_pen)
+        force_proxy = float(_recurdyn_korder_force(model, clamped_overclosure))
+        active = overclosure > 0.0
+        rows.append(
+            {
+                "sample_index": row["sample_index"],
+                "sample_type": row["sample_type"],
+                "sample_id": row["sample_id"],
+                "nearest_face": row["nearest_face"],
+                "unsigned_distance": unsigned_distance,
+                "local_signed_gap": local_signed_gap,
+                "activation_distance": distance_limit,
+                "initial_overclosure_from_unsigned_distance": overclosure,
+                "clamped_overclosure": clamped_overclosure,
+                "overclosure_to_maxpen_ratio": clamped_overclosure / max_pen,
+                "recurdyn_korder": int(model.contact.order),
+                "recurdyn_k": float(model.contact.stiffness),
+                "recurdyn_force_proxy": force_proxy,
+                "active_contact_candidate": str(active).lower(),
+                "local_negative_side_candidate": str(local_signed_gap < 0.0 and active).lower(),
+            }
+        )
+
+    summary_rows: list[Row] = []
+    for sample_type in ("node", "face_centroid", "all"):
+        subset = rows if sample_type == "all" else [row for row in rows if row["sample_type"] == sample_type]
+        if not subset:
+            continue
+        active_rows = [row for row in subset if row["active_contact_candidate"] == "true"]
+        force = np.asarray([float(row["recurdyn_force_proxy"]) for row in active_rows], dtype=float) if active_rows else np.asarray([], dtype=float)
+        overclosure = (
+            np.asarray([float(row["initial_overclosure_from_unsigned_distance"]) for row in active_rows], dtype=float)
+            if active_rows
+            else np.asarray([], dtype=float)
+        )
+        local_negative_rows = [row for row in active_rows if row["local_negative_side_candidate"] == "true"]
+        preload_recommended = bool(active_rows)
+        contact_adjust_recommended = False
+        if not active_rows:
+            recommendation = "direct_dynamic_without_preload"
+            reason = "No samples fall inside the unsigned-distance contact activation band."
+        else:
+            recommendation = "static_preload_then_dynamic_restart"
+            reason = (
+                "Unsigned-distance contact candidates exist under the RecurDyn BPEN activation band; "
+                "initialize contact history with a static preload before dynamic continuation. "
+                "CONTACT ADJUST is not recommended from this evidence alone because the open-surface local signed side is not a robust penetration classifier."
+            )
+        summary_rows.append(
+            {
+                "sample_type": sample_type,
+                "sample_count": len(subset),
+                "activation_distance": distance_limit,
+                "active_candidate_count": len(active_rows),
+                "local_negative_active_candidate_count": len(local_negative_rows),
+                "max_initial_overclosure": float(np.max(overclosure)) if overclosure.size else 0.0,
+                "mean_initial_overclosure": float(np.mean(overclosure)) if overclosure.size else 0.0,
+                "max_recurdyn_force_proxy": float(np.max(force)) if force.size else 0.0,
+                "sum_recurdyn_force_proxy": float(np.sum(force)) if force.size else 0.0,
+                "preload_recommended": str(preload_recommended).lower(),
+                "contact_adjust_recommended": str(contact_adjust_recommended).lower(),
+                "recommended_initialization": recommendation,
+                "decision_reason": reason,
+            }
+        )
+    return rows, summary_rows
+
+
+def _write_contact_initialization_plot(path: Path, rows: list[Row]) -> Row:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    distances = np.asarray([float(row["unsigned_distance"]) for row in rows], dtype=float)
+    forces = np.asarray([float(row["recurdyn_force_proxy"]) for row in rows], dtype=float)
+    activation_distance = float(rows[0]["activation_distance"]) if rows else 0.0
+    active_forces = forces[forces > 0.0]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].hist(distances, bins=100, color="#2563eb", alpha=0.85)
+    axes[0].axvline(activation_distance, color="black", linewidth=1.0, label="activation distance")
+    axes[0].set_xlim(0.0, max(activation_distance * 4.0, float(np.percentile(distances, 5)) if distances.size else 1.0e-3))
+    axes[0].set_xlabel("unsigned closest distance [mm]")
+    axes[0].set_ylabel("count")
+    axes[0].set_title("Contact initialization band")
+    axes[0].legend()
+    if active_forces.size:
+        axes[1].hist(active_forces, bins=60, color="#dc2626", alpha=0.85)
+    else:
+        axes[1].bar([0.0], [0.0], color="#dc2626")
+    axes[1].set_xlabel("RecurDyn KORDER force proxy")
+    axes[1].set_ylabel("count")
+    axes[1].set_title("Active candidate force proxy")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return {"figure_path": str(path), "source": "contact_initialization", "sample_count": len(rows)}
+
+
 def _write_calculix_input(
     path: Path,
     model: RecurDynGearModel,
@@ -1273,6 +1391,7 @@ def _write_markdown(
     generation: Row,
     gap_summary: list[Row],
     law_summary: list[Row],
+    init_summary: list[Row],
     run_row: Row | None,
     frame_rows: list[Row],
     totals: dict[float, Row],
@@ -1283,6 +1402,7 @@ def _write_markdown(
     vtk_status = "generated_from_calculix_dat" if frame_rows and frame_rows[0]["source"] == "calculix_dat" else "placeholder_or_no_dat"
     all_gap = gap_summary[-1] if gap_summary else {}
     best_law = min(law_summary, key=lambda row: float(row["relative_rms_error"])) if law_summary else {}
+    init_all = init_summary[-1] if init_summary else {}
     text = [
         "# RecurDyn Gear to CalculiX 1s Validation Handoff",
         "",
@@ -1325,6 +1445,19 @@ def _write_markdown(
         f"- Best linear proxy slope: {float(best_law.get('linear_slope', 0.0)):.6e}",
         f"- Relative RMS proxy error: {float(best_law.get('relative_rms_error', 0.0)):.6e}",
         "- This is a proxy only; RecurDyn's exact `KORDER=2` internal law is not assumed to equal this polynomial model.",
+        "",
+        "## Contact initialization from unsigned distance",
+        "",
+        f"- Activation distance: {float(init_all.get('activation_distance', model.contact.bpen)):.6e} mm",
+        f"- Active unsigned-distance candidates: {init_all.get('active_candidate_count', 0)} / {init_all.get('sample_count', 0)}",
+        f"- Maximum initialization overclosure: {float(init_all.get('max_initial_overclosure', 0.0)):.6e} mm",
+        f"- Maximum RecurDyn KORDER force proxy: {float(init_all.get('max_recurdyn_force_proxy', 0.0)):.6e}",
+        f"- Sum RecurDyn KORDER force proxy: {float(init_all.get('sum_recurdyn_force_proxy', 0.0)):.6e}",
+        f"- Preload recommended: {init_all.get('preload_recommended', 'false')}",
+        f"- CONTACT ADJUST recommended: {init_all.get('contact_adjust_recommended', 'false')}",
+        f"- Recommended initialization: {init_all.get('recommended_initialization', 'n/a')}",
+        f"- Decision reason: {init_all.get('decision_reason', 'n/a')}",
+        "- The initialization force is a sample-level RecurDyn `KORDER` proxy for deciding start-up strategy; it is not a physical integrated resultant.",
         "",
         "## CalculiX run",
         "",
@@ -1428,6 +1561,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-calculix", action="store_true")
     parser.add_argument("--gap-diagnostic-only", action="store_true")
     parser.add_argument("--gap-candidate-count", type=int, default=96)
+    parser.add_argument(
+        "--contact-init-distance",
+        type=float,
+        default=None,
+        help="Unsigned closest-distance band used to initialize contact candidates; defaults to RecurDyn BPEN.",
+    )
     parser.add_argument("--quick", action="store_true", help="Generate a short smoke deck unless duration/dt are explicitly overridden.")
     parser.add_argument("--max-vtk-frames", type=int, default=101)
     parser.add_argument("--timeout", type=int, default=3600)
@@ -1444,12 +1583,16 @@ def main(argv: list[str] | None = None) -> int:
     model = parse_recurdyn_rmd(args.rmd)
     gap_rows, gap_summary = evaluate_initial_gap_diagnostics(model, candidate_count=args.gap_candidate_count)
     law_rows, law_summary = evaluate_contact_law_alignment(model)
+    init_rows, init_summary = evaluate_contact_initialization(model, gap_rows, activation_distance=args.contact_init_distance)
     _write_csv(out_dir / "initial_gap_samples.csv", list(gap_rows[0].keys()), gap_rows)
     _write_csv(out_dir / "initial_gap_summary.csv", list(gap_summary[0].keys()), gap_summary)
     gap_plot = _write_gap_histogram(out_dir / "figures" / "initial_gap_histogram.png", gap_rows)
     _write_csv(out_dir / "contact_law_alignment.csv", list(law_rows[0].keys()), law_rows)
     _write_csv(out_dir / "contact_law_alignment_summary.csv", list(law_summary[0].keys()), law_summary)
     law_plot = _write_contact_law_plot(out_dir / "figures" / "contact_law_alignment.png", law_rows)
+    _write_csv(out_dir / "contact_initialization_samples.csv", list(init_rows[0].keys()), init_rows)
+    _write_csv(out_dir / "contact_initialization_summary.csv", list(init_summary[0].keys()), init_summary)
+    init_plot = _write_contact_initialization_plot(out_dir / "figures" / "contact_initialization.png", init_rows)
 
     inp_path = out_dir / "jiandanjiaolian_calculix_1s.inp"
     generation = _write_calculix_input(
@@ -1492,7 +1635,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     _write_csv(out_dir / "recurdyn_gear_calculix_metadata.csv", ["key", "value"], metadata_rows)
     _write_csv(out_dir / "recurdyn_gear_calculix_vtk_frames.csv", list(frame_rows[0].keys()), frame_rows)
-    figure_rows = [preview, gap_plot, law_plot]
+    figure_rows = [preview, gap_plot, law_plot, init_plot]
     _write_csv(out_dir / "recurdyn_gear_calculix_figures.csv", sorted({key for row in figure_rows for key in row}), figure_rows)
 
     summary_rows = [
@@ -1510,6 +1653,11 @@ def main(argv: list[str] | None = None) -> int:
             "min_initial_local_signed_gap": gap_summary[-1]["min_signed_gap"],
             "negative_initial_local_signed_gap_count": gap_summary[-1]["negative_signed_gap_count"],
             "contact_law_best_lsq_slope": law_summary[-1]["linear_slope"],
+            "contact_init_active_candidate_count": init_summary[-1]["active_candidate_count"],
+            "contact_init_max_force_proxy": init_summary[-1]["max_recurdyn_force_proxy"],
+            "contact_init_preload_recommended": init_summary[-1]["preload_recommended"],
+            "contact_init_adjust_recommended": init_summary[-1]["contact_adjust_recommended"],
+            "contact_init_recommendation": init_summary[-1]["recommended_initialization"],
             "acceptance": "pass"
             if run_row is not None and int(run_row.get("return_code", -1)) == 0 and frame_rows and frame_rows[0]["source"] == "calculix_dat"
             else "blocked_or_partial",
@@ -1526,6 +1674,7 @@ def main(argv: list[str] | None = None) -> int:
         generation=generation,
         gap_summary=gap_summary,
         law_summary=law_summary,
+        init_summary=init_summary,
         run_row=run_row,
         frame_rows=frame_rows,
         totals=totals,

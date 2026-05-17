@@ -82,10 +82,13 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
         "initial_gap_summary.csv",
         "contact_law_alignment.csv",
         "contact_law_alignment_summary.csv",
+        "contact_initialization_samples.csv",
+        "contact_initialization_summary.csv",
         "vtk/recurdyn_gear_calculix_frame_0000.vtk",
         "figures/recurdyn_gear_surface_preview.png",
         "figures/initial_gap_histogram.png",
         "figures/contact_law_alignment.png",
+        "figures/contact_initialization.png",
     ]
     for relative in expected:
         path = out_dir / relative
@@ -121,3 +124,10 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
 
     law_summary = {row["fit"]: row for row in _rows(out_dir / "contact_law_alignment_summary.csv")}
     assert {"parsed_K", "endpoint_fit", "least_squares_fit"} <= set(law_summary)
+
+    init_summary = {row["sample_type"]: row for row in _rows(out_dir / "contact_initialization_summary.csv")}
+    assert {"node", "face_centroid", "all"} <= set(init_summary)
+    assert int(init_summary["all"]["active_candidate_count"]) > 0
+    assert init_summary["all"]["preload_recommended"] == "true"
+    assert init_summary["all"]["contact_adjust_recommended"] == "false"
+    assert init_summary["all"]["recommended_initialization"] == "static_preload_then_dynamic_restart"
