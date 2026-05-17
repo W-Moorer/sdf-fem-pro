@@ -57,13 +57,15 @@ Rigid gear motion:
 
 - Default faithful mode uses CalculiX `*RIGID BODY` with a rotational node.
 - Engineering cloud mode can use `--drive-mode prescribed-surface`, which applies the final rigid rotation displacement directly to rigid surface nodes. This avoids explicit-dynamics rigid-body/contact MPC incompatibility but is an approximation of the RecurDyn rigid-body joint.
+- Rigid `GGEOM` nodes are now transformed with the parsed RMD hierarchy: `x_global = T_part * T_marker * x_local`.
+- For this model, `GGEOM / 2` uses `RM=12`; marker 12 belongs to part 3, has `QP=(17.46, -1.366543853054, -0.478799197013)`, and part 3 has `REULER=(0, 0.00349065850398866, 0)`.
 
 ## Commands Actually Run
 
-Initial gap/contact-law diagnostic:
+Initial distance/contact-law diagnostic after applying PART/MARKER transforms:
 
 ```bash
-python validation/run_recurdyn_gear_calculix.py --quick --skip-calculix --drive-mode prescribed-surface --slave-surface-mode element-face --gap-candidate-count 16 --out-dir results/recurdyn_gear_diagnostics_quick
+python validation/run_recurdyn_gear_calculix.py --quick --skip-calculix --drive-mode prescribed-surface --slave-surface-mode element-face --analysis preload-dynamic --contact-adjust 0.0 --gap-candidate-count 16 --out-dir results/recurdyn_gear_transform_diagnostics_quick
 ```
 
 Parser/deck smoke:
@@ -128,17 +130,17 @@ python validation/run_recurdyn_gear_calculix.py --duration 1.0 --dt 0.001 --auto
 
 ## Observed Results
 
-Initial geometry diagnostic:
+Initial geometry diagnostic after applying the RMD PART/MARKER transform:
 
 | Quantity | Value |
 |---|---:|
-| Gap samples | 16,109 |
-| Minimum signed gap | -0.270584 mm |
-| Negative signed-gap samples | 1,732 |
-| Minimum unsigned distance | 2.8639e-4 mm |
-| Samples with unsigned distance < 1e-3 mm | 4 |
+| Contact-distance samples | 16,109 |
+| Minimum unsigned closest distance | 4.1899e-6 mm |
+| Samples with unsigned distance < 1e-3 mm | 36 |
+| Minimum local signed gap | -0.271447 mm |
+| Negative local signed-gap samples | 1,009 |
 
-This indicates that the converted initial configuration contains many already-penetrating oriented local surface-gap samples. That explains why transient CalculiX contact starts with severe impact/cutback behavior.
+The unsigned closest distance is the geometric proximity metric. The local signed gap only indicates which side of the nearest oriented open rigid-surface triangle the sample lies on; it is not a robust penetration classifier for this open gear surface. Therefore the old wording "initial penetration" was too strong. The updated evidence supports "near-contact / local overclosure-side samples" rather than a confirmed large geometric interpenetration.
 
 Contact-law proxy diagnostic:
 
@@ -159,7 +161,7 @@ The least-squares proxy slope corresponds to `--contact-stiffness-scale 0.045223
 | Static preload with fitted law | Passed. Completed 10 static increments, generated stress/strain VTK frames, and contact totals. |
 | Two-step preload-to-dynamic smoke | Passed for `T=0.002s`. It completed the static preload step and two dynamic increments, and generated 8 `.dat`-derived VTK frames. The dynamic step is still an engineering prescribed-surface mapping, and the energy output must be treated as a diagnostic rather than final validation evidence. |
 | Rigid-body two-step preload-to-dynamic smoke | Failed in CalculiX with `*ERROR in add_sm_st: coefficient should be 0`; the faithful rigid-body contact/MPC mapping is blocked for this model. |
-| Dynamic smoke with `CONTACT PAIR ADJUST=0.0` | Timed out at 450 s. It produced partial VTK/contact rows but only advanced to about `6.37e-4 s` of a `0.002 s` target, so clearing initial slave nodes with `ADJUST` alone does not make the transient acceptable. |
+| Dynamic smoke with `CONTACT PAIR ADJUST=0.0` | Timed out at 450 s. It produced partial VTK/contact rows but only advanced to about `6.37e-4 s` of a `0.002 s` target, so CalculiX-side adjustment of local overclosure-side samples alone does not make the transient acceptable. |
 | Dynamic 1 s with fitted law | Still timed out at 300 s; impact rules forced maximum increment to 1e-5 near the first contact increment. |
 | Requested 1 s run | Timed out at 300 s. It generated one real `.dat`-derived VTK frame, but did not complete the requested 1 s interval. |
 
@@ -222,7 +224,7 @@ Reason:
 - The prescribed-surface version completed a short `T=0.002s`, `dt=0.001s` smoke and exported stress/strain VTK frames.
 - This does not yet validate the full `T=1s` transient, and the prescribed-surface drive remains an approximation of the original RecurDyn rigid-body joint.
 
-Initial-penetration cleanup with `ADJUST=0.0`: **NOT SUFFICIENT**.
+Initial local-overclosure cleanup with `ADJUST=0.0`: **NOT SUFFICIENT**.
 
 Reason:
 
@@ -237,7 +239,7 @@ Reason:
 - The faithful rigid-body mapping is dominated by CalculiX contact cutbacks.
 - The explicit path is incompatible with nonlinear rigid-body/contact MPCs, and the prescribed-surface explicit attempt produced invalid energy output.
 - The face-to-face automatic mapping generated real stress/strain VTK frames but timed out before completing even the 0.002 s smoke interval.
-- The initial gap diagnostic shows a nontrivial initial penetration population, so direct transient contact begins from an impact-like state.
+- The initial distance diagnostic shows near-contact samples and many local signed-gap samples on the negative side of open rigid-surface triangles, but it no longer proves broad initial geometric penetration.
 - A static preload with the contact-law proxy slope is stable.
 - A short preload-to-dynamic continuation completes, but full `1s` dynamic evidence has not been produced.
 - `CONTACT PAIR ADJUST=0.0` alone does not remove the dynamic bottleneck.
@@ -246,7 +248,7 @@ Reason:
 
 Before claiming this RecurDyn gear case as external paper evidence, reduce it to a stable CalculiX benchmark:
 
-1. Verify initial clearance/penetration between the two gear surfaces.
+1. Continue using unsigned closest distance, not local signed side alone, to verify initial geometric clearance.
 2. Use the completed static preload result as the initial state for a longer transient only after the short preload-to-dynamic run has physically acceptable energy and contact histories.
 3. Use C3D4 face-to-face contact as the primary CalculiX contact mode.
 4. Tune pressure-overclosure law from RecurDyn `KORDER=2` to a CalculiX tabular or exponential law, rather than using a one-value linear approximation.

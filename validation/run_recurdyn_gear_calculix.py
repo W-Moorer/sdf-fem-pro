@@ -55,6 +55,7 @@ NUMBER = r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[EeDd][+-]?\d+)?"
 FNODE_RE = re.compile(r"^FNODE/\s*(\d+).*?QG\s*=\s*(" + NUMBER + r")\s*,\s*(" + NUMBER + r")\s*,\s*(" + NUMBER + r")", re.I)
 FTET_RE = re.compile(r"^FTETRA4/\s*(\d+).*?NODE\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", re.I)
 MATERIAL_RE = re.compile(r"^MATERIAL\s*/\s*(\d+)", re.I)
+PART_RE = re.compile(r"^PART\s*/\s*(\d+)", re.I)
 MARKER_RE = re.compile(r"^MARKER\s*/\s*(\d+)", re.I)
 GGEOM_RE = re.compile(r"^GGEOM\s*/\s*(\d+)", re.I)
 FRBE_RE = re.compile(r"^FRBE/\s*(\d+)", re.I)
@@ -82,15 +83,30 @@ class Material:
 
 
 @dataclass
+class PartPose:
+    qg: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    reuler: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+
+@dataclass
+class MarkerPose:
+    part_id: int | None = None
+    qp: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    reuler: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+
+@dataclass
 class RigidSurface:
     marker_id: int = 0
-    origin: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    marker_pose: MarkerPose = field(default_factory=MarkerPose)
+    part_pose: PartPose = field(default_factory=PartPose)
     patches: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int64))
     nodes_local: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=float))
 
     @property
     def nodes_global(self) -> np.ndarray:
-        return self.nodes_local + self.origin[None, :]
+        marker_points = _transform_points(self.nodes_local, self.marker_pose.qp, self.marker_pose.reuler)
+        return _transform_points(marker_points, self.part_pose.qg, self.part_pose.reuler)
 
 
 @dataclass
@@ -158,27 +174,100 @@ def _parse_key_float(line: str, key: str) -> float | None:
     return _to_float(match.group(1)) if match else None
 
 
-def _parse_marker_origin(lines: list[str]) -> dict[int, np.ndarray]:
-    markers: dict[int, np.ndarray] = {}
-    current_marker: int | None = None
+def _parse_key_vector(line: str, key: str) -> np.ndarray | None:
+    match = re.search(
+        r"\b" + re.escape(key) + r"\s*=\s*("
+        + NUMBER
+        + r")\s*,\s*("
+        + NUMBER
+        + r")\s*,\s*("
+        + NUMBER
+        + r")",
+        line,
+        re.I,
+    )
+    if not match:
+        return None
+    return np.asarray([_to_float(match.group(i)) for i in range(1, 4)], dtype=float)
+
+
+def _rotation_matrix_from_reuler(reuler: np.ndarray) -> np.ndarray:
+    """Return a rotation matrix for RecurDyn-style XYZ Euler angles.
+
+    The RMD gear surface exercised by this runner has zero marker rotation and
+    a small body pitch; for that case the convention-dependent ambiguity is not
+    material.  The implementation keeps a standard intrinsic XYZ composition so
+    all parsed rotations are applied consistently rather than ignored.
+    """
+
+    rx, ry, rz = (float(value) for value in reuler)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    Rx = np.asarray([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=float)
+    Ry = np.asarray([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=float)
+    Rz = np.asarray([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+    return Rz @ Ry @ Rx
+
+
+def _transform_points(points: np.ndarray, translation: np.ndarray, reuler: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=float)
+    if pts.size == 0:
+        return pts.reshape((-1, 3))
+    R = _rotation_matrix_from_reuler(np.asarray(reuler, dtype=float))
+    return pts @ R.T + np.asarray(translation, dtype=float)[None, :]
+
+
+def _parse_part_marker_poses(lines: list[str]) -> tuple[dict[int, PartPose], dict[int, MarkerPose]]:
+    parts: dict[int, PartPose] = {}
+    markers: dict[int, MarkerPose] = {}
+    current_kind: str | None = None
+    current_id: int | None = None
     for line in lines:
-        match = MARKER_RE.match(line.strip())
-        if match:
-            current_marker = int(match.group(1))
+        stripped = line.strip()
+        part_match = PART_RE.match(stripped)
+        marker_match = MARKER_RE.match(stripped)
+        if part_match:
+            current_kind = "part"
+            current_id = int(part_match.group(1))
+            parts.setdefault(current_id, PartPose())
             continue
-        if current_marker is not None and "QP" in line:
-            values = _numbers(line)
-            if len(values) >= 3:
-                markers[current_marker] = np.asarray(values[:3], dtype=float)
-            current_marker = None
-    return markers
+        if marker_match:
+            current_kind = "marker"
+            current_id = int(marker_match.group(1))
+            markers.setdefault(current_id, MarkerPose())
+            continue
+        if re.match(r"^[A-Z_]+\s*/", stripped, re.I):
+            current_kind = None
+            current_id = None
+            continue
+        if current_kind == "part" and current_id is not None:
+            pose = parts.setdefault(current_id, PartPose())
+            qg = _parse_key_vector(line, "QG")
+            reuler = _parse_key_vector(line, "REULER")
+            if qg is not None:
+                pose.qg = qg
+            if reuler is not None:
+                pose.reuler = reuler
+        elif current_kind == "marker" and current_id is not None:
+            pose = markers.setdefault(current_id, MarkerPose())
+            part_id = _parse_key_float(line, "PART")
+            qp = _parse_key_vector(line, "QP")
+            reuler = _parse_key_vector(line, "REULER")
+            if part_id is not None:
+                pose.part_id = int(round(part_id))
+            if qp is not None:
+                pose.qp = qp
+            if reuler is not None:
+                pose.reuler = reuler
+    return parts, markers
 
 
 def parse_recurdyn_rmd(path: Path) -> RecurDynGearModel:
     """Parse the RMD subset needed for the gear contact validation deck."""
 
     lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    markers = _parse_marker_origin(lines)
+    parts, markers = _parse_part_marker_poses(lines)
 
     nodes: dict[int, np.ndarray] = {}
     elements: dict[int, tuple[int, int, int, int]] = {}
@@ -286,7 +375,8 @@ def parse_recurdyn_rmd(path: Path) -> RecurDynGearModel:
                 values = _ints(line)
                 if values:
                     rigid_surface.marker_id = values[0]
-                    rigid_surface.origin = markers.get(values[0], np.zeros(3))
+                    rigid_surface.marker_pose = markers.get(values[0], MarkerPose())
+                    rigid_surface.part_pose = parts.get(rigid_surface.marker_pose.part_id or 0, PartPose())
             if "PATCHES" in line:
                 ggeom_patch_mode = True
                 ggeom_node_mode = False
@@ -561,8 +651,8 @@ def _write_gap_histogram(path: Path, sample_rows: list[Row]) -> Row:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     axes[0].hist(gaps, bins=80, color="#3b82f6", alpha=0.85)
     axes[0].axvline(0.0, color="black", linewidth=1.0)
-    axes[0].set_title("Signed gap diagnostic")
-    axes[0].set_xlabel("signed gap [mm]")
+    axes[0].set_title("Local signed side diagnostic")
+    axes[0].set_xlabel("local signed gap [mm]")
     axes[0].set_ylabel("count")
     axes[1].hist(distances, bins=80, color="#10b981", alpha=0.85)
     axes[1].set_title("Unsigned closest distance")
@@ -867,6 +957,20 @@ def _write_calculix_input(
         "explicit_dynamic": explicit_dynamic,
         "drive_mode": drive_mode,
         "slave_surface_mode": slave_surface_mode,
+        "rigid_surface_marker_id": model.rigid_surface.marker_id,
+        "rigid_surface_marker_part_id": model.rigid_surface.marker_pose.part_id or "",
+        "rigid_surface_marker_qp_x": model.rigid_surface.marker_pose.qp[0],
+        "rigid_surface_marker_qp_y": model.rigid_surface.marker_pose.qp[1],
+        "rigid_surface_marker_qp_z": model.rigid_surface.marker_pose.qp[2],
+        "rigid_surface_marker_reuler_x": model.rigid_surface.marker_pose.reuler[0],
+        "rigid_surface_marker_reuler_y": model.rigid_surface.marker_pose.reuler[1],
+        "rigid_surface_marker_reuler_z": model.rigid_surface.marker_pose.reuler[2],
+        "rigid_surface_part_qg_x": model.rigid_surface.part_pose.qg[0],
+        "rigid_surface_part_qg_y": model.rigid_surface.part_pose.qg[1],
+        "rigid_surface_part_qg_z": model.rigid_surface.part_pose.qg[2],
+        "rigid_surface_part_reuler_x": model.rigid_surface.part_pose.reuler[0],
+        "rigid_surface_part_reuler_y": model.rigid_surface.part_pose.reuler[1],
+        "rigid_surface_part_reuler_z": model.rigid_surface.part_pose.reuler[2],
         "analysis": analysis,
         "preload_rotation": preload_rotation,
         "contact_adjust": contact_adjust or "",
@@ -1196,13 +1300,24 @@ def _write_markdown(
         f"- Material: E={model.material.E:g} N/mm^2, nu={model.material.nu:g}, density={model.material.rho_tonne_per_mm3:.6e} tonne/mm^3",
         f"- RecurDyn contact law: K={model.contact.stiffness:g}, order={model.contact.order}, damping={model.contact.damping:g}",
         "",
-        "## Initial gap / penetration diagnostic",
+        "## Initial contact-distance diagnostic",
         "",
         f"- Samples: {all_gap.get('count', 0)}",
-        f"- Minimum signed gap: {float(all_gap.get('min_signed_gap', 0.0)):.6e} mm",
-        f"- Negative signed-gap count: {all_gap.get('negative_signed_gap_count', 0)}",
         f"- Minimum unsigned closest distance: {float(all_gap.get('min_unsigned_distance', 0.0)):.6e} mm",
         f"- Near-zero unsigned distance count (`<1e-3 mm`): {all_gap.get('near_zero_distance_count_1e_3', 0)}",
+        f"- Minimum local signed gap: {float(all_gap.get('min_signed_gap', 0.0)):.6e} mm",
+        f"- Negative local signed-gap count: {all_gap.get('negative_signed_gap_count', 0)}",
+        "- Interpretation: unsigned distance is the geometric closest-distance metric. The signed local gap only indicates the side of the nearest oriented open surface patch and is not, by itself, a robust penetration classification for this open gear surface.",
+        "",
+        "## RMD rigid-surface transform",
+        "",
+        f"- Rigid GGEOM marker id: {generation['rigid_surface_marker_id']}",
+        f"- Marker PART id: {generation['rigid_surface_marker_part_id']}",
+        f"- Marker QP: ({float(generation['rigid_surface_marker_qp_x']):.6e}, {float(generation['rigid_surface_marker_qp_y']):.6e}, {float(generation['rigid_surface_marker_qp_z']):.6e})",
+        f"- Marker REULER: ({float(generation['rigid_surface_marker_reuler_x']):.6e}, {float(generation['rigid_surface_marker_reuler_y']):.6e}, {float(generation['rigid_surface_marker_reuler_z']):.6e})",
+        f"- Part QG: ({float(generation['rigid_surface_part_qg_x']):.6e}, {float(generation['rigid_surface_part_qg_y']):.6e}, {float(generation['rigid_surface_part_qg_z']):.6e})",
+        f"- Part REULER: ({float(generation['rigid_surface_part_reuler_x']):.6e}, {float(generation['rigid_surface_part_reuler_y']):.6e}, {float(generation['rigid_surface_part_reuler_z']):.6e})",
+        "- Rigid GGEOM nodes are transformed as `x_global = T_part * T_marker * x_local`.",
         "",
         "## Contact law alignment proxy",
         "",
@@ -1298,7 +1413,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--contact-adjust",
         default=None,
-        help="Optional CalculiX CONTACT PAIR ADJUST value, e.g. 0.0 to adjust initially penetrating slave nodes.",
+        help="Optional CalculiX CONTACT PAIR ADJUST value, e.g. 0.0 to adjust initially overclosed slave nodes.",
     )
     parser.add_argument(
         "--automatic-increment",
@@ -1390,8 +1505,10 @@ def main(argv: list[str] | None = None) -> int:
             "vtk_frames": len(frame_rows),
             "stress_strain_vtk_generated": str(frame_rows and frame_rows[0]["source"] == "calculix_dat").lower(),
             "contact_totals_rows": len(totals),
-            "min_initial_signed_gap": gap_summary[-1]["min_signed_gap"],
-            "negative_initial_gap_count": gap_summary[-1]["negative_signed_gap_count"],
+            "min_initial_unsigned_distance": gap_summary[-1]["min_unsigned_distance"],
+            "near_zero_initial_distance_count_1e_3": gap_summary[-1]["near_zero_distance_count_1e_3"],
+            "min_initial_local_signed_gap": gap_summary[-1]["min_signed_gap"],
+            "negative_initial_local_signed_gap_count": gap_summary[-1]["negative_signed_gap_count"],
             "contact_law_best_lsq_slope": law_summary[-1]["linear_slope"],
             "acceptance": "pass"
             if run_row is not None and int(run_row.get("return_code", -1)) == 0 and frame_rows and frame_rows[0]["source"] == "calculix_dat"

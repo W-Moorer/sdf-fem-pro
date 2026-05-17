@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -27,6 +29,12 @@ def test_recurdyn_rmd_parser_extracts_gear_contact_model() -> None:
     assert len(model.elements) == 64644
     assert model.rigid_surface.nodes_global.shape == (1641, 3)
     assert model.rigid_surface.patches.shape == (3278, 3)
+    assert model.rigid_surface.marker_id == 12
+    assert model.rigid_surface.marker_pose.part_id == 3
+    np.testing.assert_allclose(model.rigid_surface.marker_pose.qp, [17.46, -1.366543853054, -0.478799197013])
+    np.testing.assert_allclose(model.rigid_surface.part_pose.reuler, [0.0, 0.00349065850398866, 0.0])
+    translated_only = model.rigid_surface.nodes_local + model.rigid_surface.marker_pose.qp[None, :]
+    assert not np.allclose(model.rigid_surface.nodes_global, translated_only)
     assert model.flexible_surface_patches.shape == (10738, 3)
     assert len(model.hub_nodes) == 607
     assert model.material.E == 200000
@@ -101,6 +109,8 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
     assert metadata["tet4_elements"] == "64644"
     assert metadata["flexible_contact_element_faces"] == "10738"
     assert metadata["slave_surface_mode"] == "element-face"
+    assert metadata["rigid_surface_marker_id"] == "12"
+    assert metadata["rigid_surface_marker_part_id"] == "3"
     assert metadata["analysis"] == "preload-dynamic"
     assert metadata["contact_adjust"] == "0.0"
     assert metadata["run_completed"] == "False"
