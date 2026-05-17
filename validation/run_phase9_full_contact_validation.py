@@ -52,7 +52,9 @@ from sfc.fem.calculix_aligned import (  # noqa: E402
 )
 from sfc.fem.hex8 import hex8_center_strain_stress  # noqa: E402
 from sfc.mesh import VolumeMesh  # noqa: E402
-from sfc.sdf.dynamic_surface_sdf import dynamic_surface_sdf  # noqa: E402
+from sfc.contact.field_contact import field_contact_constraint_from_sample  # noqa: E402
+from sfc.contact.narrow_phase import SurfaceSample  # noqa: E402
+from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
 from validation.run_c3d8_contact_trajectory_validation import (  # noqa: E402
     C3D8_FACE_NODES,
     FLOOR_CONTACT_OFFSET,
@@ -91,6 +93,7 @@ from validation.run_calculix_contactenergy_replay import (  # noqa: E402
 )
 
 Row = dict[str, Any]
+_PHASE9_FIELD_CACHE: dict[tuple[tuple[int, ...], tuple[int, int], bytes], DynamicNarrowBandSDF] = {}
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[Row]) -> None:
@@ -167,7 +170,7 @@ def _von_mises(stress: np.ndarray) -> float:
 
 
 class Hex8SurfaceSdfContactGeometry:
-    """C3D8 slave-surface quadrature against current master surface triangles."""
+    """C3D8 slave quadrature against a true dynamic narrow-band SDF field."""
 
     def __init__(
         self,
@@ -187,6 +190,7 @@ class Hex8SurfaceSdfContactGeometry:
         master_faces = _triangles_from_quads(x, self.master_quads)
         if master_faces.size == 0:
             return
+        master_sdf = _build_phase9_master_field(x, master_faces)
         candidates = np.arange(master_faces.shape[0], dtype=np.int64)
         for quad, element in self.slave_quads:
             face = _orient_quad_outward(x, quad, element)
@@ -198,17 +202,77 @@ class Hex8SurfaceSdfContactGeometry:
                     area = float(np.linalg.norm(np.cross(dxi @ coords, deta @ coords)))
                     if area <= 0.0:
                         continue
-                    result = dynamic_surface_sdf(xq, x, master_faces, candidates)
+                    sample = SurfaceSample(
+                        node_ids=np.asarray(face, dtype=np.int64),
+                        weights=np.asarray(shape, dtype=float),
+                        candidate_face_ids=candidates,
+                    )
+                    constraint = field_contact_constraint_from_sample(x, sample, master_sdf)
+                    master_weights = _scalar_master_weights_from_field_constraint(constraint)
                     yield ContactSample(
                         node_ids=np.asarray(face, dtype=np.int64),
                         shape_weights=np.asarray(shape, dtype=float),
-                        gap=float(result.g),
-                        normal=np.asarray(result.n, dtype=float),
+                        gap=float(constraint.g),
+                        normal=np.asarray(constraint.normal, dtype=float),
                         area=area,
                         stiffness=self.stiffness,
-                        master_node_ids=np.asarray(master_faces[int(result.face_id)], dtype=np.int64),
-                        master_shape_weights=np.asarray(result.w, dtype=float),
+                        master_node_ids=np.asarray(constraint.master_node_ids, dtype=np.int64),
+                        master_shape_weights=master_weights,
                     )
+
+
+def _phase9_field_cache_key(nodes: np.ndarray, faces: np.ndarray) -> tuple[tuple[int, ...], tuple[int, int], bytes]:
+    face_ids = np.asarray(faces, dtype=np.int64)
+    used = np.unique(face_ids.ravel())
+    coords = np.round(np.asarray(nodes, dtype=float)[used], decimals=12)
+    return tuple(int(v) for v in face_ids.ravel()), tuple(coords.shape), coords.tobytes()
+
+
+def _phase9_sdf_grid_parameters(nodes: np.ndarray, faces: np.ndarray) -> tuple[float, float]:
+    used = np.unique(np.asarray(faces, dtype=np.int64).ravel())
+    X = np.asarray(nodes, dtype=float)[used]
+    extent = np.ptp(X, axis=0)
+    diag = max(float(np.linalg.norm(extent)), 1.0e-6)
+    spacing = max(diag / 24.0, 0.025)
+    band_radius = max(6.0 * spacing, 0.30 * diag, 0.10)
+    return spacing, band_radius
+
+
+def _build_phase9_master_field(nodes: np.ndarray, faces: np.ndarray) -> DynamicNarrowBandSDF:
+    key = _phase9_field_cache_key(nodes, faces)
+    cached = _PHASE9_FIELD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    spacing, band_radius = _phase9_sdf_grid_parameters(nodes, faces)
+    field = DynamicNarrowBandSDF.build(
+        nodes,
+        faces,
+        spacing=spacing,
+        band_radius=band_radius,
+        padding=band_radius,
+        cell_size=max(2.0 * spacing, band_radius),
+        gradient_mode="finite_difference",
+    )
+    _PHASE9_FIELD_CACHE[key] = field
+    return field
+
+
+def _scalar_master_weights_from_field_constraint(constraint) -> np.ndarray:
+    """Project vector field payload sensitivities onto the query normal.
+
+    The legacy Phase-9 mechanics assembly accepts scalar master weights in
+    ``-N_master n`` form. The true field constraint stores the more general
+    vector sensitivity. For this adapter, use the normal projection so flat
+    contact cases remain exactly equivalent while the query path still comes
+    from the dynamic SDF field.
+    """
+
+    normal = np.asarray(constraint.normal, dtype=float)
+    normal /= max(float(np.linalg.norm(normal)), 1.0e-30)
+    sensitivity = np.asarray(constraint.master_sensitivity, dtype=float)
+    if sensitivity.size == 0:
+        return np.empty(0, dtype=float)
+    return -(sensitivity @ normal)
 
 
 def _relative_error(value: float, reference: float) -> float:

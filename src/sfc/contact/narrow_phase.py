@@ -1,4 +1,8 @@
-"""Narrow-phase contact constraints from dynamic surface SDF queries."""
+"""Legacy projection-kernel narrow-phase contact constraints.
+
+New field-contact assembly should use ``sfc.contact.field_contact``. This
+module remains for validation references and backward-compatible tests.
+"""
 
 from __future__ import annotations
 

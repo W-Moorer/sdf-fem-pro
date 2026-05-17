@@ -1,8 +1,12 @@
-"""FEM-induced oriented local surface-distance queries.
+"""Internal current-surface projection kernel for SDF grid construction.
 
-The query operates on current boundary triangles. Those triangles may come from
-TET4 faces, triangulated HEX8/C3D8 faces, or any other finite-element boundary
-that has been converted to oriented triangles by the caller.
+The kernel operates on current boundary triangles. Those triangles may come
+from TET4 faces, triangulated HEX8/C3D8 faces, or any other finite-element
+boundary that has been converted to oriented triangles by the caller.
+
+This module is retained for grid population, tests, validation references, and
+explicit optional refinement. The main dynamic SDF query API is
+``DynamicNarrowBandSDF``, whose query path interpolates stored field data.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from .local_projection import closest_point_on_triangle
 
 
 class SurfaceSDFResult(NamedTuple):
-    """Result of a local dynamic surface SDF query."""
+    """Result of a current-surface projection-kernel evaluation."""
 
     g: float
     n: np.ndarray
@@ -82,12 +86,14 @@ def dynamic_surface_sdf(
     boundary_faces: np.ndarray,
     candidate_face_ids: np.ndarray,
 ) -> SurfaceSDFResult:
-    """Query oriented local signed distance against supplied candidate triangles.
+    """Evaluate oriented signed distance against supplied candidate triangles.
 
-    This is the final local query API. Candidate face ids must be supplied by a
-    broad phase; this function intentionally does not fall back to a global
-    all-face search. The sign is controlled by the supplied surface orientation:
-    outward-oriented closed surfaces are positive outside and negative inside.
+    This is the internal projection kernel used to populate dynamic SDF grids
+    and to support explicitly requested refinement. Candidate face ids must be
+    supplied by a broad phase; this function intentionally does not fall back to
+    a global all-face search. The sign is controlled by the supplied surface
+    orientation: outward-oriented closed surfaces are positive outside and
+    negative inside.
     """
 
     point = _as_point(x, "x")
@@ -118,7 +124,18 @@ def query_dynamic_surface_sdf(
     boundary_faces: np.ndarray,
     candidate_face_ids: np.ndarray,
 ) -> SurfaceSDFResult:
-    """Alias for :func:`dynamic_surface_sdf`."""
+    """Legacy alias for the current-surface projection kernel."""
+
+    return dynamic_surface_sdf(x, x_current, boundary_faces, candidate_face_ids)
+
+
+def surface_projection_distance_kernel(
+    x: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+    candidate_face_ids: np.ndarray,
+) -> SurfaceSDFResult:
+    """Internal projection kernel used during SDF field construction."""
 
     return dynamic_surface_sdf(x, x_current, boundary_faces, candidate_face_ids)
 

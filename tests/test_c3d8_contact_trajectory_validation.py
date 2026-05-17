@@ -40,6 +40,14 @@ def test_c3d8_contact_trajectory_model_suite_contains_plane_and_block_cases() ->
     assert any(model.master_kind == "deformable_block" for model in models)
 
 
+def test_c3d8_trajectory_replay_uses_true_field_contact_path() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+
+    assert "dynamic_surface_sdf" not in source
+    assert "DynamicNarrowBandSDF" in source
+    assert "field_contact_constraint_from_sample" in source
+
+
 def test_c3d8_contact_trajectory_quick_outputs_replay_files(tmp_path: Path) -> None:
     out_dir = tmp_path / "c3d8-contact-trajectory"
 

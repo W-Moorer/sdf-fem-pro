@@ -31,6 +31,14 @@ def _wsl_contactenergy_reference_available() -> bool:
     return proc.returncode == 0
 
 
+def test_calculix_contactenergy_replay_uses_true_field_contact_path() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+
+    assert "dynamic_surface_sdf" not in source
+    assert "DynamicNarrowBandSDF" in source
+    assert "field_contact_constraint_from_sample" in source
+
+
 @pytest.mark.skipif(not _wsl_contactenergy_reference_available(), reason="local CalculiX contactenergy reference is unavailable")
 def test_calculix_contactenergy_replay_quick_outputs_dynamic_sdf_c3d8_metrics(tmp_path: Path) -> None:
     out_dir = tmp_path / "contactenergy"

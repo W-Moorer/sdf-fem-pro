@@ -1,4 +1,9 @@
-"""Contact-geometry adapter backed by the dynamic FEM-induced SDF."""
+"""Legacy projection-backed contact-geometry adapter.
+
+The paper-facing contact path is the dynamic narrow-band SDF field in
+``sfc.contact.field_contact``. This adapter is retained for validation and
+backward-compatible projection-query comparisons.
+"""
 
 from __future__ import annotations
 
@@ -19,12 +24,12 @@ CandidateProvider = Callable[[np.ndarray], np.ndarray]
 
 @dataclass(frozen=True, slots=True)
 class DynamicSurfaceSDFContactGeometry:
-    """Slave-face quadrature contact geometry using dynamic SDF queries.
+    """Slave-face quadrature contact geometry using projection-kernel queries.
 
     The mechanics backend consumes only :class:`ContactSample` objects. This
-    adapter keeps the mechanics path independent from how contact candidates are
-    found, while preserving the project method: final gap and normal evaluation
-    are computed from the current master FEM surface by local projection.
+    adapter keeps older validation paths available: final gap and normal
+    evaluation are computed from the current master FEM surface by local
+    projection. It is not the main dynamic SDF field-contact API.
 
     ``candidate_provider`` is required. It should be supplied by the broad
     phase and must return candidate master face ids for the query point. The

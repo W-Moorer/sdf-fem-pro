@@ -1,10 +1,10 @@
-"""Replay CalculiX `contactenergy.inp` with current-surface dynamic SDF.
+"""Replay CalculiX `contactenergy.inp` with a current-surface dynamic SDF field.
 
 This validation intentionally uses the official CalculiX C3D8 contact-energy
 test as a contact-law/energy reference. It is not a TET4 trajectory-equivalence
 case: CalculiX solves the static C3D8 contact problem, and SFC replays the final
-deformed surface geometry using dynamic-SDF local projection and the same linear
-pressure-overclosure law.
+deformed surface geometry using the true dynamic narrow-band SDF field and the
+same linear pressure-overclosure law.
 """
 
 from __future__ import annotations
@@ -35,10 +35,13 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 from sfc.fem import DeformableBody, assemble_stiffness_matrix  # noqa: E402
 from sfc.fem.hex8 import hex8_center_strain_stress  # noqa: E402
 from sfc.mesh import VolumeMesh, extract_boundary_triangles  # noqa: E402
-from sfc.sdf.dynamic_surface_sdf import dynamic_surface_sdf  # noqa: E402
+from sfc.contact.field_contact import field_contact_constraint_from_sample  # noqa: E402
+from sfc.contact.narrow_phase import SurfaceSample  # noqa: E402
+from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
 
 
 Row = dict[str, Any]
+_CONTACTENERGY_FIELD_CACHE: dict[tuple[tuple[int, ...], tuple[int, int], bytes], DynamicNarrowBandSDF] = {}
 
 WSL_CONTACTENERGY_INP_CANDIDATES = [
     "/tmp/sfc_calculix_source/test/contactenergy.inp",
@@ -359,11 +362,48 @@ def _triangle_area(triangle: np.ndarray) -> float:
     return 0.5 * float(np.linalg.norm(np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])))
 
 
+def _contactenergy_field_cache_key(nodes: np.ndarray, faces: np.ndarray) -> tuple[tuple[int, ...], tuple[int, int], bytes]:
+    face_ids = np.asarray(faces, dtype=np.int64)
+    used = np.unique(face_ids.ravel())
+    coords = np.round(np.asarray(nodes, dtype=float)[used], decimals=12)
+    return tuple(int(v) for v in face_ids.ravel()), tuple(coords.shape), coords.tobytes()
+
+
+def _contactenergy_sdf_grid_parameters(nodes: np.ndarray, faces: np.ndarray) -> tuple[float, float]:
+    used = np.unique(np.asarray(faces, dtype=np.int64).ravel())
+    X = np.asarray(nodes, dtype=float)[used]
+    extent = np.ptp(X, axis=0)
+    diag = max(float(np.linalg.norm(extent)), 1.0e-6)
+    spacing = max(diag / 24.0, 0.025)
+    band_radius = max(6.0 * spacing, 0.30 * diag, 0.10)
+    return spacing, band_radius
+
+
+def _build_contactenergy_master_field(nodes: np.ndarray, faces: np.ndarray) -> DynamicNarrowBandSDF:
+    key = _contactenergy_field_cache_key(nodes, faces)
+    cached = _CONTACTENERGY_FIELD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    spacing, band_radius = _contactenergy_sdf_grid_parameters(nodes, faces)
+    field = DynamicNarrowBandSDF.build(
+        nodes,
+        faces,
+        spacing=spacing,
+        band_radius=band_radius,
+        padding=band_radius,
+        cell_size=max(2.0 * spacing, band_radius),
+        gradient_mode="finite_difference",
+    )
+    _CONTACTENERGY_FIELD_CACHE[key] = field
+    return field
+
+
 def replay_contactenergy_with_dynamic_sdf(model: ContactEnergyModel, U: np.ndarray) -> Row:
     X_current = model.X + U
     master_faces = _triangles_from_quads(X_current, _surface_quads(model, "Smast"))
     slave_faces = _triangles_from_quads(X_current, _surface_quads(model, "Sslav"))
     candidates = np.arange(master_faces.shape[0], dtype=np.int64)
+    master_sdf = _build_contactenergy_master_field(X_current, master_faces)
 
     total_force = np.zeros(3, dtype=float)
     contact_energy = 0.0
@@ -371,15 +411,19 @@ def replay_contactenergy_with_dynamic_sdf(model: ContactEnergyModel, U: np.ndarr
     active_count = 0
     for face in slave_faces:
         triangle = X_current[face]
-        xq = triangle.mean(axis=0)
         area = _triangle_area(triangle)
-        result = dynamic_surface_sdf(xq, X_current, master_faces, candidates)
-        min_gap = min(min_gap, float(result.g))
-        overclosure = max(-float(result.g), 0.0)
+        sample = SurfaceSample(
+            node_ids=np.asarray(face, dtype=np.int64),
+            weights=np.full(3, 1.0 / 3.0, dtype=float),
+            candidate_face_ids=candidates,
+        )
+        constraint = field_contact_constraint_from_sample(X_current, sample, master_sdf)
+        min_gap = min(min_gap, float(constraint.g))
+        overclosure = max(-float(constraint.g), 0.0)
         if overclosure > 0.0:
             active_count += 1
             pressure = model.pressure_stiffness * overclosure
-            total_force += pressure * area * result.n
+            total_force += pressure * area * constraint.normal
             contact_energy += 0.5 * model.pressure_stiffness * overclosure * overclosure * area
 
     return {
@@ -444,6 +488,7 @@ def _contact_jacobian_rows(model: ContactEnergyModel) -> list[tuple[np.ndarray, 
     master_faces = _triangles_from_quads(X, _surface_quads(model, "Smast"))
     slave_quads = _surface_quads(model, "Sslav")
     candidates = np.arange(master_faces.shape[0], dtype=np.int64)
+    master_sdf = _build_contactenergy_master_field(X, master_faces)
     rows: list[tuple[np.ndarray, float]] = []
     ndofs = 3 * X.shape[0]
     gp = 1.0 / np.sqrt(3.0)
@@ -479,18 +524,22 @@ def _contact_jacobian_rows(model: ContactEnergyModel) -> list[tuple[np.ndarray, 
                     ],
                     dtype=float,
                 )
-                xq = shape @ coords
                 surface_jacobian = np.cross(dshape_dxi @ coords, dshape_deta @ coords)
                 area_weight = float(np.linalg.norm(surface_jacobian))
-                result = dynamic_surface_sdf(xq, X, master_faces, candidates)
-                if float(result.g) > 1.0e-10:
+                sample = SurfaceSample(
+                    node_ids=np.asarray(face, dtype=np.int64),
+                    weights=np.asarray(shape, dtype=float),
+                    candidate_face_ids=candidates,
+                )
+                constraint = field_contact_constraint_from_sample(X, sample, master_sdf)
+                if float(constraint.g) > 1.0e-10:
                     continue
                 J = np.zeros(ndofs, dtype=float)
+                grad = np.asarray(constraint.gap_gradient, dtype=float)
                 for node, weight in zip(face, shape, strict=True):
-                    J[3 * int(node) : 3 * int(node) + 3] += float(weight) * result.n
-                master_face = master_faces[int(result.face_id)]
-                for node, weight in zip(master_face, result.w, strict=True):
-                    J[3 * int(node) : 3 * int(node) + 3] -= float(weight) * result.n
+                    J[3 * int(node) : 3 * int(node) + 3] += float(weight) * grad
+                for node, vector in zip(constraint.master_node_ids, constraint.master_sensitivity, strict=True):
+                    J[3 * int(node) : 3 * int(node) + 3] += np.asarray(vector, dtype=float)
                 rows.append((J, area_weight))
     return rows
 
@@ -661,12 +710,17 @@ def _contact_pressure_nodal_values(model: ContactEnergyModel, U: np.ndarray) -> 
     master_faces = _triangles_from_quads(X_current, _surface_quads(model, "Smast"))
     slave_faces = _triangles_from_quads(X_current, _surface_quads(model, "Sslav"))
     candidates = np.arange(master_faces.shape[0], dtype=np.int64)
+    master_sdf = _build_contactenergy_master_field(X_current, master_faces)
     sums = np.zeros(model.X.shape[0], dtype=float)
     counts = np.zeros(model.X.shape[0], dtype=float)
     for face in slave_faces:
-        triangle = X_current[face]
-        result = dynamic_surface_sdf(triangle.mean(axis=0), X_current, master_faces, candidates)
-        pressure = model.pressure_stiffness * max(-float(result.g), 0.0)
+        sample = SurfaceSample(
+            node_ids=np.asarray(face, dtype=np.int64),
+            weights=np.full(3, 1.0 / 3.0, dtype=float),
+            candidate_face_ids=candidates,
+        )
+        constraint = field_contact_constraint_from_sample(X_current, sample, master_sdf)
+        pressure = model.pressure_stiffness * max(-float(constraint.g), 0.0)
         sums[face] += pressure
         counts[face] += 1.0
     return sums / np.maximum(counts, 1.0)

@@ -14,6 +14,14 @@ def _rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def test_phase9_hex8_contact_adapter_uses_true_field_contact_path() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+
+    assert "dynamic_surface_sdf" not in source
+    assert "DynamicNarrowBandSDF" in source
+    assert "field_contact_constraint_from_sample" in source
+
+
 def test_phase9_quick_smoke_outputs_claim_gated_matrix(tmp_path: Path) -> None:
     out_dir = tmp_path / "phase9"
     subprocess.run(

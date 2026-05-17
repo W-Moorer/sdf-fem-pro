@@ -42,9 +42,12 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 
 from sfc.fem.hex8 import hex8_center_strain_stress, hex8_volume  # noqa: E402
 from sfc.mesh import extract_boundary_triangles  # noqa: E402
-from sfc.sdf.dynamic_surface_sdf import dynamic_surface_sdf  # noqa: E402
+from sfc.contact.field_contact import field_contact_constraint_from_sample  # noqa: E402
+from sfc.contact.narrow_phase import SurfaceSample  # noqa: E402
+from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
 
 Row = dict[str, Any]
+_TRAJECTORY_FIELD_CACHE: dict[tuple[tuple[int, ...], tuple[int, int], bytes], DynamicNarrowBandSDF] = {}
 
 FLOOR_SHELL_THICKNESS = 1.0e-2
 FLOOR_CONTACT_OFFSET = 0.5 * FLOOR_SHELL_THICKNESS
@@ -782,6 +785,44 @@ def _master_query_geometry(model: C3D8TrajectoryModel, X_current: np.ndarray) ->
     return X_current, faces
 
 
+def _trajectory_sdf_grid_parameters(nodes: np.ndarray, faces: np.ndarray) -> tuple[float, float]:
+    if faces.size == 0:
+        raise ValueError("master field requires at least one triangle")
+    used = np.unique(np.asarray(faces, dtype=np.int64).ravel())
+    X = np.asarray(nodes, dtype=float)[used]
+    extent = np.ptp(X, axis=0)
+    diag = max(float(np.linalg.norm(extent)), 1.0e-6)
+    spacing = max(diag / 28.0, 0.02)
+    band_radius = max(6.0 * spacing, 0.35 * diag, 0.12)
+    return spacing, band_radius
+
+
+def _trajectory_field_cache_key(nodes: np.ndarray, faces: np.ndarray) -> tuple[tuple[int, ...], tuple[int, int], bytes]:
+    face_ids = np.asarray(faces, dtype=np.int64)
+    used = np.unique(face_ids.ravel())
+    coords = np.round(np.asarray(nodes, dtype=float)[used], decimals=12)
+    return tuple(int(v) for v in face_ids.ravel()), tuple(coords.shape), coords.tobytes()
+
+
+def _build_trajectory_master_field(nodes: np.ndarray, faces: np.ndarray) -> DynamicNarrowBandSDF:
+    key = _trajectory_field_cache_key(nodes, faces)
+    cached = _TRAJECTORY_FIELD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    spacing, band_radius = _trajectory_sdf_grid_parameters(nodes, faces)
+    field = DynamicNarrowBandSDF.build(
+        nodes,
+        faces,
+        spacing=spacing,
+        band_radius=band_radius,
+        padding=band_radius,
+        cell_size=max(2.0 * spacing, band_radius),
+        gradient_mode="finite_difference",
+    )
+    _TRAJECTORY_FIELD_CACHE[key] = field
+    return field
+
+
 def _von_mises(stress: np.ndarray) -> float:
     sxx, syy, szz, sxy, syz, sxz = np.asarray(stress, dtype=float)
     return float(np.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3.0 * (sxy**2 + syz**2 + sxz**2)))
@@ -790,6 +831,7 @@ def _von_mises(stress: np.ndarray) -> float:
 def _replay_dynamic_sdf(model: C3D8TrajectoryModel, U: np.ndarray) -> Row:
     X_current = model.X + U
     query_nodes, master_faces = _master_query_geometry(model, X_current)
+    master_sdf = _build_trajectory_master_field(query_nodes, master_faces)
     candidates = np.arange(master_faces.shape[0], dtype=np.int64)
     min_gap = np.inf
     max_penetration = 0.0
@@ -806,8 +848,13 @@ def _replay_dynamic_sdf(model: C3D8TrajectoryModel, U: np.ndarray) -> Row:
                 xq = shape @ coords
                 jac = np.cross(dxi @ coords, deta @ coords)
                 area_weight = float(np.linalg.norm(jac))
-                result = dynamic_surface_sdf(xq, query_nodes, master_faces, candidates)
-                gap = float(result.g)
+                sample = SurfaceSample(
+                    node_ids=np.asarray(face, dtype=np.int64),
+                    weights=np.asarray(shape, dtype=float),
+                    candidate_face_ids=candidates,
+                )
+                constraint = field_contact_constraint_from_sample(X_current, sample, master_sdf)
+                gap = float(constraint.g)
                 min_gap = min(min_gap, gap)
                 overclosure = max(-gap, 0.0)
                 max_penetration = max(max_penetration, overclosure)
@@ -815,7 +862,7 @@ def _replay_dynamic_sdf(model: C3D8TrajectoryModel, U: np.ndarray) -> Row:
                     continue
                 active_count += 1
                 scalar_force = model.contact_stiffness * overclosure * area_weight
-                force += scalar_force * result.n
+                force += scalar_force * constraint.normal
                 contact_energy += 0.5 * model.contact_stiffness * overclosure * overclosure * area_weight
     if not np.isfinite(min_gap):
         min_gap = 0.0
