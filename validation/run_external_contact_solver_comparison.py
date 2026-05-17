@@ -2,13 +2,14 @@
 
 This validation runner calls SfePy's built-in two-body penalty contact example
 as an external open-source contact solver, then re-evaluates the final deformed
-contact state with the SFC current-surface distance query.
+contact state with the SFC true dynamic narrow-band SDF field query.
 
 The comparison is intentionally scoped: SfePy performs the nonlinear contact
-solve, while SFC evaluates gap signs and magnitudes on the SfePy final geometry.
-This is external contact-solver evidence for the contact geometry layer, not a
-claim that the current SFC package implements a full nonlinear contact
-equilibrium solver.
+solve, while SFC builds a current-space dynamic SDF field from the SfePy final
+master surface and evaluates gap signs and magnitudes by interpolation. This is
+external contact-solver evidence for the contact geometry layer, not a claim
+that the current SFC package implements a full nonlinear contact equilibrium
+solver.
 """
 
 from __future__ import annotations
@@ -34,9 +35,19 @@ if str(ROOT) not in sys.path:
 import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
+matplotlib.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "axes.unicode_minus": False,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 import matplotlib.pyplot as plt  # noqa: E402
 
-from sfc.sdf import dynamic_surface_sdf  # noqa: E402
+from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
 from validation.run_phase4_paper_validation import _format_float  # noqa: E402
 
 Row = dict[str, Any]
@@ -116,7 +127,7 @@ def _upper_contact_centroids(coors: np.ndarray, conn: np.ndarray, mat_id: np.nda
     return np.asarray(centroids, dtype=float)
 
 
-def _evaluate_sfc_gaps_on_sfepy_state(h5_path: Path) -> dict[str, float | int]:
+def _evaluate_sfc_gaps_on_sfepy_state(h5_path: Path) -> dict[str, float | int | str]:
     with h5py.File(h5_path, "r") as f:
         coors = np.asarray(f["mesh/coors"][...], dtype=float)
         conn = np.asarray(f["mesh/group0/conn"][...], dtype=np.int64)
@@ -129,14 +140,19 @@ def _evaluate_sfc_gaps_on_sfepy_state(h5_path: Path) -> dict[str, float | int]:
     current = coors + u
     lower_faces, _ = _triangulated_lower_contact_surface(coors, conn, mat_id)
     query_points = _upper_contact_centroids(coors, conn, mat_id, current)
-    candidates = np.arange(lower_faces.shape[0], dtype=np.int64)
-    sfc_gaps = np.asarray(
-        [
-            dynamic_surface_sdf(point, current, lower_faces, candidates).g
-            for point in query_points
-        ],
-        dtype=float,
+    spacing = 0.08
+    band_radius = 0.30
+    sdf = DynamicNarrowBandSDF.build_required_points(
+        current,
+        lower_faces,
+        query_points,
+        spacing=spacing,
+        band_radius=band_radius,
+        padding=band_radius,
+        cell_size=0.16,
     )
+    sfc_gaps = np.asarray([sdf.query_phi(point) for point in query_points], dtype=float)
+    gradient_norms = np.asarray([np.linalg.norm(sdf.query_gradient(point)) for point in query_points], dtype=float)
     return {
         "sfepy_gap_min": float(np.min(sfepy_gap)) if sfepy_gap.size else 0.0,
         "sfepy_gap_mean": float(np.mean(sfepy_gap)) if sfepy_gap.size else 0.0,
@@ -147,6 +163,11 @@ def _evaluate_sfc_gaps_on_sfepy_state(h5_path: Path) -> dict[str, float | int]:
         "sfc_query_count": int(sfc_gaps.size),
         "gap_mean_abs_difference": float(abs((np.mean(sfc_gaps) if sfc_gaps.size else 0.0) - (np.mean(sfepy_gap) if sfepy_gap.size else 0.0))),
         "displacement_l2_norm": float(np.linalg.norm(u)),
+        "field_population_mode": str(sdf.grid.metadata.get("population_mode", "full")),
+        "field_valid_node_count": int(sdf.stats.valid_node_count),
+        "field_update_seconds": float(sdf.stats.update_seconds),
+        "field_gradient_norm_min": float(np.min(gradient_norms)) if gradient_norms.size else 0.0,
+        "field_gradient_norm_max": float(np.max(gradient_norms)) if gradient_norms.size else 0.0,
     }
 
 
@@ -182,9 +203,14 @@ def external_contact_solver_comparison(out_dir: Path, approaches: list[float]) -
                 "sfc_query_count": metrics["sfc_query_count"],
                 "gap_mean_abs_difference": gap_diff,
                 "displacement_l2_norm": metrics["displacement_l2_norm"],
+                "field_population_mode": metrics["field_population_mode"],
+                "field_valid_node_count": metrics["field_valid_node_count"],
+                "field_update_seconds": metrics["field_update_seconds"],
+                "field_gradient_norm_min": metrics["field_gradient_norm_min"],
+                "field_gradient_norm_max": metrics["field_gradient_norm_max"],
                 "contact_state_agreement": str(sign_agreement).lower(),
                 "status": status,
-                "details": "SfePy performs nonlinear two-body penalty contact solve; SFC replays final geometry with current-surface SDF gap queries",
+                "details": "SfePy performs nonlinear two-body penalty contact solve; SFC replays final geometry with true dynamic narrow-band SDF interpolation queries",
             }
         )
         command_rows.append(
@@ -208,7 +234,7 @@ def claim_rows(rows: list[Row]) -> list[Row]:
     return [
         {
             "claim_id": "external_contact_solver_state_agreement",
-            "claim_text": "SFC current-surface gap queries agree in contact activation with SfePy external two-body contact solve final states.",
+            "claim_text": "SFC true dynamic SDF field queries agree in contact activation with SfePy external two-body contact solve final states.",
             "evidence_csv": "external_contact_solver_comparison.csv",
             "evidence_field": "contact_state_agreement",
             "gate_value": str(all_signs).lower(),
@@ -222,7 +248,7 @@ def claim_rows(rows: list[Row]) -> list[Row]:
             "evidence_field": "gap_mean_abs_difference",
             "gate_value": max_gap_diff,
             "claim_status": "supported" if max_gap_diff < 1.5e-2 else "not_supported",
-            "details": "SfePy gap is a contact-term surface average; SFC gap is a centroid current-surface projection replay",
+            "details": "SfePy gap is a contact-term surface average; SFC gap is a centroid true-field interpolation replay",
         },
     ]
 
@@ -268,7 +294,7 @@ def write_markdown(path: Path, rows: list[Row], claims: list[Row], plots: list[R
     lines = [
         "# External Contact Solver Comparison Summary",
         "",
-        "This validation uses SfePy as an external open-source nonlinear penalty contact solver. SfePy solves its built-in two-body contact problem; SFC then replays the final deformed geometry using current-surface dynamic SDF gap queries.",
+        "This validation uses SfePy as an external open-source nonlinear penalty contact solver. SfePy solves its built-in two-body contact problem; SFC then rebuilds a true current-space dynamic narrow-band SDF field from the final master surface and replays the deformed geometry by field interpolation.",
         "",
         "## Reproduce",
         "",
@@ -307,8 +333,8 @@ def write_markdown(path: Path, rows: list[Row], claims: list[Row], plots: list[R
             "## Interpretation",
             "",
             "- SfePy provides the external nonlinear two-body penalty contact solve.",
-            "- SFC is evaluated on the final SfePy deformed geometry, so the comparison checks current-surface gap consistency against an external contact state.",
-            "- The compared gap values are not expected to be bitwise identical: SfePy reports contact-term surface averages, while SFC reports centroid closest-point projection gaps.",
+            "- SFC is evaluated on the final SfePy deformed geometry, so the comparison checks true-field gap consistency against an external contact state.",
+            "- The compared gap values are not expected to be bitwise identical: SfePy reports contact-term surface averages, while SFC reports centroid dynamic-SDF interpolation gaps.",
             "- This evidence does not claim that SFC currently implements a full nonlinear contact equilibrium solver.",
         ]
     )
@@ -345,6 +371,11 @@ def main() -> int:
             "sfc_query_count",
             "gap_mean_abs_difference",
             "displacement_l2_norm",
+            "field_population_mode",
+            "field_valid_node_count",
+            "field_update_seconds",
+            "field_gradient_norm_min",
+            "field_gradient_norm_max",
             "contact_state_agreement",
             "status",
             "details",

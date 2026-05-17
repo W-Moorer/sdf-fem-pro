@@ -5,6 +5,7 @@
 \usepackage{amssymb}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{placeins}
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
@@ -288,7 +289,25 @@ The field acceleration claim is supported only for \(Q>Q^\ast\) under the measur
 
 \subsection{External Visual FEM Validation}
 
-The preceding experiments verify the dynamic SDF field itself: field accuracy, Eikonal residuals, field-contact Jacobians, and the amortized query crossover. To make the resulting FEM/contact fields visually auditable, we include a three-dimensional boundary-surface visual comparison against a generated reference field. This comparison is not used to prove the SDF acceleration claim; it checks whether displacement, stress, strain, gap, and contact-pressure fields are physically interpretable in the tested configuration. CalculiX-style external data can be substituted in the same artifact format, but no external solver is required by the core SDF field construction or contact query.
+The preceding experiments verify the dynamic SDF field itself: field accuracy, Eikonal residuals, field-contact Jacobians, and the amortized query crossover. To make the resulting FEM/contact fields visually auditable, we retain a generated three-dimensional boundary-surface comparison to exercise the same visualization artifact format without requiring any external solver. This diagnostic comparison is not used to prove the SDF acceleration claim; it checks whether displacement, stress, strain, gap, and contact-pressure fields are physically interpretable in a controlled configuration. CalculiX-style external data can be substituted in the same artifact format, but no external solver is required by the core SDF field construction or contact query.
+
+We also use open external reference lines rather than closed benchmark material without public numeric targets. SfePy's public two-body contact example solves a penalty-contact state with an independent finite-element code path~\cite{cimrman2019sfepy}; SFC then rebuilds a current-space \path{DynamicNarrowBandSDF} field from the final master surface and replays the slave samples using interpolation-only \path{query_phi} calls. The quick external replay in Table~\ref{tab:sfepy-open-reference} gives matching contact activation and sub-\(1.2\times10^{-3}\) mean-gap differences for the tested approach values. The FuzzyContact Mendeley dataset~\cite{uzun2025fuzzycontact} is retained as an optional VTU field-cloud source because it publishes displacement, strain, and stress components for several contact scenarios; it is not downloaded by default and is not a core dependency.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Open SfePy two-body contact replay with SFC true-field interpolation queries. SfePy solves the external contact state; SFC only rebuilds the dynamic SDF field on the final geometry and queries it by interpolation.}
+\label{tab:sfepy-open-reference}
+\begin{tabular}{rrrr}
+\toprule
+Approach & SfePy active & SFC active & Mean-gap diff. \\
+\midrule
+0.00 & 0 & 0 & \(1.000000\times10^{-4}\) \\
+0.06 & 2 & 1 & \(7.119386\times10^{-4}\) \\
+0.10 & 2 & 1 & \(1.187357\times10^{-3}\) \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{table}[t]
 \centering
@@ -321,11 +340,15 @@ Contact-force relative error & \(8.775744\times10^{-3}\) \\
   \caption{Dynamic SDF field visualization rendered as three-dimensional surfaces: current FEM boundary colored by interpolated gap, narrow-band \(\phi\) slice, narrow-band validity slice, and contact-pressure surface with scalar-gradient normals.}
 \end{figure}
 
+\FloatBarrier
+
 \section{Claim Gates and Unsupported Claims}
 
 The Phase-8 experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, and SDF acceleration after the measured \(Q^\ast\) crossover.
 
 The external visual validation supports physical auditability of the tested displacement, stress, strain, gap, and pressure fields. It is not evidence for the SDF acceleration claim and is not a claim of external-solver equivalence.
+
+The SfePy open-reference replay supports a scoped external contact-state check for the tested two-body penalty case. It does not convert SfePy into a dependency and does not establish full nonlinear contact equilibrium equivalence. The FuzzyContact line currently supports open VTU dataset availability and field-cloud parsing, with quantitative solver comparison deferred until a specific downloaded case is mapped to SFC replay samples.
 
 The current results do not support claims of robust global SDF behavior for arbitrary non-manifold geometry, friction, self-contact, nonlinear FEM as the main method, GPU acceleration, barrier contact, superiority over production BVH, or Abaqus-dependent core solver behavior.
 

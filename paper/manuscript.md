@@ -247,7 +247,15 @@ Figures:
 
 ### 7.5 External Visual FEM Validation
 
-The preceding experiments verify the dynamic SDF field itself: field accuracy, Eikonal residuals, field-contact Jacobians, and the amortized query crossover. To make the resulting FEM/contact fields visually auditable, we include a three-dimensional boundary-surface visual comparison against a generated reference field. This comparison is not used to prove the SDF acceleration claim; it checks whether displacement, stress, strain, gap, and contact-pressure fields are physically interpretable in the tested configuration. CalculiX-style external data can be substituted in the same artifact format, but no external solver is required by the core SDF field construction or contact query.
+The preceding experiments verify the dynamic SDF field itself: field accuracy, Eikonal residuals, field-contact Jacobians, and the amortized query crossover. To make the resulting FEM/contact fields visually auditable, we retain a generated three-dimensional boundary-surface comparison to exercise the same visualization artifact format without requiring any external solver. This diagnostic comparison is not used to prove the SDF acceleration claim; it checks whether displacement, stress, strain, gap, and contact-pressure fields are physically interpretable in a controlled configuration. CalculiX-style external data can be substituted in the same artifact format, but no external solver is required by the core SDF field construction or contact query.
+
+We also use open external reference lines rather than closed benchmark material without public numeric targets. SfePy's public two-body contact example solves a penalty-contact state with an independent finite-element code path; SFC then rebuilds a current-space `DynamicNarrowBandSDF` field from the final master surface and replays the slave samples using interpolation-only `query_phi` calls. The quick external replay reports matching contact activation and sub-\(1.2\times10^{-3}\) mean-gap differences for the tested approach values. The FuzzyContact Mendeley dataset is retained as an optional VTU field-cloud source because it publishes displacement, strain, and stress components for several contact scenarios; it is not downloaded by default and is not a core dependency.
+
+| Approach | SfePy active | SFC active | Mean-gap diff. |
+| ---: | ---: | ---: | ---: |
+| 0.00 | 0 | 0 | \(1.000000\times10^{-4}\) |
+| 0.06 | 2 | 1 | \(7.119386\times10^{-4}\) |
+| 0.10 | 2 | 1 | \(1.187357\times10^{-3}\) |
 
 | Metric | Value |
 | --- | ---: |
@@ -273,6 +281,8 @@ Supported for the Phase-8 experiments:
 - Slave and master field-contact Jacobians pass finite-difference checks.
 - SDF acceleration is supported after the measured \(Q^\ast\) crossover.
 - External visual validation supports physical auditability for the tested generated reference case, not SDF acceleration or external-solver equivalence.
+- SfePy open-reference replay supports a scoped external contact-state check for the tested two-body penalty case, without making SfePy a core dependency.
+- FuzzyContact currently supports open VTU dataset availability and field-cloud parsing; quantitative solver comparison requires mapping a specific downloaded case to SFC replay samples.
 
 Not supported:
 

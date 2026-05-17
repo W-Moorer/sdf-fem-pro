@@ -30,6 +30,16 @@ if str(ROOT) not in sys.path:
 import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
+matplotlib.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "STIXGeneral", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
+        "axes.unicode_minus": False,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 import matplotlib.pyplot as plt  # noqa: E402
 
 from sfc.fem.assembler import assemble_gravity_force, assemble_mass_matrix, assemble_stiffness_matrix  # noqa: E402
