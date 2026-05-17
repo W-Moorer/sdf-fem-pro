@@ -19,6 +19,7 @@ import argparse
 import csv
 import math
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -847,6 +848,41 @@ def _write_contact_initialization_plot(path: Path, rows: list[Row]) -> Row:
     return {"figure_path": str(path), "source": "contact_initialization", "sample_count": len(rows)}
 
 
+def _contact_surface_behavior_lines(
+    model: RecurDynGearModel,
+    *,
+    contact_law: str,
+    effective_contact_stiffness: float,
+) -> list[str]:
+    """Return CalculiX pressure-overclosure lines for the selected proxy law.
+
+    The parsed RecurDyn model uses ``KORDER=2``.  RecurDyn's exact commercial
+    contact law is not reproduced here; these are explicit CalculiX-side proxy
+    laws used to test which external-reference mapping is numerically usable.
+    """
+
+    if contact_law == "linear":
+        return [
+            "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR",
+            f"{effective_contact_stiffness:.12e}",
+        ]
+    if contact_law == "exponential":
+        return [
+            "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=EXPONENTIAL",
+            f"{max(model.contact.bpen, 1.0e-9):.12e}, {max(effective_contact_stiffness / 100000.0, 1.0e-9):.12e}",
+        ]
+    if contact_law == "tabular":
+        max_pen = max(float(model.contact.max_penetration), float(model.contact.bpen), 1.0e-9)
+        order = max(1, int(model.contact.order))
+        rows = ["*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=TABULAR"]
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            overclosure = max_pen * fraction
+            pressure = effective_contact_stiffness * overclosure**order
+            rows.append(f"{pressure:.12e}, {overclosure:.12e}")
+        return rows
+    raise ValueError(f"unsupported contact law: {contact_law}")
+
+
 def _write_calculix_input(
     path: Path,
     model: RecurDynGearModel,
@@ -864,6 +900,7 @@ def _write_calculix_input(
     analysis: str,
     preload_rotation: float,
     contact_adjust: str | None,
+    write_restart: bool = False,
 ) -> dict[str, Any]:
     """Write a CalculiX input deck and return generation metadata."""
 
@@ -884,21 +921,20 @@ def _write_calculix_input(
     rigid_node_ids = [rigid_node_offset + i + 1 for i in range(model.rigid_surface.nodes_global.shape[0])]
     rigid_element_ids = [rigid_element_offset + i + 1 for i in range(model.rigid_surface.patches.shape[0])]
 
-    if analysis == "static-preload":
+    if analysis in {"static-preload", "preload-restart-dynamic"}:
         total_rotation = preload_rotation
     elif analysis == "preload-dynamic":
         total_rotation = preload_rotation + model.angular_velocity * duration
     else:
         total_rotation = model.angular_velocity * duration
     effective_contact_stiffness = model.contact.stiffness * contact_stiffness_scale
-    pressure_line = f"{effective_contact_stiffness:.12e}"
-    pressure_keyword = "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR"
-    if contact_law == "exponential":
-        # This is only an engineering approximation of RecurDyn's KORDER=2 law.
-        pressure_keyword = "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=EXPONENTIAL"
-        pressure_line = f"{max(model.contact.bpen, 1.0e-9):.12e}, {max(effective_contact_stiffness / 100000.0, 1.0e-9):.12e}"
+    pressure_lines = _contact_surface_behavior_lines(
+        model,
+        contact_law=contact_law,
+        effective_contact_stiffness=effective_contact_stiffness,
+    )
 
-    if analysis == "static-preload":
+    if analysis in {"static-preload", "preload-restart-dynamic"}:
         dynamic_keyword = "*STATIC"
         dynamic_line = "1.0e-1, 1.0, 1.0e-8, 1.0e-1"
     elif explicit_dynamic:
@@ -980,8 +1016,7 @@ def _write_calculix_input(
             "*SURFACE, NAME=GEAR21_MASTER, TYPE=ELEMENT",
             "GEAR21_SURF, SPOS",
             "*SURFACE INTERACTION, NAME=GEAR_CONTACT",
-            pressure_keyword,
-            pressure_line,
+            *pressure_lines,
             contact_pair_keyword,
             "GEAR22_SLAVE, GEAR21_MASTER",
             "*BOUNDARY",
@@ -1031,10 +1066,12 @@ def _write_calculix_input(
             ]
         )
 
-    def _append_step(keyword: str, line: str, *, amplitude: str, angle: float, include_velocity: bool) -> None:
+    def _append_step(keyword: str, line: str, *, amplitude: str, angle: float, include_velocity: bool, restart_write: bool = False) -> None:
         lines.extend(["*STEP, NLGEOM, INC=1000000", keyword, line, f"*BOUNDARY, AMPLITUDE={amplitude}"])
         _append_motion_boundary(angle)
         _append_print_requests(include_velocity)
+        if restart_write:
+            lines.append("*RESTART, WRITE, FREQUENCY=1")
         lines.append("*END STEP")
 
     if analysis == "preload-dynamic":
@@ -1051,7 +1088,14 @@ def _write_calculix_input(
         _append_step(dynamic_keyword, dynamic_line, amplitude="ROTAMP", angle=total_rotation, include_velocity=True)
     else:
         lines.extend(["*AMPLITUDE, NAME=ROTAMP", f"0.0, 0.0, {duration:.12e}, 1.0"])
-        _append_step(dynamic_keyword, dynamic_line, amplitude="ROTAMP", angle=total_rotation, include_velocity=analysis != "static-preload")
+        _append_step(
+            dynamic_keyword,
+            dynamic_line,
+            amplitude="ROTAMP",
+            angle=total_rotation,
+            include_velocity=analysis not in {"static-preload", "preload-restart-dynamic"},
+            restart_write=write_restart,
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     return {
@@ -1092,6 +1136,95 @@ def _write_calculix_input(
         "analysis": analysis,
         "preload_rotation": preload_rotation,
         "contact_adjust": contact_adjust or "",
+        "restart_write": str(write_restart).lower(),
+    }
+
+
+def _write_calculix_restart_input(
+    path: Path,
+    model: RecurDynGearModel,
+    *,
+    duration: float,
+    dt: float,
+    output_every: int,
+    rotation_axis: str,
+    direct_dynamic: bool,
+    explicit_dynamic: bool,
+    drive_mode: str,
+    preload_rotation: float,
+) -> dict[str, Any]:
+    """Write the dynamic restart step following a completed preload job."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rigid_node_offset = 200000
+    ref_node = 900001
+    rot_node = 900002
+    axis_dof = _axis_index(rotation_axis)
+    axis = _axis_vector(rotation_axis)
+    ref_point = np.asarray([20.9136192988016, 0.503589451286037, 1.36499444260163], dtype=float)
+    rigid_node_ids = [rigid_node_offset + i + 1 for i in range(model.rigid_surface.nodes_global.shape[0])]
+    total_rotation = preload_rotation + model.angular_velocity * duration
+    preload_fraction = preload_rotation / total_rotation if abs(total_rotation) > 1.0e-30 else 0.0
+
+    if explicit_dynamic:
+        dynamic_keyword = "*DYNAMIC, DIRECT, EXPLICIT"
+        dynamic_line = f"{dt:.12e}, {duration:.12e}"
+    else:
+        dynamic_keyword = "*DYNAMIC, DIRECT" if direct_dynamic else "*DYNAMIC"
+        dynamic_line = f"{dt:.12e}, {duration:.12e}" if direct_dynamic else f"{dt:.12e}, {duration:.12e}, {0.01 * dt:.12e}, {dt:.12e}"
+
+    lines: list[str] = [
+        "** Dynamic restart deck generated from the static preload job.",
+        "** Copy the preload .rout file to this job name as .rin before running ccx.",
+        "*RESTART, READ, STEP=1",
+        "*AMPLITUDE, NAME=ROTAMP",
+        f"0.0, {preload_fraction:.12e}, {duration:.12e}, 1.0",
+        "*STEP, NLGEOM, INC=1000000",
+        dynamic_keyword,
+        dynamic_line,
+        "*BOUNDARY, AMPLITUDE=ROTAMP",
+    ]
+
+    if drive_mode == "rigid-body":
+        lines.append(f"{rot_node}, {axis_dof}, {axis_dof}, {total_rotation:.12e}")
+    elif drive_mode == "prescribed-surface":
+        displacement_rows = _rigid_rotation_displacement(
+            model.rigid_surface.nodes_global,
+            center=ref_point,
+            axis=axis,
+            angle=total_rotation,
+        )
+        for node_id, displacement in zip(rigid_node_ids, displacement_rows):
+            ux, uy, uz = displacement
+            lines.append(f"{int(node_id)}, 1, 1, {ux:.12e}")
+            lines.append(f"{int(node_id)}, 2, 2, {uy:.12e}")
+            lines.append(f"{int(node_id)}, 3, 3, {uz:.12e}")
+
+    lines.extend(
+        [
+            f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}",
+            "U",
+            f"*NODE PRINT, NSET=GEAR22_NALL, FREQUENCY={output_every}",
+            "V",
+            f"*NODE PRINT, NSET=GEAR22_HUB, TOTALS=ONLY, GLOBAL=YES, FREQUENCY={output_every}",
+            "RF",
+            f"*CONTACT PRINT, FREQUENCY={output_every}",
+            "CDIS,CSTR,CELS",
+            f"*CONTACT PRINT, TOTALS=ONLY, FREQUENCY={output_every}",
+            "CELS,CNUM",
+            f"*EL PRINT, ELSET=GEAR22_SOLID, FREQUENCY={output_every}",
+            "S,E",
+            "*END STEP",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "restart_inp_path": str(path),
+        "restart_duration": duration,
+        "restart_dt": dt,
+        "restart_total_rotation": total_rotation,
+        "restart_output_every": output_every,
+        "restart_dynamic_keyword": dynamic_keyword,
     }
 
 
@@ -1143,6 +1276,31 @@ def _run_calculix(inp_path: Path, log_path: Path, *, timeout: int) -> Row:
         "wall_time_seconds": elapsed,
         "stdout_tail": "\n".join(stdout.splitlines()[-20:]),
         "stderr_tail": "\n".join(stderr.splitlines()[-20:]),
+    }
+
+
+def _combine_restart_run_rows(preload: Row, restart: Row | None, *, restart_file_copied: bool) -> Row:
+    preload_return = int(preload.get("return_code", -1))
+    restart_return = int(restart.get("return_code", -1)) if restart is not None else preload_return
+    timed_out = str(preload.get("timed_out", "false")).lower() == "true"
+    if restart is not None:
+        timed_out = timed_out or str(restart.get("timed_out", "false")).lower() == "true"
+    return {
+        "command": preload.get("command", "") + (" && " + str(restart.get("command", "")) if restart is not None else ""),
+        "return_code": restart_return,
+        "timed_out": str(timed_out).lower(),
+        "wall_time_seconds": float(preload.get("wall_time_seconds", 0.0))
+        + (float(restart.get("wall_time_seconds", 0.0)) if restart is not None else 0.0),
+        "stdout_tail": "PRELOAD:\n"
+        + str(preload.get("stdout_tail", ""))
+        + ("\n\nRESTART:\n" + str(restart.get("stdout_tail", "")) if restart is not None else "\n\nRESTART: not run"),
+        "stderr_tail": "PRELOAD:\n"
+        + str(preload.get("stderr_tail", ""))
+        + ("\n\nRESTART:\n" + str(restart.get("stderr_tail", "")) if restart is not None else "\n\nRESTART: not run"),
+        "preload_return_code": preload_return,
+        "restart_return_code": restart_return if restart is not None else "",
+        "restart_file_copied": str(restart_file_copied).lower(),
+        "restart_attempted": str(restart is not None).lower(),
     }
 
 
@@ -1462,14 +1620,18 @@ def _write_markdown(
         "## CalculiX run",
         "",
         f"- Input deck: `{_display(Path(generation['inp_path']))}`",
+        f"- Restart dynamic deck: `{_display(Path(str(generation.get('restart_inp_path', generation['inp_path']))))}`" if generation.get("restart_inp_path") else "- Restart dynamic deck: not used",
+        f"- Analysis mode: {generation['analysis']}",
         f"- Duration: {generation['duration']} s",
         f"- Time step request: {generation['dt']} s",
         f"- Output frequency: every {generation['output_every']} increments",
         f"- Rotation axis: {generation['rotation_axis']}",
         f"- Rigid surface drive mode: {generation['drive_mode']}",
         f"- Slave surface mode: {generation['slave_surface_mode']}",
+        f"- Contact law proxy: {generation['contact_law']}",
         f"- Effective CalculiX contact stiffness: {float(generation['effective_contact_stiffness']):.6e}",
         f"- Total prescribed rigid gear rotation: {generation['total_rotation']} rad",
+        f"- Restart target total rotation: {generation.get('restart_total_rotation', 'not used')} rad",
         f"- CalculiX completed: {str(run_completed).lower()}",
     ]
     if run_row is not None:
@@ -1519,12 +1681,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rmd", type=Path, default=ROOT / "assets" / "jiandanjiaolian.rmd")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "recurdyn_gear_calculix")
     parser.add_argument("--duration", type=float, default=1.0)
-    parser.add_argument("--dt", type=float, default=0.001)
-    parser.add_argument("--output-every", type=int, default=10)
-    parser.add_argument("--analysis", choices=["dynamic", "static-preload", "preload-dynamic"], default="dynamic")
+    parser.add_argument("--dt", type=float, default=0.0005)
+    parser.add_argument("--output-every", type=int, default=20)
+    parser.add_argument("--analysis", choices=["dynamic", "static-preload", "preload-dynamic", "preload-restart-dynamic"], default="dynamic")
     parser.add_argument("--preload-rotation", type=float, default=0.0)
     parser.add_argument("--rotation-axis", choices=["x", "y", "z"], default="x")
-    parser.add_argument("--contact-law", choices=["linear", "exponential"], default="linear")
+    parser.add_argument("--contact-law", choices=["linear", "exponential", "tabular"], default="linear")
     parser.add_argument(
         "--contact-stiffness-scale",
         type=float,
@@ -1595,6 +1757,7 @@ def main(argv: list[str] | None = None) -> int:
     init_plot = _write_contact_initialization_plot(out_dir / "figures" / "contact_initialization.png", init_rows)
 
     inp_path = out_dir / "jiandanjiaolian_calculix_1s.inp"
+    is_restart_strategy = args.analysis == "preload-restart-dynamic"
     generation = _write_calculix_input(
         inp_path,
         model,
@@ -1611,13 +1774,45 @@ def main(argv: list[str] | None = None) -> int:
         analysis=args.analysis,
         preload_rotation=args.preload_rotation,
         contact_adjust=args.contact_adjust,
+        write_restart=is_restart_strategy,
     )
+    restart_inp_path: Path | None = None
+    if is_restart_strategy:
+        restart_inp_path = out_dir / "jiandanjiaolian_calculix_1s_restart.inp"
+        restart_generation = _write_calculix_restart_input(
+            restart_inp_path,
+            model,
+            duration=duration,
+            dt=args.dt,
+            output_every=output_every,
+            rotation_axis=args.rotation_axis,
+            direct_dynamic=not args.automatic_increment,
+            explicit_dynamic=args.explicit,
+            drive_mode=args.drive_mode,
+            preload_rotation=args.preload_rotation,
+        )
+        generation.update(restart_generation)
 
     run_row: Row | None = None
     if not args.skip_calculix and not args.gap_diagnostic_only:
-        run_row = _run_calculix(inp_path, out_dir / "logs" / "calculix_run.log", timeout=args.timeout)
+        if is_restart_strategy and restart_inp_path is not None:
+            preload_row = _run_calculix(inp_path, out_dir / "logs" / "calculix_preload_run.log", timeout=args.timeout)
+            restart_row: Row | None = None
+            restart_file_copied = False
+            if int(preload_row.get("return_code", -1)) == 0:
+                rout_path = inp_path.with_suffix(".rout")
+                rin_path = restart_inp_path.with_suffix(".rin")
+                if rout_path.exists():
+                    shutil.copyfile(rout_path, rin_path)
+                    restart_file_copied = True
+                    restart_row = _run_calculix(restart_inp_path, out_dir / "logs" / "calculix_restart_run.log", timeout=args.timeout)
+            run_row = _combine_restart_run_rows(preload_row, restart_row, restart_file_copied=restart_file_copied)
+        else:
+            run_row = _run_calculix(inp_path, out_dir / "logs" / "calculix_run.log", timeout=args.timeout)
 
     dat_path = inp_path.with_suffix(".dat")
+    if restart_inp_path is not None and restart_inp_path.with_suffix(".dat").exists():
+        dat_path = restart_inp_path.with_suffix(".dat")
     frame_rows = _export_vtk_frames(out_dir, model, dat_path, max_frames=args.max_vtk_frames)
     preview = _write_preview_png(out_dir / "figures" / "recurdyn_gear_surface_preview.png", model, frame_rows)
     totals = _parse_totals(dat_path) if dat_path.exists() else {}

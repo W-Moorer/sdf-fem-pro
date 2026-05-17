@@ -19,13 +19,15 @@ python validation/run_recurdyn_gear_calculix.py --rmd assets/jiandanjiaolian.rmd
 Important options:
 
 - `--duration 1.0`
-- `--dt 0.001`
+- `--dt 0.0005` by default; use smaller values for expensive dynamic checks
+- `--output-every 20` by default; lower output frequency keeps `.dat` and VTK generation manageable
 - `--drive-mode rigid-body|prescribed-surface|fixed`
 - `--slave-surface-mode node|element-face`
 - `--automatic-increment`
 - `--explicit`
 - `--contact-stiffness-scale`
-- `--analysis dynamic|static-preload|preload-dynamic`
+- `--analysis dynamic|static-preload|preload-dynamic|preload-restart-dynamic`
+- `--contact-law linear|exponential|tabular`
 - `--contact-adjust VALUE`
 - `--contact-init-distance VALUE`
 
@@ -105,6 +107,24 @@ Two-step preload-to-dynamic smoke:
 python validation/run_recurdyn_gear_calculix.py --analysis preload-dynamic --duration 0.002 --dt 0.001 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --gap-candidate-count 16 --output-every 1 --out-dir results/recurdyn_gear_preload_dynamic_smoke --timeout 450 --max-vtk-frames 8
 ```
 
+Restart preload-to-dynamic deck check with reduced output frequency and tabular contact-law proxy:
+
+```bash
+python validation/run_recurdyn_gear_calculix.py --quick --skip-calculix --analysis preload-restart-dynamic --duration 0.0005 --dt 0.0005 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --contact-law tabular --gap-candidate-count 16 --output-every 20 --out-dir results/recurdyn_gear_restart_tabular_deck_check --max-vtk-frames 4
+```
+
+Small-step same-job linear preload-to-dynamic smoke:
+
+```bash
+python validation/run_recurdyn_gear_calculix.py --analysis preload-dynamic --duration 0.001 --dt 0.0005 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --contact-law linear --gap-candidate-count 16 --output-every 20 --out-dir results/recurdyn_gear_dynamic_strategy_linear_dt0005_smoke --timeout 300 --max-vtk-frames 4
+```
+
+Small-step exponential-law smoke:
+
+```bash
+python validation/run_recurdyn_gear_calculix.py --analysis preload-dynamic --duration 0.0005 --dt 0.0005 --automatic-increment --drive-mode prescribed-surface --slave-surface-mode element-face --contact-stiffness-scale 0.04522388059701491 --contact-law exponential --gap-candidate-count 16 --output-every 20 --out-dir results/recurdyn_gear_dynamic_strategy_exponential_dt0005_smoke --timeout 300 --max-vtk-frames 4
+```
+
 Rigid-body two-step preload-to-dynamic smoke:
 
 ```bash
@@ -178,9 +198,22 @@ The least-squares proxy slope corresponds to `--contact-stiffness-scale 0.045223
 | Unsigned-distance + RecurDyn-law initialization | Passed as a diagnostic. It found 153 candidates inside `BPEN=0.01 mm`, recommends `static_preload_then_dynamic_restart`, and does not recommend `CONTACT ADJUST`. |
 | Two-step preload-to-dynamic smoke | Passed for `T=0.002s`. It completed the static preload step and two dynamic increments, and generated 8 `.dat`-derived VTK frames. The dynamic step is still an engineering prescribed-surface mapping, and the energy output must be treated as a diagnostic rather than final validation evidence. |
 | Rigid-body two-step preload-to-dynamic smoke | Failed in CalculiX with `*ERROR in add_sm_st: coefficient should be 0`; the faithful rigid-body contact/MPC mapping is blocked for this model. |
+| Same-job `dt=0.0005` linear preload-to-dynamic smoke | Static preload completed, but the first dynamic increment did not complete within 300 s. The `.cvg` log showed roughly 19k contact elements during dynamic convergence. |
+| `dt=0.0005` exponential contact-law smoke | The deck was syntactically generated, but the actual CalculiX run stalled during static preload within 300 s. This law is therefore not currently preferred for this model. |
+| `preload-restart-dynamic` deck path | Implemented as two CalculiX jobs: a static preload deck with `*RESTART, WRITE, FREQUENCY=1`, followed by a restart dynamic deck with `*RESTART, READ, STEP=1`. The runner copies the preload `.rout` to the restart job `.rin` before launching the dynamic job. |
+| `preload-restart-dynamic`, `dt=0.0005`, linear law smoke | The preload job completed and the `.rout` file was copied to the restart `.rin`. The restart dynamic job started and advanced to about `3.1875e-4 s` of the requested `5e-4 s`, then hit the 300 s restart timeout. With `--output-every 20`, no dynamic `.dat` frame was produced before timeout. |
 | Dynamic smoke with `CONTACT PAIR ADJUST=0.0` | Timed out at 450 s. It produced partial VTK/contact rows but only advanced to about `6.37e-4 s` of a `0.002 s` target, so CalculiX-side adjustment of local overclosure-side samples alone does not make the transient acceptable. |
 | Dynamic 1 s with fitted law | Still timed out at 300 s; impact rules forced maximum increment to 1e-5 near the first contact increment. |
 | Requested 1 s run | Timed out at 300 s. It generated one real `.dat`-derived VTK frame, but did not complete the requested 1 s interval. |
+
+Current dynamic strategy decision:
+
+- Use `--dt 0.0005` or smaller for follow-up dynamic trials.
+- Use `--output-every 20` or larger unless dense field output is explicitly required.
+- Keep `--slave-surface-mode element-face` so the validation remains face-to-face contact.
+- Prefer the linear fitted proxy first because the exponential proxy stalled during preload.
+- The tabular pressure-overclosure law is available as a RecurDyn `KORDER` proxy deck-generation option; it must be accepted by CalculiX on this model before it is used as validation evidence.
+- Prefer `--analysis preload-restart-dynamic` for long dynamic attempts because it separates accepted preload state generation from the transient contact solve.
 
 Generated partial VTK evidence:
 

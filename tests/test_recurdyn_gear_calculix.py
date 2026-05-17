@@ -56,7 +56,9 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
             "--slave-surface-mode",
             "element-face",
             "--analysis",
-            "preload-dynamic",
+            "preload-restart-dynamic",
+            "--contact-law",
+            "tabular",
             "--contact-adjust",
             "0.0",
             "--out-dir",
@@ -73,6 +75,7 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
 
     expected = [
         "jiandanjiaolian_calculix_1s.inp",
+        "jiandanjiaolian_calculix_1s_restart.inp",
         "recurdyn_gear_calculix_summary.csv",
         "recurdyn_gear_calculix_metadata.csv",
         "recurdyn_gear_calculix_vtk_frames.csv",
@@ -100,12 +103,17 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
     assert "*ELEMENT, TYPE=S3, ELSET=GEAR21_SURF" in deck
     assert "*SURFACE, NAME=GEAR22_SLAVE, TYPE=ELEMENT" in deck
     assert "*CONTACT PAIR, INTERACTION=GEAR_CONTACT, TYPE=SURFACE TO SURFACE, ADJUST=0.0" in deck
-    assert deck.count("*STEP, NLGEOM") == 2
+    assert "*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=TABULAR" in deck
+    assert deck.count("*STEP, NLGEOM") == 1
     assert "*STATIC" in deck
-    assert "*DYNAMIC" in deck
-    assert "*AMPLITUDE, NAME=PRELOADAMP" in deck
+    assert "*RESTART, WRITE, FREQUENCY=1" in deck
     assert "*EL PRINT, ELSET=GEAR22_SOLID" in deck
     assert "S,E" in deck
+    restart_deck = (out_dir / "jiandanjiaolian_calculix_1s_restart.inp").read_text(encoding="utf-8")
+    assert "*RESTART, READ, STEP=1" in restart_deck
+    assert "*DYNAMIC" in restart_deck
+    assert "*NODE PRINT, NSET=GEAR22_NALL" in restart_deck
+    assert "V" in restart_deck
 
     metadata = {row["key"]: row["value"] for row in _rows(out_dir / "recurdyn_gear_calculix_metadata.csv")}
     assert metadata["flexible_nodes"] == "13630"
@@ -114,7 +122,10 @@ def test_recurdyn_gear_runner_quick_generates_calculix_deck_and_vtk(tmp_path: Pa
     assert metadata["slave_surface_mode"] == "element-face"
     assert metadata["rigid_surface_marker_id"] == "12"
     assert metadata["rigid_surface_marker_part_id"] == "3"
-    assert metadata["analysis"] == "preload-dynamic"
+    assert metadata["analysis"] == "preload-restart-dynamic"
+    assert metadata["contact_law"] == "tabular"
+    assert metadata["restart_write"] == "true"
+    assert metadata["restart_inp_path"].endswith("jiandanjiaolian_calculix_1s_restart.inp")
     assert metadata["contact_adjust"] == "0.0"
     assert metadata["run_completed"] == "False"
 
