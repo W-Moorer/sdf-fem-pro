@@ -251,6 +251,7 @@ def run_validation(
     quadrature_order: int = 7,
     sdf_spacing_scale: float = 0.25,
     sfc_max_iterations: int = 4,
+    closure_steps: int = 11,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     configs = [
@@ -276,6 +277,8 @@ def run_validation(
             sfc_max_iterations=sfc_max_iterations,
             batch_projection_threshold=threshold,
             case_names=(case_name,),
+            closure_steps=closure_steps,
+            preserve_quick_closure_steps=True,
         )
         timing = _read_csv(outputs["timing"])[0]
         history = _read_csv(outputs["sfc_history"])
@@ -285,6 +288,7 @@ def run_validation(
                 "backend_label": label,
                 "problem": case_name,
                 "quick": str(quick).lower(),
+                "closure_steps": int(closure_steps),
                 "sfc_backend": backend,
                 "batch_projection_threshold": threshold,
                 "sfc_total_wall_seconds": _float(timing, "sfc_total_wall_seconds"),
@@ -333,6 +337,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quadrature-order", type=int, choices=(1, 3, 7), default=7)
     parser.add_argument("--sdf-spacing-scale", type=float, default=0.25)
     parser.add_argument("--sfc-max-iterations", type=int, default=4)
+    parser.add_argument("--closure-steps", type=int, default=11)
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "native_contact_backend_ablation")
     return parser.parse_args()
 
@@ -346,6 +351,7 @@ def main() -> None:
         quadrature_order=int(args.quadrature_order),
         sdf_spacing_scale=float(args.sdf_spacing_scale),
         sfc_max_iterations=int(args.sfc_max_iterations),
+        closure_steps=int(args.closure_steps),
     )
     print("Native contact backend ablation complete.")
     for key, value in outputs.items():

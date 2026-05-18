@@ -249,6 +249,7 @@ def _calibrated_case(
     sfc_relaxation: float = 0.55,
     sfc_max_iterations: int = 15,
     batch_projection_threshold: int = 5_000_000,
+    closure_steps: int = 21,
 ) -> NativeContactCase:
     if not (0.0 < float(sfc_relaxation) <= 1.0):
         raise ValueError("sfc_relaxation must be in (0, 1]")
@@ -265,14 +266,16 @@ def _calibrated_case(
         padding=case.band_radius_mm,
         cell_size=spacing,
     )
+    n_closures = max(2, int(closure_steps))
+    closure_factors = tuple(float(value) for value in np.linspace(1.0 / float(n_closures), 1.0, n_closures))
     if case.problem == "problem_4":
         target_closure = _linear_compression_reference(case, float(case.reference_loads_N[-1]))
         target_load = float(case.reference_loads_N[-1])
-        closures = tuple(float(target_closure) * factor for factor in (0.25, 0.5, 0.75, 1.0))
+        closures = tuple(float(target_closure) * factor for factor in closure_factors)
     else:
         target_closure = float(case.reference_metric_value)
         target_load = float(case.reference_loads_N[-1])
-        closures = tuple(float(target_closure) * factor for factor in (0.25, 0.5, 0.75, 1.0))
+        closures = tuple(float(target_closure) * factor for factor in closure_factors)
     integral = _driver_penetration_integral(
         case,
         driver,
@@ -909,7 +912,7 @@ def _plot_native_contact_outputs(
                 x_vals = np.asarray([float(row["closure_mm"]) for row in rows], dtype=float)
                 sfc_vals = np.asarray([float(row["sfc_displacement_l2_norm"]) for row in rows], dtype=float)
                 calc_vals = np.asarray([float(row["calculix_displacement_l2_norm"]) for row in rows], dtype=float)
-                max_err = max(float(row["displacement_l2_rel_error"]) for row in rows)
+                curve_err = float(np.linalg.norm(sfc_vals - calc_vals) / max(float(np.linalg.norm(calc_vals)), 1.0e-30))
                 ax.plot(
                     x_vals,
                     calc_vals,
@@ -927,7 +930,7 @@ def _plot_native_contact_outputs(
                     linestyle="--",
                     marker="s",
                     markersize=4.0,
-                    label=f"SFC dynamic SDF (max err. {100.0 * max_err:.2f}%)",
+                    label=f"SFC dynamic SDF (curve err. {100.0 * curve_err:.2f}%)",
                 )
                 ax.set_title(display_names.get(problem, problem), pad=28)
                 ax.set_xlabel("Closure (mm)")
@@ -1035,6 +1038,8 @@ def run_validation(
     sfc_max_iterations: int = 15,
     batch_projection_threshold: int = 5_000_000,
     case_names: tuple[str, ...] | None = None,
+    closure_steps: int = 21,
+    preserve_quick_closure_steps: bool = False,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     command_rows: list[Row] = []
@@ -1059,8 +1064,9 @@ def run_validation(
             sfc_relaxation=sfc_relaxation,
             sfc_max_iterations=sfc_max_iterations,
             batch_projection_threshold=batch_projection_threshold,
+            closure_steps=closure_steps,
         )
-        if quick:
+        if quick and not preserve_quick_closure_steps:
             native = replace(native, closures=(native.closures[1], native.closures[-1]))
         sfc_rows = _solve_sfc_trajectory(native)
         sfc_rows_all.extend(_json_safe_rows(sfc_rows))
@@ -1203,6 +1209,17 @@ def parse_args() -> argparse.Namespace:
         choices=("problem_1", "problem_3", "problem_4"),
         help="Limit the native-contact run to one benchmark-style problem. May be repeated.",
     )
+    parser.add_argument(
+        "--closure-steps",
+        type=int,
+        default=21,
+        help="Number of formal quasi-static closure/load steps. Quick mode still keeps two representative steps.",
+    )
+    parser.add_argument(
+        "--preserve-quick-closure-steps",
+        action="store_true",
+        help="Keep --closure-steps even in quick mesh mode. Useful for reduced-mesh timing ablations.",
+    )
     return parser.parse_args()
 
 
@@ -1220,6 +1237,8 @@ def main() -> None:
         sfc_max_iterations=int(args.sfc_max_iterations),
         batch_projection_threshold=int(args.batch_projection_threshold),
         case_names=tuple(args.case) if args.case else None,
+        closure_steps=int(args.closure_steps),
+        preserve_quick_closure_steps=bool(args.preserve_quick_closure_steps),
     )
     print("Independent CalculiX/SFC native contact trajectory complete.")
     for key, value in outputs.items():
