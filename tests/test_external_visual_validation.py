@@ -24,8 +24,12 @@ def test_external_visual_validation_quick_outputs(tmp_path: Path) -> None:
         "external_pdf",
         "sdf_png",
         "sdf_pdf",
+        "quadrature_png",
+        "quadrature_pdf",
         "sdf_slice_csv",
         "sdf_samples_csv",
+        "quadrature_csv",
+        "quadrature_vtu",
         "summary",
     ]
     for key in required:
@@ -41,6 +45,7 @@ def test_external_visual_validation_quick_outputs(tmp_path: Path) -> None:
     summary = outputs["summary"].read_text(encoding="utf-8")
     assert "not used to prove the SDF acceleration claim" in summary
     assert "does not add a core CalculiX/Abaqus dependency" in summary
+    assert "surface-to-surface quadrature contact visualization" in summary
 
 
 def test_external_visual_validation_does_not_add_core_external_solver_dependency() -> None:

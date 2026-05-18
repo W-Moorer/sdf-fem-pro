@@ -25,6 +25,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
+from sfc.contact import triangle_surface_quadrature_cache  # noqa: E402
 from sfc.mesh import extract_boundary_triangles  # noqa: E402
 
 Row = dict[str, Any]
@@ -456,6 +457,10 @@ def _draw_3d_boundary_cloud(
     return collection
 
 
+def _panel_label(ax: Any, label: str) -> None:
+    ax.text2D(0.015, 0.965, label, transform=ax.transAxes, fontsize=10, fontweight="bold")
+
+
 def _plot_field_triptych(
     path_png: Path,
     path_pdf: Path,
@@ -484,7 +489,7 @@ def _plot_field_triptych(
     fig, axes = plt.subplots(
         len(fields),
         3,
-        figsize=(11.6, 12.6),
+        figsize=(11.6, 10.6),
         subplot_kw={"projection": "3d"},
         constrained_layout=False,
     )
@@ -513,9 +518,11 @@ def _plot_field_triptych(
                 title=label,
             )
             fig.colorbar(collection, ax=ax, shrink=0.56, pad=0.01, label=cbar_label)
-    fig.suptitle(f"External visual FEM validation (deformation scale {deformation_scale:g}x)", fontsize=12)
+            _panel_label(ax, chr(ord("a") + row * 3 + col))
+    fig.suptitle(f"External visual FEM validation (deformation scale {deformation_scale:g}x)", fontsize=12, y=0.985)
+    fig.subplots_adjust(left=0.02, right=0.975, top=0.955, bottom=0.02, wspace=0.035, hspace=0.085)
     path_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path_png, dpi=180, bbox_inches="tight")
+    fig.savefig(path_png, dpi=220, bbox_inches="tight")
     fig.savefig(path_pdf, bbox_inches="tight")
     plt.close(fig)
 
@@ -566,6 +573,18 @@ def _draw_3d_slice_surface(
     return surface
 
 
+def _bottom_boundary_triangles(mesh: HexMesh) -> np.ndarray:
+    boundary_triangles, _ = extract_boundary_triangles(mesh.cells, mesh.nodes, element_type="hex8")
+    bottom = [
+        face
+        for face in boundary_triangles
+        if np.all(np.isclose(mesh.nodes[np.asarray(face, dtype=np.int64), 2], 0.0))
+    ]
+    if not bottom:
+        raise RuntimeError("failed to find bottom boundary triangles for slave quadrature visualization")
+    return np.asarray(bottom, dtype=np.int64)
+
+
 def _plot_sdf_visualization(
     path_png: Path,
     path_pdf: Path,
@@ -602,7 +621,7 @@ def _plot_sdf_visualization(
     fig, axes = plt.subplots(
         2,
         2,
-        figsize=(10.4, 8.2),
+        figsize=(10.4, 7.2),
         subplot_kw={"projection": "3d"},
         constrained_layout=False,
     )
@@ -618,6 +637,7 @@ def _plot_sdf_visualization(
         cmap="coolwarm",
         title="Current FEM surface colored by interpolated gap",
     )
+    _panel_label(axes[0, 0], "a")
     fig.colorbar(gap_collection, ax=axes[0, 0], shrink=0.58, pad=0.02, label="gap")
 
     X_slice = coords[:, y_index, :, 0]
@@ -649,6 +669,7 @@ def _plot_sdf_visualization(
     )
     phi_mappable = plt.cm.ScalarMappable(norm=phi_norm, cmap="coolwarm")
     fig.colorbar(phi_mappable, ax=axes[0, 1], shrink=0.58, pad=0.02, label="phi")
+    _panel_label(axes[0, 1], "b")
 
     valid_norm = Normalize(vmin=0.0, vmax=1.0)
     _draw_reference_wireframe(axes[1, 0], current_surface, boundary_triangles)
@@ -665,6 +686,7 @@ def _plot_sdf_visualization(
     )
     valid_mappable = plt.cm.ScalarMappable(norm=valid_norm, cmap="viridis")
     fig.colorbar(valid_mappable, ax=axes[1, 0], shrink=0.58, pad=0.02, label="valid")
+    _panel_label(axes[1, 0], "c")
 
     ax = axes[1, 1]
     active = sample_pressure > 0.0
@@ -694,9 +716,11 @@ def _plot_sdf_visualization(
         linewidth=0.7,
     )
     fig.colorbar(pressure_collection, ax=ax, shrink=0.58, pad=0.02, label="pressure")
+    _panel_label(ax, "d")
 
     path_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path_png, dpi=180, bbox_inches="tight")
+    fig.subplots_adjust(left=0.01, right=0.98, top=0.96, bottom=0.01, wspace=0.00, hspace=-0.10)
+    fig.savefig(path_png, dpi=220, bbox_inches="tight")
     fig.savefig(path_pdf, bbox_inches="tight")
     plt.close(fig)
 
@@ -725,6 +749,154 @@ def _plot_sdf_visualization(
         for point, gap, pressure, normal in zip(current_bottom, sample_gap, sample_pressure, sample_normals, strict=True)
     ]
     return slice_rows, sample_rows
+
+
+def _plot_surface_quadrature_contact(
+    path_png: Path,
+    path_pdf: Path,
+    mesh: HexMesh,
+    sfc: VisualFields,
+    sdf: DynamicNarrowBandSDF,
+    *,
+    deformation_scale: float,
+) -> tuple[list[Row], np.ndarray, dict[str, np.ndarray]]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    _configure_times_fonts(matplotlib)
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    bottom_faces = _bottom_boundary_triangles(mesh)
+    cache = triangle_surface_quadrature_cache(bottom_faces, mesh.nodes, order=7)
+    X_actual = mesh.nodes + sfc.displacement
+    X_plot = mesh.nodes + deformation_scale * sfc.displacement
+    q_actual = cache.points(X_actual)
+    q_plot = cache.points(X_plot)
+    gaps = np.asarray([sdf.query_phi(point) for point in q_actual], dtype=float)
+    pressure = 600.0 * np.maximum(-gaps, 0.0)
+    active = pressure > 0.0
+    normals = np.asarray([sdf.query_gradient(point) for point in q_actual], dtype=float)
+    nrm = np.linalg.norm(normals, axis=1)
+    normals[nrm > 0.0] /= nrm[nrm > 0.0, None]
+
+    boundary_triangles, _ = extract_boundary_triangles(mesh.cells, mesh.nodes, element_type="hex8")
+    fig, axes = plt.subplots(2, 2, figsize=(10.8, 6.8), subplot_kw={"projection": "3d"})
+    axes = np.asarray(axes)
+
+    z0 = 0.0
+    plane_x = np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+    plane_y = np.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=float)
+    plane_z = np.full_like(plane_x, z0)
+
+    pressure_norm = Normalize(vmin=0.0, vmax=max(float(np.max(pressure)), 1.0e-14))
+    gap_norm = Normalize(vmin=float(np.min(gaps)), vmax=float(np.max(gaps)))
+    face_pressure = sfc.contact_pressure
+    face_norm = Normalize(vmin=0.0, vmax=max(float(np.max(face_pressure[boundary_triangles])), 1.0e-14))
+
+    panels = [
+        ("Slave surface and master SDF plane", None),
+        ("Seven-point triangle quadrature", None),
+        ("Quadrature gap", gap_norm),
+        ("Area-weighted contact pressure", pressure_norm),
+    ]
+    for idx, (title, _norm) in enumerate(panels):
+        ax = axes.ravel()[idx]
+        if idx == 0:
+            coll = _draw_3d_boundary_cloud(
+                ax,
+                mesh.nodes,
+                X_plot,
+                boundary_triangles,
+                face_pressure,
+                norm=face_norm,
+                cmap="cividis",
+                title=title,
+            )
+            ax.plot_surface(plane_x, plane_y, plane_z, color=(0.95, 0.95, 0.95, 0.70), edgecolor="black", linewidth=0.35, shade=False)
+            fig.colorbar(coll, ax=ax, shrink=0.55, pad=0.01, label="pressure")
+        else:
+            slave = Poly3DCollection(
+                [X_plot[face] for face in bottom_faces],
+                facecolors=(0.78, 0.82, 0.88, 0.62),
+                edgecolors=(0.05, 0.05, 0.05, 0.22),
+                linewidths=0.20,
+            )
+            ax.add_collection3d(slave)
+            ax.plot_surface(plane_x, plane_y, plane_z, color=(0.96, 0.96, 0.96, 0.78), edgecolor="black", linewidth=0.30, shade=False)
+            if idx == 1:
+                colors = np.where(active, "#d62728", "#1f77b4")
+                ax.scatter(q_plot[:, 0], q_plot[:, 1], q_plot[:, 2], c=colors, s=10, depthshade=False)
+                step = max(1, q_plot.shape[0] // 32)
+                ax.quiver(
+                    q_plot[::step, 0],
+                    q_plot[::step, 1],
+                    q_plot[::step, 2],
+                    normals[::step, 0],
+                    normals[::step, 1],
+                    normals[::step, 2],
+                    length=0.055,
+                    normalize=True,
+                    color="black",
+                    linewidth=0.55,
+                )
+            elif idx == 2:
+                sc = ax.scatter(q_plot[:, 0], q_plot[:, 1], q_plot[:, 2], c=gaps, cmap="coolwarm", norm=gap_norm, s=12, depthshade=False)
+                fig.colorbar(sc, ax=ax, shrink=0.55, pad=0.01, label="gap")
+            else:
+                sc = ax.scatter(q_plot[:, 0], q_plot[:, 1], q_plot[:, 2], c=pressure, cmap="turbo", norm=pressure_norm, s=12, depthshade=False)
+                fig.colorbar(sc, ax=ax, shrink=0.55, pad=0.01, label="pressure")
+            bounds = np.vstack([X_plot[bottom_faces].reshape(-1, 3), q_plot, np.column_stack([plane_x.ravel(), plane_y.ravel(), plane_z.ravel()])])
+            mins = np.min(bounds, axis=0)
+            maxs = np.max(bounds, axis=0)
+            padding = np.maximum(0.08 * (maxs - mins), 1.0e-4)
+            ax.set_xlim(float(mins[0] - padding[0]), float(maxs[0] + padding[0]))
+            ax.set_ylim(float(mins[1] - padding[1]), float(maxs[1] + padding[1]))
+            ax.set_zlim(float(mins[2] - padding[2]), float(maxs[2] + padding[2]))
+            ax.set_box_aspect((maxs - mins + 2.0 * padding).clip(min=1.0e-12))
+            ax.view_init(elev=24.0, azim=-54.0)
+            try:
+                ax.set_proj_type("ortho")
+            except AttributeError:
+                pass
+            ax.set_title(title, pad=0.0, fontsize=9)
+            ax.set_axis_off()
+        _panel_label(ax, chr(ord("a") + idx))
+
+    fig.suptitle("Surface-to-surface quadrature contact on the dynamic SDF field", fontsize=12, y=0.985)
+    fig.subplots_adjust(left=0.01, right=0.98, top=0.92, bottom=0.01, wspace=0.00, hspace=-0.16)
+    path_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path_png, dpi=220, bbox_inches="tight")
+    fig.savefig(path_pdf, bbox_inches="tight")
+    plt.close(fig)
+
+    rows = [
+        {
+            "sample_id": i,
+            "x": float(point[0]),
+            "y": float(point[1]),
+            "z": float(point[2]),
+            "gap": float(gap),
+            "contact_pressure": float(p),
+            "active_contact": int(a),
+            "area_weight": float(area),
+            "normal_x": float(normal[0]),
+            "normal_y": float(normal[1]),
+            "normal_z": float(normal[2]),
+        }
+        for i, (point, gap, p, a, area, normal) in enumerate(
+            zip(q_actual, gaps, pressure, active, cache.area_weights, normals, strict=True)
+        )
+    ]
+    point_data = {
+        "gap": gaps,
+        "contact_pressure": pressure,
+        "active_contact": active.astype(float),
+        "area_weight": cache.area_weights,
+        "normal": normals,
+    }
+    return rows, q_actual, point_data
 
 
 def _boundary_mask(points: np.ndarray) -> np.ndarray:
@@ -766,11 +938,13 @@ def _write_summary(path: Path, outputs: dict[str, Path], metrics: list[Row]) -> 
         [
             "",
             "`figures/external_visual_fields.png` renders SFC, generated-reference, and absolute-error fields on the deformed 3D boundary surface with matched SFC/reference color scales.",
+            "`figures/surface_to_surface_quadrature_contact.png` renders slave surface quadrature points, active samples, gaps, pressure, and scalar-gradient normals.",
             "",
             "## Claim Scope",
             "",
             "- Supports physical visual audit for the tested generated reference case.",
             "- Supports 3D SDF-field visualization of the current FEM surface, phi slice, narrow-band validity slice, contact pressure, and scalar-gradient normals.",
+            "- Supports surface-to-surface quadrature contact visualization as a diagnostic artifact.",
             "- Does not support friction, self-contact, nonlinear FEM as the main method, production BVH superiority, or external solver equivalence.",
         ]
     )
@@ -801,8 +975,12 @@ def run_validation(out_dir: Path, *, quick: bool = False) -> dict[str, Path]:
         "external_pdf": fig_dir / "external_visual_fields.pdf",
         "sdf_png": fig_dir / "dynamic_sdf_field_visualization.png",
         "sdf_pdf": fig_dir / "dynamic_sdf_field_visualization.pdf",
+        "quadrature_png": fig_dir / "surface_to_surface_quadrature_contact.png",
+        "quadrature_pdf": fig_dir / "surface_to_surface_quadrature_contact.pdf",
         "sdf_slice_csv": out_dir / "sdf_phi_slice.csv",
         "sdf_samples_csv": out_dir / "sdf_contact_samples.csv",
+        "quadrature_csv": out_dir / "surface_to_surface_quadrature_contact.csv",
+        "quadrature_vtu": vtk_dir / "surface_to_surface_quadrature_contact.vtu",
         "summary": out_dir / "external_visual_summary.md",
     }
 
@@ -866,6 +1044,15 @@ def run_validation(out_dir: Path, *, quick: bool = False) -> dict[str, Path]:
     )
     _write_csv(outputs["sdf_slice_csv"], slice_rows)
     _write_csv(outputs["sdf_samples_csv"], sample_rows)
+    quadrature_rows, quadrature_points, quadrature_point_data = _plot_surface_quadrature_contact(
+        outputs["quadrature_png"],
+        outputs["quadrature_pdf"],
+        mesh,
+        sfc,
+        sdf,
+        deformation_scale=deformation_scale,
+    )
+    _write_csv(outputs["quadrature_csv"], quadrature_rows)
     slice_points = np.asarray([[row["x"], row["y"], row["z"]] for row in slice_rows], dtype=float)
     _write_point_cloud_vtu(
         outputs["sdf_slice_vtu"],
@@ -886,6 +1073,7 @@ def run_validation(out_dir: Path, *, quick: bool = False) -> dict[str, Path]:
             "active_contact": np.asarray([row["active_contact"] for row in sample_rows], dtype=float),
         },
     )
+    _write_point_cloud_vtu(outputs["quadrature_vtu"], quadrature_points, quadrature_point_data)
     _write_summary(outputs["summary"], outputs, metrics)
     return outputs
 

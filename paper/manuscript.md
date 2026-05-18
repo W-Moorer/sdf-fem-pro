@@ -273,10 +273,11 @@ Figures:
 - `results/true_field_solver_timing_formal/figures/solver_step_timing_breakdown.png`
 - `results/true_field_solver_timing_formal/figures/solver_step_speedup.png`
 - `results/true_field_solver_timing_formal/figures/solver_query_crossover.png`
+- `results/native_contact_backend_ablation_quick/figures/backend_ablation_overview.png`
 - `results/native_contact_backend_ablation_quick/figures/backend_ablation_runtime.png`
 - `results/native_contact_backend_ablation_quick/figures/backend_ablation_endpoint_metrics.png`
 
-The backend ablation is a representative engineering decomposition, not an external-solver accuracy claim. It documents that the backend includes the preserved node-to-surface path, the scalar reference surface-to-surface quadrature path, the vectorized surface-to-surface path, and the grouped field-construction path retained for larger candidate sets.
+The backend ablation is a representative engineering decomposition, not an external-solver accuracy claim. It documents that the backend includes the preserved node-to-surface path, the scalar reference surface-to-surface quadrature path, the vectorized surface-to-surface path, and the grouped field-construction path retained for larger candidate sets. The paper-facing overview figure places legends outside the axes so timing bars and endpoint-difference bars remain unobstructed.
 
 ### 7.7 External Visual FEM Validation
 
@@ -303,6 +304,7 @@ Figures:
 
 - `results/external_visual/figures/external_visual_fields.png` renders SFC, generated reference, and absolute error on the deformed 3D boundary surface.
 - `results/external_visual/figures/dynamic_sdf_field_visualization.png` renders the current FEM boundary, SDF phi slice, validity slice, and contact-pressure surface in 3D.
+- `results/external_visual/figures/surface_to_surface_quadrature_contact.png` renders the slave surface, master SDF plane, seven-point quadrature samples, interpolated gaps, contact pressure, and normals.
 
 ## 8. Scope of Claims
 

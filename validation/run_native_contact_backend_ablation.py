@@ -75,7 +75,13 @@ def _plot_ablation(out_dir: Path, rows: list[Row]) -> dict[str, Path]:
     figures = out_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     outputs: dict[str, Path] = {}
-    labels = [str(row["backend_label"]) for row in rows]
+    label_map = {
+        "node_to_surface": "node-to-surface\ncentroid",
+        "surface_to_surface_reference": "reference\nsurface-to-surface",
+        "surface_to_surface_vectorized": "vectorized\nsurface-to-surface",
+        "surface_to_surface_vectorized_grouped_projection": "vectorized + batch\nprojection build",
+    }
+    labels = [label_map.get(str(row["backend_label"]), str(row["backend_label"])) for row in rows]
     x = np.arange(len(labels), dtype=float)
 
     field = np.asarray([_float(row, "sfc_field_update_total_seconds") for row in rows], dtype=float)
@@ -83,24 +89,31 @@ def _plot_ablation(out_dir: Path, rows: list[Row]) -> dict[str, Path]:
     solve = np.asarray([_float(row, "sfc_linear_solve_total_seconds") for row in rows], dtype=float)
     other = np.asarray([_float(row, "sfc_other_total_seconds") for row in rows], dtype=float)
 
-    fig, ax = plt.subplots(figsize=(8.0, 4.2))
+    colors = {
+        "field update": "#4c78a8",
+        "query/contact": "#72b7b2",
+        "linear solve": "#f58518",
+        "other": "#b279a2",
+    }
+
+    fig, ax = plt.subplots(figsize=(8.6, 4.3))
     bottom = np.zeros_like(x)
-    for values, label, color in [
-        (field, "field update", "#4c78a8"),
-        (query, "query/contact", "#72b7b2"),
-        (solve, "linear solve", "#f58518"),
-        (other, "other", "#b279a2"),
+    for values, label in [
+        (field, "field update"),
+        (query, "query/contact"),
+        (solve, "linear solve"),
+        (other, "other"),
     ]:
-        ax.bar(x, values, bottom=bottom, label=label, color=color)
+        ax.bar(x, values, bottom=bottom, label=label, color=colors[label])
         bottom += values
     ax.set_yscale("log")
     ax.set_ylabel("SFC wall time (s)")
     ax.set_xlabel("Backend")
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=25, ha="right")
+    ax.set_xticklabels(labels, rotation=0, ha="center")
     ax.grid(True, axis="y", which="both", alpha=0.30)
-    ax.legend(fontsize=8)
-    fig.tight_layout()
+    ax.legend(fontsize=8, ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.02), frameon=False)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     png = figures / "backend_ablation_runtime.png"
     pdf = figures / "backend_ablation_runtime.pdf"
     fig.savefig(png, dpi=180)
@@ -114,7 +127,7 @@ def _plot_ablation(out_dir: Path, rows: list[Row]) -> dict[str, Path]:
     strain = [_float(row, "endpoint_strain_norm_rel_diff") for row in rows]
     min_gap = [abs(_float(row, "endpoint_min_gap_abs_diff")) for row in rows]
     width = 0.20
-    fig, ax = plt.subplots(figsize=(8.0, 4.2))
+    fig, ax = plt.subplots(figsize=(8.6, 4.3))
     for offset, values, label in [
         (-1.5, disp, "|u| norm"),
         (-0.5, vm, "VM max"),
@@ -126,10 +139,10 @@ def _plot_ablation(out_dir: Path, rows: list[Row]) -> dict[str, Path]:
     ax.set_ylabel("Endpoint difference vs reference surface quadrature")
     ax.set_xlabel("Backend")
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=25, ha="right")
+    ax.set_xticklabels(labels, rotation=0, ha="center")
     ax.grid(True, axis="y", which="both", alpha=0.30)
-    ax.legend(fontsize=8)
-    fig.tight_layout()
+    ax.legend(fontsize=8, ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.02), frameon=False)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     png = figures / "backend_ablation_endpoint_metrics.png"
     pdf = figures / "backend_ablation_endpoint_metrics.pdf"
     fig.savefig(png, dpi=180)
@@ -137,6 +150,56 @@ def _plot_ablation(out_dir: Path, rows: list[Row]) -> dict[str, Path]:
     plt.close(fig)
     outputs["endpoint_png"] = png
     outputs["endpoint_pdf"] = pdf
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.6, 4.2))
+    bottom = np.zeros_like(x)
+    for values, label in [
+        (field, "field update"),
+        (query, "query/contact"),
+        (solve, "linear solve"),
+        (other, "other"),
+    ]:
+        axes[0].bar(x, values, bottom=bottom, label=label, color=colors[label])
+        bottom += values
+    axes[0].set_yscale("log")
+    axes[0].set_ylabel("SFC wall time (s)")
+    axes[0].set_title("(a) Runtime decomposition", loc="left", fontsize=10, fontweight="bold")
+    axes[0].grid(True, axis="y", which="both", alpha=0.30)
+
+    for offset, values, label in [
+        (-1.5, disp, "|u| norm"),
+        (-0.5, vm, "VM max"),
+        (0.5, strain, "strain max"),
+        (1.5, min_gap, "min gap"),
+    ]:
+        axes[1].bar(x + offset * width, values, width, label=label)
+    axes[1].set_yscale("symlog", linthresh=1.0e-14)
+    axes[1].set_ylabel("Endpoint difference")
+    axes[1].set_title("(b) Difference from reference surface-to-surface", loc="left", fontsize=10, fontweight="bold")
+    axes[1].grid(True, axis="y", which="both", alpha=0.30)
+    for ax in axes:
+        ax.set_xlabel("Backend")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=8)
+    handles0, labels0 = axes[0].get_legend_handles_labels()
+    handles1, labels1 = axes[1].get_legend_handles_labels()
+    fig.legend(
+        handles0 + handles1,
+        labels0 + labels1,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.99),
+        ncol=4,
+        fontsize=8,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88))
+    png = figures / "backend_ablation_overview.png"
+    pdf = figures / "backend_ablation_overview.pdf"
+    fig.savefig(png, dpi=220, bbox_inches="tight")
+    fig.savefig(pdf, bbox_inches="tight")
+    plt.close(fig)
+    outputs["overview_png"] = png
+    outputs["overview_pdf"] = pdf
     return outputs
 
 

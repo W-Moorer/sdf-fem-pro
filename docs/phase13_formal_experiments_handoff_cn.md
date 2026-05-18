@@ -132,6 +132,7 @@ python validation/run_native_contact_backend_ablation.py --quick --case problem_
 关键输出：
 
 - `results/native_contact_backend_ablation_quick/backend_ablation.csv`
+- `results/native_contact_backend_ablation_quick/figures/backend_ablation_overview.png`
 - `results/native_contact_backend_ablation_quick/figures/backend_ablation_runtime.png`
 - `results/native_contact_backend_ablation_quick/figures/backend_ablation_endpoint_metrics.png`
 

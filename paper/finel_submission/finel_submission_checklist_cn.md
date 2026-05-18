@@ -40,7 +40,7 @@
 - `paper/finel_submission/declaration_of_competing_interest.txt`
 - `paper/finel_submission/funding_statement.txt`
 - `paper/finel_submission/generative_ai_statement.txt`
-- 独立图件：`results/true_sdf_final/figures/*.pdf`, `results/external_visual/figures/*.pdf`, `results/true_field_solver_timing_formal/figures/*.pdf`
+- 独立图件：`results/true_sdf_final/figures/*.pdf`, `results/external_visual/figures/*.pdf`, `results/true_field_solver_timing_formal/figures/*.pdf`, `results/native_contact_backend_ablation_quick/figures/backend_ablation_overview.pdf`
 
 ## FINEL 口径
 

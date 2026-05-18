@@ -337,8 +337,8 @@ Finally, a backend ablation separates the preserved node-to-surface path from th
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.82\linewidth]{backend_ablation_runtime.png}
-  \caption{Representative backend ablation for node-to-surface, reference surface-to-surface, vectorized surface-to-surface, and forced grouped field construction. This figure documents backend layering and engineering cost; it does not replace the native CalculiX agreement table.}
+  \includegraphics[width=0.96\linewidth]{backend_ablation_overview.png}
+  \caption{Representative backend ablation for node-to-surface sampling, reference surface-to-surface quadrature, vectorized surface-to-surface quadrature, and vectorized field contact with forced batch projection during field construction. The legend is placed outside the axes so the timing bars and endpoint-difference bars remain unobstructed.}
 \end{figure}
 
 \subsection{External Visual FEM Validation}
@@ -392,6 +392,12 @@ Contact-force relative error & \(8.775744\times10^{-3}\) \\
   \centering
   \includegraphics[width=0.86\linewidth]{dynamic_sdf_field_visualization.png}
   \caption{Dynamic SDF field visualization rendered as three-dimensional surfaces: current FEM boundary colored by interpolated gap, narrow-band \(\phi\) slice, narrow-band validity slice, and contact-pressure surface with scalar-gradient normals.}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{surface_to_surface_quadrature_contact.png}
+  \caption{Surface-to-surface quadrature contact visualization. The panels show the deformed slave surface, the master SDF plane, seven-point triangle quadrature samples, interpolated gaps, area-weighted contact pressure, and scalar-field normals.}
 \end{figure}
 
 \FloatBarrier

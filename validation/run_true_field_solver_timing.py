@@ -115,8 +115,8 @@ def _plot_outputs(out_dir: Path, step_rows: list[Row]) -> dict[str, Path]:
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7)
     ax.grid(True, axis="y", which="both", alpha=0.30)
-    ax.legend(fontsize=8, ncol=2)
-    fig.tight_layout()
+    ax.legend(fontsize=8, ncol=5, loc="lower center", bbox_to_anchor=(0.5, 1.02), frameon=False)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     png = figures / "solver_step_timing_breakdown.png"
     pdf = figures / "solver_step_timing_breakdown.pdf"
     fig.savefig(png, dpi=180)

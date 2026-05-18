@@ -692,7 +692,7 @@ def _plot_phase8_outputs(
     def save(name: str) -> None:
         path = figures / name
         pdf_path = figures / f"{Path(name).stem}.pdf"
-        plt.tight_layout()
+        plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
         plt.savefig(path, dpi=180)
         plt.savefig(pdf_path)
         outputs[name] = path
@@ -737,7 +737,7 @@ def _plot_phase8_outputs(
     plt.grid(True, axis="y", alpha=0.3)
     save("field_contact_jacobian_fd_error.png")
 
-    plt.figure(figsize=(6.0, 3.8))
+    plt.figure(figsize=(6.4, 3.8))
     plt.plot(spacings, [float(row["field_update_seconds"]) for row in timing_rows], marker="o", label="update")
     plt.plot(spacings, [float(row["field_query_seconds_per_query"]) for row in timing_rows], marker="o", label="field query")
     plt.plot(
@@ -750,11 +750,11 @@ def _plot_phase8_outputs(
     plt.yscale("log")
     plt.xlabel("Grid spacing")
     plt.ylabel("Seconds")
-    plt.legend()
+    plt.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=3, frameon=False)
     plt.grid(True, which="both", alpha=0.3)
     save("field_timing_components.png")
 
-    plt.figure(figsize=(6.0, 3.8))
+    plt.figure(figsize=(6.4, 3.8))
     qstar_by_spacing = {
         float(row["spacing"]): float(row["crossover_query_count_q_star"])
         for row in crossover_rows
@@ -773,7 +773,7 @@ def _plot_phase8_outputs(
     plt.axhline(1.0, color="black", linewidth=1.0)
     plt.xlabel("Query count")
     plt.ylabel("Projection total / field total")
-    plt.legend()
+    plt.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=3, frameon=False)
     plt.grid(True, which="both", alpha=0.3)
     save("field_speedup_vs_query_count.png")
 
@@ -786,7 +786,7 @@ def _plot_phase8_outputs(
     plt.grid(True, alpha=0.3)
     save("field_crossover_qstar.png")
 
-    plt.figure(figsize=(6.0, 3.8))
+    plt.figure(figsize=(6.2, 3.8))
     x = np.arange(len(material_rows))
     width = 0.35
     plt.bar(x - width / 2, [float(row["dynamic_field_max_phi_error"]) for row in material_rows], width, label="dynamic field")
@@ -794,7 +794,7 @@ def _plot_phase8_outputs(
     plt.yscale("log")
     plt.xticks(x, [str(row["case"]) for row in material_rows])
     plt.ylabel("Max phi error")
-    plt.legend()
+    plt.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, frameon=False)
     plt.grid(True, axis="y", alpha=0.3)
     save("material_space_vs_dynamic_field_error.png")
 
