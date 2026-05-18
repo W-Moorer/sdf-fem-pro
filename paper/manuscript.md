@@ -260,9 +260,10 @@ We further compare the independent SFC true-field contact solve against CalculiX
 Figures:
 
 - `results/native_contact_formal/figures/native_contact_displacement_curves.png`
+- `paper/numerical_experiments/phase9_full_contact_validation/figures/dynamic_displacement_time_histories.png`
 - `results/native_contact_formal_problem1/figures/native_contact_solver_timing_breakdown.png`
 
-The paper-facing displacement figure plots actual SFC and CalculiX displacement-norm trajectories. Each SFC legend reports the maximum displacement-field \(L^2\) relative error in parentheses, so the reader sees both curve agreement and the corresponding scalar error without a separate error-bar chart.
+The paper-facing static/native-contact displacement figure plots actual SFC and CalculiX displacement-norm trajectories against imposed closure. Each SFC legend reports the maximum displacement-field \(L^2\) relative error in parentheses, so the reader sees both curve agreement and the corresponding scalar error without a separate error-bar chart. Dynamic cases are shown separately as \(z\)-displacement histories against physical time; the dynamic figure uses the C3D8 linear and geometric-nonlinear block-plane/block-block histories and reports the corresponding \(z\)-history error in the legend.
 
 ### 7.6 Solver-Level Timing and Backend Ablation
 

@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/external_visual/figures/}{results/external_visual/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{../results/native_contact_formal/figures/}{results/native_contact_formal/figures/}{../results/native_contact_backend_ablation_quick/figures/}{results/native_contact_backend_ablation_quick/figures/}}
+\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/external_visual/figures/}{results/external_visual/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{../results/native_contact_formal/figures/}{results/native_contact_formal/figures/}{numerical_experiments/phase9_full_contact_validation/figures/}{../paper/numerical_experiments/phase9_full_contact_validation/figures/}{../results/native_contact_backend_ablation_quick/figures/}{results/native_contact_backend_ablation_quick/figures/}}
 
 \title{A FEM-Induced Dynamic Narrow-Band Signed Distance Field with Closest-Feature Sensitivities for Finite-Element Contact}
 \author{Anonymous Authors}
@@ -314,7 +314,13 @@ cylinder compression & \(6.558312\times10^{-4}\) & \(2.191263\times10^{-3}\) & \
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.96\linewidth]{native_contact_displacement_curves.png}
-  \caption{Actual displacement-norm trajectories for the independent CalculiX native-contact solve and the SFC dynamic-SDF contact solve. Each SFC legend reports the maximum displacement-field \(L^2\) relative error for that problem, replacing the earlier error-bar summary with curve-level agreement.}
+  \caption{Quasi-static closure/load displacement-norm trajectories for independent CalculiX native contact and SFC dynamic-SDF contact. Each SFC legend reports the maximum displacement-field \(L^2\) relative error for that problem, replacing the earlier error-bar summary with curve-level agreement.}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{dynamic_displacement_time_histories.png}
+  \caption{Dynamic C3D8 contact displacement histories. For dynamic simulations the independent variable is physical time; each panel compares the SFC dynamic-SDF contact trajectory with the CalculiX reference, and the SFC legend reports the \(z\)-displacement history error.}
 \end{figure}
 
 \subsection{Solver-Level Timing and Backend Ablation}
