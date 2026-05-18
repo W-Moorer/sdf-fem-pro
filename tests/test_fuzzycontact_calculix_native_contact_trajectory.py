@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from validation.run_fuzzycontact_calculix_native_contact_trajectory import (  # noqa: E402
     _parse_element_table,
+    _plot_native_contact_outputs,
     run_validation,
 )
 
@@ -76,6 +77,44 @@ def test_native_contact_is_not_equivalent_load_or_replay() -> None:
     assert "run_fuzzycontact_vtu_reference" not in source
     assert "legacy_abaqus_prototype" not in source
     assert ".odb" not in source
+    assert "native_contact_displacement_curves" in source
+    assert "sfc_displacement_l2_norm" in source
+    assert "calculix_displacement_l2_norm" in source
+
+
+def test_native_contact_displacement_curve_plot(tmp_path: Path) -> None:
+    comparison_rows = [
+        {
+            "problem": "problem_1",
+            "step": 1,
+            "closure_mm": 0.01,
+            "displacement_l2_rel_error": 0.012,
+            "displacement_l2_abs_error": 0.001,
+            "sfc_displacement_l2_norm": 0.099,
+            "calculix_displacement_l2_norm": 0.100,
+            "strain_l2_rel_error": 0.02,
+            "stress_l2_rel_error": 0.03,
+            "von_mises_l2_rel_error": 0.025,
+        },
+        {
+            "problem": "problem_1",
+            "step": 2,
+            "closure_mm": 0.02,
+            "displacement_l2_rel_error": 0.008,
+            "displacement_l2_abs_error": 0.001,
+            "sfc_displacement_l2_norm": 0.198,
+            "calculix_displacement_l2_norm": 0.200,
+            "strain_l2_rel_error": 0.018,
+            "stress_l2_rel_error": 0.028,
+            "von_mises_l2_rel_error": 0.022,
+        },
+    ]
+
+    outputs = _plot_native_contact_outputs(tmp_path, comparison_rows, [])
+
+    assert outputs["native_contact_displacement_curves_png"].exists()
+    assert outputs["native_contact_displacement_curves_pdf"].exists()
+    assert outputs["native_contact_solver_errors_png"].exists()
 
 
 def test_parse_element_table_stops_before_next_calculix_table(tmp_path: Path) -> None:

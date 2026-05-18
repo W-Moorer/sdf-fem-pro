@@ -728,6 +728,7 @@ def _comparison_rows(native: NativeContactCase, dat: Path, sfc_rows: list[Row]) 
         strain_calc = strain_blocks.get(time, np.zeros_like(row["sfc_strain"]))
         vm_calc = np.asarray([_von_mises_voigt(v) for v in stress_calc], dtype=float)
         disp_err = _relative_error(row["sfc_displacement"], u_calc)
+        disp_abs_err = float(np.linalg.norm(row["sfc_displacement"] - u_calc))
         strain_err = _relative_error(row["sfc_strain"], strain_calc)
         stress_err = _relative_error(row["sfc_stress"], stress_calc)
         vm_err = _relative_error(row["sfc_vm"], vm_calc)
@@ -743,6 +744,9 @@ def _comparison_rows(native: NativeContactCase, dat: Path, sfc_rows: list[Row]) 
                 "closure_mm": float(row["closure_mm"]),
                 "calculix_time": time,
                 "displacement_l2_rel_error": disp_err,
+                "displacement_l2_abs_error": disp_abs_err,
+                "sfc_displacement_l2_norm": float(np.linalg.norm(row["sfc_displacement"])),
+                "calculix_displacement_l2_norm": float(np.linalg.norm(u_calc)),
                 "strain_l2_rel_error": strain_err,
                 "stress_l2_rel_error": stress_err,
                 "von_mises_l2_rel_error": vm_err,
@@ -877,6 +881,74 @@ def _plot_native_contact_outputs(
         and row.get("von_mises_l2_rel_error") not in {"", None}
     ]
     if numeric_rows:
+        displacement_curve_rows = [
+            row
+            for row in numeric_rows
+            if row.get("sfc_displacement_l2_norm") not in {"", None}
+            and row.get("calculix_displacement_l2_norm") not in {"", None}
+            and row.get("closure_mm") not in {"", None}
+        ]
+        if displacement_curve_rows:
+            display_names = {
+                "problem_1": "Sphere indentation",
+                "problem_3": "V-indenter",
+                "problem_4": "Cylinder compression",
+            }
+            problems = list(dict.fromkeys(str(row["problem"]) for row in displacement_curve_rows))
+            fig, axes = plt.subplots(
+                1,
+                len(problems),
+                figsize=(max(7.2, 3.25 * len(problems)), 3.55),
+                squeeze=False,
+            )
+            for ax, problem in zip(axes.ravel(), problems, strict=True):
+                rows = sorted(
+                    [row for row in displacement_curve_rows if str(row["problem"]) == problem],
+                    key=lambda row: float(row["closure_mm"]),
+                )
+                x_vals = np.asarray([float(row["closure_mm"]) for row in rows], dtype=float)
+                sfc_vals = np.asarray([float(row["sfc_displacement_l2_norm"]) for row in rows], dtype=float)
+                calc_vals = np.asarray([float(row["calculix_displacement_l2_norm"]) for row in rows], dtype=float)
+                max_err = max(float(row["displacement_l2_rel_error"]) for row in rows)
+                ax.plot(
+                    x_vals,
+                    calc_vals,
+                    color="black",
+                    linewidth=1.8,
+                    marker="o",
+                    markersize=4.0,
+                    label="CalculiX reference",
+                )
+                ax.plot(
+                    x_vals,
+                    sfc_vals,
+                    color="#4c78a8",
+                    linewidth=1.8,
+                    linestyle="--",
+                    marker="s",
+                    markersize=4.0,
+                    label=f"SFC dynamic SDF (max err. {100.0 * max_err:.2f}%)",
+                )
+                ax.set_title(display_names.get(problem, problem), pad=28)
+                ax.set_xlabel("Closure (mm)")
+                ax.grid(True, alpha=0.28)
+                ax.legend(
+                    fontsize=7.4,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.01),
+                    frameon=False,
+                    handlelength=2.0,
+                )
+            axes[0, 0].set_ylabel(r"Displacement $L^2$ norm (mm)")
+            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.86), w_pad=1.7)
+            png = figures / "native_contact_displacement_curves.png"
+            pdf = figures / "native_contact_displacement_curves.pdf"
+            fig.savefig(png, dpi=180)
+            fig.savefig(pdf)
+            plt.close(fig)
+            outputs["native_contact_displacement_curves_png"] = png
+            outputs["native_contact_displacement_curves_pdf"] = pdf
+
         labels = [f"{row['problem']}-s{int(row['step'])}" for row in numeric_rows]
         x = np.arange(len(labels), dtype=float)
         width = 0.20
@@ -1041,6 +1113,9 @@ def run_validation(
                         "closure_mm": float(row["closure_mm"]),
                         "calculix_time": "",
                         "displacement_l2_rel_error": "",
+                        "displacement_l2_abs_error": "",
+                        "sfc_displacement_l2_norm": "",
+                        "calculix_displacement_l2_norm": "",
                         "strain_l2_rel_error": "",
                         "stress_l2_rel_error": "",
                         "von_mises_l2_rel_error": "",

@@ -259,10 +259,10 @@ We further compare the independent SFC true-field contact solve against CalculiX
 
 Figures:
 
-- `results/native_contact_formal_problem1/figures/native_contact_solver_errors.png`
+- `results/native_contact_formal/figures/native_contact_displacement_curves.png`
 - `results/native_contact_formal_problem1/figures/native_contact_solver_timing_breakdown.png`
-- `results/native_contact_formal_problem3/figures/native_contact_solver_errors.png`
-- `results/native_contact_formal_problem4/figures/native_contact_solver_errors.png`
+
+The paper-facing displacement figure plots actual SFC and CalculiX displacement-norm trajectories. Each SFC legend reports the maximum displacement-field \(L^2\) relative error in parentheses, so the reader sees both curve agreement and the corresponding scalar error without a separate error-bar chart.
 
 ### 7.6 Solver-Level Timing and Backend Ablation
 

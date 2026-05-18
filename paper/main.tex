@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/external_visual/figures/}{results/external_visual/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{../results/native_contact_backend_ablation_quick/figures/}{results/native_contact_backend_ablation_quick/figures/}}
+\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/external_visual/figures/}{results/external_visual/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{../results/native_contact_formal/figures/}{results/native_contact_formal/figures/}{../results/native_contact_backend_ablation_quick/figures/}{results/native_contact_backend_ablation_quick/figures/}}
 
 \title{A FEM-Induced Dynamic Narrow-Band Signed Distance Field with Closest-Feature Sensitivities for Finite-Element Contact}
 \author{Anonymous Authors}
@@ -313,8 +313,8 @@ cylinder compression & \(6.558312\times10^{-4}\) & \(2.191263\times10^{-3}\) & \
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.88\linewidth]{../results/native_contact_formal_problem1/figures/native_contact_solver_errors.png}
-  \caption{Native-contact agreement errors for the sphere-indentation case. The same figure set is generated for the V-indenter and cylinder-compression cases; Table~\ref{tab:native-contact} summarizes all three.}
+  \includegraphics[width=0.96\linewidth]{native_contact_displacement_curves.png}
+  \caption{Actual displacement-norm trajectories for the independent CalculiX native-contact solve and the SFC dynamic-SDF contact solve. Each SFC legend reports the maximum displacement-field \(L^2\) relative error for that problem, replacing the earlier error-bar summary with curve-level agreement.}
 \end{figure}
 
 \subsection{Solver-Level Timing and Backend Ablation}
