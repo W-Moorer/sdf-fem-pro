@@ -58,7 +58,11 @@ m_\ell
 
 where \(\Phi_\ell=\phi_h(\mathbf{y}_\ell,\mathbf{q})\), \(\mathbf{d}_\ell\) is an optional stored gradient or normal estimate, \(f_\ell^\ast\) is the closest surface triangle, \(\boldsymbol{\xi}_\ell^\ast\) are barycentric coordinates on that triangle, \(\mathbf{n}_\ell\) is the current closest-feature normal, and \(m_\ell\) is the narrow-band validity mask. The contact derivative is not defined by interpolating \(\mathbf{d}_\ell\); it is defined as the derivative of the scalar interpolation of \(\Phi_\ell\).
 
-Closest-point projection is used here as a field construction kernel. It is not the main contact query. The implementation rejects out-of-band or invalid interpolation cells rather than silently falling back to projection.
+The field update is performed in the deformed configuration whenever the master surface changes for a load step or time step. The current boundary faces are extracted with their deformed vertex positions and oriented normals, and an axis-aligned grid is fitted to the boundary bounding box inflated by the band width \(\rho\). When the solver already knows the slave quadrature or node samples that may query the field, the grid is additionally padded so that every candidate sample has a complete interpolation cell inside the band. Grid nodes outside the band are marked invalid and are never used for contact assembly.
+
+![Compact architecture of the dynamic narrow-band SDF update and field-contact query.](numerical_experiments/method_schematic/figures/dynamic_sdf_method_schematic.png)
+
+Valid grid nodes are populated by an internal spatial-hash projection kernel. For each valid node, the kernel searches nearby current boundary triangles, computes the signed closest distance, and stores the distance value, closest face id, barycentric coordinates, and closest-feature normal. This projection work is part of \(T_\mathrm{update}\), not part of the repeated query cost. After population, the query path is restricted to trilinear interpolation of \(\Phi_\ell\) and the payload grids. Out-of-band or invalid interpolation cells are rejected rather than silently falling back to projection; projection can reappear only when an explicit refinement mode is requested.
 
 ## 4. Field-Interpolated Contact Formulation
 
@@ -137,14 +141,21 @@ A Gauss-Newton contact stiffness approximation is assembled as \(k\mathbf{J}_i^T
 
 ## 5. Algorithm and Cost Model
 
-One update/query cycle is:
+One update/query cycle extracts current boundary triangles, builds \(\mathcal{G}_\rho(\Gamma_h)\), populates grid-node distance and payload values with the projection kernel, evaluates contact samples by interpolation, differentiates the scalar interpolation for slave sensitivities, and assembles field-contact Jacobians and penalty forces.
 
-1. Extract the current FEM boundary triangles.
-2. Build \(\mathcal{G}_\rho(\Gamma_h)\).
-3. Populate grid-node \(\Phi_\ell\), optional stored gradient, closest face id, barycentric payload, closest normal, and validity mask using the projection kernel.
-4. Evaluate repeated contact samples by field interpolation.
-5. Differentiate the scalar interpolation for slave sensitivities.
-6. Assemble field-based contact Jacobians and penalty forces.
+**Algorithm 1: Current-space dynamic SDF field contact**
+
+**Input:** master nodal positions \(\mathbf{x}^B\), boundary faces \(F^B\), slave samples \(S^A\), spacing \(h\), band width \(\rho\), penalty \(k\).
+
+1. Extract the current master surface \(\Gamma_h^B(\mathbf{q})\) and oriented boundary normals from \((\mathbf{x}^B,F^B)\).
+2. Build an inflated current-space grid \(\mathcal{G}_\rho\), including any required padding for candidate slave interpolation cells.
+3. Mark grid nodes inside the narrow band; reject nodes outside the validity mask.
+4. For each valid node \(\mathbf{y}_\ell\), use the spatial-hash projection kernel to store \(\Phi_\ell\), \(f_\ell^\ast\), \(\boldsymbol{\xi}_\ell^\ast\), \(\mathbf{n}_\ell\), and \(m_\ell\).
+5. For each slave sample \(\mathbf{x}_i^A\in S^A\), compute \(g_i=\sum_\ell w_\ell\Phi_\ell\) and \(\nabla_x\hat{\phi}_i=\sum_\ell\Phi_\ell\nabla_x w_\ell\) by interpolation only.
+6. If \(g_i<0\), assemble \(J_A=N_A\nabla_x\hat{\phi}_i^T\) and \(J_B=-\sum_\ell w_\ell N^\Gamma(\boldsymbol{\xi}_\ell^\ast)\mathbf{n}_\ell^T\).
+7. Accumulate \(\lambda_i=k\langle -g_i\rangle_+\), contact force \(\mathbf{J}_i^T\lambda_i\), optional Gauss--Newton stiffness, and update/query timings.
+
+**Output:** dynamic SDF field, field-contact residuals/Jacobians, and \(T_\mathrm{update}\), \(T_\mathrm{field}\), \(T_\mathrm{refine}\) if refinement is enabled.
 
 The field is beneficial only when the update cost is amortized over enough queries. With optional refinement count \(Q_r\), the measured gate is
 

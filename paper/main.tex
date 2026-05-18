@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{numerical_experiments/native_contact_formal_21/figures/}{../paper/numerical_experiments/native_contact_formal_21/figures/}{numerical_experiments/long_time_c3d8_dynamic/figures/}{../paper/numerical_experiments/long_time_c3d8_dynamic/figures/}{numerical_experiments/fig6_inspired_frictionless_contact/figures/}{../paper/numerical_experiments/fig6_inspired_frictionless_contact/figures/}{numerical_experiments/native_contact_backend_ablation_11/figures/}{../paper/numerical_experiments/native_contact_backend_ablation_11/figures/}{numerical_experiments/phase9_full_contact_validation/figures/}{../paper/numerical_experiments/phase9_full_contact_validation/figures/}}
+\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{numerical_experiments/method_schematic/figures/}{../paper/numerical_experiments/method_schematic/figures/}{numerical_experiments/native_contact_formal_21/figures/}{../paper/numerical_experiments/native_contact_formal_21/figures/}{numerical_experiments/long_time_c3d8_dynamic/figures/}{../paper/numerical_experiments/long_time_c3d8_dynamic/figures/}{numerical_experiments/fig6_inspired_frictionless_contact/figures/}{../paper/numerical_experiments/fig6_inspired_frictionless_contact/figures/}{numerical_experiments/native_contact_backend_ablation_11/figures/}{../paper/numerical_experiments/native_contact_backend_ablation_11/figures/}{numerical_experiments/phase9_full_contact_validation/figures/}{../paper/numerical_experiments/phase9_full_contact_validation/figures/}}
 
 \title{A FEM-Induced Dynamic Narrow-Band Signed Distance Field with Closest-Feature Sensitivities for Finite-Element Contact}
 \author{Anonymous Authors}
@@ -68,7 +68,16 @@ m_\ell
 \end{equation}
 where \(\Phi_\ell=\phi_h(\mathbf{y}_\ell,\mathbf{q})\), \(\mathbf{d}_\ell\) is an optional stored gradient or normal estimate, \(f_\ell^\ast\) is the closest surface triangle, \(\boldsymbol{\xi}_\ell^\ast\) are barycentric coordinates on that triangle, \(\mathbf{n}_\ell\) is the current closest-feature normal, and \(m_\ell\) is the narrow-band validity mask. The contact derivative is not defined by interpolating \(\mathbf{d}_\ell\); it is defined as the derivative of the scalar interpolation of \(\Phi_\ell\).
 
-Closest-point projection is used here as a field construction kernel. It is not the main contact query. The implementation rejects out-of-band or invalid interpolation cells rather than silently falling back to projection.
+The field update is performed in the deformed configuration whenever the master surface changes for a load step or time step. The current boundary faces are extracted with their deformed vertex positions and oriented normals, and an axis-aligned grid is fitted to the boundary bounding box inflated by the band width \(\rho\). When the solver already knows the slave quadrature or node samples that may query the field, the grid is additionally padded so that every candidate sample has a complete interpolation cell inside the band. Grid nodes outside the band are marked invalid and are never used for contact assembly.
+
+\begin{center}
+\refstepcounter{figure}\label{fig:dynamic-sdf-architecture}
+\includegraphics[width=0.98\linewidth]{dynamic_sdf_method_schematic.png}
+
+\parbox{0.94\linewidth}{\small Figure~\thefigure: Compact architecture of the dynamic narrow-band SDF update and field-contact query. The upper row is the current-configuration field update, where projection is used only to populate grid-node values and closest-feature payloads. The lower row is the repeated contact path, which evaluates gaps, scalar-field derivatives, Jacobians, and penalty forces by interpolation.}
+\end{center}
+
+Valid grid nodes are populated by an internal spatial-hash projection kernel. For each valid node, the kernel searches nearby current boundary triangles, computes the signed closest distance, and stores the distance value, closest face id, barycentric coordinates, and closest-feature normal. This projection work is part of \(T_\mathrm{update}\), not part of the repeated query cost. After population, the query path is restricted to trilinear interpolation of \(\Phi_\ell\) and the payload grids. Out-of-band or invalid interpolation cells are rejected rather than silently falling back to projection; projection can reappear only when an explicit refinement mode is requested.
 
 \section{Field-Interpolated Contact Formulation}
 
@@ -133,7 +142,30 @@ A Gauss-Newton contact stiffness approximation is assembled as \(k\mathbf{J}_i^T
 
 \section{Algorithm and Cost Model}
 
-One update/query cycle extracts current boundary triangles, builds \(\mathcal{G}_\rho(\Gamma_h)\), populates grid-node distance and payload values with the projection kernel, evaluates contact samples by interpolation, differentiates the scalar interpolation for slave sensitivities, and assembles field-contact Jacobians and penalty forces.
+One update/query cycle extracts current boundary triangles, builds \(\mathcal{G}_\rho(\Gamma_h)\), populates grid-node distance and payload values with the projection kernel, evaluates contact samples by interpolation, differentiates the scalar interpolation for slave sensitivities, and assembles field-contact Jacobians and penalty forces. Algorithm~1 summarizes the update and assembly sequence used in the implementation.
+
+\begin{center}
+\small
+\textbf{Algorithm 1. Dynamic narrow-band SDF update and field-contact assembly.}
+\vspace{0.4em}
+
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{p{0.94\linewidth}}
+\toprule
+\textbf{Algorithm 1: Current-space dynamic SDF field contact} \\
+\midrule
+\textbf{Input:} master nodal positions \(\mathbf{x}^B\), boundary faces \(F^B\), slave samples \(S^A\), spacing \(h\), band width \(\rho\), penalty \(k\). \\
+1. Extract the current master surface \(\Gamma_h^B(\mathbf{q})\) and oriented boundary normals from \((\mathbf{x}^B,F^B)\). \\
+2. Build an inflated current-space grid \(\mathcal{G}_\rho\), including any required padding for candidate slave interpolation cells. \\
+3. Mark grid nodes inside the narrow band; reject nodes outside the validity mask. \\
+4. For each valid node \(\mathbf{y}_\ell\), use the spatial-hash projection kernel to store \(\Phi_\ell\), \(f_\ell^\ast\), \(\boldsymbol{\xi}_\ell^\ast\), \(\mathbf{n}_\ell\), and \(m_\ell\). \\
+5. For each slave sample \(\mathbf{x}_i^A\in S^A\), compute \(g_i=\sum_\ell w_\ell\Phi_\ell\) and \(\nabla_x\hat{\phi}_i=\sum_\ell\Phi_\ell\nabla_x w_\ell\) by interpolation only. \\
+6. If \(g_i<0\), assemble \(J_A=N_A\nabla_x\hat{\phi}_i^T\) and \(J_B=-\sum_\ell w_\ell N^\Gamma(\boldsymbol{\xi}_\ell^\ast)\mathbf{n}_\ell^T\). \\
+7. Accumulate \(\lambda_i=k\langle -g_i\rangle_+\), contact force \(\mathbf{J}_i^T\lambda_i\), optional Gauss--Newton stiffness, and update/query timings. \\
+\textbf{Output:} dynamic SDF field, field-contact residuals/Jacobians, and \(T_\mathrm{update}\), \(T_\mathrm{field}\), \(T_\mathrm{refine}\) if refinement is enabled. \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 The field is beneficial only when the update cost is amortized over enough queries. With optional refinement count \(Q_r\), the measured gate is
 \begin{equation}
