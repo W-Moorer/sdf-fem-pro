@@ -1,0 +1,4 @@
+During the preparation of this work, the authors used OpenAI Codex to support
+manuscript organization, consistency checks, and language revision. After using
+this tool, the authors reviewed and edited the content as needed and take full
+responsibility for the content of the published article.

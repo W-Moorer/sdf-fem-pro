@@ -97,7 +97,8 @@ def test_fuzzycontact_first_frame_sfc_models_runs_ordered_fixture(tmp_path: Path
 
     assert [row["problem"] for row in model_rows] == ["problem_1", "problem_3"]
     assert model_rows[0]["master_reference_rule"] == "points_minus_displacement"
-    assert model_rows[1]["master_reference_rule"] == "points"
+    assert model_rows[1]["master_reference_rule"] in {"points", "points_minus_displacement"}
+    assert "points" in model_rows[1]["master_reference_score_details"]
     assert all(row["query_path"].startswith("DynamicNarrowBandSDF") for row in contact_rows)
 
 

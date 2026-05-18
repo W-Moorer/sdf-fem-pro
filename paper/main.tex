@@ -9,7 +9,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 
-\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/external_visual/figures/}{results/external_visual/figures/}}
+\graphicspath{{../results/true_sdf_final/figures/}{results/true_sdf_final/figures/}{../results/external_visual/figures/}{results/external_visual/figures/}{../results/true_field_solver_timing_formal/figures/}{results/true_field_solver_timing_formal/figures/}{../results/native_contact_backend_ablation_quick/figures/}{results/native_contact_backend_ablation_quick/figures/}}
 
 \title{A FEM-Induced Dynamic Narrow-Band Signed Distance Field with Closest-Feature Sensitivities for Finite-Element Contact}
 \author{Anonymous Authors}
@@ -23,6 +23,9 @@
 Signed distance fields provide efficient geometric queries for contact, but static SDFs are not directly suitable for deformable finite-element bodies whose surfaces evolve with nodal degrees of freedom. This paper presents a training-free dynamic narrow-band SDF field for FEM contact. At each time step, the current FEM boundary is used to populate a narrow-band signed distance field in the deformed configuration. In addition to distance values, each grid node stores closest-feature payloads, including face identity, barycentric coordinates, and current surface normals. These payloads allow the interpolated SDF field to provide contact gaps, scalar-field normals, and FEM-consistent master-side contact sensitivities. Contact queries are performed by field interpolation; closest-point projection is used only during field construction or optional refinement. We derive the field-based contact Jacobian using the analytic derivative of the scalar trilinear SDF interpolation, assemble frictionless penalty contact forces, and analyze the amortized cost relation between SDF field update and repeated contact queries. Validation reports field accuracy, Eikonal residuals, slave/master Jacobian finite-difference errors, and the crossover query count beyond which the dynamic SDF field outperforms projection-based contact queries.
 \end{abstract}
 
+\noindent\textbf{Keywords:}
+finite element contact; signed distance field; narrow-band method; contact mechanics; closest-feature sensitivity; surface quadrature; computational mechanics
+
 \section{Introduction}
 
 Contact in deformable finite-element simulation requires repeated evaluation of gaps, normals, contact sensitivities, and force contributions on evolving surfaces. Static signed distance fields are attractive for contact because they replace repeated geometric search with local field queries, but a static field does not remain a current-configuration distance field when a finite-element body deforms.
@@ -31,7 +34,7 @@ Existing dynamic SDF approaches often use deformation snapshots, reduced bases, 
 
 The proposed method builds a current-space narrow-band SDF field from the current boundary surface. A spatial-hash accelerated closest-point projection kernel is used only to populate grid nodes. Once the field exists, contact queries interpolate the field and its closest-feature payload. The method therefore keeps the current-surface geometric consistency of projection methods while making the paper-facing contact query a true field interpolation.
 
-The contributions are: a training-free FEM-induced dynamic narrow-band SDF field; closest-feature grid payloads for FEM-consistent master-side sensitivities; a variationally consistent scalar-field derivative for the slave Jacobian; a field-interpolated contact formulation for gap, normal, Jacobian, and penalty force; and an amortized cost model with measured crossover counts.
+The contributions are: a training-free FEM-induced dynamic narrow-band SDF field; closest-feature grid payloads for FEM-consistent master-side sensitivities; a variationally consistent scalar-field derivative for the slave Jacobian; field-contact integration backends covering both preserved node-to-surface sampling and surface-to-surface quadrature; and an amortized cost model with measured crossover counts.
 
 \section{Related Work}
 
@@ -152,13 +155,13 @@ The paper therefore claims acceleration only for query counts exceeding the meas
 
 \section{Implementation}
 
-The field implementation is in \path{src/sfc/sdf/narrow_band_grid.py} and \path{src/sfc/sdf/dynamic_narrow_band_sdf.py}. The query API includes \path{query_phi} and \path{query_spatial_derivative_phi}; \path{query_gradient} is the derivative of the scalar \(\phi\) interpolation, while \path{query_geometric_normal} exposes the optional interpolated closest-feature normal. The field-contact implementation is in \path{src/sfc/contact/field_contact.py}. The older projection path in \path{src/sfc/sdf/dynamic_surface_sdf.py} is retained as \path{surface_projection_distance_kernel} for field construction, validation references, and explicitly requested refinement.
+The field implementation is in \path{src/sfc/sdf/narrow_band_grid.py} and \path{src/sfc/sdf/dynamic_narrow_band_sdf.py}. The query API includes \path{query_phi} and \path{query_spatial_derivative_phi}; \path{query_gradient} is the derivative of the scalar \(\phi\) interpolation, while \path{query_geometric_normal} exposes the optional interpolated closest-feature normal. The field-contact implementation is in \path{src/sfc/contact/field_contact.py}. It contains a preserved \path{node_to_surface_field_penalty_response} path for node/sample contact, a reference \path{surface_to_surface_field_penalty_response} path for triangle quadrature, and a vectorized surface-to-surface response used for the paper-facing CalculiX native-contact comparisons. The older projection path in \path{src/sfc/sdf/dynamic_surface_sdf.py} is retained as \path{surface_projection_distance_kernel} for field construction, validation references, and explicitly requested refinement.
 
 The core finite-element mechanics remain internally assembled and independent of Abaqus-generated matrices, force files, \texttt{.odb} files, and spreadsheet outputs. No friction, self-contact, nonlinear FEM main method, GPU path, barrier contact, POD, neural SDF, or Abaqus dependency is introduced.
 
 \section{Experiments}
 
-All Phase-8 paper-facing true-SDF outputs are generated by:
+The primary SDF-field outputs are generated by:
 \begin{quote}
 \footnotesize\ttfamily
 python validation/run\_true\_dynamic\_sdf\_field\_validation.py\\
@@ -260,9 +263,9 @@ The dynamic field is not claimed to be faster for small query counts. Its update
 \toprule
 Spacing & \(T_\mathrm{update}\) & \(T_\mathrm{field}\) & \(T_\mathrm{projection}\) & \(T_\mathrm{refine}\) & \(Q^\ast\) \\
 \midrule
-0.100 & 13.998359 & \(5.708600\times10^{-5}\) & \(1.762912\times10^{-2}\) & \(5.952888\times10^{-4}\) & 797 \\
-0.075 & 28.491003 & \(5.207117\times10^{-5}\) & \(1.692433\times10^{-2}\) & \(5.167875\times10^{-4}\) & 1689 \\
-0.050 & 73.523470 & \(5.026517\times10^{-5}\) & \(1.626798\times10^{-2}\) & \(4.684375\times10^{-4}\) & 4534 \\
+0.100 & 14.330253 & \(5.626483\times10^{-5}\) & \(1.749774\times10^{-2}\) & \(5.731850\times10^{-4}\) & 822 \\
+0.075 & 29.062764 & \(5.340050\times10^{-5}\) & \(1.747250\times10^{-2}\) & \(5.369825\times10^{-4}\) & 1669 \\
+0.050 & 78.940208 & \(5.365200\times10^{-5}\) & \(1.742862\times10^{-2}\) & \(4.956188\times10^{-4}\) & 4544 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -285,6 +288,57 @@ The field acceleration claim is supported only for \(Q>Q^\ast\) under the measur
   \centering
   \includegraphics[width=0.72\linewidth]{field_crossover_qstar.png}
   \caption{Measured crossover query count \(Q^\ast\) for each grid spacing.}
+\end{figure}
+
+\subsection{Native Contact Solver Comparison}
+
+We further compare the independent SFC true-field contact solve against CalculiX native surface-to-surface contact on three benchmark-style contact geometries. CalculiX receives its own \texttt{*CONTACT PAIR} model and SFC independently solves the corresponding dynamic-SDF contact model; the comparison is not a replay and does not use CalculiX inside the core SDF path. Table~\ref{tab:native-contact} reports the largest displacement, strain, stress, and von Mises relative errors over the load steps. All rows pass the configured \(5\%\) native-solver agreement gate.
+
+\begin{table}[t]
+\centering
+\tiny
+\setlength{\tabcolsep}{2pt}
+\caption{Independent CalculiX native contact versus SFC dynamic-SDF contact. Times are wall-clock seconds for the tested Python/CalculiX runs.}
+\label{tab:native-contact}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Problem & Disp. err. & Strain err. & Stress err. & VM err. & SFC & CCX & CCX/SFC \\
+\midrule
+sphere indentation & \(1.380272\times10^{-2}\) & \(1.805590\times10^{-2}\) & \(1.630772\times10^{-2}\) & \(1.599641\times10^{-2}\) & 1.870 & 2.872 & 1.536 \\
+V-indenter & \(2.301961\times10^{-2}\) & \(3.961379\times10^{-2}\) & \(3.697091\times10^{-2}\) & \(3.304457\times10^{-2}\) & 0.628 & 3.778 & 6.015 \\
+cylinder compression & \(6.558312\times10^{-4}\) & \(2.191263\times10^{-3}\) & \(1.725421\times10^{-3}\) & \(1.294581\times10^{-3}\) & 12.678 & 9.343 & 0.737 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.88\linewidth]{../results/native_contact_formal_problem1/figures/native_contact_solver_errors.png}
+  \caption{Native-contact agreement errors for the sphere-indentation case. The same figure set is generated for the V-indenter and cylinder-compression cases; Table~\ref{tab:native-contact} summarizes all three.}
+\end{figure}
+
+\subsection{Solver-Level Timing and Backend Ablation}
+
+The field-query crossover is also reflected at the step level in contact-dominated TET4/HEX8 static and dynamic tests. These tests compare the true-field path against the spatial-hash projection timing reference while keeping the gap and force agreement at numerical roundoff. The field path is faster in all 16 non-quick rows, with measured projection/field step speedups from \(7.51\times\) to \(24.17\times\) and a minimum measured query crossover of \(24.61\) samples for the tested workload.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{solver_step_timing_breakdown.png}
+  \caption{Solver-level timing breakdown for TET4/HEX8 static and dynamic contact-dominated workloads. Diamonds mark the projection-reference total step time.}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{solver_step_speedup.png}
+  \caption{Projection-reference total step time divided by true-field total step time for the solver-level timing cases.}
+\end{figure}
+
+Finally, a backend ablation separates the preserved node-to-surface path from the surface-to-surface implementations. The non-vectorized surface-to-surface path is a correctness reference; the vectorized path preserves the same endpoint metrics while reducing the quadrature/contact query cost. Forced spatial-hash grouped field construction is retained for larger candidate sets, although it is slower on this small representative ablation because grouping overhead dominates.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.82\linewidth]{backend_ablation_runtime.png}
+  \caption{Representative backend ablation for node-to-surface, reference surface-to-surface, vectorized surface-to-surface, and forced grouped field construction. This figure documents backend layering and engineering cost; it does not replace the native CalculiX agreement table.}
 \end{figure}
 
 \subsection{External Visual FEM Validation}
@@ -342,9 +396,9 @@ Contact-force relative error & \(8.775744\times10^{-3}\) \\
 
 \FloatBarrier
 
-\section{Claim Gates and Unsupported Claims}
+\section{Scope of Claims}
 
-The Phase-8 experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, and SDF acceleration after the measured \(Q^\ast\) crossover.
+The reported experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, and SDF acceleration after the measured \(Q^\ast\) crossover. The solver-level tests support the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover, while the backend ablation documents both node-to-surface and surface-to-surface integration paths.
 
 The external visual validation supports physical auditability of the tested displacement, stress, strain, gap, and pressure fields. It is not evidence for the SDF acceleration claim and is not a claim of external-solver equivalence.
 
@@ -354,7 +408,7 @@ The current results do not support claims of robust global SDF behavior for arbi
 
 \section{Supplementary Context}
 
-Older CalculiX, C3D8, Phase-9, and external-solver replay results are not the main evidence for this method. They may be retained as supplementary context for external deformed-state checks, but the main paper claims are now field construction, field interpolation, field-contact Jacobians, penalty force assembly, and amortized SDF update/query cost.
+Additional CalculiX, C3D8, and external-solver replay results are not the main evidence for this method. They may be retained as supplementary context for external deformed-state checks, but the main paper claims are field construction, field interpolation, field-contact Jacobians, penalty force assembly, and amortized SDF update/query cost.
 
 \section{Limitations}
 
@@ -362,9 +416,25 @@ The field is valid only in the constructed narrow band. Sign handling assumes co
 
 \section{Conclusion}
 
-This paper presented a training-free dynamic narrow-band SDF field for finite-element contact. The key distinction from projection-query contact is that closest-point projection is internalized as a field construction kernel, while repeated contact evaluation is performed by interpolation of \(\Phi_\ell\) and closest-feature payloads. The slave sensitivity is the analytic derivative of the scalar SDF interpolation, and the master sensitivity is assembled from closest-feature payloads. The Phase-8 experiments show field accuracy, Eikonal consistency, finite-difference Jacobian agreement, material-space SDF failure under deformation, and measured crossover counts for amortized acceleration.
+This paper presented a training-free dynamic narrow-band SDF field for finite-element contact. The key distinction from projection-query contact is that closest-point projection is internalized as a field construction kernel, while repeated contact evaluation is performed by interpolation of \(\Phi_\ell\) and closest-feature payloads. The slave sensitivity is the analytic derivative of the scalar SDF interpolation, and the master sensitivity is assembled from closest-feature payloads. The experiments show field accuracy, Eikonal consistency, finite-difference Jacobian agreement, material-space SDF failure under deformation, and measured crossover counts for amortized acceleration.
 
-\bibliographystyle{plain}
+\section*{Data Availability}
+
+The scripts and tabulated numerical data used for the reported validation studies are available from the corresponding author upon reasonable request. A public archival repository can be linked at submission if required by the journal or funding body.
+
+\section*{Declaration of Competing Interest}
+
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
+
+\section*{Funding}
+
+This research did not receive any specific grant from funding agencies in the public, commercial, or not-for-profit sectors.
+
+\section*{Declaration of Generative AI and AI-Assisted Technologies in the Manuscript Preparation Process}
+
+During the preparation of this work, the authors used OpenAI Codex to support manuscript organization, consistency checks, and language revision. After using this tool, the authors reviewed and edited the content as needed and take full responsibility for the content of the published article.
+
+\bibliographystyle{unsrt}
 \bibliography{references}
 
 \end{document}

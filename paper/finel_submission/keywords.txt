@@ -1,0 +1,7 @@
+finite element contact
+signed distance field
+narrow-band method
+contact mechanics
+closest-feature sensitivity
+surface quadrature
+computational mechanics

@@ -4,12 +4,19 @@ from .broad_phase import UniformTriangleAABBHash, triangle_aabbs
 from .backends import ContactBackendResult, PenaltyContactBackend
 from .field_contact import (
     FieldContactConstraint,
+    FieldSurfaceContactResponse,
+    SurfaceQuadratureCache,
     assemble_field_contact_jacobian,
     compute_field_contact_constraints,
     field_contact_constraint_from_sample,
     field_contact_jacobian_entries,
     field_contact_jacobian_row,
     field_penalty_contact_response,
+    node_to_surface_field_penalty_response,
+    surface_to_surface_field_penalty_response,
+    surface_to_surface_field_penalty_response_vectorized,
+    triangle_surface_quadrature_cache,
+    triangle_surface_quadrature_samples,
 )
 from .jacobian import (
     assemble_contact_jacobian,
@@ -30,6 +37,8 @@ __all__ = [
     "ContactBackendResult",
     "DynamicSurfaceSDFContactGeometry",
     "FieldContactConstraint",
+    "FieldSurfaceContactResponse",
+    "SurfaceQuadratureCache",
     "PenaltyContactBackend",
     "SurfaceSample",
     "UniformTriangleAABBHash",
@@ -44,6 +53,11 @@ __all__ = [
     "field_contact_jacobian_entries",
     "field_contact_jacobian_row",
     "field_penalty_contact_response",
+    "node_to_surface_field_penalty_response",
     "penalty_contact_response",
+    "surface_to_surface_field_penalty_response",
+    "surface_to_surface_field_penalty_response_vectorized",
     "triangle_aabbs",
+    "triangle_surface_quadrature_cache",
+    "triangle_surface_quadrature_samples",
 ]

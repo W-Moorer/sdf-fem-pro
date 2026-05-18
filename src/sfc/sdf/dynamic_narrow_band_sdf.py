@@ -7,7 +7,12 @@ from time import perf_counter
 
 import numpy as np
 
-from .dynamic_surface_sdf import SurfaceSDFResult, surface_projection_distance_kernel
+from .dynamic_surface_sdf import (
+    SurfaceSDFResult,
+    surface_projection_distance_kernel,
+    surface_projection_distance_kernel_batch_all_faces,
+    surface_projection_distance_kernel_batch_candidates,
+)
 from .narrow_band_grid import (
     GridPayloadInterpolation,
     NarrowBandGrid,
@@ -224,6 +229,7 @@ class DynamicNarrowBandSDF:
         shape: tuple[int, int, int] | np.ndarray | None = None,
         padding: float | None = None,
         cell_size: float | None = None,
+        batch_projection_threshold: int = 5_000_000,
     ) -> "DynamicNarrowBandSDF":
         """Build an exact sparse field for the interpolation cells touched by queries.
 
@@ -260,34 +266,59 @@ class DynamicNarrowBandSDF:
         closest_normal = np.zeros((*grid_shape, 3), dtype=float)
         valid_mask = np.zeros(grid_shape, dtype=bool)
 
-        from sfc.contact.broad_phase import UniformTriangleAABBHash
-
         candidate_padding = band + 0.5 * float(np.linalg.norm(h))
-        broad_phase = UniformTriangleAABBHash.from_surface(
-            X,
-            faces,
-            delta_safe=candidate_padding,
-            cell_size=cell_size,
-        )
 
         projection_start = perf_counter()
-        for index_arr in required_indices:
-            index = tuple(int(v) for v in index_arr)
-            point = grid_origin + h * np.asarray(index, dtype=float)
-            candidates = broad_phase.query_point(point)
-            if candidates.size == 0:
-                continue
-            result = surface_projection_distance_kernel(point, X, faces, candidates)
-            _store_projection_payload(
-                index,
-                result,
-                phi,
-                closest_face_id,
-                barycentric,
-                closest_normal,
-                valid_mask,
-                band,
+        pair_count = int(required_indices.shape[0]) * int(faces.shape[0])
+        points_required = grid_origin + h * required_indices.astype(float)
+        threshold = int(batch_projection_threshold)
+        used_batch_projection = pair_count <= threshold
+        projection_mode = "all_faces_batch" if used_batch_projection else "candidate_group_batch"
+        if used_batch_projection:
+            batch = surface_projection_distance_kernel_batch_all_faces(points_required, X, faces)
+            ii = required_indices[:, 0]
+            jj = required_indices[:, 1]
+            kk = required_indices[:, 2]
+            phi[ii, jj, kk] = batch.g
+            closest_face_id[ii, jj, kk] = batch.face_id
+            barycentric[ii, jj, kk] = batch.w
+            closest_normal[ii, jj, kk] = np.asarray([_unit(n) for n in batch.n], dtype=float)
+            valid_mask[ii, jj, kk] = np.abs(batch.g) <= band + 1.0e-12
+        else:
+            from sfc.contact.broad_phase import UniformTriangleAABBHash
+
+            broad_phase = UniformTriangleAABBHash.from_surface(
+                X,
+                faces,
+                delta_safe=candidate_padding,
+                cell_size=cell_size,
             )
+            groups: dict[tuple[int, ...], list[int]] = {}
+            for point_id, candidates in enumerate(broad_phase.query_points(points_required)):
+                if candidates.size == 0:
+                    continue
+                key = tuple(int(v) for v in candidates.tolist())
+                groups.setdefault(key, []).append(point_id)
+            for key, point_ids in groups.items():
+                candidates = np.asarray(key, dtype=np.int64)
+                chunk_size = max(1, threshold // max(int(candidates.size), 1)) if threshold > 0 else len(point_ids)
+                for start in range(0, len(point_ids), chunk_size):
+                    ids = np.asarray(point_ids[start : start + chunk_size], dtype=np.int64)
+                    batch = surface_projection_distance_kernel_batch_candidates(
+                        points_required[ids],
+                        X,
+                        faces,
+                        candidates,
+                    )
+                    idx = required_indices[ids]
+                    ii = idx[:, 0]
+                    jj = idx[:, 1]
+                    kk = idx[:, 2]
+                    phi[ii, jj, kk] = batch.g
+                    closest_face_id[ii, jj, kk] = batch.face_id
+                    barycentric[ii, jj, kk] = batch.w
+                    closest_normal[ii, jj, kk] = np.asarray([_unit(n) for n in batch.n], dtype=float)
+                    valid_mask[ii, jj, kk] = np.abs(batch.g) <= band + 1.0e-12
         projection_seconds = perf_counter() - projection_start
 
         gradient_start = perf_counter()
@@ -307,6 +338,9 @@ class DynamicNarrowBandSDF:
                 "candidate_padding": candidate_padding,
                 "population_mode": "required_points",
                 "required_node_count": int(required_indices.shape[0]),
+                "batch_projection": bool(used_batch_projection),
+                "projection_mode": projection_mode,
+                "projection_pair_count": int(pair_count),
             },
         )
         stats = SDFUpdateStats(

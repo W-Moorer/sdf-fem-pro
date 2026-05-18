@@ -12,6 +12,20 @@ from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF, FieldQueryPayl
 
 from .narrow_phase import SurfaceSample
 
+_TRILINEAR_CORNERS = np.asarray(
+    [
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+        [1, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [0, 1, 1],
+        [1, 1, 1],
+    ],
+    dtype=np.int64,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class FieldContactConstraint:
@@ -32,6 +46,323 @@ class FieldContactConstraint:
         """Return true when the field gap is penetrating."""
 
         return self.g < 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class FieldSurfaceContactResponse:
+    """Area-integrated field-contact response for a slave surface."""
+
+    force: np.ndarray
+    stiffness: csr_matrix
+    constraints: tuple[FieldContactConstraint, ...]
+    quadrature_weights: np.ndarray
+    gaps: np.ndarray | None = None
+
+    @property
+    def active_count(self) -> int:
+        """Number of active quadrature constraints."""
+
+        if self.gaps is not None:
+            return int(np.count_nonzero(np.asarray(self.gaps, dtype=float) < 0.0))
+        return sum(1 for constraint in self.constraints if constraint.active)
+
+    @property
+    def min_gap(self) -> float:
+        """Minimum sampled field gap."""
+
+        if self.gaps is not None:
+            gap_values = np.asarray(self.gaps, dtype=float)
+            return float(np.min(gap_values)) if gap_values.size else 0.0
+        if not self.constraints:
+            return 0.0
+        return float(min(constraint.g for constraint in self.constraints))
+
+    @property
+    def max_penetration(self) -> float:
+        """Maximum sampled penetration depth."""
+
+        return max(-self.min_gap, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceQuadratureCache:
+    """Cached slave-triangle quadrature topology and area weights."""
+
+    node_ids: np.ndarray
+    weights: np.ndarray
+    area_weights: np.ndarray
+
+    def points(self, slave_x_current: np.ndarray) -> np.ndarray:
+        """Evaluate quadrature points for the current slave coordinates."""
+
+        X = np.asarray(slave_x_current, dtype=float)
+        if X.ndim != 2 or X.shape[1] != 3:
+            raise ValueError("slave_x_current must have shape (n_nodes, 3)")
+        if self.node_ids.size and int(self.node_ids.max()) >= X.shape[0]:
+            raise ValueError("quadrature cache references nodes outside slave_x_current")
+        return np.einsum("qk,qkd->qd", self.weights, X[self.node_ids])
+
+    def samples(self) -> list[SurfaceSample]:
+        """Return ``SurfaceSample`` objects for reference implementations."""
+
+        return [
+            SurfaceSample(nodes.copy(), weights.copy(), np.empty(0, dtype=np.int64))
+            for nodes, weights in zip(self.node_ids, self.weights, strict=True)
+        ]
+
+def node_to_surface_field_penalty_response(
+    slave_x_current: np.ndarray,
+    samples: Iterable[SurfaceSample],
+    master_sdf: DynamicNarrowBandSDF,
+    *,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    sample_area_weights: np.ndarray | Sequence[float] | None = None,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+    refine: bool = False,
+) -> FieldSurfaceContactResponse:
+    """Assemble the legacy node/point-to-surface field-contact response.
+
+    This function preserves the previous SFC integration path explicitly: each
+    supplied ``SurfaceSample`` is an independent point constraint queried
+    against the master SDF field. Optional ``sample_area_weights`` reproduce the
+    former centroid-plus-area pressure integration used by validation runners.
+    """
+
+    k = float(pressure_stiffness)
+    if k <= 0.0:
+        raise ValueError("pressure_stiffness must be positive")
+    constraints = tuple(
+        compute_field_contact_constraints(
+            slave_x_current,
+            samples,
+            master_sdf,
+            refine=refine,
+        )
+    )
+    if sample_area_weights is None:
+        area_weights = np.ones(len(constraints), dtype=float)
+    else:
+        area_weights = np.asarray(sample_area_weights, dtype=float).ravel()
+        if area_weights.shape != (len(constraints),):
+            raise ValueError("sample_area_weights must match the number of samples")
+    n_dofs = int(n_total_dofs)
+    force = np.zeros(n_dofs, dtype=float)
+    stiffness = csr_matrix((n_dofs, n_dofs), dtype=float)
+    for constraint, area_weight in zip(constraints, area_weights, strict=True):
+        penetration = max(-float(constraint.g), 0.0)
+        if penetration <= 0.0:
+            continue
+        J = field_contact_jacobian_row(
+            constraint,
+            n_total_dofs=n_dofs,
+            slave_dof_offset=slave_dof_offset,
+            master_dof_offset=master_dof_offset,
+        )
+        lam = k * float(area_weight) * penetration
+        force += np.asarray(J.T @ np.array([lam])).ravel()
+        stiffness = stiffness + (k * float(area_weight)) * (J.T @ J)
+    return FieldSurfaceContactResponse(
+        force=force,
+        stiffness=stiffness.tocsr(),
+        constraints=constraints,
+        quadrature_weights=area_weights,
+    )
+
+
+def triangle_surface_quadrature_samples(
+    slave_faces: np.ndarray,
+    slave_x_reference: np.ndarray,
+    *,
+    order: int = 3,
+) -> tuple[list[SurfaceSample], np.ndarray]:
+    """Build triangle surface quadrature samples and area weights.
+
+    ``order=1`` uses one centroid point per face. ``order=3`` uses the common
+    symmetric three-point rule. ``order=7`` uses a degree-five Dunavant rule and
+    is the preferred surface-to-surface option for curved or concentrated
+    contact because it reduces active-set aliasing at contact patch boundaries.
+    """
+
+    cache = triangle_surface_quadrature_cache(slave_faces, slave_x_reference, order=order)
+    return cache.samples(), cache.area_weights.copy()
+
+
+def triangle_surface_quadrature_cache(
+    slave_faces: np.ndarray,
+    slave_x_reference: np.ndarray,
+    *,
+    order: int = 3,
+) -> SurfaceQuadratureCache:
+    """Build reusable triangle surface quadrature topology and weights."""
+
+    faces = np.asarray(slave_faces, dtype=np.int64)
+    X = np.asarray(slave_x_reference, dtype=float)
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("slave_faces must have shape (n_faces, 3)")
+    if X.ndim != 2 or X.shape[1] != 3:
+        raise ValueError("slave_x_reference must have shape (n_nodes, 3)")
+    if faces.size and (int(faces.min()) < 0 or int(faces.max()) >= X.shape[0]):
+        raise ValueError("slave_faces reference nodes outside slave_x_reference")
+
+    bary, unit_weights = _triangle_quadrature_rule(order)
+    node_ids: list[np.ndarray] = []
+    sample_weights: list[np.ndarray] = []
+    weights: list[float] = []
+    for face in faces:
+        tri = X[face]
+        area = 0.5 * float(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+        if area <= 0.0:
+            continue
+        for local_bary, local_weight in zip(bary, unit_weights, strict=True):
+            node_ids.append(face.copy())
+            sample_weights.append(local_bary.copy())
+            weights.append(area * float(local_weight))
+    if not node_ids:
+        return SurfaceQuadratureCache(
+            node_ids=np.empty((0, 3), dtype=np.int64),
+            weights=np.empty((0, 3), dtype=float),
+            area_weights=np.empty(0, dtype=float),
+        )
+    return SurfaceQuadratureCache(
+        node_ids=np.vstack(node_ids).astype(np.int64, copy=False),
+        weights=np.vstack(sample_weights).astype(float, copy=False),
+        area_weights=np.asarray(weights, dtype=float),
+    )
+
+
+def surface_to_surface_field_penalty_response(
+    slave_x_current: np.ndarray,
+    slave_faces: np.ndarray,
+    master_sdf: DynamicNarrowBandSDF,
+    *,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    slave_x_reference: np.ndarray | None = None,
+    quadrature_order: int = 3,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+    refine: bool = False,
+) -> FieldSurfaceContactResponse:
+    """Assemble area-integrated surface-to-surface field-contact response.
+
+    The gap at each slave surface quadrature point is queried from the dynamic
+    SDF field. The linear pressure-overclosure law is integrated over slave
+    faces as ``p = pressure_stiffness * <-g>_+``.
+    """
+
+    k = float(pressure_stiffness)
+    if k <= 0.0:
+        raise ValueError("pressure_stiffness must be positive")
+    X_ref = np.asarray(slave_x_current if slave_x_reference is None else slave_x_reference, dtype=float)
+    samples, area_weights = triangle_surface_quadrature_samples(
+        slave_faces,
+        X_ref,
+        order=quadrature_order,
+    )
+    constraints = tuple(
+        compute_field_contact_constraints(
+            slave_x_current,
+            samples,
+            master_sdf,
+            refine=refine,
+        )
+    )
+    n_dofs = int(n_total_dofs)
+    force = np.zeros(n_dofs, dtype=float)
+    stiffness = csr_matrix((n_dofs, n_dofs), dtype=float)
+    for constraint, area_weight in zip(constraints, area_weights, strict=True):
+        penetration = max(-float(constraint.g), 0.0)
+        if penetration <= 0.0:
+            continue
+        J = field_contact_jacobian_row(
+            constraint,
+            n_total_dofs=n_dofs,
+            slave_dof_offset=slave_dof_offset,
+            master_dof_offset=master_dof_offset,
+        )
+        lam = k * float(area_weight) * penetration
+        force += np.asarray(J.T @ np.array([lam])).ravel()
+        stiffness = stiffness + (k * float(area_weight)) * (J.T @ J)
+    return FieldSurfaceContactResponse(
+        force=force,
+        stiffness=stiffness.tocsr(),
+        constraints=constraints,
+        quadrature_weights=area_weights,
+    )
+
+
+def surface_to_surface_field_penalty_response_vectorized(
+    slave_x_current: np.ndarray,
+    slave_faces: np.ndarray,
+    master_sdf: DynamicNarrowBandSDF,
+    *,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    slave_x_reference: np.ndarray | None = None,
+    quadrature_order: int = 3,
+    quadrature_cache: SurfaceQuadratureCache | None = None,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+) -> FieldSurfaceContactResponse:
+    """Vectorized force assembly for area-integrated field contact.
+
+    This is algebraically equivalent to
+    ``surface_to_surface_field_penalty_response`` for the force vector, but it
+    avoids per-point ``FieldContactConstraint`` objects and performs SDF field
+    interpolation and nodal force accumulation in batches. The tangent matrix is
+    intentionally left empty because the current validation solvers use the
+    contact force in fixed-point iterations.
+    """
+
+    k = float(pressure_stiffness)
+    if k <= 0.0:
+        raise ValueError("pressure_stiffness must be positive")
+    X = np.asarray(slave_x_current, dtype=float)
+    if X.ndim != 2 or X.shape[1] != 3:
+        raise ValueError("slave_x_current must have shape (n_nodes, 3)")
+    if quadrature_cache is None:
+        X_ref = np.asarray(X if slave_x_reference is None else slave_x_reference, dtype=float)
+        cache = triangle_surface_quadrature_cache(slave_faces, X_ref, order=quadrature_order)
+    else:
+        cache = quadrature_cache
+    points = cache.points(X)
+    batch = _field_query_batch(master_sdf, points)
+    gaps = batch["gaps"]
+    penetration = np.maximum(-gaps, 0.0)
+    lambdas = k * cache.area_weights * penetration
+
+    n_dofs = int(n_total_dofs)
+    force = np.zeros(n_dofs, dtype=float)
+    active = lambdas > 0.0
+    if bool(np.any(active)):
+        active_lam = lambdas[active]
+        _accumulate_slave_force(
+            force,
+            cache.node_ids[active],
+            cache.weights[active],
+            batch["gradients"][active],
+            active_lam,
+            int(slave_dof_offset),
+        )
+        _accumulate_master_force(
+            force,
+            batch["face_node_ids"][active],
+            batch["weights"][active],
+            batch["barycentric"][active],
+            batch["normals"][active],
+            active_lam,
+            int(master_dof_offset),
+        )
+
+    return FieldSurfaceContactResponse(
+        force=force,
+        stiffness=csr_matrix((n_dofs, n_dofs), dtype=float),
+        constraints=(),
+        quadrature_weights=cache.area_weights.copy(),
+        gaps=gaps.copy(),
+    )
 
 
 def field_contact_constraint_from_sample(
@@ -207,6 +538,170 @@ def field_penalty_contact_response(
         force += np.asarray(J.T @ np.array([lam])).ravel()
         K = K + k * (J.T @ J)
     return force, K.tocsr()
+
+
+def _field_query_batch(master_sdf: DynamicNarrowBandSDF, points: np.ndarray) -> dict[str, np.ndarray]:
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError("points must have shape (n, 3)")
+    grid = master_sdf.grid
+    if P.shape[0] == 0:
+        return {
+            "gaps": np.empty(0, dtype=float),
+            "gradients": np.empty((0, 3), dtype=float),
+            "weights": np.empty((0, 8), dtype=float),
+            "face_node_ids": np.empty((0, 8, 3), dtype=np.int64),
+            "barycentric": np.empty((0, 8, 3), dtype=float),
+            "normals": np.empty((0, 8, 3), dtype=float),
+        }
+
+    lower = grid.bounds_min
+    upper = grid.bounds_max
+    if bool(np.any(P < lower - 1.0e-12) or np.any(P > upper + 1.0e-12)):
+        raise ValueError("query point is outside the narrow-band grid")
+
+    u = (P - grid.origin) / grid.spacing
+    shape = np.asarray(grid.shape, dtype=np.int64)
+    base = np.floor(u).astype(np.int64)
+    frac = u - base.astype(float)
+    for axis in range(3):
+        high = base[:, axis] >= shape[axis] - 1
+        low = base[:, axis] < 0
+        base[high, axis] = shape[axis] - 2
+        frac[high, axis] = 1.0
+        base[low, axis] = 0
+        frac[low, axis] = 0.0
+
+    idx = base[:, None, :] + _TRILINEAR_CORNERS[None, :, :]
+    valid = grid.valid_mask[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
+    if not bool(np.all(valid)):
+        raise ValueError("query point is outside the valid narrow band")
+
+    weights = np.ones((P.shape[0], 8), dtype=float)
+    for axis in range(3):
+        weights *= np.where(
+            _TRILINEAR_CORNERS[None, :, axis] == 0,
+            1.0 - frac[:, None, axis],
+            frac[:, None, axis],
+        )
+    weight_gradients = _batch_weight_gradients(frac, grid.spacing)
+    phi = grid.phi[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
+    face_ids = grid.closest_face_id[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
+    if bool(np.any(face_ids < 0)):
+        raise ValueError("query point includes invalid grid-node payload")
+    barycentric = grid.barycentric[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
+    normals = grid.closest_normal[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
+    return {
+        "gaps": np.sum(weights * phi, axis=1),
+        "gradients": np.sum(phi[:, :, None] * weight_gradients, axis=1),
+        "weights": weights,
+        "face_node_ids": master_sdf.boundary_faces[face_ids],
+        "barycentric": barycentric,
+        "normals": normals,
+    }
+
+
+def _batch_weight_gradients(frac: np.ndarray, spacing: np.ndarray) -> np.ndarray:
+    gradients = np.empty((frac.shape[0], 8, 3), dtype=float)
+    for corner_id, corner in enumerate(_TRILINEAR_CORNERS):
+        for axis in range(3):
+            value = np.full(frac.shape[0], 1.0 / float(spacing[axis]), dtype=float)
+            if corner[axis] == 0:
+                value *= -1.0
+            for other_axis in range(3):
+                if other_axis == axis:
+                    continue
+                value *= frac[:, other_axis] if corner[other_axis] == 1 else 1.0 - frac[:, other_axis]
+            gradients[:, corner_id, axis] = value
+    return gradients
+
+
+def _accumulate_slave_force(
+    force: np.ndarray,
+    node_ids: np.ndarray,
+    sample_weights: np.ndarray,
+    gradients: np.ndarray,
+    lambdas: np.ndarray,
+    dof_offset: int,
+) -> None:
+    contrib = lambdas[:, None, None] * sample_weights[:, :, None] * gradients[:, None, :]
+    nodes = np.asarray(node_ids, dtype=np.int64).reshape(-1)
+    values = contrib.reshape((-1, 3))
+    for component in range(3):
+        np.add.at(force, int(dof_offset) + nodes * 3 + component, values[:, component])
+
+
+def _accumulate_master_force(
+    force: np.ndarray,
+    face_node_ids: np.ndarray,
+    grid_weights: np.ndarray,
+    barycentric: np.ndarray,
+    normals: np.ndarray,
+    lambdas: np.ndarray,
+    dof_offset: int,
+) -> None:
+    contrib = (
+        -lambdas[:, None, None, None]
+        * grid_weights[:, :, None, None]
+        * barycentric[:, :, :, None]
+        * normals[:, :, None, :]
+    )
+    nodes = np.asarray(face_node_ids, dtype=np.int64).reshape(-1)
+    values = contrib.reshape((-1, 3))
+    for component in range(3):
+        np.add.at(force, int(dof_offset) + nodes * 3 + component, values[:, component])
+
+
+def _triangle_quadrature_rule(order: int) -> tuple[np.ndarray, np.ndarray]:
+    if int(order) == 1:
+        return (
+            np.asarray([[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]], dtype=float),
+            np.asarray([1.0], dtype=float),
+        )
+    if int(order) == 3:
+        return (
+            np.asarray(
+                [
+                    [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
+                    [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+                    [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
+                ],
+                dtype=float,
+            ),
+            np.full(3, 1.0 / 3.0, dtype=float),
+        )
+    if int(order) == 7:
+        a = 0.059715871789770
+        b = 0.470142064105115
+        c = 0.797426985353087
+        d = 0.101286507323456
+        return (
+            np.asarray(
+                [
+                    [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+                    [a, b, b],
+                    [b, a, b],
+                    [b, b, a],
+                    [c, d, d],
+                    [d, c, d],
+                    [d, d, c],
+                ],
+                dtype=float,
+            ),
+            np.asarray(
+                [
+                    0.225000000000000,
+                    0.132394152788506,
+                    0.132394152788506,
+                    0.132394152788506,
+                    0.125939180544827,
+                    0.125939180544827,
+                    0.125939180544827,
+                ],
+                dtype=float,
+            ),
+        )
+    raise ValueError("order must be one of 1, 3, or 7")
 
 
 def _unit(value: np.ndarray) -> np.ndarray:

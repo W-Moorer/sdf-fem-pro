@@ -28,6 +28,16 @@ class SurfaceSDFResult(NamedTuple):
     p: np.ndarray
 
 
+class SurfaceSDFBatchResult(NamedTuple):
+    """Batch result of current-surface projection-kernel evaluations."""
+
+    g: np.ndarray
+    n: np.ndarray
+    face_id: np.ndarray
+    w: np.ndarray
+    p: np.ndarray
+
+
 def _as_point(value: np.ndarray, name: str) -> np.ndarray:
     point = np.asarray(value, dtype=float)
     if point.shape != (3,):
@@ -140,6 +150,105 @@ def surface_projection_distance_kernel(
     return dynamic_surface_sdf(x, x_current, boundary_faces, candidate_face_ids)
 
 
+def surface_projection_distance_kernel_batch_all_faces(
+    points: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+) -> SurfaceSDFBatchResult:
+    """Evaluate the projection kernel for many points against all faces.
+
+    This is used only for SDF field population. It is algebraically the same
+    closest-triangle projection as the scalar kernel, but amortizes Python
+    overhead over a batch of grid nodes.
+    """
+
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError("points must have shape (n, 3)")
+    X, faces = _as_surface(x_current, boundary_faces)
+    if faces.shape[0] == 0:
+        raise ValueError("boundary_faces must contain at least one triangle")
+
+    triangles = X[faces]
+    closest, bary, dist2 = _closest_points_on_triangles_batch(P, triangles)
+    best_face = np.argmin(dist2, axis=1)
+    rows = np.arange(P.shape[0], dtype=np.int64)
+    best_p = closest[rows, best_face]
+    best_w = bary[rows, best_face]
+    best_dist2 = dist2[rows, best_face]
+    best_triangles = triangles[best_face]
+    face_normals = np.asarray([_unit_triangle_normal(triangle) for triangle in best_triangles], dtype=float)
+    offset = P - best_p
+    distance = np.sqrt(best_dist2)
+    signed_plane_distance = np.einsum("ij,ij->i", offset, face_normals)
+    sign = np.where(signed_plane_distance >= 0.0, 1.0, -1.0)
+    normals = np.empty_like(offset)
+    nonzero = distance > 1.0e-15
+    normals[nonzero] = sign[nonzero, None] * offset[nonzero] / distance[nonzero, None]
+    normals[~nonzero] = face_normals[~nonzero]
+    g = sign * distance
+    g[~nonzero] = 0.0
+    return SurfaceSDFBatchResult(
+        g=g.astype(float, copy=False),
+        n=normals,
+        face_id=best_face.astype(np.int64, copy=False),
+        w=best_w,
+        p=best_p,
+    )
+
+
+def surface_projection_distance_kernel_batch_candidates(
+    points: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+    candidate_face_ids: np.ndarray,
+) -> SurfaceSDFBatchResult:
+    """Evaluate many projection-kernel points against a shared candidate set.
+
+    This is the batched counterpart of ``surface_projection_distance_kernel``
+    for points whose spatial-hash lookup produced the same candidate triangle
+    ids. Projection remains an internal field-construction operation.
+    """
+
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError("points must have shape (n, 3)")
+    X, faces = _as_surface(x_current, boundary_faces)
+    candidates = np.asarray(candidate_face_ids, dtype=np.int64).ravel()
+    if candidates.size == 0:
+        raise ValueError("candidate_face_ids must contain at least one face id")
+    if np.any(candidates < 0) or int(candidates.max()) >= faces.shape[0]:
+        raise ValueError("candidate_face_ids contains an invalid face id")
+
+    triangles = X[faces[candidates]]
+    closest, bary, dist2 = _closest_points_on_triangles_batch(P, triangles)
+    best_local = np.argmin(dist2, axis=1)
+    rows = np.arange(P.shape[0], dtype=np.int64)
+    best_face = candidates[best_local]
+    best_p = closest[rows, best_local]
+    best_w = bary[rows, best_local]
+    best_dist2 = dist2[rows, best_local]
+    best_triangles = X[faces[best_face]]
+    face_normals = np.asarray([_unit_triangle_normal(triangle) for triangle in best_triangles], dtype=float)
+    offset = P - best_p
+    distance = np.sqrt(best_dist2)
+    signed_plane_distance = np.einsum("ij,ij->i", offset, face_normals)
+    sign = np.where(signed_plane_distance >= 0.0, 1.0, -1.0)
+    normals = np.empty_like(offset)
+    nonzero = distance > 1.0e-15
+    normals[nonzero] = sign[nonzero, None] * offset[nonzero] / distance[nonzero, None]
+    normals[~nonzero] = face_normals[~nonzero]
+    g = sign * distance
+    g[~nonzero] = 0.0
+    return SurfaceSDFBatchResult(
+        g=g.astype(float, copy=False),
+        n=normals,
+        face_id=best_face.astype(np.int64, copy=False),
+        w=best_w,
+        p=best_p,
+    )
+
+
 def _slow_reference_dynamic_surface_sdf(
     x: np.ndarray,
     x_current: np.ndarray,
@@ -153,4 +262,84 @@ def _slow_reference_dynamic_surface_sdf(
         x_current,
         boundary_faces,
         np.arange(faces.shape[0], dtype=np.int64),
+    )
+
+
+def _closest_points_on_triangles_batch(points: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    P = points[:, None, :]
+    A = triangles[None, :, 0, :]
+    B = triangles[None, :, 1, :]
+    C = triangles[None, :, 2, :]
+    AB = B - A
+    AC = C - A
+    AP = P - A
+
+    d1 = np.einsum("nmd,nmd->nm", AB, AP)
+    d2 = np.einsum("nmd,nmd->nm", AC, AP)
+    BP = P - B
+    d3 = np.einsum("nmd,nmd->nm", AB, BP)
+    d4 = np.einsum("nmd,nmd->nm", AC, BP)
+    CP = P - C
+    d5 = np.einsum("nmd,nmd->nm", AB, CP)
+    d6 = np.einsum("nmd,nmd->nm", AC, CP)
+
+    shape = d1.shape
+    closest = np.empty((*shape, 3), dtype=float)
+    bary = np.empty((*shape, 3), dtype=float)
+    assigned = np.zeros(shape, dtype=bool)
+
+    def assign(mask: np.ndarray, p: np.ndarray, w: np.ndarray) -> None:
+        active = mask & ~assigned
+        if not bool(np.any(active)):
+            return
+        closest[active] = np.broadcast_to(p, closest.shape)[active]
+        bary[active] = np.broadcast_to(w, bary.shape)[active]
+        assigned[active] = True
+
+    assign((d1 <= 0.0) & (d2 <= 0.0), A, np.asarray([1.0, 0.0, 0.0], dtype=float))
+    assign((d3 >= 0.0) & (d4 <= d3), B, np.asarray([0.0, 1.0, 0.0], dtype=float))
+
+    vc = d1 * d4 - d3 * d2
+    edge_ab = (vc <= 0.0) & (d1 >= 0.0) & (d3 <= 0.0)
+    v = _safe_divide(d1, d1 - d3)
+    assign(edge_ab, A + v[:, :, None] * AB, np.stack((1.0 - v, v, np.zeros_like(v)), axis=-1))
+
+    assign((d6 >= 0.0) & (d5 <= d6), C, np.asarray([0.0, 0.0, 1.0], dtype=float))
+
+    vb = d5 * d2 - d1 * d6
+    edge_ac = (vb <= 0.0) & (d2 >= 0.0) & (d6 <= 0.0)
+    w_ac = _safe_divide(d2, d2 - d6)
+    assign(edge_ac, A + w_ac[:, :, None] * AC, np.stack((1.0 - w_ac, np.zeros_like(w_ac), w_ac), axis=-1))
+
+    va = d3 * d6 - d5 * d4
+    edge_bc = (va <= 0.0) & ((d4 - d3) >= 0.0) & ((d5 - d6) >= 0.0)
+    w_bc = _safe_divide(d4 - d3, (d4 - d3) + (d5 - d6))
+    assign(
+        edge_bc,
+        B + w_bc[:, :, None] * (C - B),
+        np.stack((np.zeros_like(w_bc), 1.0 - w_bc, w_bc), axis=-1),
+    )
+
+    remaining = ~assigned
+    denom = va + vb + vc
+    v_face = _safe_divide(vb, denom)
+    w_face = _safe_divide(vc, denom)
+    u_face = 1.0 - v_face - w_face
+    assign(
+        remaining,
+        u_face[:, :, None] * A + v_face[:, :, None] * B + w_face[:, :, None] * C,
+        np.stack((u_face, v_face, w_face), axis=-1),
+    )
+
+    diff = P - closest
+    dist2 = np.einsum("nmd,nmd->nm", diff, diff)
+    return closest, bary, dist2
+
+
+def _safe_divide(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    return np.divide(
+        numerator,
+        denominator,
+        out=np.zeros_like(numerator, dtype=float),
+        where=np.abs(denominator) > 1.0e-30,
     )

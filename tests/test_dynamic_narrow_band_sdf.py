@@ -12,7 +12,10 @@ from sfc.contact import (
     field_penalty_contact_response,
 )
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF
-from sfc.sdf.dynamic_surface_sdf import surface_projection_distance_kernel
+from sfc.sdf.dynamic_surface_sdf import (
+    surface_projection_distance_kernel,
+    surface_projection_distance_kernel_batch_candidates,
+)
 
 
 def _plane_surface() -> tuple[np.ndarray, np.ndarray]:
@@ -277,6 +280,66 @@ def test_required_point_sparse_field_matches_full_field_queries(monkeypatch: pyt
         sparse.query_phi(point)
         sparse.query_gradient(point)
         sparse.query_payload(point)
+
+
+def test_build_required_points_can_use_candidate_group_batch_projection() -> None:
+    X, faces = _nonplanar_surface()
+    origin = np.asarray([-0.1, -0.1, -0.35], dtype=float)
+    shape = (9, 9, 7)
+    points = np.asarray(
+        [
+            [0.31, 0.47, _nonplanar_z(0.31, 0.47) + 0.035],
+            [0.58, 0.36, _nonplanar_z(0.58, 0.36) - 0.045],
+            [0.43, 0.69, _nonplanar_z(0.43, 0.69) + 0.055],
+        ],
+        dtype=float,
+    )
+    full = DynamicNarrowBandSDF.build(
+        X,
+        faces,
+        spacing=0.12,
+        band_radius=0.40,
+        origin=origin,
+        shape=shape,
+        cell_size=0.12,
+    )
+    sparse = DynamicNarrowBandSDF.build_required_points(
+        X,
+        faces,
+        points,
+        spacing=0.12,
+        band_radius=0.40,
+        origin=origin,
+        shape=shape,
+        cell_size=0.12,
+        batch_projection_threshold=1,
+    )
+
+    assert sparse.grid.metadata["projection_mode"] == "candidate_group_batch"
+    for point in points:
+        assert sparse.query_phi(point) == pytest.approx(full.query_phi(point), abs=1.0e-14)
+        assert np.allclose(sparse.query_gradient(point), full.query_gradient(point), atol=1.0e-14)
+
+
+def test_candidate_batch_projection_matches_scalar_kernel() -> None:
+    X, faces = _nonplanar_surface()
+    candidates = np.asarray([0, 1, 2, 3], dtype=np.int64)
+    points = np.asarray(
+        [
+            [0.31, 0.47, _nonplanar_z(0.31, 0.47) + 0.035],
+            [0.58, 0.36, _nonplanar_z(0.58, 0.36) - 0.045],
+            [0.43, 0.69, _nonplanar_z(0.43, 0.69) + 0.055],
+        ],
+        dtype=float,
+    )
+
+    batch = surface_projection_distance_kernel_batch_candidates(points, X, faces, candidates)
+    scalar = [surface_projection_distance_kernel(point, X, faces, candidates) for point in points]
+
+    np.testing.assert_allclose(batch.g, [item.g for item in scalar], atol=1.0e-14)
+    np.testing.assert_array_equal(batch.face_id, [item.face_id for item in scalar])
+    np.testing.assert_allclose(batch.w, np.vstack([item.w for item in scalar]), atol=1.0e-14)
+    np.testing.assert_allclose(batch.n, np.vstack([item.n for item in scalar]), atol=1.0e-14)
 
 
 def test_field_contact_slave_jacobian_matches_finite_difference() -> None:

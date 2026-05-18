@@ -43,6 +43,19 @@ from validation.run_phase3_validation import structured_tet_block  # noqa: E402
 Row = dict[str, Any]
 
 
+def _configure_times_fonts(matplotlib_module: Any) -> None:
+    matplotlib_module.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "STIXGeneral", "DejaVu Serif"],
+            "mathtext.fontset": "stix",
+            "axes.unicode_minus": False,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TimingModel:
     mesh: VolumeMesh
@@ -65,6 +78,90 @@ def _write_csv(path: Path, rows: list[Row]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _plot_outputs(out_dir: Path, step_rows: list[Row]) -> dict[str, Path]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    _configure_times_fonts(matplotlib)
+    import matplotlib.pyplot as plt
+
+    figures = out_dir / "figures"
+    figures.mkdir(parents=True, exist_ok=True)
+    outputs: dict[str, Path] = {}
+    labels = [str(row["case_id"]).replace("_linear_", "\n") for row in step_rows]
+    x = np.arange(len(labels), dtype=float)
+
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.42 * len(labels)), 4.2))
+    field_update = np.asarray([float(row["field_update_seconds"]) for row in step_rows], dtype=float)
+    field_contact = np.asarray([float(row["field_contact_seconds"]) for row in step_rows], dtype=float)
+    field_solve = np.asarray([float(row["field_solve_or_integrate_seconds"]) for row in step_rows], dtype=float)
+    fem = np.asarray([float(row["fem_assembly_seconds"]) for row in step_rows], dtype=float)
+    bottom = np.zeros_like(x)
+    for values, label, color in [
+        (fem, "FEM assembly", "#b279a2"),
+        (field_update, "SDF field update", "#4c78a8"),
+        (field_contact, "field contact query", "#72b7b2"),
+        (field_solve, "solve/integrate", "#f58518"),
+    ]:
+        ax.bar(x, values, bottom=bottom, label=label, color=color)
+        bottom += values
+    projection_total = np.asarray([float(row["projection_total_step_seconds"]) for row in step_rows], dtype=float)
+    ax.scatter(x, projection_total, marker="D", color="black", zorder=5, label="projection total")
+    ax.set_yscale("log")
+    ax.set_ylabel("Step time (s)")
+    ax.set_xlabel("Case")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7)
+    ax.grid(True, axis="y", which="both", alpha=0.30)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    png = figures / "solver_step_timing_breakdown.png"
+    pdf = figures / "solver_step_timing_breakdown.pdf"
+    fig.savefig(png, dpi=180)
+    fig.savefig(pdf)
+    plt.close(fig)
+    outputs["solver_step_timing_breakdown_png"] = png
+    outputs["solver_step_timing_breakdown_pdf"] = pdf
+
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.42 * len(labels)), 3.8))
+    speedup = [float(row["step_speedup_projection_over_field"]) for row in step_rows]
+    colors = ["#54a24b" if float(value) > 1.0 else "#e45756" for value in speedup]
+    ax.bar(x, speedup, color=colors)
+    ax.axhline(1.0, color="black", linewidth=1.0)
+    ax.set_ylabel("Projection total / field total")
+    ax.set_xlabel("Case")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7)
+    ax.grid(True, axis="y", alpha=0.30)
+    fig.tight_layout()
+    png = figures / "solver_step_speedup.png"
+    pdf = figures / "solver_step_speedup.pdf"
+    fig.savefig(png, dpi=180)
+    fig.savefig(pdf)
+    plt.close(fig)
+    outputs["solver_step_speedup_png"] = png
+    outputs["solver_step_speedup_pdf"] = pdf
+
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.42 * len(labels)), 3.8))
+    qstar = [float(row["query_crossover_q_star"]) for row in step_rows]
+    ax.bar(x, qstar, color="#4c78a8")
+    ax.set_yscale("log")
+    ax.set_ylabel("Measured query crossover Q*")
+    ax.set_xlabel("Case")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7)
+    ax.grid(True, axis="y", which="both", alpha=0.30)
+    fig.tight_layout()
+    png = figures / "solver_query_crossover.png"
+    pdf = figures / "solver_query_crossover.pdf"
+    fig.savefig(png, dpi=180)
+    fig.savefig(pdf)
+    plt.close(fig)
+    outputs["solver_query_crossover_png"] = png
+    outputs["solver_query_crossover_pdf"] = pdf
+    return outputs
 
 
 def _timing_model(element_type: str, *, quick: bool) -> TimingModel:
@@ -469,6 +566,7 @@ def run_validation(out_dir: Path, *, quick: bool = False) -> dict[str, Path]:
     }
     _write_csv(outputs["step_timing"], step_rows)
     _write_csv(outputs["crossover"], crossover_rows)
+    outputs.update(_plot_outputs(out_dir, step_rows))
     _write_summary(outputs["summary"], step_rows, outputs)
     return outputs
 

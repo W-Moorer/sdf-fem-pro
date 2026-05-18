@@ -1,0 +1,5 @@
+Dynamic SDF fields are rebuilt from current finite-element surfaces.
+Closest-feature grid payloads provide master-side contact sensitivities.
+Scalar SDF interpolation derivatives define contact Jacobians.
+Node- and surface-based field-contact backends are validated.
+Measured crossovers quantify when field queries amortize updates.

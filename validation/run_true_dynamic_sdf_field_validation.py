@@ -691,9 +691,12 @@ def _plot_phase8_outputs(
 
     def save(name: str) -> None:
         path = figures / name
+        pdf_path = figures / f"{Path(name).stem}.pdf"
         plt.tight_layout()
         plt.savefig(path, dpi=180)
+        plt.savefig(pdf_path)
         outputs[name] = path
+        outputs[pdf_path.name] = pdf_path
         plt.close()
 
     spacings = np.asarray([float(row["spacing"]) for row in accuracy_rows], dtype=float)

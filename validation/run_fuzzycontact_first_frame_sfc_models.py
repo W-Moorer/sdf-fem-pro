@@ -78,6 +78,8 @@ class FirstFrameBody:
     name: str
     mesh: VolumeMesh
     reference_rule: str
+    reference_score: float
+    reference_score_details: str
     target_displacement: np.ndarray
     reference_points_raw: np.ndarray
     material: FirstFrameMaterial
@@ -149,7 +151,7 @@ def _displacement_field(data: VTUData) -> tuple[str, np.ndarray]:
     raise ValueError(f"{data.path} does not contain a displacement field")
 
 
-def _reference_rule(problem: str) -> str:
+def _default_reference_rule(problem: str) -> str:
     if problem == "problem_1":
         return "points_minus_displacement"
     if problem in {"problem_3", "problem_4"}:
@@ -157,15 +159,107 @@ def _reference_rule(problem: str) -> str:
     raise ValueError(f"unsupported problem: {problem}")
 
 
-def _reference_points(data: VTUData, problem: str) -> tuple[str, np.ndarray, np.ndarray]:
+def _candidate_reference_points(points: np.ndarray, displacement: np.ndarray) -> dict[str, np.ndarray]:
+    return {
+        "points": np.asarray(points, dtype=float).copy(),
+        "points_minus_displacement": np.asarray(points, dtype=float) - np.asarray(displacement, dtype=float),
+    }
+
+
+def _strain_tensor_norm_from_voigt(strain: np.ndarray) -> float:
+    """Return Frobenius norm of the symmetric strain tensor from engineering strain."""
+
+    e = np.asarray(strain, dtype=float).ravel()
+    return float(np.sqrt(e[0] ** 2 + e[1] ** 2 + e[2] ** 2 + 2.0 * ((0.5 * e[3]) ** 2 + (0.5 * e[4]) ** 2 + (0.5 * e[5]) ** 2)))
+
+
+def _strain_norm_values(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 1:
+        return np.abs(arr.reshape((-1,)))
+    if arr.shape[-1] == 9:
+        tensors = arr.reshape((-1, 3, 3))
+        sym = 0.5 * (tensors + np.swapaxes(tensors, 1, 2))
+        return np.linalg.norm(sym, axis=(1, 2))
+    if arr.shape[-1] == 6:
+        e = arr.reshape((-1, 6))
+        return np.sqrt(e[:, 0] ** 2 + e[:, 1] ** 2 + e[:, 2] ** 2 + 2.0 * (e[:, 3] ** 2 + e[:, 4] ** 2 + e[:, 5] ** 2))
+    return np.linalg.norm(arr.reshape((arr.shape[0], -1)), axis=1)
+
+
+def _summary_pair(values: np.ndarray) -> tuple[float, float]:
+    arr = np.asarray(values, dtype=float).reshape((-1,))
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 0.0, 0.0
+    return float(np.max(arr)), float(np.quantile(arr, 0.95))
+
+
+def _sfc_stress_metric_values(mesh: VolumeMesh, displacement: np.ndarray, material: FirstFrameMaterial) -> tuple[np.ndarray, np.ndarray]:
+    if mesh.element_type != "tet4":
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+    C = isotropic_linear_elasticity_matrix(material.E, material.nu)
+    vm: list[float] = []
+    strain_norm: list[float] = []
+    for element in mesh.elements:
+        B = tet4_strain_displacement_matrix(mesh.X[element])
+        strain = B @ displacement[element].reshape(12)
+        stress = C @ strain
+        vm.append(_von_mises_voigt(stress))
+        strain_norm.append(_strain_tensor_norm_from_voigt(strain))
+    return np.asarray(vm, dtype=float), np.asarray(strain_norm, dtype=float)
+
+
+def _reference_stress_metric_values(data: VTUData) -> tuple[np.ndarray, np.ndarray]:
+    strain_field = _tensor_field(data, "strain")
+    strain = _strain_norm_values(strain_field) if strain_field is not None else np.zeros(data.points.shape[0], dtype=float)
+    mises = _field_norm(data, "mises")
+    if not np.any(mises):
+        stress = _tensor_field(data, "stress")
+        mises = _von_mises_tensor(stress) if stress is not None else np.zeros(data.points.shape[0], dtype=float)
+    return np.asarray(mises, dtype=float), np.asarray(strain, dtype=float)
+
+
+def _log_scale_error(value: float, reference: float) -> float:
+    eps = 1.0e-30
+    return abs(math.log((abs(float(value)) + eps) / (abs(float(reference)) + eps)))
+
+
+def _reference_candidate_score(mesh: VolumeMesh, displacement: np.ndarray, material: FirstFrameMaterial, data: VTUData) -> float:
+    sfc_vm, sfc_strain = _sfc_stress_metric_values(mesh, displacement, material)
+    ref_vm, ref_strain = _reference_stress_metric_values(data)
+    _sfc_vm_max, sfc_vm_p95 = _summary_pair(sfc_vm)
+    _ref_vm_max, ref_vm_p95 = _summary_pair(ref_vm)
+    _sfc_strain_max, sfc_strain_p95 = _summary_pair(sfc_strain)
+    _ref_strain_max, ref_strain_p95 = _summary_pair(ref_strain)
+    return _log_scale_error(sfc_vm_p95, ref_vm_p95) + _log_scale_error(sfc_strain_p95, ref_strain_p95)
+
+
+def _reference_points(data: VTUData, problem: str) -> tuple[str, np.ndarray, np.ndarray, float, str]:
     _name, displacement = _displacement_field(data)
-    rule = _reference_rule(problem)
     points = np.asarray(data.points, dtype=float)
-    if rule == "points_minus_displacement":
-        return rule, points - displacement, displacement
-    if rule == "points":
-        return rule, points.copy(), displacement
-    raise ValueError(f"unsupported reference rule: {rule}")
+    material = _problem_material(problem)
+    default = _default_reference_rule(problem)
+    candidates = _candidate_reference_points(points, displacement)
+    scored: list[tuple[float, str, np.ndarray]] = []
+    for rule, X in candidates.items():
+        try:
+            mesh = VolumeMesh(X, np.asarray(data.cells, dtype=np.int64), element_type=_element_type(data.cell_types))
+            score = _reference_candidate_score(mesh, displacement, material, data)
+        except Exception:
+            score = math.inf
+        scored.append((score, rule, X))
+    scored.sort(key=lambda item: (item[0], 0 if item[1] == default else 1))
+    best_score, best_rule, best_points = scored[0]
+    # Keep the literature/PDF-derived default if the automatic score is
+    # numerically indistinguishable.  This prevents tiny roundoff differences in
+    # a nearly linear field from flipping the recorded coordinate convention.
+    for score, rule, X in scored:
+        if rule == default and math.isfinite(score) and score <= best_score + 1.0e-3:
+            best_score, best_rule, best_points = score, rule, X
+            break
+    details = ";".join(f"{rule}:{score:.6e}" for score, rule, _X in scored)
+    return best_rule, best_points, displacement, float(best_score), details
 
 
 def _element_type(cell_types: list[int]) -> str:
@@ -178,12 +272,14 @@ def _element_type(cell_types: list[int]) -> str:
 
 
 def _body_from_vtu(name: str, data: VTUData, problem: str) -> FirstFrameBody:
-    rule, X, displacement = _reference_points(data, problem)
+    rule, X, displacement, score, details = _reference_points(data, problem)
     mesh = VolumeMesh(X, np.asarray(data.cells, dtype=np.int64), element_type=_element_type(data.cell_types))
     return FirstFrameBody(
         name=name,
         mesh=mesh,
         reference_rule=rule,
+        reference_score=score,
+        reference_score_details=details,
         target_displacement=displacement,
         reference_points_raw=np.asarray(data.points, dtype=float),
         material=_problem_material(problem),
@@ -513,7 +609,8 @@ def _von_mises_tensor(tensor: np.ndarray) -> np.ndarray:
     tensors = arr.reshape((-1, 3, 3))
     values = []
     for s in tensors:
-        values.append(_von_mises_voigt([s[0, 0], s[1, 1], s[2, 2], s[0, 1], s[1, 2], s[0, 2]]))
+        sym = 0.5 * (s + s.T)
+        values.append(_von_mises_voigt([sym[0, 0], sym[1, 1], sym[2, 2], sym[0, 1], sym[1, 2], sym[0, 2]]))
     return np.asarray(values, dtype=float)
 
 
@@ -524,32 +621,37 @@ def _field_norm(data: VTUData, kind: str) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
     if kind == "mises":
         return _von_mises_tensor(arr)
+    if kind == "strain":
+        return _strain_norm_values(arr)
     return np.linalg.norm(arr.reshape((arr.shape[0], -1)), axis=1)
 
 
 def _sfc_stress_metrics(body: FirstFrameBody) -> tuple[float, float]:
-    if body.mesh.element_type != "tet4":
-        return math.nan, math.nan
-    C = isotropic_linear_elasticity_matrix(body.material.E, body.material.nu)
-    u = body.target_displacement
-    vm: list[float] = []
-    strain_norm: list[float] = []
-    for element in body.mesh.elements:
-        B = tet4_strain_displacement_matrix(body.mesh.X[element])
-        strain = B @ u[element].reshape(12)
-        stress = C @ strain
-        vm.append(_von_mises_voigt(stress))
-        strain_norm.append(float(np.linalg.norm(strain)))
-    return float(np.max(vm)) if vm else 0.0, float(np.max(strain_norm)) if strain_norm else 0.0
+    vm, strain_norm = _sfc_stress_metric_values(body.mesh, body.target_displacement, body.material)
+    vm_max, _vm_p95 = _summary_pair(vm)
+    strain_max, _strain_p95 = _summary_pair(strain_norm)
+    return vm_max, strain_max
+
+
+def _sfc_stress_metric_summaries(body: FirstFrameBody) -> tuple[float, float, float, float]:
+    vm, strain_norm = _sfc_stress_metric_values(body.mesh, body.target_displacement, body.material)
+    vm_max, vm_p95 = _summary_pair(vm)
+    strain_max, strain_p95 = _summary_pair(strain_norm)
+    return vm_max, vm_p95, strain_max, strain_p95
 
 
 def _reference_stress_metrics(body: FirstFrameBody) -> tuple[float, float]:
-    strain = _field_norm(body.vtu, "strain")
-    mises = _field_norm(body.vtu, "mises")
-    if not np.any(mises):
-        stress = _tensor_field(body.vtu, "stress")
-        mises = _von_mises_tensor(stress) if stress is not None else np.zeros(body.mesh.X.shape[0], dtype=float)
-    return float(np.max(mises)) if mises.size else 0.0, float(np.max(strain)) if strain.size else 0.0
+    mises, strain = _reference_stress_metric_values(body.vtu)
+    vm_max, _vm_p95 = _summary_pair(mises)
+    strain_max, _strain_p95 = _summary_pair(strain)
+    return vm_max, strain_max
+
+
+def _reference_stress_metric_summaries(body: FirstFrameBody) -> tuple[float, float, float, float]:
+    mises, strain = _reference_stress_metric_values(body.vtu)
+    vm_max, vm_p95 = _summary_pair(mises)
+    strain_max, strain_p95 = _summary_pair(strain)
+    return vm_max, vm_p95, strain_max, strain_p95
 
 
 def _safe_rel_error(value: float, reference: float) -> float:
@@ -560,10 +662,10 @@ def _safe_rel_error(value: float, reference: float) -> float:
 
 
 def _model_row(case: FirstFrameCase) -> Row:
-    master_sfc_vm, master_sfc_strain = _sfc_stress_metrics(case.master)
-    slave_sfc_vm, slave_sfc_strain = _sfc_stress_metrics(case.slave)
-    master_ref_vm, master_ref_strain = _reference_stress_metrics(case.master)
-    slave_ref_vm, slave_ref_strain = _reference_stress_metrics(case.slave)
+    master_sfc_vm, master_sfc_vm_p95, master_sfc_strain, master_sfc_strain_p95 = _sfc_stress_metric_summaries(case.master)
+    slave_sfc_vm, slave_sfc_vm_p95, slave_sfc_strain, slave_sfc_strain_p95 = _sfc_stress_metric_summaries(case.slave)
+    master_ref_vm, master_ref_vm_p95, master_ref_strain, master_ref_strain_p95 = _reference_stress_metric_summaries(case.master)
+    slave_ref_vm, slave_ref_vm_p95, slave_ref_strain, slave_ref_strain_p95 = _reference_stress_metric_summaries(case.slave)
     slave_disp = np.linalg.norm(case.slave.target_displacement, axis=1)
     master_disp = np.linalg.norm(case.master.target_displacement, axis=1)
     return {
@@ -573,6 +675,10 @@ def _model_row(case: FirstFrameCase) -> Row:
         "slave_body": case.slave.name,
         "master_reference_rule": case.master.reference_rule,
         "slave_reference_rule": case.slave.reference_rule,
+        "master_reference_score": case.master.reference_score,
+        "slave_reference_score": case.slave.reference_score,
+        "master_reference_score_details": case.master.reference_score_details,
+        "slave_reference_score_details": case.slave.reference_score_details,
         "master_nodes": int(case.master.mesh.X.shape[0]),
         "slave_nodes": int(case.slave.mesh.X.shape[0]),
         "master_elements": int(case.master.mesh.elements.shape[0]),
@@ -586,15 +692,29 @@ def _model_row(case: FirstFrameCase) -> Row:
         "master_target_disp_max": float(np.max(master_disp)),
         "slave_target_disp_max": float(np.max(slave_disp)),
         "master_sfc_postprocess_max_von_mises": master_sfc_vm,
+        "master_sfc_postprocess_p95_von_mises": master_sfc_vm_p95,
         "master_reference_max_von_mises": master_ref_vm,
+        "master_reference_p95_von_mises": master_ref_vm_p95,
         "master_von_mises_rel_error": _safe_rel_error(master_sfc_vm, master_ref_vm),
+        "master_von_mises_p95_rel_error": _safe_rel_error(master_sfc_vm_p95, master_ref_vm_p95),
         "slave_sfc_postprocess_max_von_mises": slave_sfc_vm,
+        "slave_sfc_postprocess_p95_von_mises": slave_sfc_vm_p95,
         "slave_reference_max_von_mises": slave_ref_vm,
+        "slave_reference_p95_von_mises": slave_ref_vm_p95,
         "slave_von_mises_rel_error": _safe_rel_error(slave_sfc_vm, slave_ref_vm),
+        "slave_von_mises_p95_rel_error": _safe_rel_error(slave_sfc_vm_p95, slave_ref_vm_p95),
         "master_sfc_postprocess_max_strain_norm": master_sfc_strain,
+        "master_sfc_postprocess_p95_strain_norm": master_sfc_strain_p95,
         "master_reference_max_strain_norm": master_ref_strain,
+        "master_reference_p95_strain_norm": master_ref_strain_p95,
+        "master_strain_norm_rel_error": _safe_rel_error(master_sfc_strain, master_ref_strain),
+        "master_strain_norm_p95_rel_error": _safe_rel_error(master_sfc_strain_p95, master_ref_strain_p95),
         "slave_sfc_postprocess_max_strain_norm": slave_sfc_strain,
+        "slave_sfc_postprocess_p95_strain_norm": slave_sfc_strain_p95,
         "slave_reference_max_strain_norm": slave_ref_strain,
+        "slave_reference_p95_strain_norm": slave_ref_strain_p95,
+        "slave_strain_norm_rel_error": _safe_rel_error(slave_sfc_strain, slave_ref_strain),
+        "slave_strain_norm_p95_rel_error": _safe_rel_error(slave_sfc_strain_p95, slave_ref_strain_p95),
         "claim_scope": "first-frame external benchmark mesh reproduction with SFC dynamic SDF field contact",
     }
 
@@ -759,6 +879,12 @@ def _write_summary(
         )
     lines.extend(
         [
+            "",
+            "## Coordinate and Field Convention Diagnostics",
+            "",
+            "- Reference coordinates are selected by scoring `points` and `points_minus_displacement` against the public VTU strain/stress fields.",
+            "- Strain comparisons use tensor Frobenius norms. SFC engineering shear strains are converted to tensor shear before comparison.",
+            "- Both maximum and p95 errors are written to `fuzzycontact_first_frame_models.csv`; p95 is less sensitive to isolated contact-tip peaks.",
             "",
             "## Field-Contact Evaluation",
             "",

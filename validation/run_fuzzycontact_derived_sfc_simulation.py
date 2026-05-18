@@ -45,6 +45,13 @@ from sfc.fem.tet4 import tet4_strain_displacement_matrix  # noqa: E402
 from sfc.mesh import VolumeMesh, extract_boundary_triangles  # noqa: E402
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
 from validation.run_fuzzycontact_vtu_reference import _real_vtu_files, _replay_pairs  # noqa: E402
+from validation.run_fuzzycontact_first_frame_sfc_models import (  # noqa: E402
+    FirstFrameMaterial,
+    _candidate_reference_points,
+    _default_reference_rule,
+    _reference_candidate_score,
+    _strain_tensor_norm_from_voigt,
+)
 
 Row = dict[str, Any]
 
@@ -53,6 +60,9 @@ Row = dict[str, Any]
 class BodyCase:
     name: str
     mesh: VolumeMesh
+    reference_rule: str
+    reference_score: float
+    reference_score_details: str
     target_displacement: np.ndarray
     E: float
     nu: float
@@ -138,16 +148,40 @@ def _fit_isotropic_material(strain: np.ndarray, stress: np.ndarray, *, max_point
     return float(E), float(np.clip(nu, -0.95, 0.48))
 
 
-def _body_case(name: str, data: Any) -> BodyCase:
+def _select_reference_mesh(data: Any, problem: str, displacement: np.ndarray, E: float, nu: float) -> tuple[str, VolumeMesh, float, str]:
+    material = FirstFrameMaterial(E=E, nu=nu, density=1.0, unit_system="dataset")
+    default = _default_reference_rule(problem) if problem in {"problem_1", "problem_3", "problem_4"} else "points_minus_displacement"
+    scored: list[tuple[float, str, VolumeMesh]] = []
+    for rule, X in _candidate_reference_points(np.asarray(data.points, dtype=float), displacement).items():
+        try:
+            mesh = VolumeMesh(X, np.asarray(data.cells, dtype=np.int64), element_type=_cells_element_type(data.cell_types))
+            score = _reference_candidate_score(mesh, displacement, material, data)
+        except Exception:
+            score = math.inf
+            mesh = VolumeMesh(X, np.asarray(data.cells, dtype=np.int64), element_type=_cells_element_type(data.cell_types))
+        scored.append((score, rule, mesh))
+    scored.sort(key=lambda item: (item[0], 0 if item[1] == default else 1))
+    best_score, best_rule, best_mesh = scored[0]
+    for score, rule, mesh in scored:
+        if rule == default and math.isfinite(score) and score <= best_score + 1.0e-3:
+            best_score, best_rule, best_mesh = score, rule, mesh
+            break
+    details = ";".join(f"{rule}:{score:.6e}" for score, rule, _mesh in scored)
+    return best_rule, best_mesh, float(best_score), details
+
+
+def _body_case(name: str, data: Any, problem: str) -> BodyCase:
     disp_name, displacement = _point_field(data.point_data, "displacement")
     _strain_name, strain = _point_field(data.point_data, "strain")
     stress_name, stress = _point_field(data.point_data, "stress")
-    X0 = np.asarray(data.points, dtype=float) - np.asarray(displacement, dtype=float)
-    mesh = VolumeMesh(X0, np.asarray(data.cells, dtype=np.int64), element_type=_cells_element_type(data.cell_types))
     E, nu = _fit_isotropic_material(strain, stress)
+    rule, mesh, score, details = _select_reference_mesh(data, problem, np.asarray(displacement, dtype=float), E, nu)
     return BodyCase(
         name=name,
         mesh=mesh,
+        reference_rule=rule,
+        reference_score=score,
+        reference_score_details=details,
         target_displacement=np.asarray(displacement, dtype=float),
         E=E,
         nu=nu,
@@ -215,8 +249,8 @@ def _load_cases(source_dir: Path, *, max_cases: int) -> list[DerivedCase]:
     pairs = _replay_pairs(_real_vtu_files(source_dir, 10_000), max_groups=max_cases)
     cases: list[DerivedCase] = []
     for pair in pairs:
-        master = _body_case(pair.master_body, pair.master)
-        slave = _body_case(pair.slave_body, pair.slave)
+        master = _body_case(pair.master_body, pair.master, pair.problem)
+        slave = _body_case(pair.slave_body, pair.slave, pair.problem)
         axis, direction = _bbox_contact_axis(master.mesh.X, slave.mesh.X)
         cases.append(
             DerivedCase(
@@ -238,22 +272,76 @@ def _block_stiffness(master: BodyCase, slave: BodyCase):
     return block_diag((assemble_stiffness_matrix(master_body), assemble_stiffness_matrix(slave_body)), format="csr")
 
 
-def _fixed_dofs(case: DerivedCase, load_factor: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _mean_disp_norm(displacement: np.ndarray, ids: np.ndarray) -> float:
+    arr = np.asarray(ids, dtype=np.int64)
+    if arr.size == 0:
+        return 0.0
+    return float(np.mean(np.linalg.norm(np.asarray(displacement, dtype=float)[arr], axis=1)))
+
+
+def _select_support_nodes(body: BodyCase, *, axis: int) -> tuple[np.ndarray, str]:
+    disp_norm = np.linalg.norm(body.target_displacement, axis=1)
+    candidates: list[tuple[float, str, np.ndarray]] = []
+    for side in ("min", "max"):
+        ids = _extreme_nodes(body.mesh.X, axis=axis, side=side)
+        score = float(np.mean(disp_norm[ids])) if ids.size else math.inf
+        candidates.append((score, f"{side}_low_displacement_face", ids))
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][2], candidates[0][1]
+
+
+def _top_fraction(ids: np.ndarray, scores: np.ndarray, max_count: int) -> np.ndarray:
+    arr = np.asarray(ids, dtype=np.int64)
+    if arr.size == 0:
+        return arr
+    order = np.argsort(-np.asarray(scores, dtype=float)[arr])
+    count = min(max(1, int(max_count)), arr.size)
+    return arr[order[:count]]
+
+
+def _select_driver_nodes(body: BodyCase, *, axis: int, direction: float) -> tuple[np.ndarray, str]:
+    points = body.mesh.X
+    displacement = body.target_displacement
+    norm = np.linalg.norm(displacement, axis=1)
+    outer_side = "max" if direction >= 0.0 else "min"
+    contact_side = "min" if direction >= 0.0 else "max"
+    face_outer = _extreme_nodes(points, axis=axis, side=outer_side)
+    face_contact = _extreme_nodes(points, axis=axis, side=contact_side)
+    high_norm = _top_fraction(np.arange(points.shape[0], dtype=np.int64), norm, max(1, points.shape[0] // 12))
+    high_axis = _top_fraction(np.arange(points.shape[0], dtype=np.int64), np.abs(displacement[:, axis]), max(1, points.shape[0] // 12))
+    candidates = [
+        ("outer_extreme_face", face_outer),
+        ("contact_extreme_face", face_contact),
+        ("largest_displacement_norm", high_norm),
+        ("largest_axis_displacement", high_axis),
+    ]
+    scored: list[tuple[float, str, np.ndarray]] = []
+    for label, ids in candidates:
+        if ids.size == 0:
+            continue
+        score = _mean_disp_norm(displacement, ids)
+        scored.append((score, label, ids))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][2], scored[0][1]
+
+
+def _fixed_dofs(case: DerivedCase, load_factor: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, str]:
     axis = case.axis
-    master_support_side = "min" if case.direction >= 0.0 else "max"
-    slave_driver_side = "max" if case.direction >= 0.0 else "min"
-    master_support = _extreme_nodes(case.master.mesh.X, axis=axis, side=master_support_side)
-    slave_driver = _extreme_nodes(case.slave.mesh.X, axis=axis, side=slave_driver_side)
+    master_support, support_strategy = _select_support_nodes(case.master, axis=axis)
+    slave_driver, driver_strategy = _select_driver_nodes(case.slave, axis=axis, direction=case.direction)
 
     master_fixed = fixed_dofs_from_node_set(master_support, "xyz")
     slave_fixed_local = fixed_dofs_from_node_set(slave_driver, "xyz")
     offset = case.master.mesh.X.shape[0] * 3
     fixed = np.concatenate((master_fixed, offset + slave_fixed_local))
     values = np.zeros(fixed.size, dtype=float)
-    driver_target = np.mean(case.slave.target_displacement[slave_driver], axis=0) * float(load_factor)
+    driver_targets = case.slave.target_displacement[slave_driver] * float(load_factor)
+    driver_target = np.mean(driver_targets, axis=0) if driver_targets.size else np.zeros(3, dtype=float)
     for local_id, dof in enumerate(slave_fixed_local):
-        values[master_fixed.size + local_id] = driver_target[int(dof) % 3]
-    return fixed, values, master_support, slave_driver, driver_target
+        node_rank = int(local_id // 3)
+        component = int(dof) % 3
+        values[master_fixed.size + local_id] = driver_targets[node_rank, component]
+    return fixed, values, master_support, slave_driver, driver_target, support_strategy, driver_strategy
 
 
 def _contact_state(
@@ -324,10 +412,18 @@ def _simulate_case(
     last_gaps = np.empty(0, dtype=float)
     last_force = np.zeros(n_dofs, dtype=float)
     final_driver = np.zeros(3, dtype=float)
+    final_support_strategy = ""
+    final_driver_strategy = ""
+    final_support_count = 0
+    final_driver_count = 0
     for step in range(max(1, int(load_steps))):
         load = (step + 1) / max(1, int(load_steps))
-        fixed, values, master_support, slave_driver, driver = _fixed_dofs(case, load)
+        fixed, values, master_support, slave_driver, driver, support_strategy, driver_strategy = _fixed_dofs(case, load)
         final_driver = driver
+        final_support_strategy = support_strategy
+        final_driver_strategy = driver_strategy
+        final_support_count = int(master_support.size)
+        final_driver_count = int(slave_driver.size)
         for iteration in range(max(1, int(iterations))):
             gaps, contact_force, active, query_seconds, valid_nodes = _contact_state(
                 case,
@@ -382,6 +478,12 @@ def _simulate_case(
         "slave_nodes": case.slave.mesh.X.shape[0],
         "master_elements": case.master.mesh.elements.shape[0],
         "slave_elements": case.slave.mesh.elements.shape[0],
+        "master_reference_rule": case.master.reference_rule,
+        "slave_reference_rule": case.slave.reference_rule,
+        "master_reference_score": case.master.reference_score,
+        "slave_reference_score": case.slave.reference_score,
+        "master_reference_score_details": case.master.reference_score_details,
+        "slave_reference_score_details": case.slave.reference_score_details,
         "master_E_fit": case.master.E,
         "master_nu_fit": case.master.nu,
         "slave_E_fit": case.slave.E,
@@ -390,6 +492,12 @@ def _simulate_case(
         "driver_displacement_x": float(final_driver[0]),
         "driver_displacement_y": float(final_driver[1]),
         "driver_displacement_z": float(final_driver[2]),
+        "support_selection": final_support_strategy,
+        "driver_selection": final_driver_strategy,
+        "support_node_count": final_support_count,
+        "driver_node_count": final_driver_count,
+        "driver_mean_displacement_norm": float(np.linalg.norm(final_driver)),
+        "loading_history_status": "not_available_in_public_vtu; final displacement-control reconstruction only",
         "max_contact_samples": max_contact_samples,
         "load_steps": load_steps,
         "iterations_per_step": iterations,
@@ -407,6 +515,7 @@ def _simulate_case(
         "slave_fuzzycontact_max_von_mises": target_slave_vm,
         "master_sfc_max_strain_norm": master_strain,
         "slave_sfc_max_strain_norm": slave_strain,
+        "trajectory_equivalence_status": "not_supported",
         "status": "completed",
         "claim_scope": "fuzzycontact-derived SFC simulation; inferred BC/material from public VTU fields",
     }
@@ -449,7 +558,7 @@ def _stress_metrics(body: BodyCase, u_nodes: np.ndarray) -> tuple[float, float]:
             strain = B @ u_nodes[element].reshape(12)
             stress = C @ strain
             values.append(_von_mises_voigt(stress))
-            strain_norms.append(float(np.linalg.norm(strain)))
+            strain_norms.append(_strain_tensor_norm_from_voigt(strain))
     else:
         for element in body.mesh.elements:
             strain, stress = hex8_center_strain_stress(body.mesh.X[element], u_nodes[element], body.E, body.nu)
@@ -467,10 +576,11 @@ def _write_summary(path: Path, case_rows: list[Row], outputs: dict[str, Path]) -
         "",
         "## Reconstruction",
         "",
-        "- Reference mesh: `X0 = x_current - displacement`.",
+        "- Reference mesh: selected by scoring `points` and `points_minus_displacement` against the public VTU strain/stress fields.",
         "- Material: isotropic linear fit from reported stress/strain tensors.",
-        "- Boundary conditions: support/driver faces inferred from paired-body contact geometry.",
-        "- Driver displacement: mean FuzzyContact displacement on the inferred driver face.",
+        "- Boundary conditions: support nodes are selected from low-displacement boundary faces; driver nodes are selected from the largest displacement response nodes.",
+        "- Driver displacement: nodal final displacement values on the inferred response driver set.",
+        "- Loading history: not present in the public VTU files; this runner performs only final-state displacement-control reconstruction.",
         "- Contact: SFC `DynamicNarrowBandSDF + field_contact`.",
         "",
         "## Outputs",
@@ -479,18 +589,28 @@ def _write_summary(path: Path, case_rows: list[Row], outputs: dict[str, Path]) -
     for key, value in outputs.items():
         if key != "summary":
             lines.append(f"- `{value.relative_to(path.parent).as_posix()}`")
-    lines.extend(["", "## Cases", "", "| Case | Status | Active samples | Final min gap | Slave disp. rel. error |", "| --- | --- | ---: | ---: | ---: |"])
+    lines.extend(["", "## Cases", "", "| Case | Status | Trajectory equivalence | Active samples | Final min gap | Slave disp. rel. error |", "| --- | --- | --- | ---: | ---: | ---: |"])
     for row in case_rows:
         lines.append(
-            f"| `{row['case_id']}` | {row['status']} | {row['active_contact_samples_max']} | "
+            f"| `{row['case_id']}` | {row['status']} | {row['trajectory_equivalence_status']} | {row['active_contact_samples_max']} | "
             f"{float(row['final_min_gap']):.6e} | {float(row['slave_displacement_rel_error_vs_fuzzycontact']):.6e} |"
         )
     lines.extend(
         [
             "",
+            "## Reconstruction Diagnostics",
+            "",
+            "- Coordinate convention, support selection, driver selection, driver displacement norm, and loading-history status are written to `fuzzycontact_derived_sfc_cases.csv`.",
+            "- Large displacement errors are interpreted as missing working-condition evidence, not as a dynamic-SDF field-query failure.",
+        ]
+    )
+    lines.extend(
+        [
+            "",
             "## Claim Scope",
             "",
-            "- Supports SFC simulations generated from FuzzyContact-derived geometry and final displacement fields.",
+            "- Supports an auditable reconstruction attempt from FuzzyContact-derived geometry and final displacement fields.",
+            "- Does not support complete displacement/stress/strain trajectory equivalence; rows explicitly set `trajectory_equivalence_status=not_supported`.",
             "- Does not support official FuzzyContact solver equivalence because original material cards, penalty-law parameters, boundary conditions, and load histories are not present in the public zip.",
         ]
     )
