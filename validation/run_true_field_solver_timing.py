@@ -125,17 +125,39 @@ def _plot_outputs(out_dir: Path, step_rows: list[Row]) -> dict[str, Path]:
     outputs["solver_step_timing_breakdown_png"] = png
     outputs["solver_step_timing_breakdown_pdf"] = pdf
 
-    fig, ax = plt.subplots(figsize=(max(8.0, 0.42 * len(labels)), 3.8))
-    speedup = [float(row["step_speedup_projection_over_field"]) for row in step_rows]
-    colors = ["#54a24b" if float(value) > 1.0 else "#e45756" for value in speedup]
-    ax.bar(x, speedup, color=colors)
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    family_styles = {
+        ("tet4", "static"): {"label": "TET4 static", "marker": "o", "color": "#4c78a8"},
+        ("tet4", "dynamic"): {"label": "TET4 dynamic", "marker": "s", "color": "#f58518"},
+        ("hex8", "static"): {"label": "HEX8 static", "marker": "^", "color": "#54a24b"},
+        ("hex8", "dynamic"): {"label": "HEX8 dynamic", "marker": "D", "color": "#e45756"},
+    }
+    for (element_type, regime), style in family_styles.items():
+        subset = sorted(
+            (
+                row
+                for row in step_rows
+                if str(row["element_type"]) == element_type and str(row["regime"]) == regime
+            ),
+            key=lambda row: float(row["active_field"]),
+        )
+        ax.semilogx(
+            [float(row["active_field"]) for row in subset],
+            [float(row["step_speedup_projection_over_field"]) for row in subset],
+            marker=style["marker"],
+            color=style["color"],
+            linewidth=1.8,
+            label=style["label"],
+        )
     ax.axhline(1.0, color="black", linewidth=1.0)
     ax.set_ylabel("Projection total / field total")
-    ax.set_xlabel("Case")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7)
-    ax.grid(True, axis="y", alpha=0.30)
-    fig.tight_layout()
+    ax.set_xlabel("Active contact samples (query count)")
+    xticks = sorted({int(row["active_field"]) for row in step_rows})
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(value) for value in xticks])
+    ax.grid(True, which="both", alpha=0.30)
+    ax.legend(fontsize=8, ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.02), frameon=False)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     png = figures / "solver_step_speedup.png"
     pdf = figures / "solver_step_speedup.pdf"
     fig.savefig(png, dpi=180)

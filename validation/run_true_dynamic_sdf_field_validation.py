@@ -620,51 +620,53 @@ def _speedup_rows(timing_rows: list[Row], query_counts: list[int]) -> list[Row]:
 def _material_space_vs_dynamic_field() -> list[Row]:
     rows: list[Row] = []
     cases = [
-        ("tilt_x", 0.12, 0.0),
-        ("shear_xy", 0.08, -0.06),
+        ("tilt_x", [(0.02 * k, 0.0) for k in range(1, 7)]),
+        ("shear_xy", [(0.02 * k, -0.015 * k) for k in range(1, 7)]),
     ]
     points_xy = [(0.18 + 0.64 * ((k * 17) % 31) / 30.0, 0.18 + 0.64 * ((k * 11 + 7) % 31) / 30.0) for k in range(36)]
-    for case_name, ax, ay in cases:
-        X_ref, faces = _surface_grid(14)
-        X_current = X_ref.copy()
-        X_current[:, 2] = ax * X_ref[:, 0] + ay * X_ref[:, 1]
-        sdf = DynamicNarrowBandSDF.build(
-            X_current,
-            faces,
-            spacing=0.06,
-            band_radius=0.25,
-            padding=0.25,
-            cell_size=0.06,
-        )
-        all_faces = np.arange(faces.shape[0], dtype=np.int64)
-        dynamic_phi_errors = []
-        dynamic_normal_errors = []
-        material_phi_errors = []
-        material_normal_errors = []
-        material_normal = np.asarray([0.0, 0.0, 1.0], dtype=float)
-        for k, (x, y) in enumerate(points_xy):
-            offset = [-0.08, -0.04, 0.04, 0.08][k % 4]
-            z_current = ax * x + ay * y + offset
-            point = np.asarray([x, y, z_current], dtype=float)
-            reference = surface_projection_distance_kernel(point, X_current, faces, all_faces)
-            phi, normal = sdf.query_gap_normal(point)
-            material_phi = float(point[2])
-            dynamic_phi_errors.append(abs(phi - float(reference.g)))
-            dynamic_normal_errors.append(float(np.linalg.norm(normal - reference.n)))
-            material_phi_errors.append(abs(material_phi - float(reference.g)))
-            material_normal_errors.append(float(np.linalg.norm(material_normal - reference.n)))
-        rows.append(
-            {
-                "case": case_name,
-                "ax": ax,
-                "ay": ay,
-                "sample_count": len(points_xy),
-                "dynamic_field_max_phi_error": max(dynamic_phi_errors),
-                "dynamic_field_max_normal_l2_error": max(dynamic_normal_errors),
-                "material_space_max_phi_error": max(material_phi_errors),
-                "material_space_max_normal_l2_error": max(material_normal_errors),
-            }
-        )
+    X_ref, faces = _surface_grid(14)
+    all_faces = np.arange(faces.shape[0], dtype=np.int64)
+    material_normal = np.asarray([0.0, 0.0, 1.0], dtype=float)
+    for case_name, slopes in cases:
+        for ax, ay in slopes:
+            X_current = X_ref.copy()
+            X_current[:, 2] = ax * X_ref[:, 0] + ay * X_ref[:, 1]
+            sdf = DynamicNarrowBandSDF.build(
+                X_current,
+                faces,
+                spacing=0.06,
+                band_radius=0.25,
+                padding=0.25,
+                cell_size=0.06,
+            )
+            dynamic_phi_errors = []
+            dynamic_normal_errors = []
+            material_phi_errors = []
+            material_normal_errors = []
+            for k, (x, y) in enumerate(points_xy):
+                offset = [-0.08, -0.04, 0.04, 0.08][k % 4]
+                z_current = ax * x + ay * y + offset
+                point = np.asarray([x, y, z_current], dtype=float)
+                reference = surface_projection_distance_kernel(point, X_current, faces, all_faces)
+                phi, normal = sdf.query_gap_normal(point)
+                material_phi = float(point[2])
+                dynamic_phi_errors.append(abs(phi - float(reference.g)))
+                dynamic_normal_errors.append(float(np.linalg.norm(normal - reference.n)))
+                material_phi_errors.append(abs(material_phi - float(reference.g)))
+                material_normal_errors.append(float(np.linalg.norm(material_normal - reference.n)))
+            rows.append(
+                {
+                    "case": case_name,
+                    "deformation_amplitude": float(max(abs(ax), abs(ay))),
+                    "ax": ax,
+                    "ay": ay,
+                    "sample_count": len(points_xy),
+                    "dynamic_field_max_phi_error": max(dynamic_phi_errors),
+                    "dynamic_field_max_normal_l2_error": max(dynamic_normal_errors),
+                    "material_space_max_phi_error": max(material_phi_errors),
+                    "material_space_max_normal_l2_error": max(material_normal_errors),
+                }
+            )
     return rows
 
 
@@ -725,18 +727,6 @@ def _plot_phase8_outputs(
     plt.grid(True, which="both", alpha=0.3)
     save("field_eikonal_residual_vs_spacing.png")
 
-    plt.figure(figsize=(5.6, 3.6))
-    labels = ["slave", "master"]
-    values = [
-        float(jacobian_rows[0]["slave_jacobian_max_abs_error"]),
-        float(jacobian_rows[0]["master_jacobian_max_abs_error"]),
-    ]
-    plt.bar(labels, values)
-    plt.yscale("log")
-    plt.ylabel("Max FD error")
-    plt.grid(True, axis="y", alpha=0.3)
-    save("field_contact_jacobian_fd_error.png")
-
     plt.figure(figsize=(6.4, 3.8))
     plt.plot(spacings, [float(row["field_update_seconds"]) for row in timing_rows], marker="o", label="update")
     plt.plot(spacings, [float(row["field_query_seconds_per_query"]) for row in timing_rows], marker="o", label="field query")
@@ -786,16 +776,52 @@ def _plot_phase8_outputs(
     plt.grid(True, alpha=0.3)
     save("field_crossover_qstar.png")
 
-    plt.figure(figsize=(6.2, 3.8))
-    x = np.arange(len(material_rows))
-    width = 0.35
-    plt.bar(x - width / 2, [float(row["dynamic_field_max_phi_error"]) for row in material_rows], width, label="dynamic field")
-    plt.bar(x + width / 2, [float(row["material_space_max_phi_error"]) for row in material_rows], width, label="material-space")
-    plt.yscale("log")
-    plt.xticks(x, [str(row["case"]) for row in material_rows])
-    plt.ylabel("Max phi error")
-    plt.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, frameon=False)
-    plt.grid(True, axis="y", alpha=0.3)
+    fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.7), sharex=True)
+    plot_floor = 1.0e-17
+    case_styles = {
+        "tilt_x": {"marker": "o", "label": "tilt"},
+        "shear_xy": {"marker": "s", "label": "tilt+shear"},
+    }
+    for case_name, style in case_styles.items():
+        subset = sorted((row for row in material_rows if str(row["case"]) == case_name), key=lambda row: float(row["deformation_amplitude"]))
+        amplitudes = [float(row["deformation_amplitude"]) for row in subset]
+        axes[0].plot(
+            amplitudes,
+            [max(float(row["dynamic_field_max_phi_error"]), plot_floor) for row in subset],
+            marker=style["marker"],
+            linestyle="-",
+            label=f"{style['label']} dynamic",
+        )
+        axes[0].plot(
+            amplitudes,
+            [max(float(row["material_space_max_phi_error"]), plot_floor) for row in subset],
+            marker=style["marker"],
+            linestyle="--",
+            label=f"{style['label']} material",
+        )
+        axes[1].plot(
+            amplitudes,
+            [max(float(row["dynamic_field_max_normal_l2_error"]), plot_floor) for row in subset],
+            marker=style["marker"],
+            linestyle="-",
+            label=f"{style['label']} dynamic",
+        )
+        axes[1].plot(
+            amplitudes,
+            [max(float(row["material_space_max_normal_l2_error"]), plot_floor) for row in subset],
+            marker=style["marker"],
+            linestyle="--",
+            label=f"{style['label']} material",
+        )
+    axes[0].set_ylabel("Max phi error")
+    axes[1].set_ylabel("Max normal error")
+    for ax in axes:
+        ax.set_yscale("log")
+        ax.set_xlabel("Deformation amplitude")
+        ax.grid(True, which="both", alpha=0.3)
+    axes[0].legend(loc="center", fontsize=8, frameon=False)
+    axes[1].legend(loc="center", fontsize=8, frameon=False)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     save("material_space_vs_dynamic_field_error.png")
 
     return outputs

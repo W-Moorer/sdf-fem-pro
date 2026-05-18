@@ -913,7 +913,7 @@ def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip
             elements=model.elements,
             frames=native_frames,
             frame_stride=1,
-            cell_scalar_fn=lambda U, model=model: _phase9_hex_cell_fields(model, U),
+            cell_scalar_fn=lambda _time, U, model=model: _phase9_hex_cell_fields(model, U),
             source_label=f"SFC native {case_id}",
         )
         command_rows.append(

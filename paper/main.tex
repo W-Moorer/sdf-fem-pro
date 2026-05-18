@@ -251,20 +251,14 @@ single slave / large triangle & \(-1.30\times10^{-1}\) & \(2.875566\times10^{-11
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.62\linewidth]{field_contact_jacobian_fd_error.png}
-  \caption{Slave and master field-contact Jacobian finite-difference errors.}
-\end{figure}
-
 \paragraph{Current-space SDF sanity check.}
 
-This experiment isolates why a current-space field is needed for deformable FEM contact. The baseline keeps a frozen material-space plane SDF and evaluates it after tilt or shear deformation, while the proposed field is rebuilt from the current surface. The material-space field accumulates gap and normal errors because it no longer represents the deformed boundary; the rebuilt dynamic field avoids this mismatch.
+This experiment isolates why a current-space field is needed for deformable FEM contact. The baseline keeps a frozen material-space plane SDF and evaluates it after increasing tilt or tilt-plus-shear deformation, while the proposed field is rebuilt from the current surface. The material-space field accumulates gap and normal errors as the deformation amplitude grows because it no longer represents the deformed boundary; the rebuilt dynamic field remains at interpolation/projection tolerance.
 
 \begin{table}[t]
 \centering
 \small
-\caption{Frozen material-space SDF compared with the rebuilt dynamic field.}
+\caption{Representative endpoint values from the frozen material-space SDF sweep compared with the rebuilt dynamic field.}
 \label{tab:material-baseline}
 \begin{tabular}{lrrrr}
 \toprule
@@ -279,7 +273,7 @@ shear\_xy & \(5.551115\times10^{-17}\) & \(3.351421\times10^{-15}\) & \(4.265482
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.72\linewidth]{material_space_vs_dynamic_field_error.png}
-  \caption{Material-space SDF error under current-surface deformation compared with the rebuilt dynamic field.}
+  \caption{Material-space SDF error under increasing current-surface deformation compared with the rebuilt dynamic field. Solid lines denote the rebuilt dynamic field and dashed lines denote the frozen material-space field.}
 \end{figure}
 
 \subsection{Amortized Timing and Crossover}
@@ -394,7 +388,7 @@ The field-query crossover is also reflected at the step level in contact-dominat
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.92\linewidth]{solver_step_speedup.png}
-  \caption{Projection-reference total step time divided by true-field total step time for the solver-level timing cases.}
+  \caption{Projection-reference total step time divided by true-field total step time as a function of active contact samples. This curve form exposes the amortized SDF-query advantage more directly than a case-indexed speedup bar chart.}
 \end{figure}
 
 Finally, an 11-step reduced-mesh backend ablation separates the preserved node-to-surface path from the surface-to-surface implementations. The non-vectorized surface-to-surface path is a correctness reference; the vectorized path preserves the same endpoint metrics while reducing the quadrature/contact query cost from 14.58 s to 0.061 s in this representative run. Forced spatial-hash grouped field construction is retained for larger candidate sets, although it is slower on this small ablation because grouping overhead dominates.

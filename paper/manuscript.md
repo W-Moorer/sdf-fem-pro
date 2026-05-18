@@ -205,7 +205,7 @@ The experiment uses a deterministic nonplanar triangulated current surface with 
 | 0.075 | 3969 | 2174 | \(1.132281\times10^{-3}\) | \(4.769023\times10^{-2}\) | \(4.546733\times10^{-3}\) |
 | 0.050 | 12493 | 7826 | \(5.114950\times10^{-4}\) | \(3.600289\times10^{-2}\) | \(4.743522\times10^{-3}\) |
 
-The material-space sanity check keeps a frozen reference SDF while the current surface is tilted or sheared. The rebuilt current-space field keeps near-zero gap and normal errors, while the frozen material field accumulates deformation-induced errors.
+The material-space sanity check keeps a frozen reference SDF while the current surface is tilted or sheared through an amplitude sweep. The rebuilt current-space field keeps near-zero gap and normal errors across the sweep, while the frozen material field accumulates deformation-induced errors. The paper plots this as error curves rather than a two-case bar chart.
 
 ### 7.2 Jacobian Finite-Difference Check
 
@@ -247,7 +247,7 @@ Figures:
 
 ### 7.6 Backend and Timing Ablation
 
-The field-query crossover is reflected at the step level in contact-dominated TET4/HEX8 static and dynamic tests. The field path is faster in all 16 non-quick rows, with measured projection/field step speedups from \(7.51\times\) to \(24.17\times\). An 11-step reduced-mesh backend ablation separates node-to-surface sampling, reference surface-to-surface quadrature, vectorized surface-to-surface quadrature, and forced grouped field construction. In this representative run, vectorization preserves endpoint metrics while reducing query/contact cost from 14.58 s to 0.061 s relative to the reference surface-to-surface path.
+The field-query crossover is reflected at the step level in contact-dominated TET4/HEX8 static and dynamic tests. The field path is faster in all 16 non-quick rows, with measured projection/field step speedups from \(7.51\times\) to \(24.17\times\). The speedup evidence is plotted against active contact samples so that the amortized SDF-query advantage is visible as query count grows. An 11-step reduced-mesh backend ablation separates node-to-surface sampling, reference surface-to-surface quadrature, vectorized surface-to-surface quadrature, and forced grouped field construction. In this representative run, vectorization preserves endpoint metrics while reducing query/contact cost from 14.58 s to 0.061 s relative to the reference surface-to-surface path.
 
 Figures:
 
