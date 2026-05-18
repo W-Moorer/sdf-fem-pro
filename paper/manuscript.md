@@ -227,9 +227,9 @@ Independent CalculiX native contact and SFC dynamic-SDF contact are compared on 
 
 Figure: `paper/numerical_experiments/native_contact_formal_21/figures/native_contact_displacement_curves.png`.
 
-### 7.4 Three-Second C3D8 Dynamic Time History
+### 7.4 Three-Second C3D8 Free-Fall Settling Contact
 
-The dynamic case uses a deformable C3D8 block contacting a deformable C3D8 master block through the true field-contact path for three seconds of physical time. The runner exports 151 time points for \(z\)-displacement, normal force, contact energy, minimum gap, and active contact samples. The fine-grid cloud is taken at the peak normal-force state.
+The dynamic case uses a deformable C3D8 block released from rest under \(g=9.81\) and settling onto a deformable C3D8 master block through the true field-contact path for three seconds of physical time. Mass-proportional damping dissipates the impact transient so that the latter part of the history remains in sustained contact rather than a brief touch-and-release event. The runner exports 151 time points for \(z\)-displacement, normal force, contact energy, minimum gap, and active contact samples. The fine-grid cloud is taken at the peak normal-force state.
 
 Figures:
 

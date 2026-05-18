@@ -1,20 +1,21 @@
 # Long-Time C3D8 Dynamic SDF Contact
 
+- scenario: `free_fall_settling_contact`
 - case: `block_block_c3d8`
 - element type: `C3D8`
 - resolution: `4`
 - total time: `3.0` s
 - dt: `0.02` s
-- gravity: `0.02`
-- initial z velocity: `-0.015`
-- mass-proportional damping alpha: `1.5`
+- gravity: `9.81`
+- initial z velocity: `0.0`
+- mass-proportional damping alpha: `120.0`
 - steps: `150`
 - linearity: `linear_damped`
-- wall time: `31.874637` s
+- wall time: `67.432387` s
 - max active contact samples: `64`
-- min gap: `-1.130508e-05`
-- max normal force: `1.400360e-01`
-- cloud snapshot time: `1.080000` s
+- min gap: `-9.114282e-05`
+- max normal force: `1.128852e+00`
+- cloud snapshot time: `0.260000` s
 - cloud snapshot rule: peak normal-force state
 - exported SFC VTK animation frames: `151`
 - SFC PVD: `paper\numerical_experiments\long_time_c3d8_dynamic\vtk_frames\sfc\sfc_block_block_c3d8.pvd`

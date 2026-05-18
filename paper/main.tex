@@ -349,14 +349,14 @@ cylinder compression & \(4.502934\times10^{-4}\) & \(2.190308\times10^{-3}\) & \
   \caption{Quasi-static closure/load displacement-norm trajectories for independent CalculiX native contact and SFC dynamic-SDF contact. Each case uses 21 closure steps, and each SFC legend reports the full-curve displacement \(L^2\) relative error.}
 \end{figure}
 
-\subsection{Three-Second C3D8 Dynamic Time History}
+\subsection{Three-Second C3D8 Free-Fall Settling Contact}
 
-The dynamic case uses a deformable C3D8 block contacting a deformable C3D8 master block through the true field-contact path for three seconds of physical time. The runner exports \(z\)-displacement, normal force, contact energy, minimum gap, and active contact sample histories at 151 time points. The fine-grid cloud is taken at the peak normal-force state so that the displacement, strain, stress, gap, pressure, and active-contact fields are visually auditable.
+The dynamic case uses a deformable C3D8 block released from rest under \(g=9.81\) and settling onto a deformable C3D8 master block through the true field-contact path for three seconds of physical time. Mass-proportional damping dissipates the impact transient so that the latter part of the history remains in sustained contact rather than a brief touch-and-release event. The runner exports \(z\)-displacement, normal force, contact energy, minimum gap, and active contact sample histories at 151 time points. The fine-grid cloud is taken at the peak normal-force state so that the displacement, strain, stress, gap, pressure, and active-contact fields are visually auditable.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.88\linewidth]{long_time_c3d8_dynamic_histories.png}
-  \caption{Three-second C3D8 dynamic SDF-contact time histories. The horizontal axis is physical time; the outputs are \(z\)-displacement, normal force, contact energy, minimum gap, and active contact sample count.}
+  \caption{Three-second C3D8 free-fall settling SDF-contact time histories. The horizontal axis is physical time; the outputs are \(z\)-displacement, normal force, contact energy, minimum gap, and active contact sample count.}
 \end{figure}
 
 \begin{figure}[t]

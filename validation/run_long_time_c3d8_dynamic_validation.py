@@ -1,9 +1,9 @@
 """Long-time C3D8 dynamic SDF-contact validation.
 
 This runner is a paper-facing model/visualization driver.  It does not modify
-the core contact algorithm.  The default case runs a 3 s deformable
-block-on-block C3D8 dynamic contact trajectory at resolution 4 and exports time
-histories plus fine-grid final-state contact clouds.
+the core contact algorithm.  The default case runs a 3 s deformable C3D8
+free-fall-to-settling contact trajectory at resolution 4 and exports time
+histories plus fine-grid contact clouds.
 """
 
 from __future__ import annotations
@@ -367,9 +367,9 @@ def run_validation(
     resolution: int = 4,
     total_time: float = 3.0,
     dt: float = 0.02,
-    gravity: float = 0.02,
-    initial_velocity_z: float = -0.015,
-    damping_alpha: float = 1.5,
+    gravity: float = 9.81,
+    initial_velocity_z: float = 0.0,
+    damping_alpha: float = 120.0,
     frame_stride: int = 1,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -381,6 +381,7 @@ def run_validation(
     linearity = "linear_damped"
     wall = perf_counter() - start
     for row in rows:
+        row["scenario"] = "free_fall_settling_contact"
         row["linearity"] = linearity
         row["element_type"] = "C3D8"
         row["wall_time_seconds"] = wall
@@ -413,6 +414,7 @@ def run_validation(
     summary = [
         "# Long-Time C3D8 Dynamic SDF Contact",
         "",
+        "- scenario: `free_fall_settling_contact`",
         f"- case: `{case}`",
         f"- element type: `C3D8`",
         f"- resolution: `{resolution}`",
@@ -447,9 +449,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolution", type=int, default=4)
     parser.add_argument("--total-time", type=float, default=3.0)
     parser.add_argument("--dt", type=float, default=0.02)
-    parser.add_argument("--gravity", type=float, default=0.02)
-    parser.add_argument("--initial-velocity-z", type=float, default=-0.015)
-    parser.add_argument("--damping-alpha", type=float, default=1.5)
+    parser.add_argument("--gravity", type=float, default=9.81)
+    parser.add_argument("--initial-velocity-z", type=float, default=0.0)
+    parser.add_argument("--damping-alpha", type=float, default=120.0)
     parser.add_argument("--frame-stride", type=int, default=1, help="Write every Nth dynamic VTK frame; use 0 to disable frame export.")
     return parser.parse_args()
 
