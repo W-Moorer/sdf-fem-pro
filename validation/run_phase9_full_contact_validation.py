@@ -101,6 +101,7 @@ from validation.run_calculix_contactenergy_replay import (  # noqa: E402
     parse_contactenergy_input,
     solve_sfc_c3d8_contactenergy_static,
 )
+from validation.vtk_frame_series import write_hex_frame_series  # noqa: E402
 
 Row = dict[str, Any]
 _PHASE9_FIELD_CACHE: dict[tuple[tuple[int, ...], tuple[int, int], bytes], DynamicNarrowBandSDF] = {}
@@ -177,6 +178,24 @@ def _write_legacy_hex_vtk(
 def _von_mises(stress: np.ndarray) -> float:
     sxx, syy, szz, sxy, syz, sxz = np.asarray(stress, dtype=float)
     return float(np.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3.0 * (sxy**2 + syz**2 + sxz**2)))
+
+
+def _phase9_hex_cell_fields(model: Any, displacement: np.ndarray, stress_map: dict[int, np.ndarray] | None = None) -> dict[str, np.ndarray]:
+    U = np.asarray(displacement, dtype=float)
+    stress_map = stress_map or {}
+    disp_mag = np.asarray([float(np.mean(np.linalg.norm(U[element], axis=1))) for element in model.elements], dtype=float)
+    strain_norm: list[float] = []
+    vm: list[float] = []
+    for element_id, element in zip(model.element_ids, model.elements, strict=True):
+        strain, sfc_stress = hex8_center_strain_stress(model.X[element], U[element], model.E, model.nu)
+        stress = stress_map.get(int(element_id), sfc_stress)
+        strain_norm.append(float(np.linalg.norm(strain)))
+        vm.append(_von_mises(stress))
+    return {
+        "displacement_magnitude": disp_mag,
+        "engineering_strain_norm": np.asarray(strain_norm, dtype=float),
+        "von_mises": np.asarray(vm, dtype=float),
+    }
 
 
 class Hex8SurfaceSdfContactGeometry:
@@ -580,7 +599,7 @@ def _linear_contact_response(contact: PlaneContactGeometry, x_current: np.ndarra
     return assemble_contact_response(contact.samples(x_current), n_nodes)
 
 
-def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, np.ndarray]:
+def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, np.ndarray, list[tuple[float, np.ndarray]]]:
     """Run native small-strain C3D8 Newmark dynamics with SDF contact."""
 
     mesh = VolumeMesh(model.X, model.elements, element_type="C3D8")
@@ -610,11 +629,13 @@ def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, n
     else:
         a = np.asarray(spsolve(M.tocsc(), initial_rhs), dtype=float)
     rows: list[Row] = []
+    frames: list[tuple[float, np.ndarray]] = []
     steps = int(np.ceil(float(model.total_time) / dt))
     for step in range(steps + 1):
         x_current = model.X + u.reshape((-1, 3))
         contact_response = _linear_contact_response(contact, x_current, body.n_nodes)
         replay = _replay_dynamic_sdf(model, u.reshape((-1, 3)))
+        frames.append((float(step * dt), u.reshape((-1, 3)).copy()))
         rows.append(
             {
                 "case": model.case,
@@ -671,10 +692,10 @@ def _native_c3d8_linear_dynamic_history(model) -> tuple[list[Row], np.ndarray, n
     for element in model.elements:
         _strain, stress = hex8_center_strain_stress(model.X[element], U_final[element], model.E, model.nu)
         vm_final.append(_von_mises(stress))
-    return rows, U_final, np.asarray(vm_final, dtype=float)
+    return rows, U_final, np.asarray(vm_final, dtype=float), frames
 
 
-def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bool) -> tuple[list[Row], Row]:
+def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bool) -> tuple[list[Row], Row, dict[float, np.ndarray], dict[float, dict[int, np.ndarray]]]:
     if skip_calculix or not calculix_available():
         return [], {
             "case": f"c3d8_linear_dynamic_{model.case}",
@@ -682,7 +703,7 @@ def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bo
             "completed": "false",
             "command": "skipped",
             "wall_time_seconds": "",
-        }
+        }, {}, {}
     case_name = f"linear_dynamic_{model.case}_r{model.resolution}"
     run_dir = out_dir / "c3d8_linear_dynamic_calculix" / case_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -717,8 +738,9 @@ def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bo
         "wall_time_seconds": wall_time,
     }
     if proc.returncode != 0 or not dat_path.exists():
-        return [], command_row
+        return [], command_row, {}, {}
     displacements = _parse_nodal_vectors(dat_path, model.node_ids, quantity="u")
+    stresses = _parse_element_stress(dat_path)
     totals = _parse_totals(dat_path)
     contacts = _parse_contact_elements(dat_path)
     rows: list[Row] = []
@@ -738,7 +760,7 @@ def _run_c3d8_linear_dynamic_calculix(model, out_dir: Path, *, skip_calculix: bo
                 "active_contact_count": total.get("contact_count_calculix", len(cdis_values) if cdis_values else ""),
             }
         )
-    return rows, command_row
+    return rows, command_row, displacements, stresses
 
 
 def _compare_histories(native_rows: list[Row], reference_rows: list[Row]) -> Row:
@@ -849,11 +871,33 @@ def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip
         case_label = "block_plane" if case == "block_plane_c3d8" else "block_block"
         case_id = f"c3d8_linear_dynamic_{case_label}_contact"
         (native_result, sfc_wall_time) = _timed_call(_native_c3d8_linear_dynamic_history, model)
-        native_rows, U_final, vm_final = native_result
+        native_rows, U_final, vm_final, native_frames = native_result
         native_path = out_dir / f"native_c3d8_linear_dynamic_{case_label}.csv"
         _write_csv(native_path, history_fields, native_rows)
-        reference_rows, command_row = _run_c3d8_linear_dynamic_calculix(model, out_dir, skip_calculix=skip_calculix)
+        reference_rows, command_row, calculix_displacements, calculix_stresses = _run_c3d8_linear_dynamic_calculix(model, out_dir, skip_calculix=skip_calculix)
         command_rows.append({"command": command_row.get("command", ""), "description": f"C3D8 linear dynamic CalculiX reference for {case}"})
+        if calculix_displacements:
+            calc_frames = [(float(time), U) for time, U in sorted(calculix_displacements.items())]
+            calc_frame_outputs = write_hex_frame_series(
+                out_dir / "vtk_frames" / case_id / "calculix",
+                stem=f"calculix_{case_id}",
+                reference_points=model.X,
+                elements=model.elements,
+                frames=calc_frames,
+                frame_stride=1,
+                cell_scalar_fn=lambda time_value, U, model=model, stresses=calculix_stresses: _phase9_hex_cell_fields(
+                    model,
+                    U,
+                    stresses.get(float(time_value), {}),
+                ),
+                source_label=f"CalculiX {case_id}",
+            )
+            command_rows.append(
+                {
+                    "command": "write CalculiX dynamic VTK/PVD frame sequence",
+                    "description": f"CalculiX animation frames for {case}: {_display_path(Path(calc_frame_outputs['pvd']))} ({calc_frame_outputs['frame_count']} frames)",
+                }
+            )
         metrics = _compare_histories(native_rows, reference_rows)
         comparison_rows.append({"case_id": case_id, **metrics})
         _write_legacy_hex_vtk(
@@ -861,6 +905,22 @@ def _linear_dynamic_evidence(traj_dir: Path, out_dir: Path, *, quick: bool, skip
             model.X + U_final,
             model.elements,
             cell_values={"von_mises": vm_final, "engineering_strain_norm": np.zeros_like(vm_final)},
+        )
+        frame_outputs = write_hex_frame_series(
+            out_dir / "vtk_frames" / case_id / "sfc",
+            stem=f"sfc_{case_id}",
+            reference_points=model.X,
+            elements=model.elements,
+            frames=native_frames,
+            frame_stride=1,
+            cell_scalar_fn=lambda U, model=model: _phase9_hex_cell_fields(model, U),
+            source_label=f"SFC native {case_id}",
+        )
+        command_rows.append(
+            {
+                "command": "write SFC dynamic VTK/PVD frame sequence",
+                "description": f"SFC animation frames for {case}: {_display_path(Path(frame_outputs['pvd']))} ({frame_outputs['frame_count']} frames)",
+            }
         )
         stress_rows.extend(
             {

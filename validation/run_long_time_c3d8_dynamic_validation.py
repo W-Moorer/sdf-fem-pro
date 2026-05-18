@@ -65,6 +65,7 @@ from validation.run_phase9_full_contact_validation import (  # noqa: E402
     _von_mises,
     _write_legacy_hex_vtk,
 )
+from validation.vtk_frame_series import write_hex_frame_series  # noqa: E402
 
 Row = dict[str, Any]
 
@@ -133,7 +134,7 @@ def _long_time_linear_dynamic_history(
     model: Any,
     *,
     damping_alpha: float = 1.5,
-) -> tuple[list[Row], np.ndarray, np.ndarray]:
+) -> tuple[list[Row], np.ndarray, np.ndarray, list[tuple[float, np.ndarray]]]:
     """Run a damped small-strain C3D8 Newmark trajectory with SDF contact."""
 
     mesh = VolumeMesh(model.X, model.elements, element_type="C3D8")
@@ -164,6 +165,7 @@ def _long_time_linear_dynamic_history(
     else:
         a = np.asarray(spsolve(M.tocsc(), initial_rhs), dtype=float)
     rows: list[Row] = []
+    frames: list[tuple[float, np.ndarray]] = []
     snapshot_u = u.copy()
     snapshot_vm_force = -np.inf
     steps = int(np.ceil(float(model.total_time) / dt))
@@ -171,6 +173,7 @@ def _long_time_linear_dynamic_history(
         x_current = model.X + u.reshape((-1, 3))
         contact_response = _linear_contact_response(contact, x_current, body.n_nodes)
         normal_force = float(abs(contact_response.normal_force))
+        frames.append((float(step * dt), u.reshape((-1, 3)).copy()))
         if normal_force >= snapshot_vm_force:
             snapshot_vm_force = normal_force
             snapshot_u = u.copy()
@@ -228,7 +231,7 @@ def _long_time_linear_dynamic_history(
         rows[-1]["newton_residual_norm"] = residual_norm
     U_snapshot = snapshot_u.reshape((-1, 3))
     vm_snapshot = _element_fields(model, U_snapshot)["von_mises"]
-    return rows, U_snapshot, np.asarray(vm_snapshot, dtype=float)
+    return rows, U_snapshot, np.asarray(vm_snapshot, dtype=float), frames
 
 
 def _contact_cell_fields(model: Any, displacement: np.ndarray) -> dict[str, np.ndarray]:
@@ -367,13 +370,14 @@ def run_validation(
     gravity: float = 0.02,
     initial_velocity_z: float = -0.015,
     damping_alpha: float = 1.5,
+    frame_stride: int = 1,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = build_c3d8_model(case=case, resolution=resolution, quick=False, total_time=total_time, dt=dt)
     model.gravity = float(gravity)
     model.initial_velocity_z = float(initial_velocity_z)
     start = perf_counter()
-    rows, displacement, vm_final = _long_time_linear_dynamic_history(model, damping_alpha=damping_alpha)
+    rows, displacement, vm_final, frames = _long_time_linear_dynamic_history(model, damping_alpha=damping_alpha)
     linearity = "linear_damped"
     wall = perf_counter() - start
     for row in rows:
@@ -390,6 +394,19 @@ def run_validation(
     }
     _write_csv(outputs["history"], rows)
     _write_legacy_hex_vtk(outputs["vtk"], model.X + displacement, model.elements, cell_values=fields)
+    if frame_stride > 0:
+        frame_outputs = write_hex_frame_series(
+            out_dir / "vtk_frames" / "sfc",
+            stem=f"sfc_{case}",
+            reference_points=model.X,
+            elements=model.elements,
+            frames=frames,
+            frame_stride=frame_stride,
+            cell_scalar_fn=lambda U: {**_element_fields(model, U), **_contact_cell_fields(model, U)},
+            source_label="SFC long-time C3D8 dynamic",
+        )
+        outputs["sfc_frame_pvd"] = Path(frame_outputs["pvd"])
+        outputs["sfc_first_frame"] = Path(frame_outputs["first_frame"])
     outputs.update(_plot_histories(out_dir, rows))
     outputs.update(_plot_clouds(out_dir, model, displacement, fields))
     peak_contact_row = max(rows, key=lambda row: float(row["normal_force"]))
@@ -412,6 +429,8 @@ def run_validation(
         f"- max normal force: `{max(float(row['normal_force']) for row in rows):.6e}`",
         f"- cloud snapshot time: `{float(peak_contact_row['time']):.6f}` s",
         "- cloud snapshot rule: peak normal-force state",
+        f"- exported SFC VTK animation frames: `{len(frames[::max(frame_stride, 1)]) if frame_stride > 0 else 0}`",
+        f"- SFC PVD: `{outputs.get('sfc_frame_pvd', '')}`",
         "",
         "## Outputs",
         "",
@@ -431,6 +450,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gravity", type=float, default=0.02)
     parser.add_argument("--initial-velocity-z", type=float, default=-0.015)
     parser.add_argument("--damping-alpha", type=float, default=1.5)
+    parser.add_argument("--frame-stride", type=int, default=1, help="Write every Nth dynamic VTK frame; use 0 to disable frame export.")
     return parser.parse_args()
 
 
@@ -445,6 +465,7 @@ def main() -> int:
         gravity=float(args.gravity),
         initial_velocity_z=float(args.initial_velocity_z),
         damping_alpha=float(args.damping_alpha),
+        frame_stride=int(args.frame_stride),
     )
     print("Long-time C3D8 dynamic validation complete.")
     for key, path in outputs.items():

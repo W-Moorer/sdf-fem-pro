@@ -28,7 +28,7 @@ def test_long_time_c3d8_dynamic_smoke_outputs(tmp_path: Path) -> None:
         damping_alpha=1.5,
     )
 
-    for key in ("history", "summary", "vtk", "history_png", "cloud_png"):
+    for key in ("history", "summary", "vtk", "history_png", "cloud_png", "sfc_frame_pvd", "sfc_first_frame"):
         assert outputs[key].exists(), key
         assert outputs[key].stat().st_size > 0, key
 
@@ -36,3 +36,4 @@ def test_long_time_c3d8_dynamic_smoke_outputs(tmp_path: Path) -> None:
     assert len(rows) == 3
     assert rows[-1]["linearity"] == "linear_damped"
     assert rows[-1]["element_type"] == "C3D8"
+    assert outputs["sfc_frame_pvd"].read_text(encoding="utf-8").count("<DataSet") == 3
