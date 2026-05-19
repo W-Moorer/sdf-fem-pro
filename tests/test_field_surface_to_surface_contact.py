@@ -332,28 +332,30 @@ def test_cpp_contact_tangent_pcg_solver_matches_dense_reference_when_built() -> 
     effective = (2.0 * eye(24, format="csr")).tocsr()
     rhs = np.sin(np.arange(24, dtype=float))
     op = matrix_free.stiffness_operator
-    solution, info, _iterations, residual = solve_contact_tangent_pcg(
-        effective.indptr,
-        effective.indices,
-        effective.data,
-        rhs,
-        np.arange(24, dtype=np.int64),
-        op.scale,
-        op.slave_node_ids,
-        op.slave_weights,
-        op.gradients,
-        op.face_node_ids,
-        op.grid_weights,
-        op.barycentric,
-        op.normals,
-        24,
-        op.slave_dof_offset,
-        op.master_dof_offset,
-        1.0e-12,
-        1.0e-14,
-        200,
-    )
     reference = np.linalg.solve((effective + explicit.stiffness).toarray(), rhs)
-    assert info == 0
-    assert residual < 1.0e-10
-    np.testing.assert_allclose(solution, reference, atol=1.0e-10)
+    for preconditioner in ("sgs", "block-sgs"):
+        solution, info, _iterations, residual = solve_contact_tangent_pcg(
+            effective.indptr,
+            effective.indices,
+            effective.data,
+            rhs,
+            np.arange(24, dtype=np.int64),
+            op.scale,
+            op.slave_node_ids,
+            op.slave_weights,
+            op.gradients,
+            op.face_node_ids,
+            op.grid_weights,
+            op.barycentric,
+            op.normals,
+            24,
+            op.slave_dof_offset,
+            op.master_dof_offset,
+            1.0e-12,
+            1.0e-14,
+            200,
+            preconditioner=preconditioner,
+        )
+        assert info == 0
+        assert residual < 1.0e-10
+        np.testing.assert_allclose(solution, reference, atol=1.0e-10)

@@ -117,10 +117,18 @@ def solve_contact_tangent_pcg(
     rtol: float,
     atol: float,
     maxiter: int,
+    preconditioner: str = "block-sgs",
 ) -> tuple[np.ndarray, int, int, float]:
     """Solve the matrix-free contact tangent system with C++ PCG."""
 
     _require_backend()
+    preconditioner_mode = {
+        "sgs": 0,
+        "block-sgs": 1,
+        "block_sgs": 1,
+    }.get(preconditioner)
+    if preconditioner_mode is None:
+        raise ValueError("preconditioner must be 'sgs' or 'block-sgs'")
     solution, info, iterations, residual_norm = _BACKEND.solve_contact_tangent_pcg(
         np.ascontiguousarray(effective_indptr, dtype=np.int64),
         np.ascontiguousarray(effective_indices, dtype=np.int64),
@@ -141,5 +149,6 @@ def solve_contact_tangent_pcg(
         float(rtol),
         float(atol),
         int(maxiter),
+        int(preconditioner_mode),
     )
     return np.asarray(solution, dtype=float), int(info), int(iterations), float(residual_norm)

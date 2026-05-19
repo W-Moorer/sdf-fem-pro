@@ -110,6 +110,7 @@ class DynamicSurfaceConfig:
     use_contact_tangent: bool
     use_matrix_free_contact_tangent: bool
     use_cpp_contact_tangent_solver: bool
+    cpp_contact_tangent_preconditioner: str
     contact_tangent_cg_rtol: float
     contact_tangent_cg_atol: float
     contact_tangent_cg_maxiter: int
@@ -803,6 +804,7 @@ def run_sfc_pressure_dynamic(
                     cfg.contact_tangent_cg_rtol,
                     cfg.contact_tangent_cg_atol,
                     cfg.contact_tangent_cg_maxiter,
+                    preconditioner=cfg.cpp_contact_tangent_preconditioner,
                 )
                 if info != 0:
                     raise RuntimeError(
@@ -1336,6 +1338,7 @@ def _summary_text(
         f"- Contact tangent in SFC iterations: `{bool(cfg.use_contact_tangent)}`.",
         f"- Matrix-free contact tangent in SFC iterations: `{bool(cfg.use_matrix_free_contact_tangent)}`.",
         f"- C++ contact tangent PCG solver: `{bool(cfg.use_cpp_contact_tangent_solver)}`.",
+        f"- C++ contact tangent preconditioner: `{cfg.cpp_contact_tangent_preconditioner}`.",
         f"- Deferred diagnostics/postprocess: `{bool(cfg.defer_diagnostics)}`.",
         "- Accepted-state response reuse: response is reused only after exact final-state reevaluation.",
         "",
@@ -1421,6 +1424,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
             use_contact_tangent=False,
             use_matrix_free_contact_tangent=False,
             use_cpp_contact_tangent_solver=False,
+            cpp_contact_tangent_preconditioner="block-sgs",
             contact_tangent_cg_rtol=1.0e-10,
             contact_tangent_cg_atol=1.0e-12,
             contact_tangent_cg_maxiter=80,
@@ -1455,6 +1459,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
         use_contact_tangent=False,
         use_matrix_free_contact_tangent=False,
         use_cpp_contact_tangent_solver=False,
+        cpp_contact_tangent_preconditioner="block-sgs",
         contact_tangent_cg_rtol=1.0e-10,
         contact_tangent_cg_atol=1.0e-12,
         contact_tangent_cg_maxiter=80,
@@ -1558,6 +1563,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contact-tangent", action="store_true", help="assemble and solve with the field-contact tangent")
     parser.add_argument("--matrix-free-contact-tangent", action="store_true", help="solve with matrix-free field-contact tangent")
     parser.add_argument("--cpp-contact-tangent-solver", action="store_true", help="solve contact tangent with the C++ PCG backend")
+    parser.add_argument(
+        "--cpp-contact-tangent-preconditioner",
+        choices=("sgs", "block-sgs"),
+        default=None,
+        help="C++ PCG preconditioner for the matrix-free contact tangent",
+    )
     parser.add_argument("--contact-tangent-cg-rtol", type=float, default=None, help="matrix-free tangent CG relative tolerance")
     parser.add_argument("--contact-tangent-cg-atol", type=float, default=None, help="matrix-free tangent CG absolute tolerance")
     parser.add_argument("--contact-tangent-cg-maxiter", type=int, default=None, help="matrix-free tangent CG maximum iterations")
@@ -1593,6 +1604,7 @@ def main(argv: list[str] | None = None) -> int:
         "contact_tangent_cg_rtol": args.contact_tangent_cg_rtol,
         "contact_tangent_cg_atol": args.contact_tangent_cg_atol,
         "contact_tangent_cg_maxiter": args.contact_tangent_cg_maxiter,
+        "cpp_contact_tangent_preconditioner": args.cpp_contact_tangent_preconditioner,
     }
     cfg = replace(cfg, **{key: value for key, value in overrides.items() if value is not None})
     tangent_modes = sum(

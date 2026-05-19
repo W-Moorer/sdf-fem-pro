@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include <pybind11/numpy.h>
@@ -626,7 +627,8 @@ py::tuple solve_contact_tangent_pcg(
     std::int64_t master_dof_offset,
     double rtol,
     double atol,
-    std::int64_t maxiter
+    std::int64_t maxiter,
+    std::int64_t preconditioner_mode
 ) {
     const auto indptr = effective_indptr.unchecked<1>();
     const auto indices = effective_indices.unchecked<1>();
@@ -709,6 +711,202 @@ py::tuple solve_contact_tangent_pcg(
         }
     }
 
+    auto invert_3x3 = [](const double* block, double* inv) {
+        double aug[3][6] = {
+            {block[0], block[1], block[2], 1.0, 0.0, 0.0},
+            {block[3], block[4], block[5], 0.0, 1.0, 0.0},
+            {block[6], block[7], block[8], 0.0, 0.0, 1.0},
+        };
+        bool ok = true;
+        for (int col = 0; col < 3; ++col) {
+            int pivot = col;
+            double pivot_abs = std::abs(aug[col][col]);
+            for (int row = col + 1; row < 3; ++row) {
+                const double candidate = std::abs(aug[row][col]);
+                if (candidate > pivot_abs) {
+                    pivot = row;
+                    pivot_abs = candidate;
+                }
+            }
+            if (pivot_abs <= 1.0e-24) {
+                ok = false;
+                break;
+            }
+            if (pivot != col) {
+                for (int k = 0; k < 6; ++k) {
+                    std::swap(aug[col][k], aug[pivot][k]);
+                }
+            }
+            const double scale_value = aug[col][col];
+            for (int k = 0; k < 6; ++k) {
+                aug[col][k] /= scale_value;
+            }
+            for (int row = 0; row < 3; ++row) {
+                if (row == col) {
+                    continue;
+                }
+                const double factor = aug[row][col];
+                for (int k = 0; k < 6; ++k) {
+                    aug[row][k] -= factor * aug[col][k];
+                }
+            }
+        }
+        if (ok) {
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 3; ++col) {
+                    inv[3 * row + col] = aug[row][3 + col];
+                }
+            }
+            return;
+        }
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                inv[3 * row + col] = 0.0;
+            }
+            const double diagonal = std::abs(block[3 * row + row]) > 1.0e-24
+                ? block[3 * row + row]
+                : 1.0;
+            inv[3 * row + row] = 1.0 / diagonal;
+        }
+    };
+
+    std::vector<std::int64_t> local_to_block(static_cast<std::size_t>(n), -1);
+    std::vector<int> local_component(static_cast<std::size_t>(n), 0);
+    std::vector<std::int64_t> block_comp_to_local;
+    std::vector<char> block_comp_present;
+    std::unordered_map<std::int64_t, std::int64_t> block_lookup;
+    block_lookup.reserve(static_cast<std::size_t>(n));
+    auto block_key_for_gdof = [&](std::int64_t gdof) -> std::int64_t {
+        if (gdof >= master_dof_offset) {
+            return master_dof_offset + 3 * ((gdof - master_dof_offset) / 3);
+        }
+        if (gdof >= slave_dof_offset) {
+            return slave_dof_offset + 3 * ((gdof - slave_dof_offset) / 3);
+        }
+        return gdof;
+    };
+    for (py::ssize_t i = 0; i < n; ++i) {
+        const std::int64_t gdof = free(i);
+        const std::int64_t key = block_key_for_gdof(gdof);
+        auto it = block_lookup.find(key);
+        if (it == block_lookup.end()) {
+            const std::int64_t block_id = static_cast<std::int64_t>(block_lookup.size());
+            it = block_lookup.emplace(key, block_id).first;
+            block_comp_to_local.push_back(-1);
+            block_comp_to_local.push_back(-1);
+            block_comp_to_local.push_back(-1);
+            block_comp_present.push_back(0);
+            block_comp_present.push_back(0);
+            block_comp_present.push_back(0);
+        }
+        const std::int64_t block_id = it->second;
+        int component = static_cast<int>(gdof - key);
+        if (component < 0 || component > 2) {
+            component = 0;
+        }
+        local_to_block[static_cast<std::size_t>(i)] = block_id;
+        local_component[static_cast<std::size_t>(i)] = component;
+        block_comp_to_local[static_cast<std::size_t>(3 * block_id + component)] = static_cast<std::int64_t>(i);
+        block_comp_present[static_cast<std::size_t>(3 * block_id + component)] = 1;
+    }
+    const std::int64_t n_blocks = static_cast<std::int64_t>(block_lookup.size());
+    std::vector<double> block_diag(static_cast<std::size_t>(9 * n_blocks), 0.0);
+    for (py::ssize_t i = 0; i < n; ++i) {
+        const std::int64_t rb = local_to_block[static_cast<std::size_t>(i)];
+        const int rc = local_component[static_cast<std::size_t>(i)];
+        for (std::int64_t ptr = indptr(i); ptr < indptr(i + 1); ++ptr) {
+            const std::int64_t col = indices(ptr);
+            const std::int64_t cb = local_to_block[static_cast<std::size_t>(col)];
+            if (cb == rb) {
+                const int cc = local_component[static_cast<std::size_t>(col)];
+                block_diag[static_cast<std::size_t>(9 * rb + 3 * rc + cc)] += data(ptr);
+            }
+        }
+    }
+    std::vector<std::int64_t> row_blocks;
+    std::vector<double> row_vectors;
+    row_blocks.reserve(32);
+    row_vectors.reserve(96);
+    auto add_row_contribution = [&](std::int64_t gdof, int component, double value) {
+        if (gdof < 0 || gdof >= n_total_dofs) {
+            return;
+        }
+        const std::int64_t local = global_to_free[static_cast<std::size_t>(gdof)];
+        if (local < 0) {
+            return;
+        }
+        const std::int64_t block_id = local_to_block[static_cast<std::size_t>(local)];
+        const int comp = local_component[static_cast<std::size_t>(local)];
+        std::size_t idx = 0;
+        for (; idx < row_blocks.size(); ++idx) {
+            if (row_blocks[idx] == block_id) {
+                break;
+            }
+        }
+        if (idx == row_blocks.size()) {
+            row_blocks.push_back(block_id);
+            row_vectors.push_back(0.0);
+            row_vectors.push_back(0.0);
+            row_vectors.push_back(0.0);
+        }
+        row_vectors[3 * idx + static_cast<std::size_t>(comp)] += value;
+    };
+    for (py::ssize_t row = 0; row < n_active; ++row) {
+        row_blocks.clear();
+        row_vectors.clear();
+        for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+            const std::int64_t node = snodes(row, local_node);
+            const double sw = sweights(row, local_node);
+            for (int comp = 0; comp < 3; ++comp) {
+                add_row_contribution(
+                    slave_dof_offset + 3 * node + comp,
+                    comp,
+                    sw * grads(row, comp)
+                );
+            }
+        }
+        for (py::ssize_t corner = 0; corner < fnodes.shape(1); ++corner) {
+            const double gw = gweights(row, corner);
+            for (py::ssize_t face_node = 0; face_node < fnodes.shape(2); ++face_node) {
+                const std::int64_t node = fnodes(row, corner, face_node);
+                const double bval = bary(row, corner, face_node);
+                for (int comp = 0; comp < 3; ++comp) {
+                    add_row_contribution(
+                        master_dof_offset + 3 * node + comp,
+                        comp,
+                        -gw * bval * nrm(row, corner, comp)
+                    );
+                }
+            }
+        }
+        const double s = row_scale(row);
+        for (std::size_t idx = 0; idx < row_blocks.size(); ++idx) {
+            const std::int64_t block_id = row_blocks[idx];
+            for (int a = 0; a < 3; ++a) {
+                for (int bcomp = 0; bcomp < 3; ++bcomp) {
+                    block_diag[static_cast<std::size_t>(9 * block_id + 3 * a + bcomp)] +=
+                        s * row_vectors[3 * idx + static_cast<std::size_t>(a)] *
+                        row_vectors[3 * idx + static_cast<std::size_t>(bcomp)];
+                }
+            }
+        }
+    }
+    for (std::int64_t block_id = 0; block_id < n_blocks; ++block_id) {
+        for (int comp = 0; comp < 3; ++comp) {
+            const std::size_t marker = static_cast<std::size_t>(3 * block_id + comp);
+            if (!block_comp_present[marker]) {
+                block_diag[static_cast<std::size_t>(9 * block_id + 3 * comp + comp)] = 1.0;
+            }
+        }
+    }
+    std::vector<double> block_inv(static_cast<std::size_t>(9 * n_blocks), 0.0);
+    for (std::int64_t block_id = 0; block_id < n_blocks; ++block_id) {
+        invert_3x3(
+            &block_diag[static_cast<std::size_t>(9 * block_id)],
+            &block_inv[static_cast<std::size_t>(9 * block_id)]
+        );
+    }
+
     auto dot = [](const std::vector<double>& a, const std::vector<double>& bvec) -> double {
         double out = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i) {
@@ -784,7 +982,27 @@ py::tuple solve_contact_tangent_pcg(
 
     std::vector<double> precond_forward(static_cast<std::size_t>(n), 0.0);
     std::vector<double> precond_scaled(static_cast<std::size_t>(n), 0.0);
-    auto apply_preconditioner = [&](const std::vector<double>& residual, std::vector<double>& out) {
+    std::vector<double> block_forward(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> block_scaled(static_cast<std::size_t>(n), 0.0);
+    auto solve_block = [&](std::int64_t block_id, const double* rhs3, double* out3) {
+        const double* inv = &block_inv[static_cast<std::size_t>(9 * block_id)];
+        for (int row = 0; row < 3; ++row) {
+            out3[row] =
+                inv[3 * row + 0] * rhs3[0] +
+                inv[3 * row + 1] * rhs3[1] +
+                inv[3 * row + 2] * rhs3[2];
+        }
+    };
+    auto apply_block_diag = [&](std::int64_t block_id, const double* value3, double* out3) {
+        const double* block = &block_diag[static_cast<std::size_t>(9 * block_id)];
+        for (int row = 0; row < 3; ++row) {
+            out3[row] =
+                block[3 * row + 0] * value3[0] +
+                block[3 * row + 1] * value3[1] +
+                block[3 * row + 2] * value3[2];
+        }
+    };
+    auto apply_scalar_sgs_preconditioner = [&](const std::vector<double>& residual, std::vector<double>& out) {
         for (py::ssize_t i = 0; i < n; ++i) {
             double sum = 0.0;
             for (std::int64_t ptr = indptr(i); ptr < indptr(i + 1); ++ptr) {
@@ -812,6 +1030,88 @@ py::tuple solve_contact_tangent_pcg(
             }
             out[static_cast<std::size_t>(i)] =
                 (precond_scaled[static_cast<std::size_t>(i)] - sum) / diag[static_cast<std::size_t>(i)];
+        }
+    };
+    auto apply_block_sgs_preconditioner = [&](const std::vector<double>& residual, std::vector<double>& out) {
+        std::fill(block_forward.begin(), block_forward.end(), 0.0);
+        std::fill(block_scaled.begin(), block_scaled.end(), 0.0);
+        std::fill(out.begin(), out.end(), 0.0);
+        for (std::int64_t block_id = 0; block_id < n_blocks; ++block_id) {
+            double rhs3[3] = {0.0, 0.0, 0.0};
+            double solved3[3] = {0.0, 0.0, 0.0};
+            for (int comp = 0; comp < 3; ++comp) {
+                const std::int64_t local = block_comp_to_local[static_cast<std::size_t>(3 * block_id + comp)];
+                if (local < 0) {
+                    continue;
+                }
+                double value = residual[static_cast<std::size_t>(local)];
+                for (std::int64_t ptr = indptr(local); ptr < indptr(local + 1); ++ptr) {
+                    const std::int64_t col = indices(ptr);
+                    const std::int64_t col_block = local_to_block[static_cast<std::size_t>(col)];
+                    if (col_block < block_id) {
+                        value -= data(ptr) * block_forward[static_cast<std::size_t>(col)];
+                    }
+                }
+                rhs3[comp] = value;
+            }
+            solve_block(block_id, rhs3, solved3);
+            for (int comp = 0; comp < 3; ++comp) {
+                const std::int64_t local = block_comp_to_local[static_cast<std::size_t>(3 * block_id + comp)];
+                if (local >= 0) {
+                    block_forward[static_cast<std::size_t>(local)] = solved3[comp];
+                }
+            }
+        }
+        for (std::int64_t block_id = 0; block_id < n_blocks; ++block_id) {
+            double value3[3] = {0.0, 0.0, 0.0};
+            double product3[3] = {0.0, 0.0, 0.0};
+            for (int comp = 0; comp < 3; ++comp) {
+                const std::int64_t local = block_comp_to_local[static_cast<std::size_t>(3 * block_id + comp)];
+                if (local >= 0) {
+                    value3[comp] = block_forward[static_cast<std::size_t>(local)];
+                }
+            }
+            apply_block_diag(block_id, value3, product3);
+            for (int comp = 0; comp < 3; ++comp) {
+                const std::int64_t local = block_comp_to_local[static_cast<std::size_t>(3 * block_id + comp)];
+                if (local >= 0) {
+                    block_scaled[static_cast<std::size_t>(local)] = product3[comp];
+                }
+            }
+        }
+        for (std::int64_t ib = 0; ib < n_blocks; ++ib) {
+            const std::int64_t block_id = n_blocks - 1 - ib;
+            double rhs3[3] = {0.0, 0.0, 0.0};
+            double solved3[3] = {0.0, 0.0, 0.0};
+            for (int comp = 0; comp < 3; ++comp) {
+                const std::int64_t local = block_comp_to_local[static_cast<std::size_t>(3 * block_id + comp)];
+                if (local < 0) {
+                    continue;
+                }
+                double value = block_scaled[static_cast<std::size_t>(local)];
+                for (std::int64_t ptr = indptr(local); ptr < indptr(local + 1); ++ptr) {
+                    const std::int64_t col = indices(ptr);
+                    const std::int64_t col_block = local_to_block[static_cast<std::size_t>(col)];
+                    if (col_block > block_id) {
+                        value -= data(ptr) * out[static_cast<std::size_t>(col)];
+                    }
+                }
+                rhs3[comp] = value;
+            }
+            solve_block(block_id, rhs3, solved3);
+            for (int comp = 0; comp < 3; ++comp) {
+                const std::int64_t local = block_comp_to_local[static_cast<std::size_t>(3 * block_id + comp)];
+                if (local >= 0) {
+                    out[static_cast<std::size_t>(local)] = solved3[comp];
+                }
+            }
+        }
+    };
+    auto apply_preconditioner = [&](const std::vector<double>& residual, std::vector<double>& out) {
+        if (preconditioner_mode == 1) {
+            apply_block_sgs_preconditioner(residual, out);
+        } else {
+            apply_scalar_sgs_preconditioner(residual, out);
         }
     };
 

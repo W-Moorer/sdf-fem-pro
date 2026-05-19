@@ -372,3 +372,69 @@ SGS 预条件把 quick case 的 PCG 迭代数从 `593` 降到 `362`，solve-loop
 - 当前 C++ PCG tangent 仍慢于默认 2 次 fixed-point quick 路径，因此暂不能作为默认性能 claim。
 
 下一步若要把 tangent 路径变成真正性能路径，需要更强的 C++ 预条件：例如块节点预条件、effective matrix 的 C++ 稀疏分解/多重网格预条件，或把 field build、contact response、tangent solve 合并为单个持久 workspace，减少每步对象构造和内存分配。
+
+## 2026-05-19 追加：节点块 C++ 预条件
+
+本轮继续增强 C++ tangent PCG 的预条件，而不改变求解方程、接触几何、SDF 查询或容差。
+
+### 已实现
+
+1. C++ `block-sgs` 预条件
+   - 在 `solve_contact_tangent_pcg(...)` 中新增 `preconditioner_mode`。
+   - `sgs`：保留上一版 scalar symmetric Gauss-Seidel 预条件。
+   - `block-sgs`：按每个 FEM 节点 3 个自由度构造节点块。
+   - 节点块对角包含：
+     - `effective_free` 的同节点 `3 x 3` 子块；
+     - 同节点内 contact tangent `J^T W J` 的方向耦合；
+     - 缺失/约束自由度用单位对角保护。
+   - C++ 内部预计算每个 `3 x 3` 节点块逆，并在 symmetric block-Gauss-Seidel 预条件 solve 中复用。
+
+2. Python/runner 接口
+   - `solve_contact_tangent_pcg(..., preconditioner="block-sgs")`
+   - 新增 CLI：
+     ```bash
+     --cpp-contact-tangent-preconditioner {sgs,block-sgs}
+     ```
+   - C++ tangent solver 默认使用 `block-sgs`。
+
+### 验证
+
+针对性测试：
+
+```bash
+python -m pytest -q tests/test_field_surface_to_surface_contact.py::test_cpp_contact_tangent_pcg_solver_matches_dense_reference_when_built tests/test_field_surface_to_surface_contact.py::test_cpp_contact_stiffness_matvec_matches_reference_when_built
+```
+
+结果：
+
+```text
+2 passed in 0.48s
+```
+
+该测试同时覆盖 `sgs` 和 `block-sgs`，两者均与显式 dense-reference tangent 解一致。
+
+quick 动态对比：
+
+| C++ PCG 预条件 | Newmark/contact 迭代 | solve-loop wall | PCG solves | PCG iterations |
+| --- | ---: | ---: | ---: | ---: |
+| `sgs` | 1 | `7.568905e-01 s` | 8 | 362 |
+| `block-sgs` | 1 | `7.516895e-01 s` | 8 | 360 |
+
+相对默认 2 次 fixed-point 参考，`block-sgs` 的历史量误差与旧 `sgs` 基本一致：
+
+| 量 | 最大绝对差 | 相对差 |
+| --- | ---: | ---: |
+| upper mean z displacement | `1.9112e-03` | `1.02e-02` |
+| min gap | `1.8458e-03` | `1.12e-02` |
+| normal force | `2.0669e+03` | `1.18e-02` |
+| contact energy | `2.7836e+02` | `2.05e-02` |
+
+### 当前结论
+
+`block-sgs` 是比 scalar `sgs` 更强的 C++ 预条件形式，且不降低求解精度；但在当前 quick 动态工况上只把 PCG 迭代数从 `362` 降到 `360`，收益很小。因此仍不能声称 tangent path 已成为性能路径。这个结果说明：当前瓶颈更可能来自整体 effective matrix 的长程耦合和每步重复 field/contact rebuild，而不是单个节点内的 contact tangent 方向耦合。
+
+下一步更有价值的工程方向是：
+
+1. C++ effective-matrix 预条件/稀疏求解器，而不是只靠节点块近似；
+2. 持久化 fused workspace，把 required points、field build、contact response、PCG scratch buffer 绑定为一个长期对象；
+3. C++ 侧直接复用上一步 accepted state 的拓扑/插值索引，减少每步 Python 对象和数组构造。
