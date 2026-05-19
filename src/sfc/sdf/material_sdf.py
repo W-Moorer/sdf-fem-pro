@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .narrow_band_grid import NarrowBandGrid, compute_finite_difference_gradient
 from .local_projection import closest_point_on_triangle
 
 
@@ -30,6 +31,7 @@ class MaterialSDF:
     boundary_faces: np.ndarray
     phi: PhiFunction | None = None
     gradient: GradPhiFunction | None = None
+    grid: "MaterialSDFGrid | None" = None
     band_radius: float = 0.0
 
     def __post_init__(self) -> None:
@@ -50,6 +52,7 @@ class MaterialSDF:
         *,
         phi: PhiFunction | None = None,
         gradient: GradPhiFunction | None = None,
+        grid: "MaterialSDFGrid | None" = None,
         band_radius: float = 0.0,
     ) -> "MaterialSDF":
         """Create a material SDF from reference surface triangles."""
@@ -59,6 +62,25 @@ class MaterialSDF:
             boundary_faces=boundary_faces,
             phi=phi,
             gradient=gradient,
+            grid=grid,
+            band_radius=band_radius,
+        )
+
+    @classmethod
+    def from_grid(
+        cls,
+        reference_nodes: np.ndarray,
+        boundary_faces: np.ndarray,
+        grid: "MaterialSDFGrid",
+        *,
+        band_radius: float = 0.0,
+    ) -> "MaterialSDF":
+        """Create a material SDF with trilinear reference-grid queries."""
+
+        return cls(
+            reference_nodes=reference_nodes,
+            boundary_faces=boundary_faces,
+            grid=grid,
             band_radius=band_radius,
         )
 
@@ -86,6 +108,8 @@ class MaterialSDF:
         X = _as_point(point, "point")
         if self.phi is not None:
             return float(self.phi(X))
+        if self.grid is not None:
+            return self.grid.query_phi(X)
         result = self.closest_reference_patch(X)
         return float(result.gap)
 
@@ -101,6 +125,8 @@ class MaterialSDF:
             if norm <= 0.0:
                 raise ValueError("gradient(point) must be nonzero")
             return grad / norm
+        if self.grid is not None:
+            return self.grid.query_gradient(X)
         result = self.closest_reference_patch(X)
         return result.normal.copy()
 
@@ -151,6 +177,98 @@ class MaterialPatchProjection:
     barycentric: np.ndarray
     closest_point: np.ndarray
     squared_distance: float
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialSDFGrid:
+    """Regular reference-space SDF grid with trilinear interpolation."""
+
+    origin: np.ndarray
+    spacing: np.ndarray
+    phi: np.ndarray
+    gradient: np.ndarray | None = None
+    valid_mask: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        origin = _as_point(self.origin, "origin")
+        spacing = _as_spacing(self.spacing)
+        phi = np.asarray(self.phi, dtype=float)
+        if phi.ndim != 3:
+            raise ValueError("phi must have shape (nx, ny, nz)")
+        if any(size < 2 for size in phi.shape):
+            raise ValueError("each grid axis must contain at least two nodes")
+        valid = np.isfinite(phi) if self.valid_mask is None else np.asarray(self.valid_mask, dtype=bool)
+        if valid.shape != phi.shape:
+            raise ValueError("valid_mask must match phi shape")
+        if self.gradient is None:
+            gradient = compute_finite_difference_gradient(phi, spacing)
+        else:
+            gradient = np.asarray(self.gradient, dtype=float)
+        if gradient.shape != (*phi.shape, 3):
+            raise ValueError("gradient must have shape (*phi.shape, 3)")
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "spacing", spacing)
+        object.__setattr__(self, "phi", phi)
+        object.__setattr__(self, "gradient", gradient)
+        object.__setattr__(self, "valid_mask", valid)
+
+    @classmethod
+    def from_phi_function(
+        cls,
+        *,
+        origin: np.ndarray,
+        spacing: np.ndarray | float,
+        shape: tuple[int, int, int],
+        phi: PhiFunction,
+        gradient: GradPhiFunction | None = None,
+    ) -> "MaterialSDFGrid":
+        """Sample a reference-grid SDF from callables."""
+
+        h = _as_spacing(spacing)
+        grid_shape = tuple(int(v) for v in shape)
+        values = np.empty(grid_shape, dtype=float)
+        gradients = np.empty((*grid_shape, 3), dtype=float) if gradient is not None else None
+        base = _as_point(origin, "origin")
+        for index in np.ndindex(grid_shape):
+            point = base + h * np.asarray(index, dtype=float)
+            values[index] = float(phi(point))
+            if gradient is not None:
+                gradients[index] = np.asarray(gradient(point), dtype=float)
+        return cls(origin=base, spacing=h, phi=values, gradient=gradients)
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        """Return reference-grid dimensions."""
+
+        return tuple(int(v) for v in self.phi.shape)
+
+    def _as_narrow_grid(self) -> NarrowBandGrid:
+        zeros_vec = np.zeros((*self.phi.shape, 3), dtype=float)
+        zeros_int = np.zeros(self.phi.shape, dtype=np.int64)
+        return NarrowBandGrid(
+            origin=self.origin,
+            spacing=self.spacing,
+            phi=self.phi,
+            gradient=np.asarray(self.gradient, dtype=float),
+            closest_face_id=zeros_int,
+            barycentric=zeros_vec,
+            closest_normal=np.asarray(self.gradient, dtype=float),
+            valid_mask=np.asarray(self.valid_mask, dtype=bool),
+        )
+
+    def query_phi(self, point: np.ndarray) -> float:
+        """Trilinearly interpolate ``phi0(X)``."""
+
+        return self._as_narrow_grid().query_phi(point)
+
+    def query_gradient(self, point: np.ndarray) -> np.ndarray:
+        """Return the scalar-interpolation derivative of ``phi0``."""
+
+        grad = self._as_narrow_grid().query_spatial_derivative_phi(point)
+        norm = float(np.linalg.norm(grad))
+        if norm <= 0.0:
+            raise ValueError("material SDF gradient is zero at query point")
+        return grad / norm
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +380,17 @@ def _as_point(value: np.ndarray, name: str) -> np.ndarray:
     if point.shape != (3,):
         raise ValueError(f"{name} must have shape (3,)")
     return point
+
+
+def _as_spacing(value: np.ndarray | float) -> np.ndarray:
+    arr = np.asarray(value, dtype=float)
+    if arr.shape == ():
+        arr = np.full(3, float(arr), dtype=float)
+    if arr.shape != (3,):
+        raise ValueError("spacing must be a positive scalar or have shape (3,)")
+    if np.any(arr <= 0.0):
+        raise ValueError("spacing entries must be positive")
+    return arr
 
 
 def _unit_normals(triangles: np.ndarray) -> np.ndarray:

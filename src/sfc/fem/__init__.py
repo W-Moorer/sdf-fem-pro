@@ -39,6 +39,7 @@ from .constraints import (
     free_dofs,
     project_fixed_dofs,
 )
+from .deformation_map import DeformationMapEvaluation, FEMDeformationMap
 from .elements import (
     C3D8_HEX8_BACKEND,
     C3D4_TET4_BACKEND,
@@ -75,6 +76,8 @@ from .tet4 import (
 
 __all__ = [
     "DeformableBody",
+    "DeformationMapEvaluation",
+    "FEMDeformationMap",
     "ContactGeometry",
     "ContactResponse",
     "ContactSample",

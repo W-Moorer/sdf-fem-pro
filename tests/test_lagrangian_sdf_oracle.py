@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from sfc.contact.lagrangian_sdf_oracle import LagrangianSDFContactOracle
+from sfc.contact.lagrangian_sdf_oracle import (
+    LagrangianSDFContactOracle,
+    lagrangian_oracle_constraint_from_sample,
+    lagrangian_oracle_jacobian_row,
+    lagrangian_oracle_penalty_response,
+)
+from sfc.contact.narrow_phase import SurfaceSample
+from sfc.fem.deformation_map import FEMDeformationMap
+from sfc.mesh.topology import VolumeMesh
 from sfc.sdf.dynamic_surface_sdf import surface_projection_distance_kernel
-from sfc.sdf.material_sdf import MaterialSDF
+from sfc.sdf.material_sdf import MaterialSDF, MaterialSDFGrid
 
 
 def _rotation_y(theta: float) -> np.ndarray:
@@ -146,3 +154,147 @@ def test_lagrangian_oracle_active_patch_cache_does_not_change_result() -> None:
     assert np.isclose(cached_result.gap, uncached_result.gap, atol=1.0e-14)
     np.testing.assert_allclose(cached_result.normal, uncached_result.normal, atol=1.0e-14)
     np.testing.assert_allclose(cached_result.barycentric, uncached_result.barycentric, atol=1.0e-14)
+
+
+def _tet_plane_volume_model() -> tuple[np.ndarray, np.ndarray, VolumeMesh, MaterialSDF]:
+    nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    grid = MaterialSDFGrid.from_phi_function(
+        origin=np.asarray([-0.2, -0.2, -0.3], dtype=float),
+        spacing=0.1,
+        shape=(16, 16, 18),
+        phi=lambda x: float(x[2]),
+        gradient=lambda _x: np.asarray([0.0, 0.0, 1.0], dtype=float),
+    )
+    material = MaterialSDF.from_grid(nodes, faces, grid, band_radius=0.4)
+    return nodes, faces, VolumeMesh(nodes, elements, element_type="tet4"), material
+
+
+def test_final_aim_kkt_oracle_uses_material_sdf_grid_and_deformation_map() -> None:
+    nodes, faces, mesh, material = _tet_plane_volume_model()
+    A = np.asarray(
+        [
+            [1.05, 0.15, 0.2],
+            [-0.05, 0.95, 0.1],
+            [0.0, 0.05, 1.2],
+        ],
+        dtype=float,
+    )
+    translation = np.asarray([0.25, -0.15, 0.35], dtype=float)
+    current = nodes @ A.T + translation
+    oracle = LagrangianSDFContactOracle(
+        material,
+        current,
+        search_radius=0.6,
+        deformation_map=FEMDeformationMap(mesh, current),
+        max_newton_iterations=10,
+    )
+    material_surface_point = np.asarray([0.25, 0.2, 0.0], dtype=float)
+    reference_normal = np.asarray([0.0, 0.0, 1.0], dtype=float)
+    current_normal = np.linalg.solve(A.T, reference_normal)
+    current_normal /= np.linalg.norm(current_normal)
+    closest = A @ material_surface_point + translation
+    point = closest + 0.075 * current_normal
+    result = oracle.query(point)
+    projection = surface_projection_distance_kernel(point, current, faces, np.arange(faces.shape[0]))
+
+    assert result.converged
+    assert np.isclose(result.gap, 0.075, atol=1.0e-10)
+    assert np.isclose(material.query_phi(result.material_point), 0.0, atol=1.0e-10)
+    np.testing.assert_allclose(result.normal, projection.n, atol=1.0e-10)
+    np.testing.assert_allclose(result.closest_point, projection.p, atol=1.0e-10)
+    assert result.master_node_ids.shape == (4,)
+    assert np.isclose(float(np.sum(result.master_weights)), 1.0, atol=1.0e-12)
+
+
+def test_final_aim_oracle_query_does_not_build_current_sdf_grid(monkeypatch) -> None:
+    nodes, _faces, mesh, material = _tet_plane_volume_model()
+    from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF
+
+    def fail_build(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("current-space SDF grid build was called")
+
+    monkeypatch.setattr(DynamicNarrowBandSDF, "build", fail_build)
+    oracle = LagrangianSDFContactOracle(
+        material,
+        nodes.copy(),
+        search_radius=0.4,
+        deformation_map=FEMDeformationMap(mesh, nodes.copy()),
+    )
+    g, n = oracle.query_gap_normal(np.asarray([0.2, 0.25, 0.05], dtype=float))
+    assert np.isclose(g, 0.05, atol=1.0e-12)
+    np.testing.assert_allclose(n, np.asarray([0.0, 0.0, 1.0]), atol=1.0e-12)
+
+
+def test_final_aim_oracle_contact_jacobian_matches_finite_difference() -> None:
+    nodes, _faces, mesh, material = _tet_plane_volume_model()
+    slave = np.asarray([[0.25, 0.25, -0.04]], dtype=float)
+    sample = SurfaceSample(
+        node_ids=np.asarray([0], dtype=np.int64),
+        weights=np.asarray([1.0], dtype=float),
+        candidate_face_ids=np.empty(0, dtype=np.int64),
+    )
+
+    def constraint_for(q: np.ndarray):
+        slave_x = q[:3].reshape((1, 3))
+        master_x = q[3:].reshape((4, 3))
+        oracle = LagrangianSDFContactOracle(
+            material,
+            master_x,
+            search_radius=0.4,
+            deformation_map=FEMDeformationMap(mesh, master_x),
+        )
+        return lagrangian_oracle_constraint_from_sample(slave_x, sample, oracle)
+
+    q0 = np.concatenate((slave.reshape(-1), nodes.reshape(-1)))
+    constraint = constraint_for(q0)
+    J = lagrangian_oracle_jacobian_row(
+        constraint,
+        n_total_dofs=q0.size,
+        slave_dof_offset=0,
+        master_dof_offset=3,
+    )
+    direction = np.linspace(-0.31, 0.27, q0.size)
+    direction /= np.linalg.norm(direction)
+    eps = 1.0e-6
+    fd = (constraint_for(q0 + eps * direction).g - constraint_for(q0 - eps * direction).g) / (2.0 * eps)
+    assert np.isclose(float((J @ direction)[0]), fd, rtol=1.0e-6, atol=1.0e-8)
+
+
+def test_final_aim_oracle_penalty_response_action_reaction() -> None:
+    nodes, _faces, mesh, material = _tet_plane_volume_model()
+    slave = np.asarray([[0.25, 0.25, -0.05]], dtype=float)
+    sample = SurfaceSample(
+        node_ids=np.asarray([0], dtype=np.int64),
+        weights=np.asarray([1.0], dtype=float),
+        candidate_face_ids=np.empty(0, dtype=np.int64),
+    )
+    oracle = LagrangianSDFContactOracle(
+        material,
+        nodes.copy(),
+        search_radius=0.4,
+        deformation_map=FEMDeformationMap(mesh, nodes.copy()),
+    )
+    response = lagrangian_oracle_penalty_response(
+        slave,
+        [sample],
+        oracle,
+        pressure_stiffness=100.0,
+        n_total_dofs=15,
+        slave_dof_offset=0,
+        master_dof_offset=3,
+    )
+    force = response.force.reshape((-1, 3))
+    assert response.active_count == 1
+    assert np.isclose(response.min_gap, -0.05, atol=1.0e-12)
+    np.testing.assert_allclose(force[0] + force[1:].sum(axis=0), np.zeros(3), atol=1.0e-12)
+    assert force[0, 2] > 0.0
