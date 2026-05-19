@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from validation.run_abaqus_flexible_body_rigid_plane import build_input_text
 from validation.run_abaqus_sphere_drop_full_validation import (
+    _ballistic_contact_time,
     _first_contact_time,
     run_sfc_lagrangian_sdf_full_history,
     run_validation,
@@ -59,6 +60,35 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
     assert {row["adaptive_increments"] for row in rows} == {"true"}
     assert all(int(row["accepted_increment_count"]) >= 1 for row in rows)
     assert all("active_contact_area" in row for row in rows)
+
+
+def test_contact_estimate_damping_policy_preserves_precontact_free_fall(tmp_path: Path) -> None:
+    inp = tmp_path / "sphere_drop.inp"
+    inp.write_text(build_input_text("sphere_drop"), encoding="ascii")
+    model = parse_sphere_drop_inp(inp)
+    duration = 0.04
+
+    rows = run_sfc_lagrangian_sdf_full_history(
+        model,
+        duration=duration,
+        dt=0.01,
+        contact_stiffness=1.0e8,
+        mass_damping=50.0,
+        damping_start_time=0.0,
+        damping_start_policy="contact-estimate",
+        integrator="hht",
+        hht_alpha=-0.1,
+        max_newton_iterations=3,
+    )
+
+    initial_z = float(rows[0]["z_cm"])
+    final = rows[-1]
+    expected_z = initial_z - 0.5 * model.gravity * duration * duration
+    assert _ballistic_contact_time(model) > duration
+    assert float(final["damping_start_time"]) == pytest.approx(_ballistic_contact_time(model))
+    assert final["damping_start_policy"] == "contact-estimate"
+    assert float(final["z_cm"]) == pytest.approx(expected_z, abs=5.0e-8)
+    assert all(int(row["active_contact_count"]) == 0 for row in rows)
 
 
 def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path: Path) -> None:

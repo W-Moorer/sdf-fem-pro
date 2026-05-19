@@ -68,6 +68,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 Row = dict[str, Any]
 
+DAMPING_START_POLICIES = ("time", "contact-estimate")
+
 
 def _restricted_samples(samples: list[SurfaceSample], ids: np.ndarray) -> list[SurfaceSample]:
     return [samples[int(idx)] for idx in np.asarray(ids, dtype=np.int64)]
@@ -209,6 +211,30 @@ def _first_contact_time(rows: list[Row]) -> float | None:
     return None if not active else min(active)
 
 
+def _ballistic_contact_time(model: AbaqusSphereDropModel) -> float:
+    """Return the gravity-only first-contact estimate for the initial gap."""
+
+    initial_gap = float(np.min(model.nodes[:, 2]) - model.plane_z)
+    return math.sqrt(max(2.0 * initial_gap / float(model.gravity), 0.0))
+
+
+def _resolve_damping_start_time(
+    model: AbaqusSphereDropModel,
+    *,
+    damping_start_time: float,
+    damping_start_policy: str,
+) -> float:
+    """Resolve when damping may start without altering pre-contact free fall."""
+
+    policy = str(damping_start_policy)
+    if policy not in DAMPING_START_POLICIES:
+        raise ValueError(f"damping_start_policy must be one of {DAMPING_START_POLICIES}")
+    requested = float(damping_start_time)
+    if policy == "time":
+        return requested
+    return max(requested, _ballistic_contact_time(model))
+
+
 def run_sfc_lagrangian_sdf_full_history(
     model: AbaqusSphereDropModel,
     *,
@@ -219,6 +245,7 @@ def run_sfc_lagrangian_sdf_full_history(
     mass_damping: float = 0.0,
     stiffness_damping: float = 0.0,
     damping_start_time: float = 0.0,
+    damping_start_policy: str = "time",
     integrator: str = "newmark",
     hht_alpha: float = 0.0,
     contact_integration: str = "node",
@@ -238,6 +265,11 @@ def run_sfc_lagrangian_sdf_full_history(
 ) -> list[Row]:
     """Run the full SFC sphere-drop solve with Lagrangian-SDF contact."""
 
+    effective_damping_start_time = _resolve_damping_start_time(
+        model,
+        damping_start_time=float(damping_start_time),
+        damping_start_policy=str(damping_start_policy),
+    )
     mesh = VolumeMesh(model.nodes, model.elements, element_type="tet4")
     body = DeformableBody(mesh, {"E": model.young, "nu": model.poisson}, density=model.density)
     K = assemble_stiffness_matrix(body).tocsr()
@@ -291,7 +323,7 @@ def run_sfc_lagrangian_sdf_full_history(
         velocity_tangent_factor=0.0,
         n_dofs=n_dofs,
     )
-    C_initial = C_base if 0.0 >= float(damping_start_time) else csr_matrix(K.shape, dtype=float)
+    C_initial = C_base if 0.0 >= effective_damping_start_time else csr_matrix(K.shape, dtype=float)
     a = np.asarray(spsolve(M.tocsc(), f_gravity + f_contact - C_initial @ v - K @ u), dtype=float)
     f_contact_old = f_contact.copy()
 
@@ -358,7 +390,7 @@ def run_sfc_lagrangian_sdf_full_history(
         previous_active = int(active_count)
         previous_min_gap = float(min_gap)
         while not accepted:
-            C = C_base if float(current_time) >= float(damping_start_time) else csr_matrix(K.shape, dtype=float)
+            C = C_base if float(current_time) >= effective_damping_start_time else csr_matrix(K.shape, dtype=float)
             old_internal = C @ v + K @ u - f_gravity - f_contact_old
             c0 = 1.0 / (beta * h_trial * h_trial)
             c1 = gamma / (beta * h_trial)
@@ -464,7 +496,9 @@ def run_sfc_lagrangian_sdf_full_history(
         row["contact_damping"] = float(contact_damping)
         row["mass_damping"] = float(mass_damping)
         row["stiffness_damping"] = float(stiffness_damping)
-        row["damping_start_time"] = float(damping_start_time)
+        row["damping_start_time"] = float(effective_damping_start_time)
+        row["requested_damping_start_time"] = float(damping_start_time)
+        row["damping_start_policy"] = str(damping_start_policy)
         row["hht_alpha"] = float(alpha)
         row["quadrature_order"] = int(quadrature_order)
         row["hybrid_node_area_fraction"] = float(hybrid_node_area_fraction)
@@ -530,6 +564,8 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
             {"metric": "mass_damping", "value": float(sfc_rows[0].get("mass_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
             {"metric": "stiffness_damping", "value": float(sfc_rows[0].get("stiffness_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
             {"metric": "damping_start_time", "value": float(sfc_rows[0].get("damping_start_time", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "requested_damping_start_time", "value": float(sfc_rows[0].get("requested_damping_start_time", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "damping_start_policy", "value": str(sfc_rows[0].get("damping_start_policy", "")) if sfc_rows else "", "status": "reported"},
             {"metric": "time_integrator", "value": str(sfc_rows[0].get("time_integrator", "")) if sfc_rows else "", "status": "reported"},
             {"metric": "hht_alpha", "value": float(sfc_rows[0].get("hht_alpha", 0.0)) if sfc_rows else 0.0, "status": "reported"},
             {"metric": "contact_integration", "value": str(sfc_rows[0].get("contact_integration", "")) if sfc_rows else "", "status": "reported"},
@@ -604,6 +640,8 @@ def _write_full_summary(path: Path, metrics: list[Row], outputs: dict[str, Path]
         "mass_damping",
         "stiffness_damping",
         "damping_start_time",
+        "requested_damping_start_time",
+        "damping_start_policy",
         "time_integrator",
         "hht_alpha",
         "contact_integration",
@@ -639,6 +677,7 @@ def run_validation(
     mass_damping: float = 0.0,
     stiffness_damping: float = 0.0,
     damping_start_time: float = 0.0,
+    damping_start_policy: str = "time",
     integrator: str = "newmark",
     hht_alpha: float = 0.0,
     contact_integration: str = "node",
@@ -668,6 +707,7 @@ def run_validation(
         mass_damping=float(mass_damping),
         stiffness_damping=float(stiffness_damping),
         damping_start_time=float(damping_start_time),
+        damping_start_policy=str(damping_start_policy),
         integrator=str(integrator),
         hht_alpha=float(hht_alpha),
         contact_integration=str(contact_integration),
@@ -775,6 +815,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mass-damping", type=float, default=0.0)
     parser.add_argument("--stiffness-damping", type=float, default=0.0)
     parser.add_argument("--damping-start-time", type=float, default=0.0)
+    parser.add_argument("--damping-start-policy", choices=DAMPING_START_POLICIES, default="time")
     parser.add_argument("--integrator", choices=("newmark", "hht"), default="newmark")
     parser.add_argument("--hht-alpha", type=float, default=0.0)
     parser.add_argument("--contact-integration", choices=("node", "surface", "hybrid"), default="node")
@@ -806,6 +847,7 @@ def main() -> None:
         mass_damping=float(args.mass_damping),
         stiffness_damping=float(args.stiffness_damping),
         damping_start_time=float(args.damping_start_time),
+        damping_start_policy=str(args.damping_start_policy),
         integrator=str(args.integrator),
         hht_alpha=float(args.hht_alpha),
         contact_integration=str(args.contact_integration),
