@@ -92,6 +92,7 @@ class LagrangianSDFContactOracle:
     bvh: ReferencePatchBVH = field(init=False)
     _patch_cache: dict[Hashable, int] = field(default_factory=dict, init=False, repr=False)
     _barycentric_cache: dict[Hashable, np.ndarray] = field(default_factory=dict, init=False, repr=False)
+    _face_element_cache: dict[tuple[int, ...], int | None] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         X = _as_nodes(self.x_current, "x_current")
@@ -126,6 +127,7 @@ class LagrangianSDFContactOracle:
 
         self._patch_cache.clear()
         self._barycentric_cache.clear()
+        self._face_element_cache.clear()
 
     def query_gap_normal(
         self,
@@ -380,7 +382,7 @@ class LagrangianSDFContactOracle:
         else:
             bary0 = _project_barycentric_to_simplex(np.asarray(initial_barycentric, dtype=float))
         X = bary0 @ reference_triangle
-        preferred_element = self.deformation_map.element_for_face(face)
+        preferred_element = self._element_for_face(face)
         lam = 0.0
         converged = False
         iterations = 0
@@ -428,6 +430,14 @@ class LagrangianSDFContactOracle:
             master_node_ids=evaluation.node_ids.copy(),
             master_weights=evaluation.shape_values.copy(),
         )
+
+    def _element_for_face(self, face_node_ids: np.ndarray) -> int | None:
+        if self.deformation_map is None:
+            return None
+        key = tuple(sorted(int(v) for v in np.asarray(face_node_ids, dtype=np.int64).ravel()))
+        if key not in self._face_element_cache:
+            self._face_element_cache[key] = self.deformation_map.element_for_face(np.asarray(face_node_ids, dtype=np.int64))
+        return self._face_element_cache[key]
 
 
 @dataclass(frozen=True, slots=True)

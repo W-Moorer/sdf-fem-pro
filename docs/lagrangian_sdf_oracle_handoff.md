@@ -220,6 +220,53 @@ quick 结果：
 | `static_linear_hex8_lagrangian_oracle` | passed | 0.000000e+00 | 0.000000e+00 | 2.000000e-02 | 1.200000e+01 |
 | `dynamic_linear_hex8_lagrangian_oracle` | passed | 0.000000e+00 | 0.000000e+00 | 1.272863e-02 | 7.637180e+00 |
 
+## 复杂曲面误差与效率
+
+新增 `validation/run_final_aim_complex_surface_validation.py`，用于 warped FEM top surface 的复杂曲面验证：
+
+```text
+MaterialSDF + LagrangianSDFContactOracle
+vs
+brute-force current-surface projection reference
+vs
+DynamicNarrowBandSDF compatibility path
+```
+
+运行命令：
+
+```text
+python validation/run_final_aim_complex_surface_validation.py --out-dir results/final_aim_complex_surface
+```
+
+输出：
+
+- `results/final_aim_complex_surface/final_aim_complex_surface_accuracy.csv`
+- `results/final_aim_complex_surface/final_aim_complex_surface_queries.csv`
+- `results/final_aim_complex_surface/final_aim_complex_surface_timing.csv`
+- `results/final_aim_complex_surface/final_aim_complex_surface_summary.md`
+
+非 quick 结果：
+
+| Method | Max gap error | Max normal error | Max closest-point error |
+| --- | ---: | ---: | ---: |
+| `lagrangian_patch_oracle` | 1.075529e-16 | 1.060405e-14 | 4.475452e-16 |
+| `dynamic_field` | 1.089262e-04 | 4.143984e-02 | 4.690134e-04 |
+
+效率结果：
+
+| Method | Query count | Total seconds | Seconds/query | Projection/method |
+| --- | ---: | ---: | ---: | ---: |
+| `brute_force_projection_reference` | 432 | 4.220226e+00 | 9.769041e-03 | 1.000000e+00 |
+| `lagrangian_patch_oracle` | 432 | 2.009131e+00 | 4.650766e-03 | 2.100523e+00 |
+| `dynamic_field` | 432 | 2.367893e+01 | 2.701796e-04 query-only | 1.782270e-01 |
+
+解释：
+
+- `lagrangian_patch_oracle` 不重建 current-space SDF grid，因此在该复杂曲面场景中比 dynamic field 总成本快约 `11.79x`。
+- dynamic field 的单次插值 query 仍然更快，但 field update 成本在该查询规模下没有被摊销。
+- brute-force projection 在小网格上可作为验证参考；在该非 quick 场景中，Lagrangian oracle 已经比它快约 `2.10x`，同时保持机器精度级别的 gap/normal/closest-point 一致性。
+- 该结果支持复杂曲面几何查询正确性和 scoped efficiency claim，但仍不等价于 CalculiX native-contact trajectory equivalence。
+
 ## 与 DynamicNarrowBandSDF 的关系
 
 当前项目有两条路线：

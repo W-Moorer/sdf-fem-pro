@@ -20,6 +20,7 @@ pytest -q -m final_aim
 
 - `tests/test_lagrangian_sdf_oracle.py`
 - `tests/test_final_aim_lagrangian_contact_cases.py`
+- `tests/test_final_aim_complex_surface_validation.py`
 
 本轮结果：
 
