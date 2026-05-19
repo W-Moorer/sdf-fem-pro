@@ -32,6 +32,10 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
         contact_damping=1.0e3,
         mass_damping=0.1,
         damping_start_time=0.02,
+        integrator="hht",
+        hht_alpha=-0.1,
+        contact_integration="surface",
+        quadrature_order=3,
         output_stride=1,
         max_newton_iterations=4,
     )
@@ -44,6 +48,10 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
     assert {float(row["contact_damping"]) for row in rows} == {1000.0}
     assert {float(row["mass_damping"]) for row in rows} == {0.1}
     assert {float(row["damping_start_time"]) for row in rows} == {0.02}
+    assert {row["time_integrator"] for row in rows} == {"hht"}
+    assert {float(row["hht_alpha"]) for row in rows} == {-0.1}
+    assert {row["contact_integration"] for row in rows} == {"surface"}
+    assert all("active_contact_area" in row for row in rows)
 
 
 def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path: Path) -> None:

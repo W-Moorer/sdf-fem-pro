@@ -98,3 +98,32 @@ python validation\run_abaqus_sphere_drop_full_validation.py `
 这组对标已经把接触律从 Abaqus/Explicit 硬接触调整为 Abaqus/Standard 隐式线性罚函数接触，并让 SFC 自动读取相同罚刚度。SFC 在 3 s 全程中接触触发时间与 Abaqus 相差约 `0.002 s`，位移 RMS 误差约 `2.91 mm`，且完整 SFC solve wall time 小于 Abaqus 原生求解 wall time。
 
 仍需谨慎表述的是：质量比例阻尼是为了对齐隐式动力学耗散响应而加入的验证层参数；它支撑该工况下的结果对齐，但不等价于 Abaqus 内部算法的源级复现。
+
+## HHT + surface quadrature 更新
+
+为减少接触后的非物理反弹，新增并验证了两个 SFC 选项：
+
+- `--integrator hht --hht-alpha -0.3`
+- `--contact-integration surface --quadrature-order 3`
+
+对应全程输出目录：
+
+- `results/abaqus_sphere_drop_implicit_hht_surface_aligned`
+
+关键结果如下：
+
+| 指标 | 旧 Newmark node-sample | 新 HHT surface-quadrature |
+| --- | ---: | ---: |
+| `rms_z_cm_abs_error` | `0.0029100077 m` | `0.0004654438 m` |
+| `max_z_cm_abs_error` | `0.0116215886 m` | `0.0042523097 m` |
+| `full_z_cm_l2_error` | `0.1594142488` | `0.0254976527` |
+| `rms_strain_norm_abs_error` | `0.0012440639` | `0.0006784661` |
+| `rms_von_mises_abs_error` | `4.236631e4` | `1.974471e4` |
+| `surface_sample_count` | `266` | `1584` |
+| `sfc_solve_wall_seconds` | `135.108105 s` | `339.739580 s` |
+
+这说明 HHT 算法耗散和面高斯积分显著改善了位移轨迹、应变和应力时间历程的一致性，但计算时间上升明显。与 Abaqus 原生求解 `345.819903 s` 相比，新 SFC 路径约为 `1.02x`，因此这个版本更适合作为“精度对齐路径”，不能作为最终加速路径。
+
+接触力需要单独说明：当前 Abaqus VTK 文件没有原生接触反力历史。脚本只能用导出的几何穿透量和线性罚刚度重构一个诊断性 contact force。该重构在后期给出约 `88.6 N`，而 SFC 稳态接触力约 `5.99 N`，与球体重量一致。因此论文中不能把 VTK 反推力当成 Abaqus 原生接触反力。若要严格对齐接触力，应重新导出 Abaqus 原生接触反力、接触压力或约束反力历史。
+
+应力/应变对比现在按单元场历史进行：SFC 使用 TET4 单元常应变中心值恢复线弹性应力，Abaqus 使用 ODB 导出的单元平均 `S` 和 `LE` cell scalar。二者都是单元级最大值时间历程，不再混用节点量和单元量；但 `LE` 与小应变工程应变仍不是源级完全相同的应变度量。

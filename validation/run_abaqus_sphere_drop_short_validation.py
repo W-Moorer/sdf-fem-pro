@@ -33,7 +33,12 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from sfc.contact import LagrangianSDFContactOracle, SurfaceSample, lagrangian_oracle_penalty_response  # noqa: E402
+from sfc.contact import (  # noqa: E402
+    LagrangianSDFContactOracle,
+    SurfaceSample,
+    lagrangian_oracle_penalty_response,
+    triangle_surface_quadrature_cache,
+)
 from sfc.fem import DeformableBody  # noqa: E402
 from sfc.fem.material import isotropic_linear_elasticity_matrix  # noqa: E402
 from sfc.fem.tet4 import tet4_strain_displacement_matrix, tet4_volume  # noqa: E402
@@ -470,6 +475,7 @@ def _abaqus_history_from_vtk(model: AbaqusSphereDropModel, vtk_dir: Path, *, dur
     if sphere_cell_ids.size == 0:
         raise ValueError("VTK frame has no sphere cells with object_id=2")
     sphere_point_ids = np.unique(np.concatenate([ref_frame.cells[int(cell_id)] for cell_id in sphere_cell_ids]))
+    model_to_vtk = _map_model_nodes_to_vtk_points(model.nodes, ref_frame.points, sphere_point_ids)
     tet_cell_ids = [int(cell_id) for cell_id in sphere_cell_ids if int(ref_frame.cell_types[int(cell_id)]) == 10]
     reference_points = ref_frame.points.copy()
     reference_volumes = np.asarray(
@@ -483,34 +489,81 @@ def _abaqus_history_from_vtk(model: AbaqusSphereDropModel, vtk_dir: Path, *, dur
         ],
         dtype=float,
     )
+    contact_penalty = model.contact_penalty_normal_stiffness
+    surface_quadrature = triangle_surface_quadrature_cache(_boundary_faces(model.elements), model.nodes, order=3)
     rows: list[Row] = []
     for manifest_row in manifest:
         frame = read_legacy_vtk(vtk_dir / str(manifest_row["vtk_file"]))
         points = frame.points
         cell_vm = frame.cell_scalars.get("von_mises", np.zeros(len(frame.cells), dtype=float))
         cell_strain = frame.cell_scalars.get("logarithmic_strain_norm", np.zeros(len(frame.cells), dtype=float))
+        current_model_points = points[model_to_vtk]
         if reference_volumes.size:
             centers_z = np.asarray([np.mean(points[frame.cells[cell_id], 2]) for cell_id in tet_cell_ids], dtype=float)
             z_cm = float(np.dot(reference_volumes, centers_z) / np.sum(reference_volumes))
         else:
             z_cm = float(np.mean(points[sphere_point_ids, 2]))
+        quad_points = surface_quadrature.points(current_model_points)
+        quad_gaps = quad_points[:, 2] - model.plane_z if quad_points.size else np.empty(0, dtype=float)
+        quad_penetration = np.maximum(-quad_gaps, 0.0)
+        quad_active = quad_penetration > 0.0
+        if contact_penalty is None:
+            normal_force_z: float | str = ""
+            contact_energy: float | str = ""
+            active_area: float | str = ""
+        else:
+            weights = surface_quadrature.area_weights
+            normal_force_z = float(contact_penalty * np.sum(weights * quad_penetration))
+            contact_energy = float(0.5 * contact_penalty * np.sum(weights * quad_penetration**2))
+            active_area = float(np.sum(weights[quad_active]))
         rows.append(
             {
-                "source": "abaqus_explicit_vtk",
+                "source": "abaqus_native_vtk",
                 "step": int(manifest_row["frame"]),
                 "time": float(manifest_row["time"]),
                 "z_cm": z_cm,
-                "min_gap": float(np.min(points[sphere_point_ids, 2]) - model.plane_z),
-                "active_contact_count": int(np.count_nonzero(points[sphere_point_ids, 2] <= model.plane_z + 1.0e-12)),
-                "max_penetration": float(max(model.plane_z - float(np.min(points[sphere_point_ids, 2])), 0.0)),
-                "normal_force_z": "",
-                "contact_energy": "",
+                "min_gap": float(np.min(quad_gaps)) if quad_gaps.size else float(np.min(points[sphere_point_ids, 2]) - model.plane_z),
+                "active_contact_count": int(np.count_nonzero(quad_active)),
+                "active_contact_area": active_area,
+                "max_penetration": float(np.max(quad_penetration)) if quad_penetration.size else 0.0,
+                "normal_force_z": normal_force_z,
+                "contact_energy": contact_energy,
                 "max_von_mises": float(np.max(cell_vm[sphere_cell_ids])),
                 "max_strain_norm": float(np.max(cell_strain[sphere_cell_ids])),
-                "contact_path": "Abaqus/Explicit native general contact",
+                "contact_path": "Abaqus native contact VTK replay",
             }
         )
     return rows
+
+
+def _map_model_nodes_to_vtk_points(model_nodes: np.ndarray, vtk_points: np.ndarray, candidate_ids: np.ndarray) -> np.ndarray:
+    """Map model node order to VTK point ids by matching reference coordinates."""
+
+    X = np.asarray(model_nodes, dtype=float)
+    P = np.asarray(vtk_points, dtype=float)
+    candidates = np.asarray(candidate_ids, dtype=np.int64).ravel()
+    if candidates.size < X.shape[0]:
+        raise ValueError("VTK candidate point set is smaller than the model node set")
+    mapped: list[int] = []
+    used: set[int] = set()
+    for point in X:
+        diff = P[candidates] - point[None, :]
+        order = np.argsort(np.einsum("ij,ij->i", diff, diff))
+        chosen = None
+        for idx in order:
+            candidate = int(candidates[int(idx)])
+            if candidate not in used:
+                chosen = candidate
+                break
+        if chosen is None:
+            raise ValueError("could not build a one-to-one model-to-VTK node map")
+        used.add(chosen)
+        mapped.append(chosen)
+    mapped_array = np.asarray(mapped, dtype=np.int64)
+    max_error = float(np.max(np.linalg.norm(P[mapped_array] - X, axis=1))) if mapped_array.size else 0.0
+    if max_error > 1.0e-8:
+        raise ValueError(f"model-to-VTK node map mismatch is too large: {max_error:.3e}")
+    return mapped_array
 
 
 def _interp_series(rows: list[Row], key: str, times: np.ndarray) -> np.ndarray:
@@ -519,31 +572,51 @@ def _interp_series(rows: list[Row], key: str, times: np.ndarray) -> np.ndarray:
     return np.interp(times, row_times, values)
 
 
+def _interp_optional_series(rows: list[Row], key: str, times: np.ndarray) -> np.ndarray | None:
+    if not rows or any(key not in row or row[key] == "" for row in rows):
+        return None
+    return _interp_series(rows, key, times)
+
+
 def _comparison_rows(abaqus_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
     sfc_times = np.asarray([float(row["time"]) for row in sfc_rows], dtype=float)
     z_abq = _interp_series(abaqus_rows, "z_cm", sfc_times)
     gap_abq = _interp_series(abaqus_rows, "min_gap", sfc_times)
     vm_abq = _interp_series(abaqus_rows, "max_von_mises", sfc_times)
     strain_abq = _interp_series(abaqus_rows, "max_strain_norm", sfc_times)
+    force_abq = _interp_optional_series(abaqus_rows, "normal_force_z", sfc_times)
+    energy_abq = _interp_optional_series(abaqus_rows, "contact_energy", sfc_times)
+    active_area_abq = _interp_optional_series(abaqus_rows, "active_contact_area", sfc_times)
     rows: list[Row] = []
     for i, row in enumerate(sfc_rows):
-        rows.append(
-            {
-                "time": float(row["time"]),
-                "sfc_z_cm": float(row["z_cm"]),
-                "abaqus_z_cm": float(z_abq[i]),
-                "z_cm_abs_error": float(abs(float(row["z_cm"]) - z_abq[i])),
-                "sfc_min_gap": float(row["min_gap"]),
-                "abaqus_min_gap": float(gap_abq[i]),
-                "min_gap_abs_error": float(abs(float(row["min_gap"]) - gap_abq[i])),
-                "sfc_max_von_mises": float(row["max_von_mises"]),
-                "abaqus_max_von_mises": float(vm_abq[i]),
-                "von_mises_abs_error": float(abs(float(row["max_von_mises"]) - vm_abq[i])),
-                "sfc_max_strain_norm": float(row["max_strain_norm"]),
-                "abaqus_max_strain_norm": float(strain_abq[i]),
-                "strain_norm_abs_error": float(abs(float(row["max_strain_norm"]) - strain_abq[i])),
-            }
-        )
+        comparison_row = {
+            "time": float(row["time"]),
+            "sfc_z_cm": float(row["z_cm"]),
+            "abaqus_z_cm": float(z_abq[i]),
+            "z_cm_abs_error": float(abs(float(row["z_cm"]) - z_abq[i])),
+            "sfc_min_gap": float(row["min_gap"]),
+            "abaqus_min_gap": float(gap_abq[i]),
+            "min_gap_abs_error": float(abs(float(row["min_gap"]) - gap_abq[i])),
+            "sfc_max_von_mises": float(row["max_von_mises"]),
+            "abaqus_max_von_mises": float(vm_abq[i]),
+            "von_mises_abs_error": float(abs(float(row["max_von_mises"]) - vm_abq[i])),
+            "sfc_max_strain_norm": float(row["max_strain_norm"]),
+            "abaqus_max_strain_norm": float(strain_abq[i]),
+            "strain_norm_abs_error": float(abs(float(row["max_strain_norm"]) - strain_abq[i])),
+        }
+        if force_abq is not None and "normal_force_z" in row:
+            comparison_row["sfc_normal_force_z"] = float(row["normal_force_z"])
+            comparison_row["abaqus_normal_force_z"] = float(force_abq[i])
+            comparison_row["normal_force_z_abs_error"] = float(abs(float(row["normal_force_z"]) - force_abq[i]))
+        if energy_abq is not None and "contact_energy" in row:
+            comparison_row["sfc_contact_energy"] = float(row["contact_energy"])
+            comparison_row["abaqus_contact_energy"] = float(energy_abq[i])
+            comparison_row["contact_energy_abs_error"] = float(abs(float(row["contact_energy"]) - energy_abq[i]))
+        if active_area_abq is not None and "active_contact_area" in row:
+            comparison_row["sfc_active_contact_area"] = float(row["active_contact_area"])
+            comparison_row["abaqus_active_contact_area"] = float(active_area_abq[i])
+            comparison_row["active_contact_area_abs_error"] = float(abs(float(row["active_contact_area"]) - active_area_abq[i]))
+        rows.append(comparison_row)
     return rows
 
 

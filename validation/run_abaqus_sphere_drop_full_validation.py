@@ -32,7 +32,12 @@ if str(SRC) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sfc.contact import LagrangianSDFContactOracle, SurfaceSample, lagrangian_oracle_penalty_response  # noqa: E402
+from sfc.contact import (  # noqa: E402
+    LagrangianSDFContactOracle,
+    SurfaceSample,
+    lagrangian_oracle_penalty_response,
+    triangle_surface_quadrature_cache,
+)
 from sfc.fem import DeformableBody, assemble_gravity_force, assemble_mass_matrix, assemble_stiffness_matrix  # noqa: E402
 from sfc.mesh import VolumeMesh  # noqa: E402
 from validation.run_abaqus_sphere_drop_short_validation import (  # noqa: E402
@@ -68,12 +73,39 @@ def _restricted_samples(samples: list[SurfaceSample], ids: np.ndarray) -> list[S
     return [samples[int(idx)] for idx in np.asarray(ids, dtype=np.int64)]
 
 
+def _surface_sample_points(samples: list[SurfaceSample], x_current: np.ndarray) -> np.ndarray:
+    if not samples:
+        return np.empty((0, 3), dtype=float)
+    X = np.asarray(x_current, dtype=float)
+    return np.vstack([sample.point(X) for sample in samples])
+
+
+def _node_surface_samples(surface_nodes: np.ndarray) -> list[SurfaceSample]:
+    return _node_samples(surface_nodes)
+
+
+def _contact_samples(
+    model: AbaqusSphereDropModel,
+    surface_faces: np.ndarray,
+    surface_nodes: np.ndarray,
+    area_weights: np.ndarray,
+    *,
+    contact_integration: str,
+    quadrature_order: int,
+) -> tuple[list[SurfaceSample], np.ndarray]:
+    if contact_integration == "node":
+        return _node_surface_samples(surface_nodes), area_weights
+    if contact_integration == "surface":
+        cache = triangle_surface_quadrature_cache(surface_faces, model.nodes, order=quadrature_order)
+        return cache.samples(), cache.area_weights.copy()
+    raise ValueError("contact_integration must be 'node' or 'surface'")
+
+
 def _lagrangian_plane_contact_response(
     model: AbaqusSphereDropModel,
     x_current: np.ndarray,
     *,
     v_current: np.ndarray | None = None,
-    surface_nodes: np.ndarray,
     area_weights: np.ndarray,
     samples: list[SurfaceSample],
     oracle: LagrangianSDFContactOracle,
@@ -81,14 +113,15 @@ def _lagrangian_plane_contact_response(
     contact_damping: float = 0.0,
     velocity_tangent_factor: float = 0.0,
     n_dofs: int,
-) -> tuple[np.ndarray, csr_matrix, float, int, float, float]:
+) -> tuple[np.ndarray, csr_matrix, float, int, float, float, float]:
     """Return SFC Lagrangian-SDF contact force and tangent against the plane."""
 
-    direct_gaps = x_current[surface_nodes, 2] - model.plane_z
-    min_gap = float(np.min(direct_gaps))
+    sample_points = _surface_sample_points(samples, x_current)
+    direct_gaps = sample_points[:, 2] - model.plane_z if sample_points.size else np.empty(0, dtype=float)
+    min_gap = float(np.min(direct_gaps)) if direct_gaps.size else 0.0
     active_ids = np.nonzero(direct_gaps <= 0.0)[0]
     if active_ids.size == 0:
-        return np.zeros(n_dofs, dtype=float), csr_matrix((n_dofs, n_dofs), dtype=float), min_gap, 0, 0.0, 0.0
+        return np.zeros(n_dofs, dtype=float), csr_matrix((n_dofs, n_dofs), dtype=float), min_gap, 0, 0.0, 0.0, 0.0
 
     active_samples = _restricted_samples(samples, active_ids)
     active_weights = area_weights[active_ids]
@@ -104,6 +137,7 @@ def _lagrangian_plane_contact_response(
     )
     gaps = np.asarray([constraint.g for constraint in response.constraints], dtype=float)
     penetration = np.maximum(-gaps, 0.0)
+    active_response = penetration > 0.0
     Kc = response.stiffness[:n_dofs, :n_dofs].tocsr()
     if contact_damping > 0.0 and v_current is not None and response.constraints:
         damping_force = np.zeros(n_dofs, dtype=float)
@@ -150,6 +184,7 @@ def _lagrangian_plane_contact_response(
         int(response.active_count),
         float(np.max(penetration)) if penetration.size else 0.0,
         float(0.5 * contact_stiffness * np.sum(active_weights * penetration**2)),
+        float(np.sum(active_weights[active_response])),
     )
 
 
@@ -168,6 +203,10 @@ def run_sfc_lagrangian_sdf_full_history(
     mass_damping: float = 0.0,
     stiffness_damping: float = 0.0,
     damping_start_time: float = 0.0,
+    integrator: str = "newmark",
+    hht_alpha: float = 0.0,
+    contact_integration: str = "node",
+    quadrature_order: int = 3,
     output_stride: int = 1,
     max_newton_iterations: int = 8,
     tolerance: float = 1.0e-10,
@@ -182,19 +221,31 @@ def run_sfc_lagrangian_sdf_full_history(
     f_gravity = assemble_gravity_force(body, (0.0, 0.0, -model.gravity))
     surface_faces = _boundary_faces(model.elements)
     surface_nodes, area_weights = _surface_node_area_weights(model.nodes, surface_faces)
-    samples = _node_samples(surface_nodes)
+    samples, sample_area_weights = _contact_samples(
+        model,
+        surface_faces,
+        surface_nodes,
+        area_weights,
+        contact_integration=contact_integration,
+        quadrature_order=quadrature_order,
+    )
     oracle = _plane_oracle(model)
     n_dofs = body.n_dofs
     u = np.zeros(n_dofs, dtype=float)
     v = np.zeros(n_dofs, dtype=float)
+    integrator_name = str(integrator).lower()
+    if integrator_name not in {"newmark", "hht"}:
+        raise ValueError("integrator must be 'newmark' or 'hht'")
+    alpha = float(hht_alpha) if integrator_name == "hht" else 0.0
+    if not (-1.0 / 3.0 <= alpha <= 0.0):
+        raise ValueError("hht_alpha must lie in [-1/3, 0]")
 
     x0 = model.nodes.copy()
-    f_contact, K_contact, min_gap, active_count, max_pen, contact_energy = _lagrangian_plane_contact_response(
+    f_contact, K_contact, min_gap, active_count, max_pen, contact_energy, active_area = _lagrangian_plane_contact_response(
         model,
         x0,
         v_current=v.reshape((-1, 3)),
-        surface_nodes=surface_nodes,
-        area_weights=area_weights,
+        area_weights=sample_area_weights,
         samples=samples,
         oracle=oracle,
         contact_stiffness=contact_stiffness,
@@ -204,9 +255,10 @@ def run_sfc_lagrangian_sdf_full_history(
     )
     C_initial = C_base if 0.0 >= float(damping_start_time) else csr_matrix(K.shape, dtype=float)
     a = np.asarray(spsolve(M.tocsc(), f_gravity + f_contact - C_initial @ v - K @ u), dtype=float)
+    f_contact_old = f_contact.copy()
 
-    beta = 0.25
-    gamma = 0.5
+    beta = 0.25 * (1.0 - alpha) ** 2
+    gamma = 0.5 - alpha
     c0 = 1.0 / (beta * dt * dt)
     rows: list[Row] = []
     times = np.arange(0.0, duration + 0.5 * dt, dt)
@@ -218,12 +270,11 @@ def run_sfc_lagrangian_sdf_full_history(
     for step, time in enumerate(times):
         if step % output_stride_value == 0 or step == len(times) - 1:
             current = model.nodes + u.reshape((-1, 3))
-            f_contact, _Kc, min_gap, active_count, max_pen, contact_energy = _lagrangian_plane_contact_response(
+            f_contact, _Kc, min_gap, active_count, max_pen, contact_energy, active_area = _lagrangian_plane_contact_response(
                 model,
                 current,
                 v_current=v.reshape((-1, 3)),
-                surface_nodes=surface_nodes,
-                area_weights=area_weights,
+                area_weights=sample_area_weights,
                 samples=samples,
                 oracle=oracle,
                 contact_stiffness=contact_stiffness,
@@ -240,23 +291,28 @@ def run_sfc_lagrangian_sdf_full_history(
                     "z_cm": _mass_weighted_center_z(model.nodes, model.elements, current),
                     "min_gap": float(min_gap),
                     "active_contact_count": int(active_count),
+                    "active_contact_area": float(active_area),
                     "max_penetration": float(max_pen),
                     "normal_force_z": float(np.sum(f_contact[2::3])),
                     "contact_energy": float(contact_energy),
                     "max_von_mises": float(max_vm),
                     "max_strain_norm": float(max_strain),
                     "contact_path": "MaterialSDF+LagrangianSDFContactOracle",
+                    "contact_integration": str(contact_integration),
+                    "time_integrator": integrator_name,
                 }
             )
         if step == len(times) - 1:
             break
 
         C = C_base if float(time) >= float(damping_start_time) else csr_matrix(K.shape, dtype=float)
+        old_internal = C @ v + K @ u - f_gravity - f_contact_old
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
         c1 = gamma / (beta * dt)
         u_guess = u_pred.copy()
         converged = False
+        accepted_contact_force = f_contact_old
         for iteration in range(1, int(max_newton_iterations) + 1):
             current_guess = model.nodes + u_guess.reshape((-1, 3))
             a_guess = c0 * (u_guess - u_pred)
@@ -265,8 +321,7 @@ def run_sfc_lagrangian_sdf_full_history(
                 model,
                 current_guess,
                 v_current=v_guess.reshape((-1, 3)),
-                surface_nodes=surface_nodes,
-                area_weights=area_weights,
+                area_weights=sample_area_weights,
                 samples=samples,
                 oracle=oracle,
                 contact_stiffness=contact_stiffness,
@@ -274,8 +329,10 @@ def run_sfc_lagrangian_sdf_full_history(
                 velocity_tangent_factor=c1,
                 n_dofs=n_dofs,
             )
-            residual = M @ a_guess + C @ v_guess + K @ u_guess - f_gravity - f_contact
-            tangent = (c0 * M + c1 * C + K + K_contact).tocsc()
+            accepted_contact_force = f_contact.copy()
+            new_internal = C @ v_guess + K @ u_guess - f_gravity - f_contact
+            residual = M @ a_guess + (1.0 + alpha) * new_internal - alpha * old_internal
+            tangent = (c0 * M + (1.0 + alpha) * (c1 * C + K + K_contact)).tocsc()
             correction = np.asarray(spsolve(tangent, -residual), dtype=float)
             u_guess += correction
             total_newton_iterations += 1
@@ -288,6 +345,7 @@ def run_sfc_lagrangian_sdf_full_history(
         a_new = c0 * (u_new - u_pred)
         v_new = v_pred + gamma * dt * a_new
         u, v, a = u_new, v_new, a_new
+        f_contact_old = accepted_contact_force
 
     elapsed = perf_counter() - solve_start
     for row in rows:
@@ -300,6 +358,8 @@ def run_sfc_lagrangian_sdf_full_history(
         row["mass_damping"] = float(mass_damping)
         row["stiffness_damping"] = float(stiffness_damping)
         row["damping_start_time"] = float(damping_start_time)
+        row["hht_alpha"] = float(alpha)
+        row["quadrature_order"] = int(quadrature_order)
         row["newton_iterations_total"] = int(total_newton_iterations)
         row["newton_failed_steps"] = int(failed_newton_steps)
     return rows
@@ -313,6 +373,9 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
     strain_errors = np.asarray([abs(float(row["sfc_max_strain_norm"]) - float(row["abaqus_max_strain_norm"])) for row in comparison], dtype=float)
     z_errors = np.asarray([float(row["z_cm_abs_error"]) for row in comparison], dtype=float)
     gap_errors = np.asarray([float(row["min_gap_abs_error"]) for row in comparison], dtype=float)
+    force_errors = np.asarray([float(row["normal_force_z_abs_error"]) for row in comparison if "normal_force_z_abs_error" in row], dtype=float)
+    energy_errors = np.asarray([float(row["contact_energy_abs_error"]) for row in comparison if "contact_energy_abs_error" in row], dtype=float)
+    active_area_errors = np.asarray([float(row["active_contact_area_abs_error"]) for row in comparison if "active_contact_area_abs_error" in row], dtype=float)
     rows.extend(
         [
             {"metric": "sfc_first_contact_time", "value": "" if sfc_first is None else sfc_first, "status": "reported"},
@@ -328,6 +391,12 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
             {"metric": "rms_strain_norm_abs_error", "value": float(np.sqrt(np.mean(strain_errors**2))), "status": "reported"},
             {"metric": "full_z_cm_l2_error", "value": float(np.linalg.norm(z_errors)), "status": "reported"},
             {"metric": "full_min_gap_l2_error", "value": float(np.linalg.norm(gap_errors)), "status": "reported"},
+            {"metric": "max_normal_force_z_abs_error", "value": "" if force_errors.size == 0 else float(np.max(force_errors)), "status": "not_available" if force_errors.size == 0 else "reported"},
+            {"metric": "rms_normal_force_z_abs_error", "value": "" if force_errors.size == 0 else float(np.sqrt(np.mean(force_errors**2))), "status": "not_available" if force_errors.size == 0 else "reported"},
+            {"metric": "max_contact_energy_abs_error", "value": "" if energy_errors.size == 0 else float(np.max(energy_errors)), "status": "not_available" if energy_errors.size == 0 else "reported"},
+            {"metric": "rms_contact_energy_abs_error", "value": "" if energy_errors.size == 0 else float(np.sqrt(np.mean(energy_errors**2))), "status": "not_available" if energy_errors.size == 0 else "reported"},
+            {"metric": "max_active_contact_area_abs_error", "value": "" if active_area_errors.size == 0 else float(np.max(active_area_errors)), "status": "not_available" if active_area_errors.size == 0 else "reported"},
+            {"metric": "rms_active_contact_area_abs_error", "value": "" if active_area_errors.size == 0 else float(np.sqrt(np.mean(active_area_errors**2))), "status": "not_available" if active_area_errors.size == 0 else "reported"},
             {"metric": "newton_iterations_total", "value": int(sfc_rows[0].get("newton_iterations_total", 0)) if sfc_rows else 0, "status": "reported"},
             {"metric": "newton_failed_steps", "value": int(sfc_rows[0].get("newton_failed_steps", 0)) if sfc_rows else 0, "status": "reported"},
             {"metric": "contact_stiffness", "value": float(sfc_rows[0].get("contact_stiffness", 0.0)) if sfc_rows else 0.0, "status": "reported"},
@@ -335,6 +404,10 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
             {"metric": "mass_damping", "value": float(sfc_rows[0].get("mass_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
             {"metric": "stiffness_damping", "value": float(sfc_rows[0].get("stiffness_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
             {"metric": "damping_start_time", "value": float(sfc_rows[0].get("damping_start_time", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "time_integrator", "value": str(sfc_rows[0].get("time_integrator", "")) if sfc_rows else "", "status": "reported"},
+            {"metric": "hht_alpha", "value": float(sfc_rows[0].get("hht_alpha", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "contact_integration", "value": str(sfc_rows[0].get("contact_integration", "")) if sfc_rows else "", "status": "reported"},
+            {"metric": "quadrature_order", "value": int(sfc_rows[0].get("quadrature_order", 0)) if sfc_rows else 0, "status": "reported"},
         ]
     )
     return rows
@@ -364,13 +437,14 @@ def _write_full_summary(path: Path, metrics: list[Row], outputs: dict[str, Path]
     lines = [
         "# Abaqus Sphere Drop Full Validation",
         "",
-        "This full-run validation compares an independent SFC Lagrangian-SDF penalty-contact solve against the exported Abaqus/Explicit native-contact VTK trajectory for the same input deck.",
+        "This full-run validation compares an independent SFC Lagrangian-SDF penalty-contact solve against the exported Abaqus native-contact VTK trajectory for the same input deck.",
         "",
         "## Scope",
         "",
         "- SFC reconstructs the C3D4 sphere from the Abaqus `.inp` and assembles FEM matrices internally.",
         "- Abaqus is used only as an external native-contact reference trajectory.",
-        "- The contact laws are not identical: Abaqus uses Explicit hard normal contact, while SFC uses a frictionless Lagrangian-SDF penalty response. The reported errors are therefore alignment diagnostics, not a claim of source-level Abaqus equivalence.",
+        "- When the Abaqus deck provides a linear penalty pressure-overclosure value, SFC uses the same normal penalty stiffness unless explicitly overridden.",
+        "- The reported errors are alignment diagnostics, not a claim of source-level Abaqus equivalence.",
         "",
         "## Key Metrics",
         "",
@@ -393,6 +467,13 @@ def _write_full_summary(path: Path, metrics: list[Row], outputs: dict[str, Path]
         "mass_damping",
         "stiffness_damping",
         "damping_start_time",
+        "time_integrator",
+        "hht_alpha",
+        "contact_integration",
+        "quadrature_order",
+        "max_normal_force_z_abs_error",
+        "max_contact_energy_abs_error",
+        "max_active_contact_area_abs_error",
         "newton_failed_steps",
     ):
         row = by_metric[key]
@@ -415,6 +496,10 @@ def run_validation(
     mass_damping: float = 0.0,
     stiffness_damping: float = 0.0,
     damping_start_time: float = 0.0,
+    integrator: str = "newmark",
+    hht_alpha: float = 0.0,
+    contact_integration: str = "node",
+    quadrature_order: int = 3,
     output_stride: int = 1,
     max_newton_iterations: int = 8,
 ) -> dict[str, Path]:
@@ -431,6 +516,10 @@ def run_validation(
         mass_damping=float(mass_damping),
         stiffness_damping=float(stiffness_damping),
         damping_start_time=float(damping_start_time),
+        integrator=str(integrator),
+        hht_alpha=float(hht_alpha),
+        contact_integration=str(contact_integration),
+        quadrature_order=int(quadrature_order),
         output_stride=int(output_stride),
         max_newton_iterations=int(max_newton_iterations),
     )
@@ -453,6 +542,18 @@ def run_validation(
         "contact_count_curve": out_dir / "abaqus_sphere_drop_full_active_contact.png",
         "summary": out_dir / "abaqus_sphere_drop_full_summary.md",
     }
+    has_force_reference = bool(comparison and "normal_force_z_abs_error" in comparison[0])
+    has_energy_reference = bool(comparison and "contact_energy_abs_error" in comparison[0])
+    has_active_area_reference = bool(comparison and "active_contact_area_abs_error" in comparison[0])
+    if has_force_reference:
+        outputs["normal_force_curve"] = out_dir / "abaqus_sphere_drop_full_normal_force_z.png"
+        outputs["normal_force_error_curve"] = out_dir / "abaqus_sphere_drop_full_normal_force_z_abs_error.png"
+    if has_energy_reference:
+        outputs["contact_energy_curve"] = out_dir / "abaqus_sphere_drop_full_contact_energy.png"
+        outputs["contact_energy_error_curve"] = out_dir / "abaqus_sphere_drop_full_contact_energy_abs_error.png"
+    if has_active_area_reference:
+        outputs["active_area_curve"] = out_dir / "abaqus_sphere_drop_full_active_area.png"
+        outputs["active_area_error_curve"] = out_dir / "abaqus_sphere_drop_full_active_area_abs_error.png"
     _write_csv(outputs["sfc_history"], sfc_rows)
     _write_csv(outputs["abaqus_history"], abaqus_rows)
     _write_csv(outputs["comparison"], comparison)
@@ -465,6 +566,15 @@ def run_validation(
     _plot_abs_error_curve(outputs["stress_error_curve"], comparison, y_error="von_mises_abs_error", ylabel="Max von Mises abs. error", title="Stress history error")
     _plot_curve(outputs["strain_curve"], comparison, y_sfc="sfc_max_strain_norm", y_abq="abaqus_max_strain_norm", ylabel="Max strain norm", title="Full strain history")
     _plot_abs_error_curve(outputs["strain_error_curve"], comparison, y_error="strain_norm_abs_error", ylabel="Max strain norm abs. error", title="Strain history error")
+    if has_force_reference:
+        _plot_curve(outputs["normal_force_curve"], comparison, y_sfc="sfc_normal_force_z", y_abq="abaqus_normal_force_z", ylabel="Normal contact force (N)", title="Normal contact force history")
+        _plot_abs_error_curve(outputs["normal_force_error_curve"], comparison, y_error="normal_force_z_abs_error", ylabel="Normal force abs. error (N)", title="Normal contact force error")
+    if has_energy_reference:
+        _plot_curve(outputs["contact_energy_curve"], comparison, y_sfc="sfc_contact_energy", y_abq="abaqus_contact_energy", ylabel="Contact energy (J)", title="Contact energy history")
+        _plot_abs_error_curve(outputs["contact_energy_error_curve"], comparison, y_error="contact_energy_abs_error", ylabel="Contact energy abs. error (J)", title="Contact energy error")
+    if has_active_area_reference:
+        _plot_curve(outputs["active_area_curve"], comparison, y_sfc="sfc_active_contact_area", y_abq="abaqus_active_contact_area", ylabel="Active contact area (m$^2$)", title="Active contact area history")
+        _plot_abs_error_curve(outputs["active_area_error_curve"], comparison, y_error="active_contact_area_abs_error", ylabel="Active area abs. error (m$^2$)", title="Active contact area error")
     _plot_contact_count(outputs["contact_count_curve"], comparison, sfc_rows, abaqus_rows)
     _write_full_summary(outputs["summary"], metrics, outputs)
     return outputs
@@ -482,6 +592,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mass-damping", type=float, default=0.0)
     parser.add_argument("--stiffness-damping", type=float, default=0.0)
     parser.add_argument("--damping-start-time", type=float, default=0.0)
+    parser.add_argument("--integrator", choices=("newmark", "hht"), default="newmark")
+    parser.add_argument("--hht-alpha", type=float, default=0.0)
+    parser.add_argument("--contact-integration", choices=("node", "surface"), default="node")
+    parser.add_argument("--quadrature-order", type=int, choices=(1, 3, 7), default=3)
     parser.add_argument("--output-stride", type=int, default=1)
     parser.add_argument("--max-newton-iterations", type=int, default=8)
     return parser.parse_args()
@@ -500,6 +614,10 @@ def main() -> None:
         mass_damping=float(args.mass_damping),
         stiffness_damping=float(args.stiffness_damping),
         damping_start_time=float(args.damping_start_time),
+        integrator=str(args.integrator),
+        hht_alpha=float(args.hht_alpha),
+        contact_integration=str(args.contact_integration),
+        quadrature_order=int(args.quadrature_order),
         output_stride=int(args.output_stride),
         max_newton_iterations=int(args.max_newton_iterations),
     )
