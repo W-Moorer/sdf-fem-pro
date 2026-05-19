@@ -41,6 +41,7 @@ def test_final_aim_lagrangian_contact_cases_quick_outputs(tmp_path: Path) -> Non
     assert {row["regime"] for row in cases} == {"static", "dynamic"}
     assert all(float(row["max_gap_abs_error"]) < 1.0e-10 for row in cases)
     assert all(float(row["force_l2_rel_error"]) < 1.0e-10 for row in cases)
+    assert all(float(row["case_wall_seconds"]) > 0.0 for row in cases)
     assert any(float(row["max_penetration_oracle"]) > 0.0 for row in cases)
 
     history = _rows(outputs["history"])

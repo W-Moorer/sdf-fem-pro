@@ -318,6 +318,8 @@ class ReferencePatchBVH:
     x_current: np.ndarray
     aabb_min: np.ndarray
     aabb_max: np.ndarray
+    cell_aabb_min: np.ndarray
+    cell_aabb_max: np.ndarray
     padding: float
     cell_size: float
     cells: dict[tuple[int, int, int], tuple[int, ...]]
@@ -341,15 +343,17 @@ class ReferencePatchBVH:
         if pad < 0.0:
             raise ValueError("padding must be non-negative")
         triangles = X[material.boundary_faces]
-        mins = triangles.min(axis=1) - pad
-        maxs = triangles.max(axis=1) + pad
-        if mins.shape[0] == 0:
+        tight_mins = triangles.min(axis=1)
+        tight_maxs = triangles.max(axis=1)
+        cell_mins = tight_mins - pad
+        cell_maxs = tight_maxs + pad
+        if tight_mins.shape[0] == 0:
             origin = np.zeros(3, dtype=float)
             h = 1.0
         else:
-            origin = mins.min(axis=0)
+            origin = cell_mins.min(axis=0)
             if cell_size is None:
-                extents = np.maximum(maxs - mins, 0.0)
+                extents = np.maximum(cell_maxs - cell_mins, 0.0)
                 positive = extents[extents > 0.0]
                 h = float(np.max(positive)) if positive.size else 1.0
             else:
@@ -357,14 +361,16 @@ class ReferencePatchBVH:
         if h <= 0.0:
             raise ValueError("cell_size must be positive")
         cells: dict[tuple[int, int, int], list[int]] = {}
-        for patch_id in range(mins.shape[0]):
-            for key in _cell_keys_for_aabb(mins[patch_id], maxs[patch_id], origin, h):
+        for patch_id in range(cell_mins.shape[0]):
+            for key in _cell_keys_for_aabb(cell_mins[patch_id], cell_maxs[patch_id], origin, h):
                 cells.setdefault(key, []).append(int(patch_id))
         return cls(
             material=material,
             x_current=X,
-            aabb_min=mins,
-            aabb_max=maxs,
+            aabb_min=tight_mins,
+            aabb_max=tight_maxs,
+            cell_aabb_min=cell_mins,
+            cell_aabb_max=cell_maxs,
             padding=pad,
             cell_size=h,
             cells={key: tuple(values) for key, values in cells.items()},
@@ -402,9 +408,7 @@ class ReferencePatchBVH:
         """
 
         x = _as_point(point, "point")
-        lower_delta = np.maximum(self.aabb_min - x, 0.0)
-        upper_delta = np.maximum(x - self.aabb_max, 0.0)
-        dist2 = np.sum((lower_delta + upper_delta) ** 2, axis=1)
+        dist2 = self.aabb_distance_squared(x)
         if search_radius is None:
             ids = self._hash_candidates_for_point(x)
             if ids.size == 0:
@@ -430,12 +434,20 @@ class ReferencePatchBVH:
         ijk = np.floor((point - self.origin) / self.cell_size).astype(np.int64)
         return int(ijk[0]), int(ijk[1]), int(ijk[2])
 
+    def aabb_distance_squared(self, point: np.ndarray) -> np.ndarray:
+        """Return squared distances from ``point`` to tight patch AABBs."""
+
+        x = _as_point(point, "point")
+        lower_delta = np.maximum(self.aabb_min - x, 0.0)
+        upper_delta = np.maximum(x - self.aabb_max, 0.0)
+        return np.sum((lower_delta + upper_delta) ** 2, axis=1)
+
     def _hash_candidates_for_point(self, point: np.ndarray) -> np.ndarray:
         ids = self.cells.get(self._cell_index(point), ())
         if not ids:
             return np.empty(0, dtype=np.int64)
         unique = np.asarray(sorted(set(int(v) for v in ids)), dtype=np.int64)
-        contains = np.all((self.aabb_min[unique] <= point) & (point <= self.aabb_max[unique]), axis=1)
+        contains = np.all((self.cell_aabb_min[unique] <= point) & (point <= self.cell_aabb_max[unique]), axis=1)
         return unique[contains]
 
     def _hash_candidates_for_ball(self, point: np.ndarray, radius: float) -> np.ndarray:

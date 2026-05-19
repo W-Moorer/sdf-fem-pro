@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Hashable
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 
 from sfc.fem.deformation_map import FEMDeformationMap
 from sfc.sdf.local_projection import closest_point_on_triangle
@@ -285,10 +285,19 @@ class LagrangianSDFContactOracle:
             search_radius=self.search_radius,
             cached_face_id=cached_face_id,
         )
+        if candidates.size:
+            candidate_bounds = self.bvh.aabb_distance_squared(x)[candidates]
+            order = np.argsort(candidate_bounds, kind="stable")
+            candidates = candidates[order]
+            candidate_bounds = candidate_bounds[order]
+        else:
+            candidate_bounds = np.empty(0, dtype=float)
         best: LagrangianSDFQueryResult | None = None
         best_abs_gap = np.inf
         best_dist2 = np.inf
-        for candidate_id in candidates:
+        for candidate_id, bound2 in zip(candidates, candidate_bounds, strict=True):
+            if best is not None and float(bound2) > best_dist2 + 1.0e-15:
+                break
             initial = cached_bary if cached_face_id == int(candidate_id) and cached_bary is not None else None
             if self.deformation_map is None:
                 result = self._query_patch(
@@ -568,20 +577,34 @@ def lagrangian_oracle_penalty_response(
         if weights.shape != (len(constraints),):
             raise ValueError("sample_area_weights must match samples")
     force = np.zeros(int(n_total_dofs), dtype=float)
-    stiffness = csr_matrix((int(n_total_dofs), int(n_total_dofs)), dtype=float)
-    for constraint, area_weight in zip(constraints, weights, strict=True):
-        penetration = max(-float(constraint.g), 0.0)
-        if penetration <= 0.0:
-            continue
-        J = lagrangian_oracle_jacobian_row(
-            constraint,
-            n_total_dofs=int(n_total_dofs),
-            slave_dof_offset=int(slave_dof_offset),
-            master_dof_offset=int(master_dof_offset),
-        )
-        lam = k * float(area_weight) * penetration
-        force += np.asarray(J.T @ np.asarray([lam], dtype=float)).ravel()
-        stiffness = stiffness + (k * float(area_weight)) * (J.T @ J)
+    active = np.asarray([constraint.active for constraint in constraints], dtype=bool)
+    if np.any(active):
+        active_constraints = [constraint for constraint, is_active in zip(constraints, active, strict=True) if is_active]
+        active_weights = weights[active]
+        rows: list[int] = []
+        cols: list[int] = []
+        vals: list[float] = []
+        for row, constraint in enumerate(active_constraints):
+            normal = np.asarray(constraint.normal, dtype=float)
+            for node, weight in zip(constraint.slave_node_ids, constraint.slave_weights, strict=True):
+                base = int(slave_dof_offset) + 3 * int(node)
+                for axis in range(3):
+                    rows.append(row)
+                    cols.append(base + axis)
+                    vals.append(float(weight) * float(normal[axis]))
+            for node, weight in zip(constraint.master_node_ids, constraint.master_weights, strict=True):
+                base = int(master_dof_offset) + 3 * int(node)
+                for axis in range(3):
+                    rows.append(row)
+                    cols.append(base + axis)
+                    vals.append(-float(weight) * float(normal[axis]))
+        J = coo_matrix((vals, (rows, cols)), shape=(len(active_constraints), int(n_total_dofs))).tocsr()
+        scale = k * active_weights
+        penetration = np.asarray([-float(constraint.g) for constraint in active_constraints], dtype=float)
+        force = np.asarray(J.T @ (scale * penetration), dtype=float).ravel()
+        stiffness = (J.T @ diags(scale, format="csr") @ J).tocsr()
+    else:
+        stiffness = csr_matrix((int(n_total_dofs), int(n_total_dofs)), dtype=float)
     return LagrangianOracleContactResponse(
         force=force,
         stiffness=stiffness.tocsr(),

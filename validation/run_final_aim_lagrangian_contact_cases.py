@@ -237,6 +237,7 @@ def _von_mises_voigt(stress: np.ndarray) -> float:
 
 
 def _static_case(element_type: str, *, quick: bool, oracle: LagrangianSDFContactOracle, stiffness: float) -> tuple[Row, list[Row]]:
+    case_start = perf_counter()
     model = _case_model(element_type, quick=quick)
     z_min = float(np.min(model.mesh.X[:, 2]))
     height = float(np.max(model.mesh.X[:, 2]) - z_min)
@@ -263,10 +264,12 @@ def _static_case(element_type: str, *, quick: bool, oracle: LagrangianSDFContact
         max_strain_norm=max_strain,
         z_cm_error=0.0,
     )
+    row["case_wall_seconds"] = float(perf_counter() - case_start)
     return row, _sample_rows(row["case_id"], constraints, analytic_gaps)
 
 
 def _dynamic_case(element_type: str, *, quick: bool, oracle: LagrangianSDFContactOracle, stiffness: float) -> tuple[Row, list[Row], list[Row]]:
+    case_start = perf_counter()
     model_oracle = _case_model(element_type, quick=quick)
     model_ref = _case_model(element_type, quick=quick)
     samples = _bottom_node_samples(model_oracle.bottom_nodes)
@@ -356,6 +359,7 @@ def _dynamic_case(element_type: str, *, quick: bool, oracle: LagrangianSDFContac
         reaction_oracle_override=peak_reaction_oracle,
         reaction_reference_override=peak_reaction_ref,
     )
+    row["case_wall_seconds"] = float(perf_counter() - case_start)
     return row, _sample_rows(row["case_id"], last_constraints, last_analytic_gaps), history_rows
 
 
@@ -469,13 +473,14 @@ def _write_summary(path: Path, case_rows: list[Row], outputs: dict[str, Path]) -
             "",
             "## Case Results",
             "",
-            "| Case | Status | Max gap error | Force rel. error | Max penetration | Reaction z |",
-            "| --- | --- | ---: | ---: | ---: | ---: |",
+            "| Case | Status | Wall time (s) | Max gap error | Force rel. error | Max penetration | Reaction z |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in case_rows:
         lines.append(
             f"| `{row['case_id']}` | {row['status']} | "
+            f"{float(row.get('case_wall_seconds', 0.0)):.6e} | "
             f"{float(row['max_gap_abs_error']):.6e} | "
             f"{float(row['force_l2_rel_error']):.6e} | "
             f"{float(row['max_penetration_oracle']):.6e} | "
@@ -487,6 +492,7 @@ def _write_summary(path: Path, case_rows: list[Row], outputs: dict[str, Path]) -
             "## Claim Gate",
             "",
             f"- Cases passed: `{passed}/{len(case_rows)}`.",
+            f"- Total wall time for this runner: `{sum(float(row.get('case_wall_seconds', 0.0)) for row in case_rows):.6e}` s.",
             f"- Final-aim oracle path used in every case: `{str(all(row['contact_path'] == 'MaterialSDF+LagrangianSDFContactOracle' for row in case_rows)).lower()}`.",
             "- No current-space SDF grid is built in this runner.",
             "- The validation checks migration correctness for the existing small TET4/HEX8 cases, not broad nonlinear/friction/self-contact coverage.",
