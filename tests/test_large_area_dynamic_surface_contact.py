@@ -38,7 +38,7 @@ def test_large_area_dynamic_surface_contact_quick_outputs(tmp_path: Path) -> Non
     rows = _read_rows(Path(outputs["sfc_history"]))
     assert rows
     assert max(int(row["active_samples"]) for row in rows) > 0
-    assert {row["field_path"] for row in rows} == {"DynamicNarrowBandSDF.build_required_points -> field_contact"}
+    assert {row["field_path"] for row in rows} == {"RequiredPointSDFWorkspace.build -> field_contact"}
     assert {row["load_type"] for row in rows} == {"top_pressure"}
     assert Path(outputs["summary"]).exists()
     assert Path(outputs["vtk_pvd"]).exists()

@@ -11,7 +11,7 @@ from sfc.contact import (
     field_contact_jacobian_row,
     field_penalty_contact_response,
 )
-from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF
+from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF, RequiredPointSDFWorkspace
 from sfc.sdf.dynamic_surface_sdf import (
     surface_projection_distance_kernel,
     surface_projection_distance_kernel_batch_candidates,
@@ -106,6 +106,56 @@ def test_interpolation_consistency() -> None:
     ]
 
     assert sdf.query_phi(x) == pytest.approx(float(stencil.weights @ corner_phi))
+
+
+def test_required_point_workspace_matches_build_required_points() -> None:
+    X, faces = _nonplanar_surface(resolution=4)
+    points = np.asarray(
+        [
+            [0.35, 0.25, _nonplanar_z(0.35, 0.25) + 0.035],
+            [0.62, 0.58, _nonplanar_z(0.62, 0.58) - 0.025],
+            [0.48, 0.72, _nonplanar_z(0.48, 0.72) + 0.015],
+        ],
+        dtype=float,
+    )
+    spacing = 0.125
+    band = 0.25
+    reference = DynamicNarrowBandSDF.build_required_points(
+        X,
+        faces,
+        points,
+        spacing=spacing,
+        band_radius=band,
+        padding=band,
+    )
+    workspace = RequiredPointSDFWorkspace.from_surface(
+        X,
+        faces,
+        spacing=spacing,
+        band_radius=band,
+        padding=band,
+    )
+    cached = workspace.build(X, faces, points)
+
+    for point in points:
+        assert cached.query_phi(point) == pytest.approx(reference.query_phi(point), abs=1.0e-14)
+        assert np.allclose(cached.query_spatial_derivative_phi(point), reference.query_spatial_derivative_phi(point))
+        assert np.array_equal(cached.query_payload(point).face_ids, reference.query_payload(point).face_ids)
+
+    moved = X.copy()
+    moved[:, 2] += 0.01 * moved[:, 0]
+    moved_cached = workspace.build(moved, faces, points)
+    moved_reference = DynamicNarrowBandSDF.build_required_points(
+        moved,
+        faces,
+        points,
+        spacing=spacing,
+        band_radius=band,
+        origin=workspace.origin,
+        shape=workspace.shape,
+    )
+    for point in points:
+        assert moved_cached.query_phi(point) == pytest.approx(moved_reference.query_phi(point), abs=1.0e-14)
 
 
 def test_finite_difference_gradient_consistency() -> None:

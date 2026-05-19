@@ -71,6 +71,14 @@ def _unit_triangle_normal(triangle: np.ndarray) -> np.ndarray:
     return normal / norm
 
 
+def _unit_triangle_normals(triangles: np.ndarray) -> np.ndarray:
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    norms = np.linalg.norm(normals, axis=1)
+    if bool(np.any(norms <= 0.0)):
+        raise ValueError("boundary face has zero area")
+    return normals / norms[:, None]
+
+
 def _signed_triangle_distance(
     x: np.ndarray,
     triangle: np.ndarray,
@@ -177,7 +185,7 @@ def surface_projection_distance_kernel_batch_all_faces(
     best_w = bary[rows, best_face]
     best_dist2 = dist2[rows, best_face]
     best_triangles = triangles[best_face]
-    face_normals = np.asarray([_unit_triangle_normal(triangle) for triangle in best_triangles], dtype=float)
+    face_normals = _unit_triangle_normals(best_triangles)
     offset = P - best_p
     distance = np.sqrt(best_dist2)
     signed_plane_distance = np.einsum("ij,ij->i", offset, face_normals)
@@ -229,7 +237,7 @@ def surface_projection_distance_kernel_batch_candidates(
     best_w = bary[rows, best_local]
     best_dist2 = dist2[rows, best_local]
     best_triangles = X[faces[best_face]]
-    face_normals = np.asarray([_unit_triangle_normal(triangle) for triangle in best_triangles], dtype=float)
+    face_normals = _unit_triangle_normals(best_triangles)
     offset = P - best_p
     distance = np.sqrt(best_dist2)
     signed_plane_distance = np.einsum("ij,ij->i", offset, face_normals)

@@ -4,7 +4,7 @@ This runner implements the selected "scheme B" engineering case: a dense upper
 C3D8 body is loaded by a pressure on its top surface, moves freely in the
 normal direction, and contacts a deformable lower C3D8 body.  The contact stays
 active over a large surface patch, so the benchmark stresses the true
-``DynamicNarrowBandSDF.build_required_points(...) -> field_contact`` path with
+``RequiredPointSDFWorkspace.build(...) -> field_contact`` path with
 many quadrature samples per time step.
 
 CalculiX support is optional and used only as an external native-contact
@@ -56,7 +56,7 @@ from sfc.contact.field_contact import (  # noqa: E402
 from sfc.fem import DeformableBody  # noqa: E402
 from sfc.fem.assembler import assemble_mass_matrix, assemble_stiffness_matrix  # noqa: E402
 from sfc.mesh import VolumeMesh  # noqa: E402
-from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF  # noqa: E402
+from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF, RequiredPointSDFWorkspace  # noqa: E402
 from validation.run_c3d8_contact_trajectory_validation import (  # noqa: E402
     _append_id_list,
     _parse_nodal_vectors,
@@ -105,6 +105,7 @@ class DynamicSurfaceConfig:
     damping_alpha: float
     newmark_iterations: int
     frame_stride: int
+    sdf_batch_projection_threshold: int
 
     @property
     def output_frequency(self) -> int:
@@ -266,6 +267,7 @@ def _contact_cell_fields(
         band_radius=cfg.band_radius,
         padding=cfg.band_radius,
         cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
+        batch_projection_threshold=cfg.sdf_batch_projection_threshold,
     )
     field_elapsed = time.perf_counter() - field_t0
     response_t0 = time.perf_counter()
@@ -335,6 +337,15 @@ def run_sfc_dynamic(
     top_faces = _top_triangles(lower)
     cache = triangle_surface_quadrature_cache(driver_faces, driver_ref, order=cfg.quadrature_order)
     n_slave_dofs = 3 * driver_ref.shape[0]
+    sdf_workspace = RequiredPointSDFWorkspace.from_surface(
+        lower.X,
+        top_faces,
+        spacing=cfg.spacing,
+        band_radius=cfg.band_radius,
+        padding=cfg.band_radius,
+        cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
+        batch_projection_threshold=cfg.sdf_batch_projection_threshold,
+    )
 
     beta = 0.25
     gamma = 0.5
@@ -358,14 +369,10 @@ def run_sfc_dynamic(
         x_master = lower.X + u.reshape((-1, 3))
         q_points = cache.points(driver_x)
         build_t0 = time.perf_counter()
-        master_sdf = DynamicNarrowBandSDF.build_required_points(
+        master_sdf = sdf_workspace.build(
             x_master,
             top_faces,
             q_points,
-            spacing=cfg.spacing,
-            band_radius=cfg.band_radius,
-            padding=cfg.band_radius,
-            cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
         )
         build_elapsed = time.perf_counter() - build_t0
         query_t0 = time.perf_counter()
@@ -399,7 +406,7 @@ def run_sfc_dynamic(
                     * cfg.pressure_stiffness
                     * np.sum(cache.area_weights * np.maximum(-np.asarray(response.gaps, dtype=float), 0.0) ** 2)
                 ),
-                "field_path": "DynamicNarrowBandSDF.build_required_points -> field_contact",
+                "field_path": "RequiredPointSDFWorkspace.build -> field_contact",
             }
         )
         timing.append(
@@ -429,14 +436,10 @@ def run_sfc_dynamic(
             driver_next = _driver_positions(driver_ref, next_t, cfg)
             q_next = cache.points(driver_next)
             x_guess = lower.X + u_guess.reshape((-1, 3))
-            sdf_next = DynamicNarrowBandSDF.build_required_points(
+            sdf_next = sdf_workspace.build(
                 x_guess,
                 top_faces,
                 q_next,
-                spacing=cfg.spacing,
-                band_radius=cfg.band_radius,
-                padding=cfg.band_radius,
-                cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
             )
             response_next = surface_to_surface_field_penalty_response_vectorized(
                 driver_next,
@@ -516,6 +519,15 @@ def run_sfc_pressure_dynamic(
     upper_bottom_faces = _bottom_triangles(upper)
     upper_top_faces = _top_triangles(upper)
     contact_cache = triangle_surface_quadrature_cache(upper_bottom_faces, upper.X, order=cfg.quadrature_order)
+    sdf_workspace = RequiredPointSDFWorkspace.from_surface(
+        lower.X,
+        lower_top_faces,
+        spacing=cfg.spacing,
+        band_radius=cfg.band_radius,
+        padding=cfg.band_radius,
+        cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
+        batch_projection_threshold=cfg.sdf_batch_projection_threshold,
+    )
 
     beta = 0.25
     gamma = 0.5
@@ -543,14 +555,10 @@ def run_sfc_pressure_dynamic(
         x_lower = lower.X + u_lower
         q_points = contact_cache.points(x_upper)
         build_t0 = time.perf_counter()
-        master_sdf = DynamicNarrowBandSDF.build_required_points(
+        master_sdf = sdf_workspace.build(
             x_lower,
             lower_top_faces,
             q_points,
-            spacing=cfg.spacing,
-            band_radius=cfg.band_radius,
-            padding=cfg.band_radius,
-            cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
         )
         build_elapsed = time.perf_counter() - build_t0
         query_t0 = time.perf_counter()
@@ -587,7 +595,7 @@ def run_sfc_pressure_dynamic(
                     * cfg.pressure_stiffness
                     * np.sum(contact_cache.area_weights * np.maximum(-np.asarray(response.gaps, dtype=float), 0.0) ** 2)
                 ),
-                "field_path": "DynamicNarrowBandSDF.build_required_points -> field_contact",
+                "field_path": "RequiredPointSDFWorkspace.build -> field_contact",
                 "load_type": "top_pressure",
             }
         )
@@ -621,14 +629,10 @@ def run_sfc_pressure_dynamic(
             x_upper_guess = upper.X + u_upper_guess
             x_lower_guess = lower.X + u_lower_guess
             q_next = contact_cache.points(x_upper_guess)
-            sdf_next = DynamicNarrowBandSDF.build_required_points(
+            sdf_next = sdf_workspace.build(
                 x_lower_guess,
                 lower_top_faces,
                 q_next,
-                spacing=cfg.spacing,
-                band_radius=cfg.band_radius,
-                padding=cfg.band_radius,
-                cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
             )
             response_next = surface_to_surface_field_penalty_response_vectorized(
                 x_upper_guess,
@@ -1069,7 +1073,7 @@ def _summary_text(
         "## SFC path",
         "",
         "- Upper body: internally assembled C3D8 dynamics with equivalent top-pressure nodal loads.",
-        "- Current lower master surface -> `DynamicNarrowBandSDF.build_required_points(...)`.",
+        "- Current lower master surface -> `RequiredPointSDFWorkspace.build(...)`.",
         "- Query/integration -> `surface_to_surface_field_penalty_response_vectorized(...)`.",
         "- Projection is used only inside field construction; field contact queries use interpolation.",
         "",
@@ -1145,6 +1149,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
             damping_alpha=2.5,
             newmark_iterations=2,
             frame_stride=1,
+            sdf_batch_projection_threshold=250_000,
         )
     return DynamicSurfaceConfig(
         nx=36,
@@ -1170,6 +1175,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
         damping_alpha=2.5,
         newmark_iterations=3,
         frame_stride=5,
+        sdf_batch_projection_threshold=250_000,
     )
 
 
@@ -1264,6 +1270,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--peak-pressure", type=float, default=None, help="override top pressure magnitude")
     parser.add_argument("--damping-alpha", type=float, default=None, help="override mass-proportional damping")
     parser.add_argument("--density", type=float, default=None, help="override material density")
+    parser.add_argument("--sdf-batch-projection-threshold", type=int, default=None, help="override SDF all-faces batch threshold")
     return parser.parse_args(argv)
 
 
@@ -1290,6 +1297,7 @@ def main(argv: list[str] | None = None) -> int:
         "peak_pressure": args.peak_pressure,
         "damping_alpha": args.damping_alpha,
         "density": args.density,
+        "sdf_batch_projection_threshold": args.sdf_batch_projection_threshold,
     }
     cfg = replace(cfg, **{key: value for key, value in overrides.items() if value is not None})
     outputs = run_benchmark(

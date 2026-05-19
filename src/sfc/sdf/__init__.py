@@ -9,6 +9,7 @@ from .dynamic_surface_sdf import (
 from .dynamic_narrow_band_sdf import (
     DynamicNarrowBandSDF,
     FieldQueryPayload,
+    RequiredPointSDFWorkspace,
     SDFUpdateStats,
 )
 from .local_projection import closest_point_on_triangle, signed_point_triangle_gap
@@ -25,6 +26,7 @@ __all__ = [
     "GridInterpolation",
     "GridPayloadInterpolation",
     "NarrowBandGrid",
+    "RequiredPointSDFWorkspace",
     "SDFUpdateStats",
     "SurfaceSDFResult",
     "closest_point_on_triangle",

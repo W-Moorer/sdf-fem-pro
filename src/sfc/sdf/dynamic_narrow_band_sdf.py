@@ -282,7 +282,7 @@ class DynamicNarrowBandSDF:
             phi[ii, jj, kk] = batch.g
             closest_face_id[ii, jj, kk] = batch.face_id
             barycentric[ii, jj, kk] = batch.w
-            closest_normal[ii, jj, kk] = np.asarray([_unit(n) for n in batch.n], dtype=float)
+            closest_normal[ii, jj, kk] = _unit_rows(batch.n)
             valid_mask[ii, jj, kk] = np.abs(batch.g) <= band + 1.0e-12
         else:
             from sfc.contact.broad_phase import UniformTriangleAABBHash
@@ -317,7 +317,7 @@ class DynamicNarrowBandSDF:
                     phi[ii, jj, kk] = batch.g
                     closest_face_id[ii, jj, kk] = batch.face_id
                     barycentric[ii, jj, kk] = batch.w
-                    closest_normal[ii, jj, kk] = np.asarray([_unit(n) for n in batch.n], dtype=float)
+                    closest_normal[ii, jj, kk] = _unit_rows(batch.n)
                     valid_mask[ii, jj, kk] = np.abs(batch.g) <= band + 1.0e-12
         projection_seconds = perf_counter() - projection_start
 
@@ -353,6 +353,7 @@ class DynamicNarrowBandSDF:
             gradient_seconds=gradient_seconds,
         )
         return cls(grid, X, faces, stats)
+
 
     @property
     def field_update_cost(self) -> float:
@@ -442,6 +443,197 @@ class DynamicNarrowBandSDF:
         return norms - 1.0
 
 
+class RequiredPointSDFWorkspace:
+    """Reusable sparse narrow-band SDF builder for repeated contact steps.
+
+    The workspace preserves the exact ``build_required_points`` semantics for a
+    fixed grid specification, but reuses the dense grid arrays between rebuilds
+    and clears only the grid nodes touched by the previous build.  Public query
+    APIs still receive a normal ``DynamicNarrowBandSDF`` object and remain
+    interpolation-only.
+    """
+
+    def __init__(
+        self,
+        *,
+        spacing: float | np.ndarray,
+        band_radius: float,
+        origin: np.ndarray,
+        shape: tuple[int, int, int] | np.ndarray,
+        cell_size: float | None = None,
+        batch_projection_threshold: int = 5_000_000,
+    ) -> None:
+        h = _as_spacing(spacing)
+        band = float(band_radius)
+        if band <= 0.0:
+            raise ValueError("band_radius must be positive")
+        grid_origin = _as_vector3(origin, "origin")
+        grid_shape = _as_shape3(shape)
+        self.spacing = h
+        self.band_radius = band
+        self.origin = grid_origin
+        self.shape = grid_shape
+        self.cell_size = cell_size
+        self.batch_projection_threshold = int(batch_projection_threshold)
+        self.phi = np.full(grid_shape, np.nan, dtype=float)
+        self.closest_face_id = np.full(grid_shape, -1, dtype=np.int64)
+        self.barycentric = np.zeros((*grid_shape, 3), dtype=float)
+        self.closest_normal = np.zeros((*grid_shape, 3), dtype=float)
+        self.gradient = np.zeros((*grid_shape, 3), dtype=float)
+        self.valid_mask = np.zeros(grid_shape, dtype=bool)
+        self._previous_indices = np.empty((0, 3), dtype=np.int64)
+
+    @classmethod
+    def from_surface(
+        cls,
+        x_reference: np.ndarray,
+        boundary_faces: np.ndarray,
+        *,
+        spacing: float | np.ndarray,
+        band_radius: float,
+        padding: float | None = None,
+        cell_size: float | None = None,
+        batch_projection_threshold: int = 5_000_000,
+    ) -> "RequiredPointSDFWorkspace":
+        """Create a reusable workspace from a reference surface grid spec."""
+
+        X = _as_surface_nodes(x_reference)
+        faces = _as_boundary_faces(boundary_faces, X.shape[0])
+        h = _as_spacing(spacing)
+        band = float(band_radius)
+        origin, shape = grid_spec_from_surface(
+            X,
+            faces,
+            spacing=h,
+            padding=band if padding is None else float(padding),
+        )
+        return cls(
+            spacing=h,
+            band_radius=band,
+            origin=origin,
+            shape=shape,
+            cell_size=cell_size,
+            batch_projection_threshold=batch_projection_threshold,
+        )
+
+    def _clear_previous(self) -> None:
+        if self._previous_indices.size == 0:
+            return
+        ii = self._previous_indices[:, 0]
+        jj = self._previous_indices[:, 1]
+        kk = self._previous_indices[:, 2]
+        self.phi[ii, jj, kk] = np.nan
+        self.closest_face_id[ii, jj, kk] = -1
+        self.barycentric[ii, jj, kk] = 0.0
+        self.closest_normal[ii, jj, kk] = 0.0
+        self.gradient[ii, jj, kk] = 0.0
+        self.valid_mask[ii, jj, kk] = False
+
+    def build(
+        self,
+        x_current: np.ndarray,
+        boundary_faces: np.ndarray,
+        query_points: np.ndarray,
+    ) -> DynamicNarrowBandSDF:
+        """Populate the reusable workspace for the current surface and queries."""
+
+        t0 = perf_counter()
+        X = _as_surface_nodes(x_current)
+        faces = _as_boundary_faces(boundary_faces, X.shape[0])
+        points = _as_query_points(query_points)
+        required_indices = _required_trilinear_corner_indices(points, self.origin, self.spacing, self.shape)
+        self._clear_previous()
+        self._previous_indices = required_indices.copy()
+
+        candidate_padding = self.band_radius + 0.5 * float(np.linalg.norm(self.spacing))
+        projection_start = perf_counter()
+        pair_count = int(required_indices.shape[0]) * int(faces.shape[0])
+        points_required = self.origin + self.spacing * required_indices.astype(float)
+        threshold = int(self.batch_projection_threshold)
+        used_batch_projection = pair_count <= threshold
+        projection_mode = "all_faces_batch" if used_batch_projection else "candidate_group_batch"
+        if used_batch_projection:
+            batch = surface_projection_distance_kernel_batch_all_faces(points_required, X, faces)
+            ids = np.arange(required_indices.shape[0], dtype=np.int64)
+            self._store_batch(required_indices, ids, batch)
+        else:
+            from sfc.contact.broad_phase import UniformTriangleAABBHash
+
+            broad_phase = UniformTriangleAABBHash.from_surface(
+                X,
+                faces,
+                delta_safe=candidate_padding,
+                cell_size=self.cell_size,
+            )
+            groups: dict[tuple[int, ...], list[int]] = {}
+            for point_id, candidates in enumerate(broad_phase.query_points(points_required)):
+                if candidates.size == 0:
+                    continue
+                key = tuple(int(v) for v in candidates.tolist())
+                groups.setdefault(key, []).append(point_id)
+            for key, point_ids in groups.items():
+                candidates = np.asarray(key, dtype=np.int64)
+                chunk_size = max(1, threshold // max(int(candidates.size), 1)) if threshold > 0 else len(point_ids)
+                for start in range(0, len(point_ids), chunk_size):
+                    ids = np.asarray(point_ids[start : start + chunk_size], dtype=np.int64)
+                    batch = surface_projection_distance_kernel_batch_candidates(
+                        points_required[ids],
+                        X,
+                        faces,
+                        candidates,
+                    )
+                    self._store_batch(required_indices, ids, batch)
+        projection_seconds = perf_counter() - projection_start
+
+        gradient_start = perf_counter()
+        ii = required_indices[:, 0]
+        jj = required_indices[:, 1]
+        kk = required_indices[:, 2]
+        self.gradient[ii, jj, kk] = self.closest_normal[ii, jj, kk]
+        gradient_seconds = perf_counter() - gradient_start
+        grid = NarrowBandGrid(
+            origin=self.origin,
+            spacing=self.spacing,
+            phi=self.phi,
+            gradient=self.gradient,
+            closest_face_id=self.closest_face_id,
+            barycentric=self.barycentric,
+            closest_normal=self.closest_normal,
+            valid_mask=self.valid_mask,
+            metadata={
+                "band_radius": self.band_radius,
+                "candidate_padding": candidate_padding,
+                "population_mode": "required_points_workspace",
+                "required_node_count": int(required_indices.shape[0]),
+                "batch_projection": bool(used_batch_projection),
+                "projection_mode": projection_mode,
+                "projection_pair_count": int(pair_count),
+            },
+        )
+        valid_node_count = int(np.count_nonzero(self.valid_mask[ii, jj, kk]))
+        stats = SDFUpdateStats(
+            grid_node_count=int(np.prod(self.shape)),
+            valid_node_count=valid_node_count,
+            spacing=self.spacing.copy(),
+            band_radius=self.band_radius,
+            update_seconds=perf_counter() - t0,
+            projection_seconds=projection_seconds,
+            gradient_seconds=gradient_seconds,
+        )
+        return DynamicNarrowBandSDF(grid, X, faces, stats)
+
+    def _store_batch(self, required_indices: np.ndarray, ids: np.ndarray, batch: SurfaceSDFResult) -> None:
+        idx = required_indices[ids]
+        ii = idx[:, 0]
+        jj = idx[:, 1]
+        kk = idx[:, 2]
+        self.phi[ii, jj, kk] = batch.g
+        self.closest_face_id[ii, jj, kk] = batch.face_id
+        self.barycentric[ii, jj, kk] = batch.w
+        self.closest_normal[ii, jj, kk] = _unit_rows(batch.n)
+        self.valid_mask[ii, jj, kk] = np.abs(batch.g) <= self.band_radius + 1.0e-12
+
+
 def _store_projection_payload(
     index: tuple[int, int, int],
     result: SurfaceSDFResult,
@@ -509,6 +701,15 @@ def _unit(value: np.ndarray) -> np.ndarray:
     if norm <= 0.0:
         return np.zeros(3, dtype=float)
     return value / norm
+
+
+def _unit_rows(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    norms = np.linalg.norm(arr, axis=1)
+    out = np.zeros_like(arr, dtype=float)
+    mask = norms > 0.0
+    out[mask] = arr[mask] / norms[mask, None]
+    return out
 
 
 def _as_surface_nodes(value: np.ndarray) -> np.ndarray:
