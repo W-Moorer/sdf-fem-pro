@@ -95,3 +95,51 @@ def contact_stiffness_matvec(
         int(slave_dof_offset),
         int(master_dof_offset),
     )
+
+
+def solve_contact_tangent_pcg(
+    effective_indptr: np.ndarray,
+    effective_indices: np.ndarray,
+    effective_data: np.ndarray,
+    rhs: np.ndarray,
+    free_dofs: np.ndarray,
+    scale: np.ndarray,
+    slave_node_ids: np.ndarray,
+    slave_weights: np.ndarray,
+    gradients: np.ndarray,
+    face_node_ids: np.ndarray,
+    grid_weights: np.ndarray,
+    barycentric: np.ndarray,
+    normals: np.ndarray,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+    rtol: float,
+    atol: float,
+    maxiter: int,
+) -> tuple[np.ndarray, int, int, float]:
+    """Solve the matrix-free contact tangent system with C++ PCG."""
+
+    _require_backend()
+    solution, info, iterations, residual_norm = _BACKEND.solve_contact_tangent_pcg(
+        np.ascontiguousarray(effective_indptr, dtype=np.int64),
+        np.ascontiguousarray(effective_indices, dtype=np.int64),
+        np.ascontiguousarray(effective_data, dtype=np.float64),
+        np.ascontiguousarray(rhs, dtype=np.float64),
+        np.ascontiguousarray(free_dofs, dtype=np.int64),
+        np.ascontiguousarray(scale, dtype=np.float64),
+        np.ascontiguousarray(slave_node_ids, dtype=np.int64),
+        np.ascontiguousarray(slave_weights, dtype=np.float64),
+        np.ascontiguousarray(gradients, dtype=np.float64),
+        np.ascontiguousarray(face_node_ids, dtype=np.int64),
+        np.ascontiguousarray(grid_weights, dtype=np.float64),
+        np.ascontiguousarray(barycentric, dtype=np.float64),
+        np.ascontiguousarray(normals, dtype=np.float64),
+        int(n_total_dofs),
+        int(slave_dof_offset),
+        int(master_dof_offset),
+        float(rtol),
+        float(atol),
+        int(maxiter),
+    )
+    return np.asarray(solution, dtype=float), int(info), int(iterations), float(residual_norm)

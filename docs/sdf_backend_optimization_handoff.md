@@ -290,3 +290,85 @@ Deferred diagnostics 将可用于论文中的工程求解器计时口径：
 - 后处理/诊断时间：`15.87 s`
 
 这一步没有改变接触结果，但仍未让 SFC solve-loop 快于已有 CalculiX `53.63 s`。剩余主要瓶颈仍是每个时间步内的重复 field rebuild/contact iteration。下一步若要继续压到 CalculiX 以下，需要把 tangent 迭代控制和预条件求解继续 C++ 化，而不仅仅是 C++ matvec。
+
+## 2026-05-19 追加：C++ tangent PCG 迭代控制与预条件 solve
+
+本轮把 matrix-free contact tangent 从“Python `LinearOperator` 调 C++ matvec”推进到“C++ 内部完成 Krylov 迭代、残差控制和预条件 solve”。这一步不改变接触几何、不改变 SDF field 查询、不降低容差，只改变线性化修正方程的工程实现。
+
+### 已实现
+
+1. C++ PCG tangent solver
+   - 新增 C++ 入口：`solve_contact_tangent_pcg(...)`
+   - 输入：`effective_free` CSR、free dofs、matrix-free contact tangent payload、右端项、`rtol/atol/maxiter`
+   - C++ 内部完成：
+     - `A v = effective_free v + J^T W J v`
+     - PCG 迭代控制
+     - residual norm 计算
+     - contact tangent diagonal 构造
+     - symmetric Gauss-Seidel 型预条件 solve
+   - 输出：`solution, info, iterations, residual_norm`
+
+2. Python wrapper
+   - 新增：`sfc.contact._cpp_field_contact.solve_contact_tangent_pcg(...)`
+   - runner 新增：`--cpp-contact-tangent-solver`
+   - 与 `--contact-tangent`、`--matrix-free-contact-tangent` 互斥。
+
+3. 动态 runner 接入
+   - `validation/run_large_area_dynamic_surface_contact.py`
+   - 新增 `DynamicSurfaceConfig.use_cpp_contact_tangent_solver`
+   - summary 输出：
+     - C++ tangent PCG solves
+     - C++ tangent PCG iterations
+
+### 验证
+
+针对性 dense-reference 测试：
+
+```bash
+python -m pytest -q tests/test_field_surface_to_surface_contact.py::test_cpp_contact_tangent_pcg_solver_matches_dense_reference_when_built tests/test_field_surface_to_surface_contact.py::test_cpp_contact_stiffness_matvec_matches_reference_when_built
+```
+
+结果：
+
+```text
+2 passed in 0.47s
+```
+
+quick 动态工况结果：
+
+| 路径 | Newmark/contact 迭代 | solve-loop wall | PCG solves | PCG iterations |
+| --- | ---: | ---: | ---: | ---: |
+| 默认无 tangent | 2 | `5.677792e-01 s` | 0 | 0 |
+| C++ PCG tangent，Jacobi 预条件 | 1 | `8.038335e-01 s` | 8 | 593 |
+| C++ PCG tangent，SGS 预条件 | 1 | `7.272235e-01 s` | 8 | 362 |
+
+SGS 预条件把 quick case 的 PCG 迭代数从 `593` 降到 `362`，solve-loop 从 `0.8038 s` 降到 `0.7272 s`。这说明 C++ 级预条件 solve 有效果，但当前实现仍未快过默认 2 次 fixed-point 路径。
+
+最终源码进一步把 SGS 预条件的 scratch buffer 提升为持久缓冲，避免每次 PCG 迭代分配临时数组。该改动不改变迭代数；后续 quick rerun 仍为 `362` 次 PCG 迭代，solve-loop wall time 受本机运行噪声影响记录为 `1.012192e+00 s`。因此本轮不把该 buffer 调整作为性能 claim，只作为减少 C++ solver 内部分配的工程清理。
+
+与默认 2 次迭代路径相比，C++ PCG tangent 1 次迭代的历史量最大差异：
+
+| 量 | 最大绝对差 | 相对差 |
+| --- | ---: | ---: |
+| upper mean z displacement | `1.9112e-03` | `1.02e-02` |
+| min gap | `1.8458e-03` | `1.12e-02` |
+| normal force | `2.0669e+03` | `1.18e-02` |
+| contact energy | `2.7836e+02` | `2.05e-02` |
+
+与默认 1 次迭代路径相比，C++ PCG tangent 1 次迭代明显改善残差一致性：
+
+| 路径 | upper mean z displacement 相对差 | min gap 相对差 | normal force 相对差 | contact energy 相对差 |
+| --- | ---: | ---: | ---: | ---: |
+| 默认 1 次迭代 | `6.82e-02` | `7.75e-02` | `7.79e-02` | `1.30e-01` |
+| C++ PCG tangent 1 次迭代 | `1.02e-02` | `1.12e-02` | `1.18e-02` | `2.05e-02` |
+
+### 当前结论
+
+本轮完成了“C++ 级 tangent 迭代控制和预条件求解”，但不能声称完整 solve time 已经因此超过 CalculiX。当前更准确的结论是：
+
+- C++ PCG tangent solver 与显式 dense-reference tangent 解一致；
+- SGS 预条件相对 Jacobi 预条件显著降低 PCG 迭代数；
+- 1 次 C++ tangent correction 比 1 次 fixed-point correction 更接近 2 次 fixed-point 参考结果；
+- 当前 C++ PCG tangent 仍慢于默认 2 次 fixed-point quick 路径，因此暂不能作为默认性能 claim。
+
+下一步若要把 tangent 路径变成真正性能路径，需要更强的 C++ 预条件：例如块节点预条件、effective matrix 的 C++ 稀疏分解/多重网格预条件，或把 field build、contact response、tangent solve 合并为单个持久 workspace，减少每步对象构造和内存分配。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.sparse import eye
 
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF
 from sfc.contact import (
@@ -276,3 +277,83 @@ def test_cpp_contact_stiffness_matvec_matches_reference_when_built() -> None:
     assert matrix_free.stiffness_operator is not None
     probe = np.cos(np.arange(24, dtype=float))
     np.testing.assert_allclose(matrix_free.stiffness_operator.matvec(probe), explicit.stiffness @ probe, atol=1.0e-14)
+
+
+def test_cpp_contact_tangent_pcg_solver_matches_dense_reference_when_built() -> None:
+    if not cpp_field_contact_available():
+        pytest.skip("C++ field-contact backend is not built")
+    x = np.asarray(
+        [
+            [0.0, 0.0, -0.10],
+            [1.0, 0.0, -0.08],
+            [0.0, 1.0, -0.12],
+            [1.0, 1.0, -0.07],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2], [1, 3, 2]], dtype=np.int64)
+    cache = triangle_surface_quadrature_cache(faces, x, order=7)
+    master_x = np.asarray([[-1.0, -1.0, 0.0], [2.0, -1.0, 0.0], [-1.0, 2.0, 0.0], [2.0, 2.0, 0.0]])
+    master_faces = np.asarray([[0, 1, 2], [1, 3, 2]], dtype=np.int64)
+    sdf = DynamicNarrowBandSDF.build_required_points(
+        master_x,
+        master_faces,
+        cache.points(x),
+        spacing=0.25,
+        band_radius=0.5,
+        padding=0.5,
+        cell_size=0.25,
+    )
+    explicit = surface_to_surface_field_penalty_response_vectorized(
+        x,
+        faces,
+        sdf,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_order=7,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        assemble_stiffness=True,
+    )
+    matrix_free = surface_to_surface_field_penalty_response_vectorized(
+        x,
+        faces,
+        sdf,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_order=7,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        matrix_free_stiffness=True,
+    )
+    assert matrix_free.stiffness_operator is not None
+    from sfc.contact._cpp_field_contact import solve_contact_tangent_pcg
+
+    effective = (2.0 * eye(24, format="csr")).tocsr()
+    rhs = np.sin(np.arange(24, dtype=float))
+    op = matrix_free.stiffness_operator
+    solution, info, _iterations, residual = solve_contact_tangent_pcg(
+        effective.indptr,
+        effective.indices,
+        effective.data,
+        rhs,
+        np.arange(24, dtype=np.int64),
+        op.scale,
+        op.slave_node_ids,
+        op.slave_weights,
+        op.gradients,
+        op.face_node_ids,
+        op.grid_weights,
+        op.barycentric,
+        op.normals,
+        24,
+        op.slave_dof_offset,
+        op.master_dof_offset,
+        1.0e-12,
+        1.0e-14,
+        200,
+    )
+    reference = np.linalg.solve((effective + explicit.stiffness).toarray(), rhs)
+    assert info == 0
+    assert residual < 1.0e-10
+    np.testing.assert_allclose(solution, reference, atol=1.0e-10)

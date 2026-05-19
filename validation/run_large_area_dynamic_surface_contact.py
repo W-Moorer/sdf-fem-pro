@@ -109,6 +109,7 @@ class DynamicSurfaceConfig:
     sdf_candidate_padding: float | None
     use_contact_tangent: bool
     use_matrix_free_contact_tangent: bool
+    use_cpp_contact_tangent_solver: bool
     contact_tangent_cg_rtol: float
     contact_tangent_cg_atol: float
     contact_tangent_cg_maxiter: int
@@ -134,6 +135,8 @@ class SFCDynamicResult:
     solve_wall_seconds: float = 0.0
     core_solve_seconds: float = 0.0
     diagnostics_seconds: float = 0.0
+    cpp_tangent_iterations: int = 0
+    cpp_tangent_solves: int = 0
 
 
 def _write_csv(path: Path, rows: list[Row]) -> None:
@@ -646,6 +649,8 @@ def run_sfc_pressure_dynamic(
     steps = int(round(cfg.total_time / cfg.dt))
     core_solve_seconds = 0.0
     diagnostics_seconds = 0.0
+    cpp_tangent_iterations = 0
+    cpp_tangent_solves = 0
     accepted_response_cache: tuple[float, Any, Any, float, float] | None = None
     solve_loop_start = time.perf_counter()
 
@@ -762,7 +767,7 @@ def run_sfc_pressure_dynamic(
                 slave_dof_offset=0,
                 master_dof_offset=upper_dofs,
                 assemble_stiffness=cfg.use_contact_tangent,
-                matrix_free_stiffness=cfg.use_matrix_free_contact_tangent,
+                matrix_free_stiffness=cfg.use_matrix_free_contact_tangent or cfg.use_cpp_contact_tangent_solver,
             )
             f_ext = np.zeros(n_dofs, dtype=float)
             f_ext[:upper_dofs] = pressure_next * unit_pressure_force_upper
@@ -770,7 +775,44 @@ def run_sfc_pressure_dynamic(
             v_guess = v_pred + gamma * dt * a_guess
             residual = M @ a_guess + cfg.damping_alpha * (M @ v_guess) + K @ u_guess - f_ext - response_next.force
             correction = np.zeros(n_dofs, dtype=float)
-            if cfg.use_matrix_free_contact_tangent:
+            if cfg.use_cpp_contact_tangent_solver:
+                if response_next.stiffness_operator is None or effective_free is None:
+                    raise RuntimeError("C++ contact tangent solver was requested but no operator is available")
+                try:
+                    from sfc.contact._cpp_field_contact import solve_contact_tangent_pcg
+                except Exception as exc:
+                    raise RuntimeError("C++ contact tangent solver is not available") from exc
+                op = response_next.stiffness_operator
+                solution, info, iterations, residual_norm = solve_contact_tangent_pcg(
+                    effective_free.indptr,
+                    effective_free.indices,
+                    effective_free.data,
+                    -residual[free],
+                    free,
+                    op.scale,
+                    op.slave_node_ids,
+                    op.slave_weights,
+                    op.gradients,
+                    op.face_node_ids,
+                    op.grid_weights,
+                    op.barycentric,
+                    op.normals,
+                    n_dofs,
+                    op.slave_dof_offset,
+                    op.master_dof_offset,
+                    cfg.contact_tangent_cg_rtol,
+                    cfg.contact_tangent_cg_atol,
+                    cfg.contact_tangent_cg_maxiter,
+                )
+                if info != 0:
+                    raise RuntimeError(
+                        f"C++ contact tangent PCG did not converge, info={info}, "
+                        f"iterations={iterations}, residual={residual_norm:.6e}"
+                    )
+                cpp_tangent_iterations += int(iterations)
+                cpp_tangent_solves += 1
+                correction[free] = solution
+            elif cfg.use_matrix_free_contact_tangent:
                 if response_next.stiffness_operator is None or effective_free is None or solve_effective_free is None:
                     raise RuntimeError("matrix-free contact tangent was requested but no operator is available")
                 contact_free = response_next.stiffness_operator.as_linear_operator(free)
@@ -896,6 +938,8 @@ def run_sfc_pressure_dynamic(
         solve_wall_seconds=float(solve_wall_seconds),
         core_solve_seconds=float(core_solve_seconds),
         diagnostics_seconds=float(diagnostics_seconds),
+        cpp_tangent_iterations=int(cpp_tangent_iterations),
+        cpp_tangent_solves=int(cpp_tangent_solves),
     )
 
 
@@ -1291,6 +1335,7 @@ def _summary_text(
         "- Projection is used only inside field construction; field contact queries use interpolation.",
         f"- Contact tangent in SFC iterations: `{bool(cfg.use_contact_tangent)}`.",
         f"- Matrix-free contact tangent in SFC iterations: `{bool(cfg.use_matrix_free_contact_tangent)}`.",
+        f"- C++ contact tangent PCG solver: `{bool(cfg.use_cpp_contact_tangent_solver)}`.",
         f"- Deferred diagnostics/postprocess: `{bool(cfg.defer_diagnostics)}`.",
         "- Accepted-state response reuse: response is reused only after exact final-state reevaluation.",
         "",
@@ -1302,6 +1347,8 @@ def _summary_text(
         f"- Diagnostics/accepted-response time inside SFC trajectory: `{float(sfc.diagnostics_seconds):.6e}` s.",
         f"- Mean field update time, backend breakdown only: `{avg_update:.6e}` s/step.",
         f"- Mean field query/contact assembly time, backend breakdown only: `{avg_query:.6e}` s/step.",
+        f"- C++ tangent PCG solves: `{int(sfc.cpp_tangent_solves)}`.",
+        f"- C++ tangent PCG iterations: `{int(sfc.cpp_tangent_iterations)}`.",
         "",
         "## VTK outputs",
         "",
@@ -1373,6 +1420,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
             sdf_candidate_padding=None,
             use_contact_tangent=False,
             use_matrix_free_contact_tangent=False,
+            use_cpp_contact_tangent_solver=False,
             contact_tangent_cg_rtol=1.0e-10,
             contact_tangent_cg_atol=1.0e-12,
             contact_tangent_cg_maxiter=80,
@@ -1406,6 +1454,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
         sdf_candidate_padding=None,
         use_contact_tangent=False,
         use_matrix_free_contact_tangent=False,
+        use_cpp_contact_tangent_solver=False,
         contact_tangent_cg_rtol=1.0e-10,
         contact_tangent_cg_atol=1.0e-12,
         contact_tangent_cg_maxiter=80,
@@ -1508,6 +1557,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sdf-candidate-padding", type=float, default=None, help="override exact-fallback AABB candidate padding")
     parser.add_argument("--contact-tangent", action="store_true", help="assemble and solve with the field-contact tangent")
     parser.add_argument("--matrix-free-contact-tangent", action="store_true", help="solve with matrix-free field-contact tangent")
+    parser.add_argument("--cpp-contact-tangent-solver", action="store_true", help="solve contact tangent with the C++ PCG backend")
     parser.add_argument("--contact-tangent-cg-rtol", type=float, default=None, help="matrix-free tangent CG relative tolerance")
     parser.add_argument("--contact-tangent-cg-atol", type=float, default=None, help="matrix-free tangent CG absolute tolerance")
     parser.add_argument("--contact-tangent-cg-maxiter", type=int, default=None, help="matrix-free tangent CG maximum iterations")
@@ -1545,12 +1595,22 @@ def main(argv: list[str] | None = None) -> int:
         "contact_tangent_cg_maxiter": args.contact_tangent_cg_maxiter,
     }
     cfg = replace(cfg, **{key: value for key, value in overrides.items() if value is not None})
-    if bool(args.contact_tangent) and bool(args.matrix_free_contact_tangent):
-        raise ValueError("--contact-tangent and --matrix-free-contact-tangent are mutually exclusive")
+    tangent_modes = sum(
+        int(flag)
+        for flag in (
+            bool(args.contact_tangent),
+            bool(args.matrix_free_contact_tangent),
+            bool(args.cpp_contact_tangent_solver),
+        )
+    )
+    if tangent_modes > 1:
+        raise ValueError("--contact-tangent, --matrix-free-contact-tangent, and --cpp-contact-tangent-solver are mutually exclusive")
     if bool(args.contact_tangent):
         cfg = replace(cfg, use_contact_tangent=True)
     if bool(args.matrix_free_contact_tangent):
         cfg = replace(cfg, use_matrix_free_contact_tangent=True)
+    if bool(args.cpp_contact_tangent_solver):
+        cfg = replace(cfg, use_cpp_contact_tangent_solver=True)
     if bool(args.defer_diagnostics):
         cfg = replace(cfg, defer_diagnostics=True)
     outputs = run_benchmark(

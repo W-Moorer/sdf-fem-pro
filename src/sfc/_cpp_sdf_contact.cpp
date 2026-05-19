@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -605,10 +607,284 @@ py::array_t<double> contact_stiffness_matvec(
     return out;
 }
 
+py::tuple solve_contact_tangent_pcg(
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> effective_indptr,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> effective_indices,
+    py::array_t<double, py::array::c_style | py::array::forcecast> effective_data,
+    py::array_t<double, py::array::c_style | py::array::forcecast> rhs,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> free_dofs,
+    py::array_t<double, py::array::c_style | py::array::forcecast> scale,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> slave_node_ids,
+    py::array_t<double, py::array::c_style | py::array::forcecast> slave_weights,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gradients,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> face_node_ids,
+    py::array_t<double, py::array::c_style | py::array::forcecast> grid_weights,
+    py::array_t<double, py::array::c_style | py::array::forcecast> barycentric,
+    py::array_t<double, py::array::c_style | py::array::forcecast> normals,
+    std::int64_t n_total_dofs,
+    std::int64_t slave_dof_offset,
+    std::int64_t master_dof_offset,
+    double rtol,
+    double atol,
+    std::int64_t maxiter
+) {
+    const auto indptr = effective_indptr.unchecked<1>();
+    const auto indices = effective_indices.unchecked<1>();
+    const auto data = effective_data.unchecked<1>();
+    const auto b = rhs.unchecked<1>();
+    const auto free = free_dofs.unchecked<1>();
+    const auto row_scale = scale.unchecked<1>();
+    const auto snodes = slave_node_ids.unchecked<2>();
+    const auto sweights = slave_weights.unchecked<2>();
+    const auto grads = gradients.unchecked<2>();
+    const auto fnodes = face_node_ids.unchecked<3>();
+    const auto gweights = grid_weights.unchecked<2>();
+    const auto bary = barycentric.unchecked<3>();
+    const auto nrm = normals.unchecked<3>();
+    const py::ssize_t n = b.shape(0);
+    const py::ssize_t n_active = row_scale.shape(0);
+    if (free.shape(0) != n) {
+        throw std::runtime_error("free_dofs size must match rhs size");
+    }
+    if (indptr.shape(0) != n + 1) {
+        throw std::runtime_error("effective CSR indptr size must be n + 1");
+    }
+
+    py::array_t<double> solution({n});
+    auto x_out = solution.mutable_unchecked<1>();
+
+    std::vector<std::int64_t> global_to_free(static_cast<std::size_t>(n_total_dofs), -1);
+    for (py::ssize_t i = 0; i < n; ++i) {
+        const auto gdof = free(i);
+        if (gdof < 0 || gdof >= n_total_dofs) {
+            throw std::runtime_error("free_dofs contains an invalid global dof");
+        }
+        global_to_free[static_cast<std::size_t>(gdof)] = static_cast<std::int64_t>(i);
+        x_out(i) = 0.0;
+    }
+
+    std::vector<double> diag(static_cast<std::size_t>(n), 0.0);
+    for (py::ssize_t i = 0; i < n; ++i) {
+        for (std::int64_t ptr = indptr(i); ptr < indptr(i + 1); ++ptr) {
+            if (indices(ptr) == i) {
+                diag[static_cast<std::size_t>(i)] += data(ptr);
+                break;
+            }
+        }
+    }
+    auto add_contact_diag = [&](std::int64_t gdof, double value) {
+        if (gdof < 0 || gdof >= n_total_dofs) {
+            return;
+        }
+        const std::int64_t local = global_to_free[static_cast<std::size_t>(gdof)];
+        if (local >= 0) {
+            diag[static_cast<std::size_t>(local)] += value;
+        }
+    };
+    for (py::ssize_t row = 0; row < n_active; ++row) {
+        const double s = row_scale(row);
+        for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+            const std::int64_t node = snodes(row, local_node);
+            const double sw = sweights(row, local_node);
+            for (int comp = 0; comp < 3; ++comp) {
+                const double entry = sw * grads(row, comp);
+                add_contact_diag(slave_dof_offset + 3 * node + comp, s * entry * entry);
+            }
+        }
+        for (py::ssize_t corner = 0; corner < fnodes.shape(1); ++corner) {
+            const double gw = gweights(row, corner);
+            for (py::ssize_t face_node = 0; face_node < fnodes.shape(2); ++face_node) {
+                const std::int64_t node = fnodes(row, corner, face_node);
+                const double bval = bary(row, corner, face_node);
+                for (int comp = 0; comp < 3; ++comp) {
+                    const double entry = -gw * bval * nrm(row, corner, comp);
+                    add_contact_diag(master_dof_offset + 3 * node + comp, s * entry * entry);
+                }
+            }
+        }
+    }
+    for (py::ssize_t i = 0; i < n; ++i) {
+        if (std::abs(diag[static_cast<std::size_t>(i)]) <= 1.0e-30) {
+            diag[static_cast<std::size_t>(i)] = 1.0;
+        }
+    }
+
+    auto dot = [](const std::vector<double>& a, const std::vector<double>& bvec) -> double {
+        double out = 0.0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            out += a[i] * bvec[i];
+        }
+        return out;
+    };
+
+    auto apply_operator = [&](const std::vector<double>& x, std::vector<double>& y) {
+        std::fill(y.begin(), y.end(), 0.0);
+        for (py::ssize_t i = 0; i < n; ++i) {
+            double value = 0.0;
+            for (std::int64_t ptr = indptr(i); ptr < indptr(i + 1); ++ptr) {
+                value += data(ptr) * x[static_cast<std::size_t>(indices(ptr))];
+            }
+            y[static_cast<std::size_t>(i)] = value;
+        }
+        for (py::ssize_t row = 0; row < n_active; ++row) {
+            double jx = 0.0;
+            for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+                const std::int64_t node = snodes(row, local_node);
+                const double sw = sweights(row, local_node);
+                for (int comp = 0; comp < 3; ++comp) {
+                    const std::int64_t gdof = slave_dof_offset + 3 * node + comp;
+                    const std::int64_t local = global_to_free[static_cast<std::size_t>(gdof)];
+                    if (local >= 0) {
+                        jx += sw * grads(row, comp) * x[static_cast<std::size_t>(local)];
+                    }
+                }
+            }
+            for (py::ssize_t corner = 0; corner < fnodes.shape(1); ++corner) {
+                const double gw = gweights(row, corner);
+                for (py::ssize_t face_node = 0; face_node < fnodes.shape(2); ++face_node) {
+                    const std::int64_t node = fnodes(row, corner, face_node);
+                    const double bval = bary(row, corner, face_node);
+                    for (int comp = 0; comp < 3; ++comp) {
+                        const std::int64_t gdof = master_dof_offset + 3 * node + comp;
+                        const std::int64_t local = global_to_free[static_cast<std::size_t>(gdof)];
+                        if (local >= 0) {
+                            jx -= gw * bval * nrm(row, corner, comp) * x[static_cast<std::size_t>(local)];
+                        }
+                    }
+                }
+            }
+            const double scaled = row_scale(row) * jx;
+            for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+                const std::int64_t node = snodes(row, local_node);
+                const double sw = sweights(row, local_node);
+                for (int comp = 0; comp < 3; ++comp) {
+                    const std::int64_t gdof = slave_dof_offset + 3 * node + comp;
+                    const std::int64_t local = global_to_free[static_cast<std::size_t>(gdof)];
+                    if (local >= 0) {
+                        y[static_cast<std::size_t>(local)] += scaled * sw * grads(row, comp);
+                    }
+                }
+            }
+            for (py::ssize_t corner = 0; corner < fnodes.shape(1); ++corner) {
+                const double gw = gweights(row, corner);
+                for (py::ssize_t face_node = 0; face_node < fnodes.shape(2); ++face_node) {
+                    const std::int64_t node = fnodes(row, corner, face_node);
+                    const double bval = bary(row, corner, face_node);
+                    for (int comp = 0; comp < 3; ++comp) {
+                        const std::int64_t gdof = master_dof_offset + 3 * node + comp;
+                        const std::int64_t local = global_to_free[static_cast<std::size_t>(gdof)];
+                        if (local >= 0) {
+                            y[static_cast<std::size_t>(local)] += -scaled * gw * bval * nrm(row, corner, comp);
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    std::vector<double> precond_forward(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> precond_scaled(static_cast<std::size_t>(n), 0.0);
+    auto apply_preconditioner = [&](const std::vector<double>& residual, std::vector<double>& out) {
+        for (py::ssize_t i = 0; i < n; ++i) {
+            double sum = 0.0;
+            for (std::int64_t ptr = indptr(i); ptr < indptr(i + 1); ++ptr) {
+                const std::int64_t col = indices(ptr);
+                if (col < i) {
+                    sum += data(ptr) * precond_forward[static_cast<std::size_t>(col)];
+                }
+            }
+            precond_forward[static_cast<std::size_t>(i)] =
+                (residual[static_cast<std::size_t>(i)] - sum) / diag[static_cast<std::size_t>(i)];
+        }
+        for (py::ssize_t i = 0; i < n; ++i) {
+            precond_scaled[static_cast<std::size_t>(i)] =
+                diag[static_cast<std::size_t>(i)] * precond_forward[static_cast<std::size_t>(i)];
+            out[static_cast<std::size_t>(i)] = 0.0;
+        }
+        for (py::ssize_t ii = 0; ii < n; ++ii) {
+            const py::ssize_t i = n - 1 - ii;
+            double sum = 0.0;
+            for (std::int64_t ptr = indptr(i); ptr < indptr(i + 1); ++ptr) {
+                const std::int64_t col = indices(ptr);
+                if (col > i) {
+                    sum += data(ptr) * out[static_cast<std::size_t>(col)];
+                }
+            }
+            out[static_cast<std::size_t>(i)] =
+                (precond_scaled[static_cast<std::size_t>(i)] - sum) / diag[static_cast<std::size_t>(i)];
+        }
+    };
+
+    std::vector<double> x(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> r(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> z(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> p(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> ap(static_cast<std::size_t>(n), 0.0);
+    double rhs_norm2 = 0.0;
+    for (py::ssize_t i = 0; i < n; ++i) {
+        r[static_cast<std::size_t>(i)] = b(i);
+        rhs_norm2 += b(i) * b(i);
+    }
+    apply_preconditioner(r, z);
+    for (py::ssize_t i = 0; i < n; ++i) {
+        p[static_cast<std::size_t>(i)] = z[static_cast<std::size_t>(i)];
+    }
+    const double rhs_norm = std::sqrt(rhs_norm2);
+    const double tolerance = std::max(std::abs(atol), std::abs(rtol) * rhs_norm);
+    double residual_norm = rhs_norm;
+    double rz_old = dot(r, z);
+    std::int64_t info = 0;
+    std::int64_t iterations = 0;
+    if (residual_norm > tolerance && std::abs(rz_old) > 1.0e-300) {
+        for (iterations = 1; iterations <= maxiter; ++iterations) {
+            apply_operator(p, ap);
+            const double denom = dot(p, ap);
+            if (std::abs(denom) <= 1.0e-300) {
+                info = 2;
+                break;
+            }
+            const double alpha = rz_old / denom;
+            double res2 = 0.0;
+            for (py::ssize_t i = 0; i < n; ++i) {
+                const std::size_t idx = static_cast<std::size_t>(i);
+                x[idx] += alpha * p[idx];
+                r[idx] -= alpha * ap[idx];
+                res2 += r[idx] * r[idx];
+            }
+            residual_norm = std::sqrt(res2);
+            if (residual_norm <= tolerance) {
+                info = 0;
+                break;
+            }
+            apply_preconditioner(r, z);
+            const double rz_new = dot(r, z);
+            if (std::abs(rz_old) <= 1.0e-300) {
+                info = 3;
+                break;
+            }
+            const double beta = rz_new / rz_old;
+            for (py::ssize_t i = 0; i < n; ++i) {
+                const std::size_t idx = static_cast<std::size_t>(i);
+                p[idx] = z[idx] + beta * p[idx];
+            }
+            rz_old = rz_new;
+        }
+        if (iterations > maxiter && residual_norm > tolerance) {
+            iterations = maxiter;
+            info = 1;
+        }
+    }
+    for (py::ssize_t i = 0; i < n; ++i) {
+        x_out(i) = x[static_cast<std::size_t>(i)];
+    }
+    return py::make_tuple(solution, info, iterations, residual_norm);
+}
+
 PYBIND11_MODULE(_sfc_cpp, m) {
     m.doc() = "C++ fused SDF field-population and field-contact kernels";
     m.def("closest_points_all_faces", &closest_points_all_faces);
     m.def("closest_points_padded_aabb", &closest_points_padded_aabb);
     m.def("surface_penalty_response", &surface_penalty_response);
     m.def("contact_stiffness_matvec", &contact_stiffness_matvec);
+    m.def("solve_contact_tangent_pcg", &solve_contact_tangent_pcg);
 }
