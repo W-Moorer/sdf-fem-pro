@@ -55,7 +55,7 @@ from validation.run_abaqus_sphere_drop_short_validation import (  # noqa: E402
     _plot_abs_error_curve,
     _plot_curve,
     _resolved_contact_stiffness,
-    _stress_metrics,
+    _stress_metric_summary,
     _surface_node_area_weights,
     _write_csv,
     parse_sphere_drop_inp,
@@ -282,7 +282,7 @@ def run_sfc_lagrangian_sdf_full_history(
                 velocity_tangent_factor=0.0,
                 n_dofs=n_dofs,
             )
-            max_vm, max_strain = _stress_metrics(model, u)
+            stress_summary = _stress_metric_summary(model, u)
             rows.append(
                 {
                     "source": "sfc_lagrangian_sdf_full",
@@ -295,8 +295,7 @@ def run_sfc_lagrangian_sdf_full_history(
                     "max_penetration": float(max_pen),
                     "normal_force_z": float(np.sum(f_contact[2::3])),
                     "contact_energy": float(contact_energy),
-                    "max_von_mises": float(max_vm),
-                    "max_strain_norm": float(max_strain),
+                    **stress_summary,
                     "contact_path": "MaterialSDF+LagrangianSDFContactOracle",
                     "contact_integration": str(contact_integration),
                     "time_integrator": integrator_name,
@@ -369,8 +368,12 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
     rows = _metric_rows(model, comparison, sfc_rows, abaqus_rows)
     sfc_first = _first_contact_time(sfc_rows)
     abaqus_first = _first_contact_time(abaqus_rows)
-    vm_errors = np.asarray([abs(float(row["sfc_max_von_mises"]) - float(row["abaqus_max_von_mises"])) for row in comparison], dtype=float)
-    strain_errors = np.asarray([abs(float(row["sfc_max_strain_norm"]) - float(row["abaqus_max_strain_norm"])) for row in comparison], dtype=float)
+    vm_errors = np.asarray([float(row["von_mises_abs_error"]) for row in comparison], dtype=float)
+    strain_errors = np.asarray([float(row["strain_norm_abs_error"]) for row in comparison], dtype=float)
+    vm_p95_errors = np.asarray([float(row["p95_von_mises_abs_error"]) for row in comparison if "p95_von_mises_abs_error" in row], dtype=float)
+    vm_mean_errors = np.asarray([float(row["volume_mean_von_mises_abs_error"]) for row in comparison if "volume_mean_von_mises_abs_error" in row], dtype=float)
+    strain_p95_errors = np.asarray([float(row["p95_strain_norm_abs_error"]) for row in comparison if "p95_strain_norm_abs_error" in row], dtype=float)
+    strain_mean_errors = np.asarray([float(row["volume_mean_strain_norm_abs_error"]) for row in comparison if "volume_mean_strain_norm_abs_error" in row], dtype=float)
     z_errors = np.asarray([float(row["z_cm_abs_error"]) for row in comparison], dtype=float)
     gap_errors = np.asarray([float(row["min_gap_abs_error"]) for row in comparison], dtype=float)
     force_errors = np.asarray([float(row["normal_force_z_abs_error"]) for row in comparison if "normal_force_z_abs_error" in row], dtype=float)
@@ -387,8 +390,16 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
             },
             {"metric": "max_von_mises_abs_error", "value": float(np.max(vm_errors)), "status": "reported"},
             {"metric": "rms_von_mises_abs_error", "value": float(np.sqrt(np.mean(vm_errors**2))), "status": "reported"},
+            {"metric": "max_p95_von_mises_abs_error", "value": "" if vm_p95_errors.size == 0 else float(np.max(vm_p95_errors)), "status": "not_available" if vm_p95_errors.size == 0 else "reported"},
+            {"metric": "rms_p95_von_mises_abs_error", "value": "" if vm_p95_errors.size == 0 else float(np.sqrt(np.mean(vm_p95_errors**2))), "status": "not_available" if vm_p95_errors.size == 0 else "reported"},
+            {"metric": "max_volume_mean_von_mises_abs_error", "value": "" if vm_mean_errors.size == 0 else float(np.max(vm_mean_errors)), "status": "not_available" if vm_mean_errors.size == 0 else "reported"},
+            {"metric": "rms_volume_mean_von_mises_abs_error", "value": "" if vm_mean_errors.size == 0 else float(np.sqrt(np.mean(vm_mean_errors**2))), "status": "not_available" if vm_mean_errors.size == 0 else "reported"},
             {"metric": "max_strain_norm_abs_error", "value": float(np.max(strain_errors)), "status": "reported"},
             {"metric": "rms_strain_norm_abs_error", "value": float(np.sqrt(np.mean(strain_errors**2))), "status": "reported"},
+            {"metric": "max_p95_strain_norm_abs_error", "value": "" if strain_p95_errors.size == 0 else float(np.max(strain_p95_errors)), "status": "not_available" if strain_p95_errors.size == 0 else "reported"},
+            {"metric": "rms_p95_strain_norm_abs_error", "value": "" if strain_p95_errors.size == 0 else float(np.sqrt(np.mean(strain_p95_errors**2))), "status": "not_available" if strain_p95_errors.size == 0 else "reported"},
+            {"metric": "max_volume_mean_strain_norm_abs_error", "value": "" if strain_mean_errors.size == 0 else float(np.max(strain_mean_errors)), "status": "not_available" if strain_mean_errors.size == 0 else "reported"},
+            {"metric": "rms_volume_mean_strain_norm_abs_error", "value": "" if strain_mean_errors.size == 0 else float(np.sqrt(np.mean(strain_mean_errors**2))), "status": "not_available" if strain_mean_errors.size == 0 else "reported"},
             {"metric": "full_z_cm_l2_error", "value": float(np.linalg.norm(z_errors)), "status": "reported"},
             {"metric": "full_min_gap_l2_error", "value": float(np.linalg.norm(gap_errors)), "status": "reported"},
             {"metric": "max_normal_force_z_abs_error", "value": "" if force_errors.size == 0 else float(np.max(force_errors)), "status": "not_available" if force_errors.size == 0 else "reported"},
@@ -460,7 +471,11 @@ def _write_full_summary(path: Path, metrics: list[Row], outputs: dict[str, Path]
         "max_z_cm_abs_error",
         "max_min_gap_abs_error",
         "max_von_mises_abs_error",
+        "rms_p95_von_mises_abs_error",
+        "rms_volume_mean_von_mises_abs_error",
         "max_strain_norm_abs_error",
+        "rms_p95_strain_norm_abs_error",
+        "rms_volume_mean_strain_norm_abs_error",
         "sfc_solve_wall_seconds",
         "contact_stiffness",
         "contact_damping",
@@ -545,6 +560,18 @@ def run_validation(
     has_force_reference = bool(comparison and "normal_force_z_abs_error" in comparison[0])
     has_energy_reference = bool(comparison and "contact_energy_abs_error" in comparison[0])
     has_active_area_reference = bool(comparison and "active_contact_area_abs_error" in comparison[0])
+    has_robust_stress_metrics = bool(comparison and "p95_von_mises_abs_error" in comparison[0] and "volume_mean_von_mises_abs_error" in comparison[0])
+    has_robust_strain_metrics = bool(comparison and "p95_strain_norm_abs_error" in comparison[0] and "volume_mean_strain_norm_abs_error" in comparison[0])
+    if has_robust_stress_metrics:
+        outputs["stress_p95_curve"] = out_dir / "abaqus_sphere_drop_full_von_mises_p95.png"
+        outputs["stress_p95_error_curve"] = out_dir / "abaqus_sphere_drop_full_von_mises_p95_abs_error.png"
+        outputs["stress_volume_mean_curve"] = out_dir / "abaqus_sphere_drop_full_von_mises_volume_mean.png"
+        outputs["stress_volume_mean_error_curve"] = out_dir / "abaqus_sphere_drop_full_von_mises_volume_mean_abs_error.png"
+    if has_robust_strain_metrics:
+        outputs["strain_p95_curve"] = out_dir / "abaqus_sphere_drop_full_strain_norm_p95.png"
+        outputs["strain_p95_error_curve"] = out_dir / "abaqus_sphere_drop_full_strain_norm_p95_abs_error.png"
+        outputs["strain_volume_mean_curve"] = out_dir / "abaqus_sphere_drop_full_strain_norm_volume_mean.png"
+        outputs["strain_volume_mean_error_curve"] = out_dir / "abaqus_sphere_drop_full_strain_norm_volume_mean_abs_error.png"
     if has_force_reference:
         outputs["normal_force_curve"] = out_dir / "abaqus_sphere_drop_full_normal_force_z.png"
         outputs["normal_force_error_curve"] = out_dir / "abaqus_sphere_drop_full_normal_force_z_abs_error.png"
@@ -566,6 +593,16 @@ def run_validation(
     _plot_abs_error_curve(outputs["stress_error_curve"], comparison, y_error="von_mises_abs_error", ylabel="Max von Mises abs. error", title="Stress history error")
     _plot_curve(outputs["strain_curve"], comparison, y_sfc="sfc_max_strain_norm", y_abq="abaqus_max_strain_norm", ylabel="Max strain norm", title="Full strain history")
     _plot_abs_error_curve(outputs["strain_error_curve"], comparison, y_error="strain_norm_abs_error", ylabel="Max strain norm abs. error", title="Strain history error")
+    if has_robust_stress_metrics:
+        _plot_curve(outputs["stress_p95_curve"], comparison, y_sfc="sfc_p95_von_mises", y_abq="abaqus_p95_von_mises", ylabel="P95 von Mises stress", title="P95 stress history")
+        _plot_abs_error_curve(outputs["stress_p95_error_curve"], comparison, y_error="p95_von_mises_abs_error", ylabel="P95 von Mises abs. error", title="P95 stress error")
+        _plot_curve(outputs["stress_volume_mean_curve"], comparison, y_sfc="sfc_volume_mean_von_mises", y_abq="abaqus_volume_mean_von_mises", ylabel="Volume-mean von Mises stress", title="Volume-mean stress history")
+        _plot_abs_error_curve(outputs["stress_volume_mean_error_curve"], comparison, y_error="volume_mean_von_mises_abs_error", ylabel="Volume-mean stress abs. error", title="Volume-mean stress error")
+    if has_robust_strain_metrics:
+        _plot_curve(outputs["strain_p95_curve"], comparison, y_sfc="sfc_p95_strain_norm", y_abq="abaqus_p95_strain_norm", ylabel="P95 strain norm", title="P95 strain history")
+        _plot_abs_error_curve(outputs["strain_p95_error_curve"], comparison, y_error="p95_strain_norm_abs_error", ylabel="P95 strain norm abs. error", title="P95 strain error")
+        _plot_curve(outputs["strain_volume_mean_curve"], comparison, y_sfc="sfc_volume_mean_strain_norm", y_abq="abaqus_volume_mean_strain_norm", ylabel="Volume-mean strain norm", title="Volume-mean strain history")
+        _plot_abs_error_curve(outputs["strain_volume_mean_error_curve"], comparison, y_error="volume_mean_strain_norm_abs_error", ylabel="Volume-mean strain norm abs. error", title="Volume-mean strain error")
     if has_force_reference:
         _plot_curve(outputs["normal_force_curve"], comparison, y_sfc="sfc_normal_force_z", y_abq="abaqus_normal_force_z", ylabel="Normal contact force (N)", title="Normal contact force history")
         _plot_abs_error_curve(outputs["normal_force_error_curve"], comparison, y_error="normal_force_z_abs_error", ylabel="Normal force abs. error (N)", title="Normal contact force error")

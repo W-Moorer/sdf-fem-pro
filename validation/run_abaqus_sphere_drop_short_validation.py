@@ -260,10 +260,34 @@ def _plane_oracle(model: AbaqusSphereDropModel) -> LagrangianSDFContactOracle:
     return LagrangianSDFContactOracle(plane, model.plane_nodes, search_radius=0.20, patch_cell_size=0.25)
 
 
-def _stress_metrics(model: AbaqusSphereDropModel, u: np.ndarray) -> tuple[float, float]:
+def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
+    if values.size == 0:
+        return 0.0
+    total = float(np.sum(weights))
+    if total <= 0.0:
+        return float(np.mean(values))
+    return float(np.dot(weights, values) / total)
+
+
+def _field_summary(values: np.ndarray, weights: np.ndarray | None = None) -> dict[str, float]:
+    data = np.asarray(values, dtype=float).reshape(-1)
+    if data.size == 0:
+        return {"max": 0.0, "p95": 0.0, "volume_mean": 0.0}
+    weight_values = np.ones(data.shape, dtype=float) if weights is None else np.asarray(weights, dtype=float).reshape(-1)
+    if weight_values.shape != data.shape:
+        raise ValueError("weights must match values")
+    return {
+        "max": float(np.max(data)),
+        "p95": float(np.percentile(data, 95.0)),
+        "volume_mean": _weighted_mean(data, weight_values),
+    }
+
+
+def _stress_metric_summary(model: AbaqusSphereDropModel, u: np.ndarray) -> dict[str, float]:
     C = isotropic_linear_elasticity_matrix(model.young, model.poisson)
     values: list[float] = []
     strain_norms: list[float] = []
+    volumes: list[float] = []
     u_nodes = u.reshape((-1, 3))
     for element in model.elements:
         B = tet4_strain_displacement_matrix(model.nodes[element])
@@ -273,7 +297,22 @@ def _stress_metrics(model: AbaqusSphereDropModel, u: np.ndarray) -> tuple[float,
         vm = math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3.0 * (sxy**2 + syz**2 + sxz**2))
         values.append(float(vm))
         strain_norms.append(float(np.linalg.norm(strain)))
-    return float(max(values, default=0.0)), float(max(strain_norms, default=0.0))
+        volumes.append(float(tet4_volume(model.nodes[element])))
+    stress_summary = _field_summary(np.asarray(values, dtype=float), np.asarray(volumes, dtype=float))
+    strain_summary = _field_summary(np.asarray(strain_norms, dtype=float), np.asarray(volumes, dtype=float))
+    return {
+        "max_von_mises": stress_summary["max"],
+        "p95_von_mises": stress_summary["p95"],
+        "volume_mean_von_mises": stress_summary["volume_mean"],
+        "max_strain_norm": strain_summary["max"],
+        "p95_strain_norm": strain_summary["p95"],
+        "volume_mean_strain_norm": strain_summary["volume_mean"],
+    }
+
+
+def _stress_metrics(model: AbaqusSphereDropModel, u: np.ndarray) -> tuple[float, float]:
+    summary = _stress_metric_summary(model, u)
+    return float(summary["max_von_mises"]), float(summary["max_strain_norm"])
 
 
 def _mass_weighted_center_z(nodes: np.ndarray, elements: np.ndarray, current: np.ndarray) -> float:
@@ -350,7 +389,7 @@ def run_sfc_lagrangian_sdf_short_history(
         u[2::3] = -0.5 * model.gravity * float(time) * float(time)
         current = model.nodes + u.reshape((-1, 3))
         f_contact, min_gap, active_count, max_pen, contact_energy = contact_response(u)
-        max_vm, max_strain = _stress_metrics(model, u)
+        stress_summary = _stress_metric_summary(model, u)
         rows.append(
             {
                 "source": "sfc_lagrangian_sdf",
@@ -362,8 +401,7 @@ def run_sfc_lagrangian_sdf_short_history(
                 "max_penetration": float(max_pen),
                 "normal_force_z": float(np.sum(f_contact[2::3])),
                 "contact_energy": float(contact_energy),
-                "max_von_mises": float(max_vm),
-                "max_strain_norm": float(max_strain),
+                **stress_summary,
                 "contact_path": "MaterialSDF+LagrangianSDFContactOracle",
             }
         )
@@ -489,6 +527,8 @@ def _abaqus_history_from_vtk(model: AbaqusSphereDropModel, vtk_dir: Path, *, dur
         ],
         dtype=float,
     )
+    stress_cell_ids = np.asarray(tet_cell_ids if tet_cell_ids else [int(cell_id) for cell_id in sphere_cell_ids], dtype=np.int64)
+    stress_volumes = reference_volumes if reference_volumes.size == stress_cell_ids.size else np.ones(stress_cell_ids.shape, dtype=float)
     contact_penalty = model.contact_penalty_normal_stiffness
     surface_quadrature = triangle_surface_quadrature_cache(_boundary_faces(model.elements), model.nodes, order=3)
     rows: list[Row] = []
@@ -497,6 +537,8 @@ def _abaqus_history_from_vtk(model: AbaqusSphereDropModel, vtk_dir: Path, *, dur
         points = frame.points
         cell_vm = frame.cell_scalars.get("von_mises", np.zeros(len(frame.cells), dtype=float))
         cell_strain = frame.cell_scalars.get("logarithmic_strain_norm", np.zeros(len(frame.cells), dtype=float))
+        vm_summary = _field_summary(cell_vm[stress_cell_ids], stress_volumes)
+        strain_summary = _field_summary(cell_strain[stress_cell_ids], stress_volumes)
         current_model_points = points[model_to_vtk]
         if reference_volumes.size:
             centers_z = np.asarray([np.mean(points[frame.cells[cell_id], 2]) for cell_id in tet_cell_ids], dtype=float)
@@ -528,8 +570,12 @@ def _abaqus_history_from_vtk(model: AbaqusSphereDropModel, vtk_dir: Path, *, dur
                 "max_penetration": float(np.max(quad_penetration)) if quad_penetration.size else 0.0,
                 "normal_force_z": normal_force_z,
                 "contact_energy": contact_energy,
-                "max_von_mises": float(np.max(cell_vm[sphere_cell_ids])),
-                "max_strain_norm": float(np.max(cell_strain[sphere_cell_ids])),
+                "max_von_mises": vm_summary["max"],
+                "p95_von_mises": vm_summary["p95"],
+                "volume_mean_von_mises": vm_summary["volume_mean"],
+                "max_strain_norm": strain_summary["max"],
+                "p95_strain_norm": strain_summary["p95"],
+                "volume_mean_strain_norm": strain_summary["volume_mean"],
                 "contact_path": "Abaqus native contact VTK replay",
             }
         )
@@ -584,6 +630,10 @@ def _comparison_rows(abaqus_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
     gap_abq = _interp_series(abaqus_rows, "min_gap", sfc_times)
     vm_abq = _interp_series(abaqus_rows, "max_von_mises", sfc_times)
     strain_abq = _interp_series(abaqus_rows, "max_strain_norm", sfc_times)
+    vm_p95_abq = _interp_optional_series(abaqus_rows, "p95_von_mises", sfc_times)
+    vm_mean_abq = _interp_optional_series(abaqus_rows, "volume_mean_von_mises", sfc_times)
+    strain_p95_abq = _interp_optional_series(abaqus_rows, "p95_strain_norm", sfc_times)
+    strain_mean_abq = _interp_optional_series(abaqus_rows, "volume_mean_strain_norm", sfc_times)
     force_abq = _interp_optional_series(abaqus_rows, "normal_force_z", sfc_times)
     energy_abq = _interp_optional_series(abaqus_rows, "contact_energy", sfc_times)
     active_area_abq = _interp_optional_series(abaqus_rows, "active_contact_area", sfc_times)
@@ -604,6 +654,22 @@ def _comparison_rows(abaqus_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
             "abaqus_max_strain_norm": float(strain_abq[i]),
             "strain_norm_abs_error": float(abs(float(row["max_strain_norm"]) - strain_abq[i])),
         }
+        if vm_p95_abq is not None and "p95_von_mises" in row:
+            comparison_row["sfc_p95_von_mises"] = float(row["p95_von_mises"])
+            comparison_row["abaqus_p95_von_mises"] = float(vm_p95_abq[i])
+            comparison_row["p95_von_mises_abs_error"] = float(abs(float(row["p95_von_mises"]) - vm_p95_abq[i]))
+        if vm_mean_abq is not None and "volume_mean_von_mises" in row:
+            comparison_row["sfc_volume_mean_von_mises"] = float(row["volume_mean_von_mises"])
+            comparison_row["abaqus_volume_mean_von_mises"] = float(vm_mean_abq[i])
+            comparison_row["volume_mean_von_mises_abs_error"] = float(abs(float(row["volume_mean_von_mises"]) - vm_mean_abq[i]))
+        if strain_p95_abq is not None and "p95_strain_norm" in row:
+            comparison_row["sfc_p95_strain_norm"] = float(row["p95_strain_norm"])
+            comparison_row["abaqus_p95_strain_norm"] = float(strain_p95_abq[i])
+            comparison_row["p95_strain_norm_abs_error"] = float(abs(float(row["p95_strain_norm"]) - strain_p95_abq[i]))
+        if strain_mean_abq is not None and "volume_mean_strain_norm" in row:
+            comparison_row["sfc_volume_mean_strain_norm"] = float(row["volume_mean_strain_norm"])
+            comparison_row["abaqus_volume_mean_strain_norm"] = float(strain_mean_abq[i])
+            comparison_row["volume_mean_strain_norm_abs_error"] = float(abs(float(row["volume_mean_strain_norm"]) - strain_mean_abq[i]))
         if force_abq is not None and "normal_force_z" in row:
             comparison_row["sfc_normal_force_z"] = float(row["normal_force_z"])
             comparison_row["abaqus_normal_force_z"] = float(force_abq[i])

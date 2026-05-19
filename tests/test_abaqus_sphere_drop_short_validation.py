@@ -162,11 +162,11 @@ def test_short_validation_runner_writes_outputs_with_existing_reference(tmp_path
 
 def test_comparison_rows_report_gap_and_trajectory_errors() -> None:
     abaqus = [
-        {"time": 0.0, "z_cm": 1.0, "min_gap": 0.2, "normal_force_z": 0.0, "contact_energy": 0.0, "active_contact_area": 0.0, "max_von_mises": 0.0, "max_strain_norm": 0.0},
-        {"time": 1.0, "z_cm": 0.8, "min_gap": 0.0, "normal_force_z": 4.0, "contact_energy": 2.0, "active_contact_area": 0.2, "max_von_mises": 2.0, "max_strain_norm": 0.1},
+        {"time": 0.0, "z_cm": 1.0, "min_gap": 0.2, "normal_force_z": 0.0, "contact_energy": 0.0, "active_contact_area": 0.0, "max_von_mises": 0.0, "p95_von_mises": 0.0, "volume_mean_von_mises": 0.0, "max_strain_norm": 0.0, "p95_strain_norm": 0.0, "volume_mean_strain_norm": 0.0},
+        {"time": 1.0, "z_cm": 0.8, "min_gap": 0.0, "normal_force_z": 4.0, "contact_energy": 2.0, "active_contact_area": 0.2, "max_von_mises": 2.0, "p95_von_mises": 1.8, "volume_mean_von_mises": 1.0, "max_strain_norm": 0.1, "p95_strain_norm": 0.09, "volume_mean_strain_norm": 0.05},
     ]
     sfc = [
-        {"time": 0.5, "z_cm": 0.9, "min_gap": 0.1, "normal_force_z": 2.5, "contact_energy": 0.75, "active_contact_area": 0.08, "max_von_mises": 1.0, "max_strain_norm": 0.05},
+        {"time": 0.5, "z_cm": 0.9, "min_gap": 0.1, "normal_force_z": 2.5, "contact_energy": 0.75, "active_contact_area": 0.08, "max_von_mises": 1.0, "p95_von_mises": 0.95, "volume_mean_von_mises": 0.45, "max_strain_norm": 0.05, "p95_strain_norm": 0.047, "volume_mean_strain_norm": 0.02},
     ]
 
     rows = _comparison_rows(abaqus, sfc)
@@ -176,3 +176,7 @@ def test_comparison_rows_report_gap_and_trajectory_errors() -> None:
     assert rows[0]["normal_force_z_abs_error"] == pytest.approx(0.5)
     assert rows[0]["contact_energy_abs_error"] == pytest.approx(0.25)
     assert rows[0]["active_contact_area_abs_error"] == pytest.approx(0.02)
+    assert rows[0]["p95_von_mises_abs_error"] == pytest.approx(0.05)
+    assert rows[0]["volume_mean_von_mises_abs_error"] == pytest.approx(0.05)
+    assert rows[0]["p95_strain_norm_abs_error"] == pytest.approx(0.002)
+    assert rows[0]["volume_mean_strain_norm_abs_error"] == pytest.approx(0.005)

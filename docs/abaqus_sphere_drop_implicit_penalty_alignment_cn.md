@@ -119,11 +119,36 @@ python validation\run_abaqus_sphere_drop_full_validation.py `
 | `full_z_cm_l2_error` | `0.1594142488` | `0.0254976527` |
 | `rms_strain_norm_abs_error` | `0.0012440639` | `0.0006784661` |
 | `rms_von_mises_abs_error` | `4.236631e4` | `1.974471e4` |
+| `rms_p95_von_mises_abs_error` | 未输出 | `7.658351e3` |
+| `rms_volume_mean_von_mises_abs_error` | 未输出 | `1.822384e3` |
+| `rms_p95_strain_norm_abs_error` | 未输出 | `2.303409e-4` |
+| `rms_volume_mean_strain_norm_abs_error` | 未输出 | `5.349043e-5` |
 | `surface_sample_count` | `266` | `1584` |
-| `sfc_solve_wall_seconds` | `135.108105 s` | `339.739580 s` |
+| `sfc_solve_wall_seconds` | `135.108105 s` | `368.710001 s` |
 
-这说明 HHT 算法耗散和面高斯积分显著改善了位移轨迹、应变和应力时间历程的一致性，但计算时间上升明显。与 Abaqus 原生求解 `345.819903 s` 相比，新 SFC 路径约为 `1.02x`，因此这个版本更适合作为“精度对齐路径”，不能作为最终加速路径。
+这说明 HHT 算法耗散和面高斯积分显著改善了位移轨迹、应变和应力时间历程的一致性，但计算时间上升明显。与 Abaqus 原生求解 `345.819903 s` 相比，新 SFC 路径略慢，因此这个版本更适合作为“精度对齐路径”，不能作为最终加速路径。
 
 接触力需要单独说明：当前 Abaqus VTK 文件没有原生接触反力历史。脚本只能用导出的几何穿透量和线性罚刚度重构一个诊断性 contact force。该重构在后期给出约 `88.6 N`，而 SFC 稳态接触力约 `5.99 N`，与球体重量一致。因此论文中不能把 VTK 反推力当成 Abaqus 原生接触反力。若要严格对齐接触力，应重新导出 Abaqus 原生接触反力、接触压力或约束反力历史。
 
-应力/应变对比现在按单元场历史进行：SFC 使用 TET4 单元常应变中心值恢复线弹性应力，Abaqus 使用 ODB 导出的单元平均 `S` 和 `LE` cell scalar。二者都是单元级最大值时间历程，不再混用节点量和单元量；但 `LE` 与小应变工程应变仍不是源级完全相同的应变度量。
+应力/应变对比现在按单元场历史进行：SFC 使用 TET4 单元常应变中心值恢复线弹性应力，Abaqus 使用 ODB 导出的单元平均 `S` 和 `LE` cell scalar。脚本同时输出 `max`、`p95` 和体积加权平均三个口径，不再只依赖单个最大值；但 `LE` 与小应变工程应变仍不是源级完全相同的应变度量。
+
+## Abaqus 理论文档对当前差异的解释
+
+基于 Abaqus/Standard 隐式动力学、接触约束和线性 pressure-overclosure 文档，当前 SFC 与 Abaqus 的差异主要来自以下几点：
+
+1. Abaqus/Standard 的隐式动力学不是单纯的 Newmark 平均加速度法。它允许使用带算法耗散的 Hilber-Hughes-Taylor 类积分，并与自动时间增量、非线性迭代和接触收敛控制耦合。SFC 的 HHT `alpha=-0.3` 是显式暴露的近似对齐参数，不等价于 Abaqus 内部完整求解流程。
+2. 线性罚函数中的同一个罚刚度只定义 pressure-overclosure 斜率，不保证接触面积、接触积分点、从属/主面投影、接触释放和压力平滑与 Abaqus 完全一致。
+3. Abaqus 输出的 `S` 和 `LE` 是单元/积分点场输出经 ODB 导出后的单元数据；SFC 当前使用 TET4 单元常应变恢复小应变应力。因此最大值对单元局部噪声和接触边界激活非常敏感。
+
+相关文档入口：
+
+- Abaqus contact constraint and pressure-overclosure behavior: `https://docs.software.vt.edu/abaqusv2024/English/SIMACAEITNRefMap/simaitn-c-contactconstraints.htm`
+- Abaqus/Standard implicit dynamic analysis and HHT-style numerical damping: `https://abaqus-docs.mit.edu/2017/English/SIMACAEANLRefMap/simaanl-c-dynamic.htm`
+
+因此，论文对 Abaqus 对齐的主指标应从单点最大应力/应变扩展为：
+
+- `max`：保留为冲击峰值和局部接触奇异性的诊断指标；
+- `p95`：降低单个接触边界单元对结论的支配；
+- `volume_mean`：反映整体体积场响应。
+
+验证脚本已经新增 `p95_von_mises`、`volume_mean_von_mises`、`p95_strain_norm` 和 `volume_mean_strain_norm` 的 SFC/Abaqus 时间曲线与误差曲线。后续论文主图建议优先使用位移曲线、`p95` 曲线和体积加权平均曲线，最大值曲线放在补充材料或作为峰值诊断。
