@@ -62,3 +62,36 @@ def surface_penalty_response(
         int(slave_dof_offset),
         int(master_dof_offset),
     )
+
+
+def contact_stiffness_matvec(
+    vector: np.ndarray,
+    scale: np.ndarray,
+    slave_node_ids: np.ndarray,
+    slave_weights: np.ndarray,
+    gradients: np.ndarray,
+    face_node_ids: np.ndarray,
+    grid_weights: np.ndarray,
+    barycentric: np.ndarray,
+    normals: np.ndarray,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+) -> np.ndarray:
+    """Apply the matrix-free contact tangent with the optional C++ backend."""
+
+    _require_backend()
+    return _BACKEND.contact_stiffness_matvec(
+        np.ascontiguousarray(vector, dtype=np.float64),
+        np.ascontiguousarray(scale, dtype=np.float64),
+        np.ascontiguousarray(slave_node_ids, dtype=np.int64),
+        np.ascontiguousarray(slave_weights, dtype=np.float64),
+        np.ascontiguousarray(gradients, dtype=np.float64),
+        np.ascontiguousarray(face_node_ids, dtype=np.int64),
+        np.ascontiguousarray(grid_weights, dtype=np.float64),
+        np.ascontiguousarray(barycentric, dtype=np.float64),
+        np.ascontiguousarray(normals, dtype=np.float64),
+        int(n_total_dofs),
+        int(slave_dof_offset),
+        int(master_dof_offset),
+    )

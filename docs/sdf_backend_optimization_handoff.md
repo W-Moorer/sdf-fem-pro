@@ -184,3 +184,109 @@ python validation/run_large_area_dynamic_surface_contact.py \
    - core solve time；
    - diagnostics/postprocess time。
 4. 保持精度门槛：任何减少迭代、放宽 CG 容差、跳过 accepted-state reevaluation 的方案，都不能作为“不降精度”的默认路径。
+
+## 2026-05-19 追加：C++ tangent matvec 与 deferred diagnostics
+
+本轮继续推进两个不改变接触结果的工程化点。
+
+### 已实现
+
+1. C++ matrix-free contact tangent matvec
+   - 新增 C++ 入口：`contact_stiffness_matvec(...)`
+   - Python 包装：`src/sfc/contact/_cpp_field_contact.py`
+   - `FieldContactMatrixFreeStiffness.matvec(...)` 在 C++ extension 可用时自动调用 C++ matvec。
+   - 数学形式仍是同一个 `K_c v = J^T W J v`，没有显式装配全局 `Kc`。
+
+2. Deferred diagnostics / postprocess
+   - 新增配置：`DynamicSurfaceConfig.defer_diagnostics`
+   - 新增 CLI：`--defer-diagnostics`
+   - 开启后，求解循环不再为 history/VTK 额外重建 accepted-state response。
+   - 接触诊断在求解结束后对保存的 accepted states 逐帧后处理生成，因此 gap、force、energy 历史量不变。
+
+### 验证
+
+针对性测试：
+
+```bash
+python -m pytest -q tests/test_field_surface_to_surface_contact.py::test_cpp_contact_stiffness_matvec_matches_reference_when_built tests/test_field_surface_to_surface_contact.py::test_vectorized_surface_response_matches_reference_force tests/test_large_area_dynamic_surface_contact.py::test_large_area_dynamic_surface_contact_deferred_diagnostics_outputs
+```
+
+结果：
+
+```text
+3 passed in 2.55s
+```
+
+0.1 s formal-size deferred diagnostics 与原路径对比：
+
+| 量 | 最大差异 |
+| --- | ---: |
+| upper mean z displacement | `0.0` |
+| lower top mean z displacement | `0.0` |
+| min gap | `0.0` |
+| max penetration | `0.0` |
+| normal force | `0.0` |
+| contact energy | `0.0` |
+
+0.1 s matrix-free C++ matvec 与原 matrix-free 路径对比：
+
+| 量 | 最大差异 |
+| --- | ---: |
+| upper mean z displacement | `2.78e-17` |
+| lower top mean z displacement | `1.73e-18` |
+| min gap | `2.48e-15` |
+| max penetration | `2.48e-15` |
+| normal force | `2.91e-11` |
+| contact energy | `3.64e-12` |
+
+### 1.0 s 大面积压力驱动动力学算例
+
+命令：
+
+```bash
+python validation/run_large_area_dynamic_surface_contact.py \
+  --skip-calculix \
+  --out-dir results/large_area_pressure_dynamic_1s_dt001_deferdiag \
+  --total-time 1.0 \
+  --dt 0.001 \
+  --band-radius 8.0 \
+  --sdf-candidate-padding 1.0 \
+  --spacing 0.35 \
+  --nx 36 --ny 36 --nz 2 \
+  --driver-nx 36 --driver-ny 36 \
+  --frame-stride 50 \
+  --newmark-iterations 3 \
+  --defer-diagnostics
+```
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| complete command wall including output/postprocess | `1.046569e+02 s` |
+| SFC solve-loop wall excluding deferred diagnostics | `8.005022e+01 s` |
+| inner correction solve time | `7.952349e+01 s` |
+| diagnostics/postprocess time | `1.587470e+01 s` |
+| mean field update | `1.092996e-02 s/step` |
+| mean field query/contact | `3.465488e-03 s/step` |
+
+与 `results/large_area_pressure_dynamic_1s_dt001_cppcontact_reuse` 历史量逐点一致：
+
+| 量 | 最大差异 |
+| --- | ---: |
+| upper mean z displacement | `0.0` |
+| lower top mean z displacement | `0.0` |
+| min gap | `0.0` |
+| max penetration | `0.0` |
+| normal force | `0.0` |
+| contact energy | `0.0` |
+
+### 当前结论
+
+Deferred diagnostics 将可用于论文中的工程求解器计时口径：
+
+- 完整命令时间：`104.66 s`
+- 求解循环时间：`80.05 s`
+- 后处理/诊断时间：`15.87 s`
+
+这一步没有改变接触结果，但仍未让 SFC solve-loop 快于已有 CalculiX `53.63 s`。剩余主要瓶颈仍是每个时间步内的重复 field rebuild/contact iteration。下一步若要继续压到 CalculiX 以下，需要把 tangent 迭代控制和预条件求解继续 C++ 化，而不仅仅是 C++ matvec。

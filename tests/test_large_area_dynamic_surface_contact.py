@@ -45,6 +45,33 @@ def test_large_area_dynamic_surface_contact_quick_outputs(tmp_path: Path) -> Non
     assert int(outputs["vtk_frame_count"]) >= 2
 
 
+def test_large_area_dynamic_surface_contact_deferred_diagnostics_outputs(tmp_path: Path) -> None:
+    cfg = replace(
+        default_config(quick=True),
+        nx=3,
+        ny=3,
+        nz=1,
+        driver_nx=3,
+        driver_ny=3,
+        total_time=0.02,
+        dt=0.01,
+        ramp_time=0.01,
+        quadrature_order=3,
+        spacing=0.8,
+        band_radius=2.0,
+        peak_pressure=2000.0,
+        newmark_iterations=1,
+        defer_diagnostics=True,
+    )
+    outputs = run_benchmark(out_dir=tmp_path, quick=True, skip_calculix=True, cfg=cfg)
+    rows = _read_rows(Path(outputs["sfc_history"]))
+    assert rows
+    assert {row["accepted_response_reused"] for row in rows} == {"postprocess"}
+    summary = Path(outputs["summary"]).read_text(encoding="utf-8")
+    assert "Deferred diagnostics/postprocess: `True`" in summary
+    assert "SFC solve-loop wall time excluding deferred diagnostics" in summary
+
+
 def test_large_area_dynamic_runner_uses_true_field_contact_path() -> None:
     source = Path("validation/run_large_area_dynamic_surface_contact.py").read_text(encoding="utf-8")
     assert "DynamicNarrowBandSDF.build_required_points" in source

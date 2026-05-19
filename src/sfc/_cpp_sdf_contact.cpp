@@ -522,9 +522,93 @@ py::tuple surface_penalty_response(
     return py::make_tuple(force, gaps);
 }
 
+py::array_t<double> contact_stiffness_matvec(
+    py::array_t<double, py::array::c_style | py::array::forcecast> vector,
+    py::array_t<double, py::array::c_style | py::array::forcecast> scale,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> slave_node_ids,
+    py::array_t<double, py::array::c_style | py::array::forcecast> slave_weights,
+    py::array_t<double, py::array::c_style | py::array::forcecast> gradients,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> face_node_ids,
+    py::array_t<double, py::array::c_style | py::array::forcecast> grid_weights,
+    py::array_t<double, py::array::c_style | py::array::forcecast> barycentric,
+    py::array_t<double, py::array::c_style | py::array::forcecast> normals,
+    std::int64_t n_total_dofs,
+    std::int64_t slave_dof_offset,
+    std::int64_t master_dof_offset
+) {
+    const auto x = vector.unchecked<1>();
+    const auto row_scale = scale.unchecked<1>();
+    const auto snodes = slave_node_ids.unchecked<2>();
+    const auto sweights = slave_weights.unchecked<2>();
+    const auto grads = gradients.unchecked<2>();
+    const auto fnodes = face_node_ids.unchecked<3>();
+    const auto gweights = grid_weights.unchecked<2>();
+    const auto bary = barycentric.unchecked<3>();
+    const auto nrm = normals.unchecked<3>();
+    const py::ssize_t n_active = row_scale.shape(0);
+    if (x.shape(0) != static_cast<py::ssize_t>(n_total_dofs)) {
+        throw std::runtime_error("vector size does not match n_total_dofs");
+    }
+
+    py::array_t<double> out({static_cast<py::ssize_t>(n_total_dofs)});
+    auto y = out.mutable_unchecked<1>();
+    for (py::ssize_t i = 0; i < n_total_dofs; ++i) {
+        y(i) = 0.0;
+    }
+
+    for (py::ssize_t row = 0; row < n_active; ++row) {
+        double jx = 0.0;
+        for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+            const std::int64_t node = snodes(row, local_node);
+            const double sw = sweights(row, local_node);
+            const std::int64_t base = slave_dof_offset + 3 * node;
+            jx += sw * (
+                grads(row, 0) * x(base) +
+                grads(row, 1) * x(base + 1) +
+                grads(row, 2) * x(base + 2)
+            );
+        }
+        for (py::ssize_t corner = 0; corner < fnodes.shape(1); ++corner) {
+            const double gw = gweights(row, corner);
+            for (py::ssize_t face_node = 0; face_node < fnodes.shape(2); ++face_node) {
+                const std::int64_t node = fnodes(row, corner, face_node);
+                const std::int64_t base = master_dof_offset + 3 * node;
+                const double n_dot_x =
+                    nrm(row, corner, 0) * x(base) +
+                    nrm(row, corner, 1) * x(base + 1) +
+                    nrm(row, corner, 2) * x(base + 2);
+                jx -= gw * bary(row, corner, face_node) * n_dot_x;
+            }
+        }
+
+        const double scaled = row_scale(row) * jx;
+        for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+            const std::int64_t node = snodes(row, local_node);
+            const double sw = sweights(row, local_node);
+            const std::int64_t base = slave_dof_offset + 3 * node;
+            y(base) += scaled * sw * grads(row, 0);
+            y(base + 1) += scaled * sw * grads(row, 1);
+            y(base + 2) += scaled * sw * grads(row, 2);
+        }
+        for (py::ssize_t corner = 0; corner < fnodes.shape(1); ++corner) {
+            const double gw = gweights(row, corner);
+            for (py::ssize_t face_node = 0; face_node < fnodes.shape(2); ++face_node) {
+                const std::int64_t node = fnodes(row, corner, face_node);
+                const std::int64_t base = master_dof_offset + 3 * node;
+                const double coeff = -scaled * gw * bary(row, corner, face_node);
+                y(base) += coeff * nrm(row, corner, 0);
+                y(base + 1) += coeff * nrm(row, corner, 1);
+                y(base + 2) += coeff * nrm(row, corner, 2);
+            }
+        }
+    }
+    return out;
+}
+
 PYBIND11_MODULE(_sfc_cpp, m) {
     m.doc() = "C++ fused SDF field-population and field-contact kernels";
     m.def("closest_points_all_faces", &closest_points_all_faces);
     m.def("closest_points_padded_aabb", &closest_points_padded_aabb);
     m.def("surface_penalty_response", &surface_penalty_response);
+    m.def("contact_stiffness_matvec", &contact_stiffness_matvec);
 }

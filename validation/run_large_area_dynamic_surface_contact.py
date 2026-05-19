@@ -112,6 +112,7 @@ class DynamicSurfaceConfig:
     contact_tangent_cg_rtol: float
     contact_tangent_cg_atol: float
     contact_tangent_cg_maxiter: int
+    defer_diagnostics: bool
 
     @property
     def output_frequency(self) -> int:
@@ -130,6 +131,7 @@ class SFCDynamicResult:
     upper_mesh: BoxMesh | None = None
     upper_frames: list[tuple[float, np.ndarray]] | None = None
     upper_bottom_faces: np.ndarray | None = None
+    solve_wall_seconds: float = 0.0
     core_solve_seconds: float = 0.0
     diagnostics_seconds: float = 0.0
 
@@ -251,6 +253,79 @@ def _normal_force_from_response(response: Any, pressure_stiffness: float) -> flo
     gaps = np.asarray(response.gaps, dtype=float)
     penetration = np.maximum(-gaps, 0.0)
     return float(np.sum(float(pressure_stiffness) * np.asarray(response.quadrature_weights, dtype=float) * penetration))
+
+
+def _pressure_contact_diagnostics_row(
+    *,
+    time_value: float,
+    upper: BoxMesh,
+    lower: BoxMesh,
+    upper_displacement: np.ndarray,
+    lower_displacement: np.ndarray,
+    upper_bottom_faces: np.ndarray,
+    lower_top_faces: np.ndarray,
+    contact_cache: Any,
+    sdf_workspace: RequiredPointSDFWorkspace,
+    cfg: DynamicSurfaceConfig,
+) -> tuple[Row, Row]:
+    """Evaluate exact field-contact diagnostics for one accepted state."""
+
+    t = float(time_value)
+    u_upper = np.asarray(upper_displacement, dtype=float)
+    u_lower = np.asarray(lower_displacement, dtype=float)
+    x_upper = upper.X + u_upper
+    x_lower = lower.X + u_lower
+    q_points = contact_cache.points(x_upper)
+    build_t0 = time.perf_counter()
+    master_sdf = sdf_workspace.build(
+        x_lower,
+        lower_top_faces,
+        q_points,
+    )
+    build_elapsed = time.perf_counter() - build_t0
+    query_t0 = time.perf_counter()
+    response = surface_to_surface_field_penalty_response_vectorized(
+        x_upper,
+        upper_bottom_faces,
+        master_sdf,
+        pressure_stiffness=cfg.pressure_stiffness,
+        n_total_dofs=3 * upper.X.shape[0] + 3 * lower.X.shape[0],
+        slave_x_reference=upper.X,
+        quadrature_cache=contact_cache,
+        slave_dof_offset=0,
+        master_dof_offset=3 * upper.X.shape[0],
+    )
+    query_elapsed = time.perf_counter() - query_t0
+    normal_force = _normal_force_from_response(response, cfg.pressure_stiffness)
+    gaps = np.asarray(response.gaps, dtype=float)
+    history_row: Row = {
+        "time": t,
+        "top_pressure": _pressure_value(t, cfg),
+        "upper_mean_z_displacement": float(np.mean(u_upper[:, 2])),
+        "upper_bottom_mean_z": float(np.mean(x_upper[np.isclose(upper.X[:, 2], upper.X[:, 2].min()), 2])),
+        "lower_top_mean_z_displacement": float(np.mean(u_lower[np.isclose(lower.X[:, 2], lower.X[:, 2].max()), 2])),
+        "min_gap": float(response.min_gap),
+        "max_penetration": float(response.max_penetration),
+        "active_samples": int(response.active_count),
+        "quadrature_points": int(contact_cache.area_weights.size),
+        "active_fraction": float(response.active_count / max(contact_cache.area_weights.size, 1)),
+        "normal_force": normal_force,
+        "contact_energy": float(0.5 * cfg.pressure_stiffness * np.sum(contact_cache.area_weights * np.maximum(-gaps, 0.0) ** 2)),
+        "field_path": "RequiredPointSDFWorkspace.build -> field_contact",
+        "load_type": "top_pressure",
+        "accepted_response_reused": "false",
+    }
+    timing_row: Row = {
+        "time": t,
+        "field_update_seconds": float(master_sdf.stats.update_seconds),
+        "field_elapsed_seconds": float(build_elapsed),
+        "field_query_seconds": float(query_elapsed),
+        "field_query_seconds_per_sample": float(query_elapsed / max(contact_cache.area_weights.size, 1)),
+        "quadrature_points": int(contact_cache.area_weights.size),
+        "active_samples": int(response.active_count),
+        "accepted_response_reused": "false",
+    }
+    return history_row, timing_row
 
 
 def _contact_cell_fields(
@@ -572,6 +647,7 @@ def run_sfc_pressure_dynamic(
     core_solve_seconds = 0.0
     diagnostics_seconds = 0.0
     accepted_response_cache: tuple[float, Any, Any, float, float] | None = None
+    solve_loop_start = time.perf_counter()
 
     for step in range(steps + 1):
         t = float(step * dt)
@@ -580,76 +656,79 @@ def run_sfc_pressure_dynamic(
         u_lower = u[upper_dofs:].reshape((-1, 3))
         x_upper = upper.X + u_upper
         x_lower = lower.X + u_lower
-        reused_accepted_response = False
-        if accepted_response_cache is not None and abs(float(accepted_response_cache[0]) - t) <= 1.0e-12:
-            _cache_time, master_sdf, response, build_elapsed, query_elapsed = accepted_response_cache
-            accepted_response_cache = None
-            reused_accepted_response = True
-        else:
-            diagnostics_t0 = time.perf_counter()
-            q_points = contact_cache.points(x_upper)
-            build_t0 = time.perf_counter()
-            master_sdf = sdf_workspace.build(
-                x_lower,
-                lower_top_faces,
-                q_points,
-            )
-            build_elapsed = time.perf_counter() - build_t0
-            query_t0 = time.perf_counter()
-            response = surface_to_surface_field_penalty_response_vectorized(
-                x_upper,
-                upper_bottom_faces,
-                master_sdf,
-                pressure_stiffness=cfg.pressure_stiffness,
-                n_total_dofs=n_dofs,
-                slave_x_reference=upper.X,
-                quadrature_cache=contact_cache,
-                slave_dof_offset=0,
-                master_dof_offset=upper_dofs,
-            )
-            query_elapsed = time.perf_counter() - query_t0
-            diagnostics_seconds += time.perf_counter() - diagnostics_t0
-        normal_force = _normal_force_from_response(response, cfg.pressure_stiffness)
         lower_frames.append((t, u_lower.copy()))
         upper_frames.append((t, u_upper.copy()))
-        history.append(
-            {
-                "time": t,
-                "top_pressure": pressure,
-                "upper_mean_z_displacement": float(np.mean(u_upper[:, 2])),
-                "upper_bottom_mean_z": float(np.mean(x_upper[np.isclose(upper.X[:, 2], upper.X[:, 2].min()), 2])),
-                "lower_top_mean_z_displacement": float(np.mean(u_lower[np.isclose(lower.X[:, 2], lower.X[:, 2].max()), 2])),
-                "min_gap": float(response.min_gap),
-                "max_penetration": float(response.max_penetration),
-                "active_samples": int(response.active_count),
-                "quadrature_points": int(contact_cache.area_weights.size),
-                "active_fraction": float(response.active_count / max(contact_cache.area_weights.size, 1)),
-                "normal_force": normal_force,
-                "contact_energy": float(
-                    0.5
-                    * cfg.pressure_stiffness
-                    * np.sum(contact_cache.area_weights * np.maximum(-np.asarray(response.gaps, dtype=float), 0.0) ** 2)
-                ),
-                "field_path": "RequiredPointSDFWorkspace.build -> field_contact",
-                "load_type": "top_pressure",
-                "accepted_response_reused": str(reused_accepted_response).lower(),
-            }
-        )
-        timing.append(
-            {
-                "time": t,
-                "field_update_seconds": float(master_sdf.stats.update_seconds),
-                "field_elapsed_seconds": float(build_elapsed),
-                "field_query_seconds": float(query_elapsed),
-                "field_query_seconds_per_sample": float(query_elapsed / max(contact_cache.area_weights.size, 1)),
-                "quadrature_points": int(contact_cache.area_weights.size),
-                "active_samples": int(response.active_count),
-                "accepted_response_reused": str(reused_accepted_response).lower(),
-            }
-        )
+        if not cfg.defer_diagnostics:
+            reused_accepted_response = False
+            if accepted_response_cache is not None and abs(float(accepted_response_cache[0]) - t) <= 1.0e-12:
+                _cache_time, master_sdf, response, build_elapsed, query_elapsed = accepted_response_cache
+                accepted_response_cache = None
+                reused_accepted_response = True
+            else:
+                diagnostics_t0 = time.perf_counter()
+                q_points = contact_cache.points(x_upper)
+                build_t0 = time.perf_counter()
+                master_sdf = sdf_workspace.build(
+                    x_lower,
+                    lower_top_faces,
+                    q_points,
+                )
+                build_elapsed = time.perf_counter() - build_t0
+                query_t0 = time.perf_counter()
+                response = surface_to_surface_field_penalty_response_vectorized(
+                    x_upper,
+                    upper_bottom_faces,
+                    master_sdf,
+                    pressure_stiffness=cfg.pressure_stiffness,
+                    n_total_dofs=n_dofs,
+                    slave_x_reference=upper.X,
+                    quadrature_cache=contact_cache,
+                    slave_dof_offset=0,
+                    master_dof_offset=upper_dofs,
+                )
+                query_elapsed = time.perf_counter() - query_t0
+                diagnostics_seconds += time.perf_counter() - diagnostics_t0
+            normal_force = _normal_force_from_response(response, cfg.pressure_stiffness)
+            history.append(
+                {
+                    "time": t,
+                    "top_pressure": pressure,
+                    "upper_mean_z_displacement": float(np.mean(u_upper[:, 2])),
+                    "upper_bottom_mean_z": float(np.mean(x_upper[np.isclose(upper.X[:, 2], upper.X[:, 2].min()), 2])),
+                    "lower_top_mean_z_displacement": float(np.mean(u_lower[np.isclose(lower.X[:, 2], lower.X[:, 2].max()), 2])),
+                    "min_gap": float(response.min_gap),
+                    "max_penetration": float(response.max_penetration),
+                    "active_samples": int(response.active_count),
+                    "quadrature_points": int(contact_cache.area_weights.size),
+                    "active_fraction": float(response.active_count / max(contact_cache.area_weights.size, 1)),
+                    "normal_force": normal_force,
+                    "contact_energy": float(
+                        0.5
+                        * cfg.pressure_stiffness
+                        * np.sum(contact_cache.area_weights * np.maximum(-np.asarray(response.gaps, dtype=float), 0.0) ** 2)
+                    ),
+                    "field_path": "RequiredPointSDFWorkspace.build -> field_contact",
+                    "load_type": "top_pressure",
+                    "accepted_response_reused": str(reused_accepted_response).lower(),
+                }
+            )
+            timing.append(
+                {
+                    "time": t,
+                    "field_update_seconds": float(master_sdf.stats.update_seconds),
+                    "field_elapsed_seconds": float(build_elapsed),
+                    "field_query_seconds": float(query_elapsed),
+                    "field_query_seconds_per_sample": float(query_elapsed / max(contact_cache.area_weights.size, 1)),
+                    "quadrature_points": int(contact_cache.area_weights.size),
+                    "active_samples": int(response.active_count),
+                    "accepted_response_reused": str(reused_accepted_response).lower(),
+                }
+            )
         if checkpoint_dir is not None and (step % max(1, int(checkpoint_stride)) == 0 or step == steps):
-            _write_csv(checkpoint_dir / "large_area_dynamic_sfc_history_partial.csv", history)
-            _write_csv(checkpoint_dir / "large_area_dynamic_sfc_timing_partial.csv", timing)
+            if history:
+                _write_csv(checkpoint_dir / "large_area_dynamic_sfc_history_partial.csv", history)
+            if timing:
+                _write_csv(checkpoint_dir / "large_area_dynamic_sfc_timing_partial.csv", timing)
         if step == steps:
             break
 
@@ -745,7 +824,7 @@ def run_sfc_pressure_dynamic(
             u[fixed] = 0.0
             v[fixed] = 0.0
             a[fixed] = 0.0
-        if step + 1 <= steps:
+        if step + 1 <= steps and not cfg.defer_diagnostics:
             diagnostics_t0 = time.perf_counter()
             u_upper_final = u[:upper_dofs].reshape((-1, 3))
             u_lower_final = u[upper_dofs:].reshape((-1, 3))
@@ -781,6 +860,28 @@ def run_sfc_pressure_dynamic(
                 float(query_elapsed_final),
             )
 
+    solve_wall_seconds = time.perf_counter() - solve_loop_start
+    if cfg.defer_diagnostics:
+        diagnostics_t0 = time.perf_counter()
+        for (time_value, lower_u), (_upper_time, upper_u) in zip(lower_frames, upper_frames, strict=True):
+            history_row, timing_row = _pressure_contact_diagnostics_row(
+                time_value=float(time_value),
+                upper=upper,
+                lower=lower,
+                upper_displacement=upper_u,
+                lower_displacement=lower_u,
+                upper_bottom_faces=upper_bottom_faces,
+                lower_top_faces=lower_top_faces,
+                contact_cache=contact_cache,
+                sdf_workspace=sdf_workspace,
+                cfg=cfg,
+            )
+            history_row["accepted_response_reused"] = "postprocess"
+            timing_row["accepted_response_reused"] = "postprocess"
+            history.append(history_row)
+            timing.append(timing_row)
+        diagnostics_seconds += time.perf_counter() - diagnostics_t0
+
     return SFCDynamicResult(
         history=history,
         timing=timing,
@@ -792,6 +893,7 @@ def run_sfc_pressure_dynamic(
         upper_mesh=upper,
         upper_frames=upper_frames,
         upper_bottom_faces=upper_bottom_faces,
+        solve_wall_seconds=float(solve_wall_seconds),
         core_solve_seconds=float(core_solve_seconds),
         diagnostics_seconds=float(diagnostics_seconds),
     )
@@ -1189,12 +1291,14 @@ def _summary_text(
         "- Projection is used only inside field construction; field contact queries use interpolation.",
         f"- Contact tangent in SFC iterations: `{bool(cfg.use_contact_tangent)}`.",
         f"- Matrix-free contact tangent in SFC iterations: `{bool(cfg.use_matrix_free_contact_tangent)}`.",
+        f"- Deferred diagnostics/postprocess: `{bool(cfg.defer_diagnostics)}`.",
         "- Accepted-state response reuse: response is reused only after exact final-state reevaluation.",
         "",
         "## Timing",
         "",
-        f"- Complete SFC dynamic solve wall time: `{float(sfc_wall_time_seconds):.6e}` s.",
-        f"- Core solve time, excluding diagnostics/postprocess: `{float(sfc.core_solve_seconds):.6e}` s.",
+        f"- Complete command wall time including output/postprocess: `{float(sfc_wall_time_seconds):.6e}` s.",
+        f"- SFC solve-loop wall time excluding deferred diagnostics: `{float(sfc.solve_wall_seconds):.6e}` s.",
+        f"- Inner correction solve time: `{float(sfc.core_solve_seconds):.6e}` s.",
         f"- Diagnostics/accepted-response time inside SFC trajectory: `{float(sfc.diagnostics_seconds):.6e}` s.",
         f"- Mean field update time, backend breakdown only: `{avg_update:.6e}` s/step.",
         f"- Mean field query/contact assembly time, backend breakdown only: `{avg_query:.6e}` s/step.",
@@ -1272,6 +1376,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
             contact_tangent_cg_rtol=1.0e-10,
             contact_tangent_cg_atol=1.0e-12,
             contact_tangent_cg_maxiter=80,
+            defer_diagnostics=False,
         )
     return DynamicSurfaceConfig(
         nx=36,
@@ -1304,6 +1409,7 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
         contact_tangent_cg_rtol=1.0e-10,
         contact_tangent_cg_atol=1.0e-12,
         contact_tangent_cg_maxiter=80,
+        defer_diagnostics=False,
     )
 
 
@@ -1405,6 +1511,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contact-tangent-cg-rtol", type=float, default=None, help="matrix-free tangent CG relative tolerance")
     parser.add_argument("--contact-tangent-cg-atol", type=float, default=None, help="matrix-free tangent CG absolute tolerance")
     parser.add_argument("--contact-tangent-cg-maxiter", type=int, default=None, help="matrix-free tangent CG maximum iterations")
+    parser.add_argument("--defer-diagnostics", action="store_true", help="move accepted-state contact diagnostics to postprocess")
     return parser.parse_args(argv)
 
 
@@ -1444,6 +1551,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = replace(cfg, use_contact_tangent=True)
     if bool(args.matrix_free_contact_tangent):
         cfg = replace(cfg, use_matrix_free_contact_tangent=True)
+    if bool(args.defer_diagnostics):
+        cfg = replace(cfg, defer_diagnostics=True)
     outputs = run_benchmark(
         out_dir=args.out_dir,
         quick=bool(args.quick),

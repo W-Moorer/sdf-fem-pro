@@ -113,6 +113,27 @@ class FieldContactMatrixFreeStiffness:
         x = np.asarray(vector, dtype=float).reshape(-1)
         if x.shape != (int(self.n_total_dofs),):
             raise ValueError("vector size does not match n_total_dofs")
+        try:
+            from ._cpp_field_contact import contact_stiffness_matvec, is_available as cpp_available
+        except Exception:
+            cpp = False
+        else:
+            cpp = bool(cpp_available())
+        if cpp:
+            return contact_stiffness_matvec(
+                x,
+                self.scale,
+                self.slave_node_ids,
+                self.slave_weights,
+                self.gradients,
+                self.face_node_ids,
+                self.grid_weights,
+                self.barycentric,
+                self.normals,
+                int(self.n_total_dofs),
+                int(self.slave_dof_offset),
+                int(self.master_dof_offset),
+            )
         y = np.zeros(int(self.n_total_dofs), dtype=float)
         if self.scale.size == 0:
             return y

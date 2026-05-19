@@ -224,3 +224,55 @@ def test_cpp_field_contact_backend_matches_vectorized_force_when_built() -> None
     )
     np.testing.assert_allclose(force_cpp, reference.force, atol=1.0e-14)
     np.testing.assert_allclose(gaps_cpp, reference.gaps, atol=1.0e-14)
+
+
+def test_cpp_contact_stiffness_matvec_matches_reference_when_built() -> None:
+    if not cpp_field_contact_available():
+        pytest.skip("C++ field-contact backend is not built")
+    x = np.asarray(
+        [
+            [0.0, 0.0, -0.10],
+            [1.0, 0.0, -0.08],
+            [0.0, 1.0, -0.12],
+            [1.0, 1.0, -0.07],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2], [1, 3, 2]], dtype=np.int64)
+    cache = triangle_surface_quadrature_cache(faces, x, order=7)
+    master_x = np.asarray([[-1.0, -1.0, 0.0], [2.0, -1.0, 0.0], [-1.0, 2.0, 0.0], [2.0, 2.0, 0.0]])
+    master_faces = np.asarray([[0, 1, 2], [1, 3, 2]], dtype=np.int64)
+    sdf = DynamicNarrowBandSDF.build_required_points(
+        master_x,
+        master_faces,
+        cache.points(x),
+        spacing=0.25,
+        band_radius=0.5,
+        padding=0.5,
+        cell_size=0.25,
+    )
+    explicit = surface_to_surface_field_penalty_response_vectorized(
+        x,
+        faces,
+        sdf,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_order=7,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        assemble_stiffness=True,
+    )
+    matrix_free = surface_to_surface_field_penalty_response_vectorized(
+        x,
+        faces,
+        sdf,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_order=7,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        matrix_free_stiffness=True,
+    )
+    assert matrix_free.stiffness_operator is not None
+    probe = np.cos(np.arange(24, dtype=float))
+    np.testing.assert_allclose(matrix_free.stiffness_operator.matvec(probe), explicit.stiffness @ probe, atol=1.0e-14)
