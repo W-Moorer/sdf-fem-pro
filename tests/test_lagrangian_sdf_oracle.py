@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from sfc.contact.lagrangian_sdf_oracle import (
     LagrangianSDFContactOracle,
@@ -15,6 +16,8 @@ from sfc.fem.deformation_map import FEMDeformationMap
 from sfc.mesh.topology import VolumeMesh
 from sfc.sdf.dynamic_surface_sdf import surface_projection_distance_kernel
 from sfc.sdf.material_sdf import MaterialSDF, MaterialSDFGrid
+
+pytestmark = pytest.mark.final_aim
 
 
 def _rotation_y(theta: float) -> np.ndarray:

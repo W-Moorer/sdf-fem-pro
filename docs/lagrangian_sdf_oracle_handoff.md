@@ -175,6 +175,51 @@ pytest -q
 324 passed in 642.18s (0:10:42)
 ```
 
+新的 final-aim 局部测试策略见 `docs/final_aim_test_scope.md`。当只修改 Lagrangian/material SDF oracle 及其 validation runner 时，推荐使用：
+
+```text
+pytest -q -m final_aim
+```
+
+本轮局部测试结果：
+
+```text
+pytest -q -m final_aim
+16 passed, 310 deselected in 25.92s
+```
+
+## 已迁移算例
+
+新增 `validation/run_final_aim_lagrangian_contact_cases.py`，将已有 Phase-10 小型 TET4/HEX8 静力和动力接触算例迁移到 final-aim 路径：
+
+```text
+MaterialSDF -> LagrangianSDFContactOracle -> oracle penalty response
+```
+
+它不构建 current-space SDF grid，不调用旧 projection query 路径。参考解为同一 penalty law 下的 analytic rigid plane。
+
+运行命令：
+
+```text
+python validation/run_final_aim_lagrangian_contact_cases.py --quick --out-dir results/final_aim_lagrangian_contact_quick
+```
+
+输出：
+
+- `results/final_aim_lagrangian_contact_quick/final_aim_lagrangian_contact_cases.csv`
+- `results/final_aim_lagrangian_contact_quick/final_aim_lagrangian_contact_samples.csv`
+- `results/final_aim_lagrangian_contact_quick/final_aim_lagrangian_contact_history.csv`
+- `results/final_aim_lagrangian_contact_quick/final_aim_lagrangian_contact_summary.md`
+
+quick 结果：
+
+| Case | Status | Max gap error | Force rel. error | Max penetration | Reaction z |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `static_linear_tet4_lagrangian_oracle` | passed | 0.000000e+00 | 0.000000e+00 | 2.000000e-02 | 1.200000e+01 |
+| `dynamic_linear_tet4_lagrangian_oracle` | passed | 0.000000e+00 | 0.000000e+00 | 1.451057e-02 | 7.018813e+00 |
+| `static_linear_hex8_lagrangian_oracle` | passed | 0.000000e+00 | 0.000000e+00 | 2.000000e-02 | 1.200000e+01 |
+| `dynamic_linear_hex8_lagrangian_oracle` | passed | 0.000000e+00 | 0.000000e+00 | 1.272863e-02 | 7.637180e+00 |
+
 ## 与 DynamicNarrowBandSDF 的关系
 
 当前项目有两条路线：

@@ -35,3 +35,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "final_aim: tests covering the Lagrangian/material SDF final-aim path",
+]
