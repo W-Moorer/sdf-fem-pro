@@ -384,6 +384,35 @@ To add a more engineering-like visual contact case without importing a frictiona
   \caption{SDF-field visualization for the Fig.~6-inspired case: deformed contact surface and driver, \(\phi\) slice with zero contour, narrow-band validity, and driver gap with scalar-gradient normals.}
 \end{figure}
 
+\subsection{Large-Area Dynamic Surface Contact}
+
+To test the amortized field-contact backend under a naturally large contact patch, we add a prescribed dynamic indentation case with a \(10\times10\times2\) C3D8 lower mesh and a \(10\times10\) upper driver surface. The driver ramps into contact and then remains in sustained oscillatory contact, so the vectorized surface-to-surface formulation evaluates 1400 quadrature samples per step and reaches 1400 active samples after contact is established. For this solver-level comparison, the reported timing is the complete SFC dynamic solve time, not only the field-query kernel time. The same kinematic contact problem is solved independently in CalculiX using native \texttt{*CONTACT PAIR}; backend field update and field-query timings are reported only as a breakdown of the SFC solve.
+
+\begin{table}[t]
+\centering
+\caption{Large-area dynamic surface-contact timing. Complete solver wall time is used for the SFC--CalculiX comparison; field timings are backend breakdowns and are not used as standalone solver speedups.}
+\label{tab:large-area-dynamic}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Case & active & SFC (s) & CCX (s) & CCX/SFC \\
+\midrule
+prescribed dynamic & 1400 & 11.71 & 155.62 & 13.29 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.4em}
+
+\begin{tabular}{lrr}
+\toprule
+Backend component & total time (s) & mean per step (s) \\
+\midrule
+SDF field update & 4.094 & 0.455 \\
+field query/contact assembly & 0.031 & 0.00346 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Backend and Timing Ablation}
 
 The field-query crossover is also reflected at the step level in contact-dominated TET4/HEX8 static and dynamic tests. These tests compare the true-field path against the spatial-hash projection timing reference while keeping the gap and force agreement at numerical roundoff. The field path is faster in all 16 non-quick rows, with measured projection/field step speedups from \(7.51\times\) to \(24.17\times\) and a minimum measured query crossover of \(24.61\) samples for the tested workload.
@@ -412,7 +441,7 @@ Finally, an 11-step reduced-mesh backend ablation separates the preserved node-t
 
 \section{Scope of Claims}
 
-The reported experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, 21-step quasi-static native-contact agreement, three-second C3D8 dynamic field-contact histories, and SDF acceleration after the measured \(Q^\ast\) crossover. The solver-level tests support the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover, while the backend ablation documents both node-to-surface and surface-to-surface integration paths.
+The reported experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, 21-step quasi-static native-contact agreement, three-second C3D8 dynamic field-contact histories, and SDF acceleration after the measured \(Q^\ast\) crossover. The solver-level tests support the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover. The large-area dynamic comparison supports a complete-solver timing statement for the reported case: SFC requires 11.71 s while CalculiX native contact requires 155.62 s. Field update and field-query timings are reported only as backend breakdowns, not as standalone solver speedups. The backend ablation documents both node-to-surface and surface-to-surface integration paths.
 
 The Fig.~6-inspired case supports physical auditability of displacement, strain, stress, gap, pressure, active-contact, and SDF-field visualizations in a more engineering-like geometry. It is not evidence for frictional stick-slip, and it is not used to prove the SDF acceleration claim.
 

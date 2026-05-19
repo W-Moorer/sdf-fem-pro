@@ -256,7 +256,29 @@ Figures:
 - `paper/numerical_experiments/fig6_inspired_frictionless_contact/figures/fig6_inspired_shifted_frictionless_clouds.png`
 - `paper/numerical_experiments/fig6_inspired_frictionless_contact/figures/fig6_inspired_sdf_field_visualization.png`
 
-### 7.6 Backend and Timing Ablation
+### 7.6 Large-Area Dynamic Surface Contact
+
+The large-area dynamic case tests the amortized field-contact backend under a sustained contact patch rather than a brief impact. A \(10\times10\times2\) C3D8 lower mesh is contacted by a \(10\times10\) prescribed driver surface. The driver ramps into contact and then remains in oscillatory contact, producing 1400 surface quadrature samples per step and 1400 active samples after contact is established. The solver-level comparison uses the complete SFC dynamic solve wall time, not the field-query kernel time alone.
+
+| Case | Active samples | SFC solve (s) | CalculiX solve (s) | CCX/SFC |
+| --- | ---: | ---: | ---: | ---: |
+| prescribed dynamic surface contact | 1400 | 11.71 | 155.62 | 13.29 |
+
+Backend breakdown for the same SFC run:
+
+| Component | Total time (s) | Mean per step (s) |
+| --- | ---: | ---: |
+| SDF field update | 4.094 | 0.455 |
+| field query/contact assembly | 0.031 | 0.00346 |
+
+The timing claim should use the first table: complete SFC solve time \(11.71\) s versus complete CalculiX native-contact solve time \(155.62\) s. The second table is only a backend breakdown explaining where the SFC time is spent; it must not be presented as the full solver acceleration. The same comparison reports a maximum top-displacement absolute error of \(4.68\times10^{-4}\) and a maximum normal-force relative error of \(1.88\times10^{-1}\), with the largest force mismatch occurring during contact establishment.
+
+Data:
+
+- `paper/numerical_experiments/large_area_dynamic_surface_contact/large_area_dynamic_solver_timing.csv`
+- `results/large_area_dynamic_surface_contact_quick_final/large_area_dynamic_comparison.csv`
+
+### 7.7 Backend and Timing Ablation
 
 The field-query crossover is reflected at the step level in contact-dominated TET4/HEX8 static and dynamic tests. The field path is faster in all 16 non-quick rows, with measured projection/field step speedups from \(7.51\times\) to \(24.17\times\). The speedup evidence is plotted against active contact samples so that the amortized SDF-query advantage is visible as query count grows. An 11-step reduced-mesh backend ablation separates node-to-surface sampling, reference surface-to-surface quadrature, vectorized surface-to-surface quadrature, and forced grouped field construction. In this representative run, vectorization preserves endpoint metrics while reducing query/contact cost from 14.58 s to 0.061 s relative to the reference surface-to-surface path.
 
@@ -278,6 +300,7 @@ Supported for the reported experiments:
 - The 21-step quasi-static native-contact curves support scoped SFC/CalculiX agreement for the reported geometries.
 - The three-second C3D8 dynamic case supports time-history and field-cloud auditability for deformable SDF contact.
 - The Fig. 6-inspired case supports engineering-style three-dimensional displacement, strain, stress, gap, pressure, active-mask, and SDF-field visualization, without any stick-slip or friction claim.
+- The large-area dynamic comparison supports complete-solver timing for the reported case: SFC \(11.71\) s versus CalculiX native contact \(155.62\) s; field update/query timings are backend breakdowns only.
 - Solver-level timing supports the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover.
 - The backend contains both node-to-surface and surface-to-surface contact integration paths.
 

@@ -725,6 +725,8 @@ def _summary_text(
     calc_status: Row | None,
     comparison_rows: list[Row],
     vtk_outputs: dict[str, Path | int],
+    *,
+    sfc_wall_time_seconds: float,
 ) -> str:
     max_active = max(int(row["active_samples"]) for row in sfc.history)
     max_quad = max(int(row["quadrature_points"]) for row in sfc.history)
@@ -752,8 +754,9 @@ def _summary_text(
         "",
         "## Timing",
         "",
-        f"- Mean field update time: `{avg_update:.6e}` s/step.",
-        f"- Mean field query/contact assembly time: `{avg_query:.6e}` s/step.",
+        f"- Complete SFC dynamic solve wall time: `{float(sfc_wall_time_seconds):.6e}` s.",
+        f"- Mean field update time, backend breakdown only: `{avg_update:.6e}` s/step.",
+        f"- Mean field query/contact assembly time, backend breakdown only: `{avg_query:.6e}` s/step.",
         "",
         "## VTK outputs",
         "",
@@ -889,7 +892,14 @@ def run_benchmark(
     comparison_rows = _compare_histories(sfc.history, calc_rows)
     _write_csv(out_dir / "large_area_dynamic_comparison.csv", comparison_rows)
     figure_outputs = _plot_histories(out_dir, sfc.history, calc_rows if calc_rows else None)
-    summary = _summary_text(config, sfc, calc_status, comparison_rows, vtk_outputs)
+    summary = _summary_text(
+        config,
+        sfc,
+        calc_status,
+        comparison_rows,
+        vtk_outputs,
+        sfc_wall_time_seconds=sfc_wall,
+    )
     (out_dir / "large_area_dynamic_summary.md").write_text(summary, encoding="utf-8")
     return {
         "out_dir": out_dir,
