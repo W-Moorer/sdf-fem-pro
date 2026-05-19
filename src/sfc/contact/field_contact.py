@@ -328,6 +328,36 @@ def surface_to_surface_field_penalty_response_vectorized(
     else:
         cache = quadrature_cache
     points = cache.points(X)
+    if compiled_field_contact_available():
+        from ._numba_field_contact import surface_penalty_response
+
+        force, gaps = surface_penalty_response(
+            points,
+            cache.node_ids,
+            cache.weights,
+            cache.area_weights,
+            master_sdf.grid.origin,
+            master_sdf.grid.spacing,
+            np.asarray(master_sdf.grid.shape, dtype=np.int64),
+            master_sdf.grid.phi,
+            master_sdf.grid.valid_mask,
+            master_sdf.grid.closest_face_id,
+            master_sdf.grid.barycentric,
+            master_sdf.grid.closest_normal,
+            master_sdf.boundary_faces,
+            k,
+            n_total_dofs,
+            slave_dof_offset,
+            master_dof_offset,
+        )
+        return FieldSurfaceContactResponse(
+            force=force,
+            stiffness=csr_matrix((int(n_total_dofs), int(n_total_dofs)), dtype=float),
+            constraints=(),
+            quadrature_weights=cache.area_weights.copy(),
+            gaps=gaps.copy(),
+        )
+
     batch = _field_query_batch(master_sdf, points)
     gaps = batch["gaps"]
     penetration = np.maximum(-gaps, 0.0)
@@ -363,6 +393,16 @@ def surface_to_surface_field_penalty_response_vectorized(
         quadrature_weights=cache.area_weights.copy(),
         gaps=gaps.copy(),
     )
+
+
+def compiled_field_contact_available() -> bool:
+    """Return whether the optional compiled field-contact backend is available."""
+
+    try:
+        from ._numba_field_contact import is_available
+    except Exception:
+        return False
+    return bool(is_available())
 
 
 def field_contact_constraint_from_sample(

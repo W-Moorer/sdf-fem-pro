@@ -109,6 +109,112 @@ pytest -q
 暂不应声称：
 
 - 已完成 production-scale BVH；
-- 已完成 C++/Numba compiled kernel；
+- 已完成 C++ production compiled kernel；
 - 已完成 consistent tangent；
 - 完整 1 s non-quick pressure-driven dynamic solve 已经快于 CalculiX。
+
+## 2026-05-19 追加优化
+
+本轮继续优化的目标是：不改变接触 gap、payload、力装配和时间积分精度，只降低工程实现开销。
+
+### 新增 compiled backend
+
+1. SDF field-population projection
+   - 新增：`src/sfc/sdf/_numba_projection.py`
+   - 接入：`RequiredPointSDFWorkspace(projection_backend="auto")`
+   - 默认可用时走 `compiled_padded_aabb`：
+     - 对当前 boundary faces 计算 padded AABB；
+     - 在编译循环中筛选候选面；
+     - 对候选面执行同一 closest-feature projection；
+     - 若某个 grid node 没有 AABB 候选，则回退 all-face exact search。
+   - 该路径仍只用于 field construction，query path 仍是 interpolation-only。
+
+2. required grid node 去重
+   - `_required_trilinear_corner_indices(...)` 从 `np.unique(axis=0)` 改为 linear grid index 去重。
+   - 同一 formal 尺寸查询下，该步骤从约 `0.11 s` 降到约 `0.005 s`。
+   - required nodes 集合不变。
+
+3. field-contact response
+   - 新增：`src/sfc/contact/_numba_field_contact.py`
+   - `surface_to_surface_field_penalty_response_vectorized(...)` 可用时使用 compiled gap interpolation + slave/master force accumulation。
+   - 输出仍为 `FieldSurfaceContactResponse`，force/gap 与原 vectorized 路径一致。
+
+4. 压力载荷缓存
+   - pressure-driven runner 中 top-pressure 空间分布不变，仅压力标量随时间变化。
+   - 已预计算 unit-pressure nodal force，每个迭代只乘当前 pressure。
+   - 与逐次重新积分压力面力相比，位移、gap、force、energy 保持一致。
+
+5. 线性求解缓存
+   - Newmark effective matrix 在该线性动力学 runner 中固定。
+   - 已改为 `scipy.sparse.linalg.factorized(...)`，迭代中复用 LU solve。
+
+### 关键验证
+
+测试：
+
+```bash
+pytest -q tests/test_field_surface_to_surface_contact.py \
+  tests/test_large_area_dynamic_surface_contact.py \
+  tests/test_dynamic_narrow_band_sdf.py::test_compiled_padded_aabb_projection_matches_all_faces_in_band
+```
+
+结果：
+
+```text
+7 passed
+```
+
+完整 1.0 s SFC 压力驱动大面积接触：
+
+```bash
+python validation/run_large_area_dynamic_surface_contact.py \
+  --skip-calculix \
+  --out-dir results/large_area_pressure_dynamic_1s_dt001_compiled \
+  --total-time 1.0 \
+  --dt 0.001 \
+  --band-radius 8.0 \
+  --spacing 0.35 \
+  --nx 36 --ny 36 --nz 2 \
+  --driver-nx 36 --driver-ny 36 \
+  --frame-stride 50
+```
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| complete SFC solve wall time | `1.910167e+02 s` |
+| mean field update | `2.152489e-02 s/step` |
+| sum record field update | `2.154642e+01 s` |
+| mean field query/contact | `1.636655e-02 s/step` |
+| sum record field query/contact | `1.638291e+01 s` |
+| max active samples | `18144` |
+| active steps | `957 / 1001` |
+
+与旧 pressure-driven 1.0 s 结果对比：
+
+| 版本 | complete SFC solve wall time |
+| --- | ---: |
+| 优化前 | `1.791773e+03 s` |
+| 本轮优化后 | `1.910167e+02 s` |
+
+提升约 `9.4x`，但仍未快于之前同场景 CalculiX native-contact wall time `5.362540e+01 s`。
+
+### 当前瓶颈结论
+
+现在已经不能再说主要瓶颈是记录步的 field update。完整 1.0 s case 中，recorded field update + recorded field query 约 `37.9 s`，而 complete SFC solve 为 `191.0 s`。差额主要来自每个时间步内部 fixed-point contact iteration 的重复 field build/query。
+
+因此，若要在完整动态求解 wall time 上超过 CalculiX，下一步必须做：
+
+1. consistent contact tangent，减少 fixed-point rebuild 次数；
+2. C++/pybind11 或 C++ extension 版 spatial-hash + projection + contact accumulation，继续压低每次 iteration 的 field build/query；
+3. accepted-state response/field reuse，但必须保证 accepted state 的 response 对应最终位移，不能复用 correction 前的近似响应。
+
+### 当前不能声称
+
+本轮后仍不能声称：
+
+- 完整 1.0 s pressure-driven dynamic solve 已经快于 CalculiX；
+- fixed-point iteration overhead 已经解决；
+- 已完成 C++ production backend；
+- 已完成 consistent tangent。

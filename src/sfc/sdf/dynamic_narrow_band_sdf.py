@@ -9,9 +9,12 @@ import numpy as np
 
 from .dynamic_surface_sdf import (
     SurfaceSDFResult,
+    compiled_projection_available,
     surface_projection_distance_kernel,
     surface_projection_distance_kernel_batch_all_faces,
+    surface_projection_distance_kernel_batch_all_faces_compiled,
     surface_projection_distance_kernel_batch_candidates,
+    surface_projection_distance_kernel_batch_padded_aabb_compiled,
 )
 from .narrow_band_grid import (
     GridPayloadInterpolation,
@@ -462,6 +465,7 @@ class RequiredPointSDFWorkspace:
         shape: tuple[int, int, int] | np.ndarray,
         cell_size: float | None = None,
         batch_projection_threshold: int = 5_000_000,
+        projection_backend: str = "auto",
     ) -> None:
         h = _as_spacing(spacing)
         band = float(band_radius)
@@ -475,6 +479,9 @@ class RequiredPointSDFWorkspace:
         self.shape = grid_shape
         self.cell_size = cell_size
         self.batch_projection_threshold = int(batch_projection_threshold)
+        if projection_backend not in {"auto", "numpy", "compiled", "compiled_all_faces"}:
+            raise ValueError("projection_backend must be 'auto', 'numpy', 'compiled', or 'compiled_all_faces'")
+        self.projection_backend = projection_backend
         self.phi = np.full(grid_shape, np.nan, dtype=float)
         self.closest_face_id = np.full(grid_shape, -1, dtype=np.int64)
         self.barycentric = np.zeros((*grid_shape, 3), dtype=float)
@@ -494,6 +501,7 @@ class RequiredPointSDFWorkspace:
         padding: float | None = None,
         cell_size: float | None = None,
         batch_projection_threshold: int = 5_000_000,
+        projection_backend: str = "auto",
     ) -> "RequiredPointSDFWorkspace":
         """Create a reusable workspace from a reference surface grid spec."""
 
@@ -514,6 +522,7 @@ class RequiredPointSDFWorkspace:
             shape=shape,
             cell_size=cell_size,
             batch_projection_threshold=batch_projection_threshold,
+            projection_backend=projection_backend,
         )
 
     def _clear_previous(self) -> None:
@@ -550,15 +559,33 @@ class RequiredPointSDFWorkspace:
         pair_count = int(required_indices.shape[0]) * int(faces.shape[0])
         points_required = self.origin + self.spacing * required_indices.astype(float)
         threshold = int(self.batch_projection_threshold)
+        use_compiled = self.projection_backend in {"compiled", "compiled_all_faces"} or (
+            self.projection_backend == "auto" and compiled_projection_available()
+        )
         used_batch_projection = pair_count <= threshold
-        projection_mode = "all_faces_batch" if used_batch_projection else "candidate_group_batch"
-        if used_batch_projection:
+        if use_compiled:
+            if self.projection_backend == "compiled_all_faces":
+                batch = surface_projection_distance_kernel_batch_all_faces_compiled(points_required, X, faces)
+                projection_mode = "compiled_all_faces"
+            else:
+                batch = surface_projection_distance_kernel_batch_padded_aabb_compiled(
+                    points_required,
+                    X,
+                    faces,
+                    delta_safe=candidate_padding,
+                )
+                projection_mode = "compiled_padded_aabb"
+            ids = np.arange(required_indices.shape[0], dtype=np.int64)
+            self._store_batch(required_indices, ids, batch)
+        elif used_batch_projection:
             batch = surface_projection_distance_kernel_batch_all_faces(points_required, X, faces)
             ids = np.arange(required_indices.shape[0], dtype=np.int64)
             self._store_batch(required_indices, ids, batch)
+            projection_mode = "all_faces_batch"
         else:
             from sfc.contact.broad_phase import UniformTriangleAABBHash
 
+            projection_mode = "candidate_group_batch"
             broad_phase = UniformTriangleAABBHash.from_surface(
                 X,
                 faces,
@@ -606,6 +633,7 @@ class RequiredPointSDFWorkspace:
                 "population_mode": "required_points_workspace",
                 "required_node_count": int(required_indices.shape[0]),
                 "batch_projection": bool(used_batch_projection),
+                "compiled_projection": bool(use_compiled),
                 "projection_mode": projection_mode,
                 "projection_pair_count": int(pair_count),
             },
@@ -678,7 +706,15 @@ def _required_trilinear_corner_indices(
     for axis in range(3):
         base[:, axis] = np.clip(base[:, axis], 0, int(grid_shape[axis]) - 2)
     corners = (base[:, None, :] + _TRILINEAR_CORNERS[None, :, :]).reshape((-1, 3))
-    return np.unique(corners, axis=0)
+    stride_i = int(grid_shape[1]) * int(grid_shape[2])
+    stride_j = int(grid_shape[2])
+    linear = corners[:, 0] * stride_i + corners[:, 1] * stride_j + corners[:, 2]
+    unique_linear = np.unique(linear)
+    ii = unique_linear // stride_i
+    rem = unique_linear - ii * stride_i
+    jj = rem // stride_j
+    kk = rem - jj * stride_j
+    return np.column_stack((ii, jj, kk)).astype(np.int64, copy=False)
 
 
 def _aggregate_node_vectors(node_ids: np.ndarray, vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import factorized
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -354,6 +354,7 @@ def run_sfc_dynamic(
     cv = gamma * dt * c0
     effective = (M * (c0 + cfg.damping_alpha * cv) + K).tocsc()
     effective_free = effective[free[:, None], free]
+    solve_effective_free = factorized(effective_free) if free.size else None
 
     u = np.zeros(body.n_dofs, dtype=float)
     v = np.zeros(body.n_dofs, dtype=float)
@@ -457,7 +458,8 @@ def run_sfc_dynamic(
             v_guess = v_pred + gamma * dt * a_guess
             residual = M @ a_guess + cfg.damping_alpha * (M @ v_guess) + K @ u_guess - f_contact
             correction = np.zeros(body.n_dofs, dtype=float)
-            correction[free] = np.asarray(spsolve(effective_free, -residual[free]), dtype=float)
+            if solve_effective_free is not None:
+                correction[free] = np.asarray(solve_effective_free(-residual[free]), dtype=float)
             u_guess[free] += correction[free]
             if fixed.size:
                 u_guess[fixed] = 0.0
@@ -519,6 +521,13 @@ def run_sfc_pressure_dynamic(
     upper_bottom_faces = _bottom_triangles(upper)
     upper_top_faces = _top_triangles(upper)
     contact_cache = triangle_surface_quadrature_cache(upper_bottom_faces, upper.X, order=cfg.quadrature_order)
+    unit_pressure_force_upper = _surface_pressure_force(
+        upper.X,
+        upper_top_faces,
+        pressure=1.0,
+        node_count=upper.X.shape[0],
+        quadrature_order=cfg.quadrature_order,
+    )
     sdf_workspace = RequiredPointSDFWorkspace.from_surface(
         lower.X,
         lower_top_faces,
@@ -535,7 +544,10 @@ def run_sfc_pressure_dynamic(
     c0 = 1.0 / (beta * dt * dt)
     cv = gamma * dt * c0
     effective = (M * (c0 + cfg.damping_alpha * cv) + K).tocsc()
-    effective_free = effective[free[:, None], free]
+    upper_free = free[free < upper_dofs]
+    lower_free = free[free >= upper_dofs]
+    upper_solve = factorized(effective[upper_free[:, None], upper_free]) if upper_free.size else None
+    lower_solve = factorized(effective[lower_free[:, None], lower_free]) if lower_free.size else None
 
     u = np.zeros(n_dofs, dtype=float)
     v = np.zeros(n_dofs, dtype=float)
@@ -645,20 +657,16 @@ def run_sfc_pressure_dynamic(
                 slave_dof_offset=0,
                 master_dof_offset=upper_dofs,
             )
-            pressure_force_upper = _surface_pressure_force(
-                upper.X,
-                upper_top_faces,
-                pressure=pressure_next,
-                node_count=upper.X.shape[0],
-                quadrature_order=cfg.quadrature_order,
-            )
             f_ext = np.zeros(n_dofs, dtype=float)
-            f_ext[:upper_dofs] = pressure_force_upper
+            f_ext[:upper_dofs] = pressure_next * unit_pressure_force_upper
             a_guess = c0 * (u_guess - u_pred)
             v_guess = v_pred + gamma * dt * a_guess
             residual = M @ a_guess + cfg.damping_alpha * (M @ v_guess) + K @ u_guess - f_ext - response_next.force
             correction = np.zeros(n_dofs, dtype=float)
-            correction[free] = np.asarray(spsolve(effective_free, -residual[free]), dtype=float)
+            if upper_solve is not None:
+                correction[upper_free] = np.asarray(upper_solve(-residual[upper_free]), dtype=float)
+            if lower_solve is not None:
+                correction[lower_free] = np.asarray(lower_solve(-residual[lower_free]), dtype=float)
             u_guess[free] += correction[free]
             if fixed.size:
                 u_guess[fixed] = 0.0

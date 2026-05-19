@@ -13,8 +13,12 @@ from sfc.contact import (
 )
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF, RequiredPointSDFWorkspace
 from sfc.sdf.dynamic_surface_sdf import (
+    compiled_projection_available,
     surface_projection_distance_kernel,
     surface_projection_distance_kernel_batch_candidates,
+    surface_projection_distance_kernel_batch_all_faces,
+    surface_projection_distance_kernel_batch_all_faces_compiled,
+    surface_projection_distance_kernel_batch_padded_aabb_compiled,
 )
 
 
@@ -156,6 +160,55 @@ def test_required_point_workspace_matches_build_required_points() -> None:
     )
     for point in points:
         assert moved_cached.query_phi(point) == pytest.approx(moved_reference.query_phi(point), abs=1.0e-14)
+
+
+def test_compiled_all_face_projection_matches_numpy_batch() -> None:
+    if not compiled_projection_available():
+        pytest.skip("compiled projection backend is not available")
+    X, faces = _nonplanar_surface(resolution=4)
+    points = np.asarray(
+        [
+            [0.35, 0.25, _nonplanar_z(0.35, 0.25) + 0.035],
+            [0.62, 0.58, _nonplanar_z(0.62, 0.58) - 0.025],
+            [0.48, 0.72, _nonplanar_z(0.48, 0.72) + 0.015],
+            [0.12, 0.63, _nonplanar_z(0.12, 0.63) + 0.045],
+        ],
+        dtype=float,
+    )
+    reference = surface_projection_distance_kernel_batch_all_faces(points, X, faces)
+    compiled = surface_projection_distance_kernel_batch_all_faces_compiled(points, X, faces)
+    assert np.allclose(compiled.g, reference.g, atol=1.0e-13)
+    assert np.allclose(compiled.n, reference.n, atol=1.0e-13)
+    assert np.array_equal(compiled.face_id, reference.face_id)
+    assert np.allclose(compiled.w, reference.w, atol=1.0e-13)
+    assert np.allclose(compiled.p, reference.p, atol=1.0e-13)
+
+
+def test_compiled_padded_aabb_projection_matches_all_faces_in_band() -> None:
+    if not compiled_projection_available():
+        pytest.skip("compiled projection backend is not available")
+    X, faces = _nonplanar_surface(resolution=4)
+    points = np.asarray(
+        [
+            [0.35, 0.25, _nonplanar_z(0.35, 0.25) + 0.035],
+            [0.62, 0.58, _nonplanar_z(0.62, 0.58) - 0.025],
+            [0.48, 0.72, _nonplanar_z(0.48, 0.72) + 0.015],
+            [0.12, 0.63, _nonplanar_z(0.12, 0.63) + 0.045],
+        ],
+        dtype=float,
+    )
+    reference = surface_projection_distance_kernel_batch_all_faces(points, X, faces)
+    compiled = surface_projection_distance_kernel_batch_padded_aabb_compiled(
+        points,
+        X,
+        faces,
+        delta_safe=0.25,
+    )
+    assert np.allclose(compiled.g, reference.g, atol=1.0e-13)
+    assert np.allclose(compiled.n, reference.n, atol=1.0e-13)
+    assert np.array_equal(compiled.face_id, reference.face_id)
+    assert np.allclose(compiled.w, reference.w, atol=1.0e-13)
+    assert np.allclose(compiled.p, reference.p, atol=1.0e-13)
 
 
 def test_finite_difference_gradient_consistency() -> None:

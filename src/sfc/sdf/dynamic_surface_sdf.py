@@ -205,6 +205,83 @@ def surface_projection_distance_kernel_batch_all_faces(
     )
 
 
+def surface_projection_distance_kernel_batch_all_faces_compiled(
+    points: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+) -> SurfaceSDFBatchResult:
+    """Evaluate all-face projection with the optional compiled backend.
+
+    The compiled path performs the same closest-feature search as
+    ``surface_projection_distance_kernel_batch_all_faces`` but avoids the large
+    ``(points, faces, 3)`` temporary arrays used by the NumPy vectorized path.
+    It is used only during SDF field construction; field queries remain
+    interpolation-only.
+    """
+
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError("points must have shape (n, 3)")
+    X, faces = _as_surface(x_current, boundary_faces)
+    if faces.shape[0] == 0:
+        raise ValueError("boundary_faces must contain at least one triangle")
+    _unit_triangle_normals(X[faces])
+    from ._numba_projection import closest_points_all_faces
+
+    g, normals, face_id, bary, closest = closest_points_all_faces(P, X, faces)
+    return SurfaceSDFBatchResult(
+        g=g.astype(float, copy=False),
+        n=normals,
+        face_id=face_id.astype(np.int64, copy=False),
+        w=bary,
+        p=closest,
+    )
+
+
+def surface_projection_distance_kernel_batch_padded_aabb_compiled(
+    points: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+    *,
+    delta_safe: float,
+) -> SurfaceSDFBatchResult:
+    """Evaluate projection with compiled padded-AABB candidate screening."""
+
+    P = np.asarray(points, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError("points must have shape (n, 3)")
+    X, faces = _as_surface(x_current, boundary_faces)
+    if faces.shape[0] == 0:
+        raise ValueError("boundary_faces must contain at least one triangle")
+    delta = float(delta_safe)
+    if delta < 0.0:
+        raise ValueError("delta_safe must be non-negative")
+    triangles = X[faces]
+    _unit_triangle_normals(triangles)
+    aabb_min = triangles.min(axis=1) - delta
+    aabb_max = triangles.max(axis=1) + delta
+    from ._numba_projection import closest_points_padded_aabb
+
+    g, normals, face_id, bary, closest = closest_points_padded_aabb(P, X, faces, aabb_min, aabb_max)
+    return SurfaceSDFBatchResult(
+        g=g.astype(float, copy=False),
+        n=normals,
+        face_id=face_id.astype(np.int64, copy=False),
+        w=bary,
+        p=closest,
+    )
+
+
+def compiled_projection_available() -> bool:
+    """Return whether the optional compiled projection backend is available."""
+
+    try:
+        from ._numba_projection import is_available
+    except Exception:
+        return False
+    return bool(is_available())
+
+
 def surface_projection_distance_kernel_batch_candidates(
     points: np.ndarray,
     x_current: np.ndarray,
