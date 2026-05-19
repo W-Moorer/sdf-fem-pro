@@ -13,7 +13,9 @@ if str(ROOT) not in sys.path:
 
 from validation.run_abaqus_flexible_body_rigid_plane import build_input_text
 from validation.run_abaqus_sphere_drop_short_validation import (
+    DEFAULT_INP,
     _comparison_rows,
+    _resolved_contact_stiffness,
     parse_sphere_drop_inp,
     read_legacy_vtk,
     run_sfc_lagrangian_sdf_short_history,
@@ -36,7 +38,34 @@ def test_parse_sphere_drop_inp_extracts_mesh_material_and_gravity(tmp_path: Path
     assert model.gravity == pytest.approx(9.81)
     assert model.abaqus_duration == pytest.approx(3.0)
     assert model.output_interval == pytest.approx(0.001)
+    assert model.contact_penalty_normal_stiffness is None
     assert np.min(model.nodes[:, 2]) - model.plane_z == pytest.approx(0.02)
+
+
+def test_parse_implicit_dynamic_deck_extracts_total_time_and_penalty(tmp_path: Path) -> None:
+    from validation.run_abaqus_flexible_body_rigid_plane_implicit import PENALTY_NORMAL_STIFFNESS, build_implicit_input_text
+
+    inp = tmp_path / "sphere_drop_implicit.inp"
+    inp.write_text(build_implicit_input_text("sphere_drop"), encoding="ascii")
+
+    model = parse_sphere_drop_inp(inp)
+
+    assert model.abaqus_duration == pytest.approx(3.0)
+    assert model.output_interval == pytest.approx(0.001)
+    assert model.contact_penalty_normal_stiffness == pytest.approx(PENALTY_NORMAL_STIFFNESS)
+
+
+def test_resolved_contact_stiffness_prefers_cli_then_inp_then_fallback(tmp_path: Path) -> None:
+    from validation.run_abaqus_flexible_body_rigid_plane_implicit import PENALTY_NORMAL_STIFFNESS, build_implicit_input_text
+
+    inp = tmp_path / "sphere_drop_implicit.inp"
+    inp.write_text(build_implicit_input_text("sphere_drop"), encoding="ascii")
+    implicit_model = parse_sphere_drop_inp(inp)
+    explicit_model = parse_sphere_drop_inp(DEFAULT_INP)
+
+    assert _resolved_contact_stiffness(implicit_model, None, fallback=1.0e9) == pytest.approx(PENALTY_NORMAL_STIFFNESS)
+    assert _resolved_contact_stiffness(implicit_model, 2.5e9, fallback=1.0e9) == pytest.approx(2.5e9)
+    assert _resolved_contact_stiffness(explicit_model, None, fallback=1.0e9) == pytest.approx(1.0e9)
 
 
 def test_sfc_short_history_uses_lagrangian_oracle_and_matches_freefall(tmp_path: Path) -> None:

@@ -62,6 +62,7 @@ class AbaqusSphereDropModel:
     gravity: float
     abaqus_duration: float
     output_interval: float
+    contact_penalty_normal_stiffness: float | None = None
 
     @property
     def plane_z(self) -> float:
@@ -107,6 +108,7 @@ def parse_sphere_drop_inp(path: Path) -> AbaqusSphereDropModel:
     gravity: float | None = None
     duration: float | None = None
     output_interval: float | None = None
+    contact_penalty: float | None = None
     sphere_nodes: dict[int, tuple[float, float, float]] = {}
     sphere_elements: list[tuple[int, int, int, int]] = []
     plane_nodes: dict[int, tuple[float, float, float]] = {}
@@ -137,10 +139,14 @@ def parse_sphere_drop_inp(path: Path) -> AbaqusSphereDropModel:
             values = _parse_csv_numbers(line)
             young = float(values[0])
             poisson = float(values[1])
+        elif section == "*surface behavior":
+            values = _parse_csv_numbers(line)
+            if values:
+                contact_penalty = float(values[0])
         elif section == "*dynamic":
             values = _parse_csv_numbers(line)
             if values:
-                duration = float(values[-1])
+                duration = float(values[1] if len(values) >= 2 else values[-1])
         elif section == "*dload" and "GRAV" in line.upper():
             parts = [part.strip() for part in line.split(",")]
             gravity = float(parts[2])
@@ -191,7 +197,18 @@ def parse_sphere_drop_inp(path: Path) -> AbaqusSphereDropModel:
         gravity=float(gravity),
         abaqus_duration=float(duration),
         output_interval=float(output_interval),
+        contact_penalty_normal_stiffness=contact_penalty,
     )
+
+
+def _resolved_contact_stiffness(model: AbaqusSphereDropModel, requested: float | None, fallback: float) -> float:
+    """Choose the SFC penalty stiffness, preferring an explicit CLI override."""
+
+    if requested is not None:
+        return float(requested)
+    if model.contact_penalty_normal_stiffness is not None:
+        return float(model.contact_penalty_normal_stiffness)
+    return float(fallback)
 
 
 def _boundary_faces(elements: np.ndarray) -> np.ndarray:
@@ -651,16 +668,17 @@ def run_validation(
     vtk_dir: Path = DEFAULT_VTK_DIR,
     duration: float = 0.05,
     dt: float = 0.001,
-    contact_stiffness: float = 1.0e10,
+    contact_stiffness: float | None = None,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = parse_sphere_drop_inp(inp)
     duration_value = min(float(duration), model.abaqus_duration)
+    contact_stiffness_value = _resolved_contact_stiffness(model, contact_stiffness, fallback=1.0e10)
     sfc_rows = run_sfc_lagrangian_sdf_short_history(
         model,
         duration=duration_value,
         dt=float(dt),
-        contact_stiffness=float(contact_stiffness),
+        contact_stiffness=contact_stiffness_value,
     )
     abaqus_rows = _abaqus_history_from_vtk(model, vtk_dir, duration=duration_value)
     comparison = _comparison_rows(abaqus_rows, sfc_rows)
@@ -691,7 +709,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "abaqus_sphere_drop_short")
     parser.add_argument("--duration", type=float, default=0.05)
     parser.add_argument("--dt", type=float, default=0.001)
-    parser.add_argument("--contact-stiffness", type=float, default=1.0e10)
+    parser.add_argument("--contact-stiffness", type=float, default=None)
     return parser.parse_args()
 
 
@@ -703,7 +721,7 @@ def main() -> None:
         vtk_dir=args.vtk_dir,
         duration=float(args.duration),
         dt=float(args.dt),
-        contact_stiffness=float(args.contact_stiffness),
+        contact_stiffness=args.contact_stiffness,
     )
     print("Abaqus sphere-drop short validation complete.")
     for key, value in outputs.items():

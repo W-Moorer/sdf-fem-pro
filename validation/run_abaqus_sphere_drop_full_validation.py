@@ -48,6 +48,7 @@ from validation.run_abaqus_sphere_drop_short_validation import (  # noqa: E402
     _node_samples,
     _plane_oracle,
     _plot_curve,
+    _resolved_contact_stiffness,
     _stress_metrics,
     _surface_node_area_weights,
     _write_csv,
@@ -408,7 +409,7 @@ def run_validation(
     vtk_dir: Path = DEFAULT_VTK_DIR,
     duration: float = 3.0,
     dt: float = 0.001,
-    contact_stiffness: float = 1.0e9,
+    contact_stiffness: float | None = None,
     contact_damping: float = 0.0,
     mass_damping: float = 0.0,
     stiffness_damping: float = 0.0,
@@ -419,11 +420,12 @@ def run_validation(
     out_dir.mkdir(parents=True, exist_ok=True)
     model = parse_sphere_drop_inp(inp)
     duration_value = min(float(duration), model.abaqus_duration)
+    contact_stiffness_value = _resolved_contact_stiffness(model, contact_stiffness, fallback=1.0e9)
     sfc_rows = run_sfc_lagrangian_sdf_full_history(
         model,
         duration=duration_value,
         dt=float(dt),
-        contact_stiffness=float(contact_stiffness),
+        contact_stiffness=contact_stiffness_value,
         contact_damping=float(contact_damping),
         mass_damping=float(mass_damping),
         stiffness_damping=float(stiffness_damping),
@@ -466,7 +468,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "results" / "abaqus_sphere_drop_full")
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--dt", type=float, default=0.001)
-    parser.add_argument("--contact-stiffness", type=float, default=1.0e9)
+    parser.add_argument("--contact-stiffness", type=float, default=None)
     parser.add_argument("--contact-damping", type=float, default=0.0)
     parser.add_argument("--mass-damping", type=float, default=0.0)
     parser.add_argument("--stiffness-damping", type=float, default=0.0)
@@ -484,7 +486,7 @@ def main() -> None:
         vtk_dir=args.vtk_dir,
         duration=float(args.duration),
         dt=float(args.dt),
-        contact_stiffness=float(args.contact_stiffness),
+        contact_stiffness=args.contact_stiffness,
         contact_damping=float(args.contact_damping),
         mass_damping=float(args.mass_damping),
         stiffness_damping=float(args.stiffness_damping),
