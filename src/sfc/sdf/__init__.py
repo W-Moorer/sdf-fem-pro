@@ -13,6 +13,7 @@ from .dynamic_narrow_band_sdf import (
     SDFUpdateStats,
 )
 from .local_projection import closest_point_on_triangle, signed_point_triangle_gap
+from .material_sdf import MaterialPatchProjection, MaterialSDF, ReferencePatchBVH
 from .narrow_band_grid import (
     GridInterpolation,
     GridPayloadInterpolation,
@@ -25,7 +26,10 @@ __all__ = [
     "FieldQueryPayload",
     "GridInterpolation",
     "GridPayloadInterpolation",
+    "MaterialPatchProjection",
+    "MaterialSDF",
     "NarrowBandGrid",
+    "ReferencePatchBVH",
     "RequiredPointSDFWorkspace",
     "SDFUpdateStats",
     "SurfaceSDFResult",

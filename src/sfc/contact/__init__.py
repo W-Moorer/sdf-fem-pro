@@ -24,6 +24,7 @@ from .jacobian import (
     contact_jacobian_entries,
     contact_jacobian_row,
 )
+from .lagrangian_sdf_oracle import LagrangianSDFContactOracle, LagrangianSDFQueryResult
 from .narrow_phase import (
     ContactConstraint,
     SurfaceSample,
@@ -40,6 +41,8 @@ __all__ = [
     "FieldContactConstraint",
     "FieldContactMatrixFreeStiffness",
     "FieldSurfaceContactResponse",
+    "LagrangianSDFContactOracle",
+    "LagrangianSDFQueryResult",
     "SurfaceQuadratureCache",
     "PenaltyContactBackend",
     "SurfaceSample",
