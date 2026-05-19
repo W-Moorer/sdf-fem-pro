@@ -538,8 +538,10 @@ def _comparison_rows(abaqus_rows: list[Row], sfc_rows: list[Row]) -> list[Row]:
                 "min_gap_abs_error": float(abs(float(row["min_gap"]) - gap_abq[i])),
                 "sfc_max_von_mises": float(row["max_von_mises"]),
                 "abaqus_max_von_mises": float(vm_abq[i]),
+                "von_mises_abs_error": float(abs(float(row["max_von_mises"]) - vm_abq[i])),
                 "sfc_max_strain_norm": float(row["max_strain_norm"]),
                 "abaqus_max_strain_norm": float(strain_abq[i]),
+                "strain_norm_abs_error": float(abs(float(row["max_strain_norm"]) - strain_abq[i])),
             }
         )
     return rows
@@ -609,6 +611,24 @@ def _plot_curve(path: Path, comparison: list[Row], *, y_sfc: str, y_abq: str, yl
     fig, ax = plt.subplots(figsize=(3.35, 2.2), constrained_layout=True)
     ax.plot(t, abq, color="#1f4e79", linewidth=1.6, label=f"Abaqus (max err. {max_error:.2e})")
     ax.plot(t, sfc, color="#c0504d", linewidth=1.4, linestyle="--", label="SFC Lagrangian SDF")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, color="#d9d9d9", linewidth=0.5)
+    ax.legend(loc="best", frameon=True)
+    fig.savefig(path, dpi=300)
+    fig.savefig(path.with_suffix(".pdf"))
+    plt.close(fig)
+
+
+def _plot_abs_error_curve(path: Path, comparison: list[Row], *, y_error: str, ylabel: str, title: str) -> None:
+    _configure_plot_style()
+    t = np.asarray([float(row["time"]) for row in comparison], dtype=float)
+    error = np.asarray([float(row[y_error]) for row in comparison], dtype=float)
+    rms_error = float(np.sqrt(np.mean(error**2))) if error.size else 0.0
+    max_error = float(np.max(error)) if error.size else 0.0
+    fig, ax = plt.subplots(figsize=(3.35, 2.2), constrained_layout=True)
+    ax.plot(t, error, color="#7030a0", linewidth=1.5, label=f"abs. error (max {max_error:.2e}, RMS {rms_error:.2e})")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)

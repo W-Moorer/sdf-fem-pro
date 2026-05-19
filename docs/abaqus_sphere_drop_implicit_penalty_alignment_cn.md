@@ -85,9 +85,13 @@ python validation\run_abaqus_sphere_drop_full_validation.py `
 - `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_metrics.csv`
 - `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_comparison.csv`
 - `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_z_cm.png`
+- `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_z_cm_abs_error.png`
 - `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_min_gap.png`
+- `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_min_gap_abs_error.png`
 - `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_von_mises.png`
+- `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_von_mises_abs_error.png`
 - `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_strain_norm.png`
+- `results/abaqus_sphere_drop_implicit_penalty_sfc_aligned/abaqus_sphere_drop_full_strain_norm_abs_error.png`
 
 ## 当前结论
 

@@ -47,6 +47,7 @@ from validation.run_abaqus_sphere_drop_short_validation import (  # noqa: E402
     _metric_rows,
     _node_samples,
     _plane_oracle,
+    _plot_abs_error_curve,
     _plot_curve,
     _resolved_contact_stiffness,
     _stress_metrics,
@@ -442,9 +443,13 @@ def run_validation(
         "comparison": out_dir / "abaqus_sphere_drop_full_comparison.csv",
         "metrics": out_dir / "abaqus_sphere_drop_full_metrics.csv",
         "z_cm_curve": out_dir / "abaqus_sphere_drop_full_z_cm.png",
+        "z_cm_error_curve": out_dir / "abaqus_sphere_drop_full_z_cm_abs_error.png",
         "gap_curve": out_dir / "abaqus_sphere_drop_full_min_gap.png",
+        "gap_error_curve": out_dir / "abaqus_sphere_drop_full_min_gap_abs_error.png",
         "stress_curve": out_dir / "abaqus_sphere_drop_full_von_mises.png",
+        "stress_error_curve": out_dir / "abaqus_sphere_drop_full_von_mises_abs_error.png",
         "strain_curve": out_dir / "abaqus_sphere_drop_full_strain_norm.png",
+        "strain_error_curve": out_dir / "abaqus_sphere_drop_full_strain_norm_abs_error.png",
         "contact_count_curve": out_dir / "abaqus_sphere_drop_full_active_contact.png",
         "summary": out_dir / "abaqus_sphere_drop_full_summary.md",
     }
@@ -453,9 +458,13 @@ def run_validation(
     _write_csv(outputs["comparison"], comparison)
     _write_csv(outputs["metrics"], metrics)
     _plot_curve(outputs["z_cm_curve"], comparison, y_sfc="sfc_z_cm", y_abq="abaqus_z_cm", ylabel="Mass-center z (m)", title="Full sphere-drop trajectory")
+    _plot_abs_error_curve(outputs["z_cm_error_curve"], comparison, y_error="z_cm_abs_error", ylabel="Mass-center z abs. error (m)", title="Displacement trajectory error")
     _plot_curve(outputs["gap_curve"], comparison, y_sfc="sfc_min_gap", y_abq="abaqus_min_gap", ylabel="Minimum gap (m)", title="Full sphere-plane clearance")
+    _plot_abs_error_curve(outputs["gap_error_curve"], comparison, y_error="min_gap_abs_error", ylabel="Minimum gap abs. error (m)", title="Clearance error")
     _plot_curve(outputs["stress_curve"], comparison, y_sfc="sfc_max_von_mises", y_abq="abaqus_max_von_mises", ylabel="Max von Mises stress", title="Full stress history")
+    _plot_abs_error_curve(outputs["stress_error_curve"], comparison, y_error="von_mises_abs_error", ylabel="Max von Mises abs. error", title="Stress history error")
     _plot_curve(outputs["strain_curve"], comparison, y_sfc="sfc_max_strain_norm", y_abq="abaqus_max_strain_norm", ylabel="Max strain norm", title="Full strain history")
+    _plot_abs_error_curve(outputs["strain_error_curve"], comparison, y_error="strain_norm_abs_error", ylabel="Max strain norm abs. error", title="Strain history error")
     _plot_contact_count(outputs["contact_count_curve"], comparison, sfc_rows, abaqus_rows)
     _write_full_summary(outputs["summary"], metrics, outputs)
     return outputs
