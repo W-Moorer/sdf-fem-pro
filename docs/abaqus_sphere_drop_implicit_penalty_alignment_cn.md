@@ -152,3 +152,28 @@ python validation\run_abaqus_sphere_drop_full_validation.py `
 - `volume_mean`：反映整体体积场响应。
 
 验证脚本已经新增 `p95_von_mises`、`volume_mean_von_mises`、`p95_strain_norm` 和 `volume_mean_strain_norm` 的 SFC/Abaqus 时间曲线与误差曲线。后续论文主图建议优先使用位移曲线、`p95` 曲线和体积加权平均曲线，最大值曲线放在补充材料或作为峰值诊断。
+
+## Abaqus-style 增量/接触控制开发记录
+
+为对齐 Abaqus/Standard 中“隐式动力学、自动增量、非线性迭代、接触收敛控制耦合”的求解行为，SFC 验证 runner 新增以下控制：
+
+- `--adaptive-increments`：每个输出间隔内允许内部自适应时间增量；
+- `--min-increment` / `--max-increment`：限制内部时间步，默认最大不超过输出步长；
+- `--cutback-factor` / `--growth-factor`：非线性迭代失败或接触事件出现时 cutback，低迭代数通过时增长；
+- `--residual-tolerance`：除位移修正量外，同时检查残差范数；
+- 接触 active-set 稳定判据：Newton 迭代中 active contact 数量稳定后才允许收敛；
+- 接触事件细分：从无接触跨入接触时自动细分时间步；
+- `--contact-integration hybrid` 与 `--hybrid-node-area-fraction`：以 surface quadrature 为主，同时加入少量节点面积权重作为 faceted surface 的接触激活 guard。
+
+短程筛查结果表明，自动增量控制本身提高了求解过程的可解释性，但没有自动降低位移误差：
+
+| 路径 | 0.5 s RMS z 误差 | 首次接触误差 | 说明 |
+| --- | ---: | ---: | --- |
+| HHT + surface order 3，固定输出步 | 约 `1.12 mm` | 约 `9 ms` | 上一轮精度最好的短程轨迹 |
+| HHT + surface order 3，自适应增量 | `1.54 mm` | `9 ms` | cutback 后相位仍偏后 |
+| HHT + surface order 7，自适应增量 | `1.54 mm` | `8 ms` | 更高阶积分改变等效接触面积，未改善 |
+| HHT + hybrid，自适应增量，接触后阻尼 | `2.95 mm` | `2 ms` | 首次接触更准，但反弹幅值偏大 |
+
+因此，当前最重要的结论是：Abaqus-style 自动增量和接触收敛控制已经实现为可选路径，但它不能单独保证与 Abaqus 位移曲线完全一致。曲线差异仍主要来自 Abaqus general contact 的内部接触正则化、接触释放、压力平滑和隐式数值耗散细节，而这些信息无法从当前 Abaqus 位移/应力/应变输出中唯一反推。
+
+论文中应把该开发结果表述为：SFC 已具备与 Abaqus/Standard 类似的隐式求解控制机制；在当前可观测数据下，精度对齐路径仍采用 HHT + surface quadrature 的最优参数，而 automatic increment / hybrid guard 作为稳定性和诊断选项保留。

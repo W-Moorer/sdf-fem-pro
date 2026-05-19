@@ -34,8 +34,12 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
         damping_start_time=0.02,
         integrator="hht",
         hht_alpha=-0.1,
-        contact_integration="surface",
+        contact_integration="hybrid",
         quadrature_order=3,
+        hybrid_node_area_fraction=0.1,
+        adaptive_increments=True,
+        min_increment=1.0e-5,
+        contact_event_substeps=2,
         output_stride=1,
         max_newton_iterations=4,
     )
@@ -50,7 +54,10 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
     assert {float(row["damping_start_time"]) for row in rows} == {0.02}
     assert {row["time_integrator"] for row in rows} == {"hht"}
     assert {float(row["hht_alpha"]) for row in rows} == {-0.1}
-    assert {row["contact_integration"] for row in rows} == {"surface"}
+    assert {row["contact_integration"] for row in rows} == {"hybrid"}
+    assert {float(row["hybrid_node_area_fraction"]) for row in rows} == {0.1}
+    assert {row["adaptive_increments"] for row in rows} == {"true"}
+    assert all(int(row["accepted_increment_count"]) >= 1 for row in rows)
     assert all("active_contact_area" in row for row in rows)
 
 
@@ -73,6 +80,9 @@ def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path:
         contact_damping=1.0e3,
         mass_damping=0.1,
         damping_start_time=0.02,
+        adaptive_increments=True,
+        min_increment=1.0e-5,
+        contact_event_substeps=2,
         output_stride=1,
         max_newton_iterations=4,
     )
@@ -87,4 +97,7 @@ def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path:
     assert metrics["contact_damping"]["value"] == "1000.0"
     assert metrics["mass_damping"]["value"] == "0.1"
     assert metrics["damping_start_time"]["value"] == "0.02"
+    assert metrics["adaptive_increments"]["value"] == "true"
+    assert "accepted_increment_count" in metrics
+    assert "cutback_count" in metrics
     assert "newton_failed_steps" in metrics
