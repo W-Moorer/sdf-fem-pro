@@ -194,8 +194,8 @@ Purpose: prove engineering mechanics result accuracy.
 
 Cases:
 
-- linear static small deformation;
-- large displacement/large rotation static deformation;
+- sphere-on-cantilever quasi-static contact as the front-end mechanics check;
+- large displacement/large rotation static deformation where feasible;
 - different element types where available, e.g. TET4/HEX8/C3D8-style cases.
 
 Metrics:
@@ -212,9 +212,19 @@ Purpose: prove the method follows time-dependent contact.
 
 Cases:
 
-- free-fall or pressure-driven contact, not purely prescribed closure;
-- 1.0 s or longer time horizon where contact establishes and evolves;
-- small and large deformation variants if feasible.
+- high-resolution flexible cube free-fall onto a rigid plane;
+- high-resolution flexible sphere free-fall onto a rigid plane;
+- flexible sphere free-fall onto a flexible cube resting on the ground;
+- the current manuscript Figure 9 / reference-paper Fig. 6 geometry, with a higher-resolution mesh and figure style matched to the reference.
+
+All dynamic paper-facing cases should use:
+
+```text
+total_time = 3.0 s
+dt = 0.001 s
+gravity = 9.81
+initial vertical velocity = 0
+```
 
 Metrics:
 
@@ -224,6 +234,13 @@ Metrics:
 - active contact/time;
 - kinetic/internal/contact energy;
 - frame-wise VTK comparison.
+
+Plot policy:
+
+- no bar charts for paper-facing evidence;
+- use SFC/CalculiX curves with the error printed in the legend;
+- use tables for finite-difference/Jacobian scalar errors;
+- use 3D stress/strain/displacement/contact clouds and error clouds for mechanics fields.
 
 ### Experiment 4: Efficiency Against CalculiX
 
