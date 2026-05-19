@@ -27,11 +27,15 @@ from .jacobian import (
 from .lagrangian_sdf_oracle import (
     LagrangianOracleConstraint,
     LagrangianOracleContactResponse,
+    LagrangianPatchPairQueryResult,
+    LagrangianPullbackQueryResult,
     LagrangianSDFContactOracle,
     LagrangianSDFQueryResult,
     lagrangian_oracle_constraint_from_sample,
     lagrangian_oracle_jacobian_row,
     lagrangian_oracle_penalty_response,
+    lagrangian_oracle_penalty_response_batch,
+    lagrangian_patch_pair_query,
 )
 from .narrow_phase import (
     ContactConstraint,
@@ -51,6 +55,8 @@ __all__ = [
     "FieldSurfaceContactResponse",
     "LagrangianOracleConstraint",
     "LagrangianOracleContactResponse",
+    "LagrangianPatchPairQueryResult",
+    "LagrangianPullbackQueryResult",
     "LagrangianSDFContactOracle",
     "LagrangianSDFQueryResult",
     "SurfaceQuadratureCache",
@@ -71,6 +77,8 @@ __all__ = [
     "lagrangian_oracle_constraint_from_sample",
     "lagrangian_oracle_jacobian_row",
     "lagrangian_oracle_penalty_response",
+    "lagrangian_oracle_penalty_response_batch",
+    "lagrangian_patch_pair_query",
     "node_to_surface_field_penalty_response",
     "penalty_contact_response",
     "surface_to_surface_field_penalty_response",

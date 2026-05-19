@@ -116,17 +116,23 @@ class MaterialSDF:
     def query_gradient(self, point: np.ndarray) -> np.ndarray:
         """Evaluate ``grad_X phi0(X)``."""
 
+        grad = self.query_raw_gradient(point)
+        norm = float(np.linalg.norm(grad))
+        if norm <= 0.0:
+            raise ValueError("gradient(point) must be nonzero")
+        return grad / norm
+
+    def query_raw_gradient(self, point: np.ndarray) -> np.ndarray:
+        """Evaluate the unnormalized material-space SDF derivative."""
+
         X = _as_point(point, "point")
         if self.gradient is not None:
             grad = np.asarray(self.gradient(X), dtype=float)
             if grad.shape != (3,):
                 raise ValueError("gradient(point) must return shape (3,)")
-            norm = float(np.linalg.norm(grad))
-            if norm <= 0.0:
-                raise ValueError("gradient(point) must be nonzero")
-            return grad / norm
+            return grad
         if self.grid is not None:
-            return self.grid.query_gradient(X)
+            return self.grid.query_raw_gradient(X)
         result = self.closest_reference_patch(X)
         return result.normal.copy()
 
@@ -161,10 +167,11 @@ class MaterialSDF:
         x_current: np.ndarray,
         *,
         padding: float | None = None,
+        cell_size: float | None = None,
     ) -> "ReferencePatchBVH":
         """Build/refit a current-space AABB index over reference patches."""
 
-        return ReferencePatchBVH.from_material(self, x_current, padding=padding)
+        return ReferencePatchBVH.from_material(self, x_current, padding=padding, cell_size=cell_size)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,13 +188,20 @@ class MaterialPatchProjection:
 
 @dataclass(frozen=True, slots=True)
 class MaterialSDFGrid:
-    """Regular reference-space SDF grid with trilinear interpolation."""
+    """Regular reference-space SDF grid.
+
+    ``interpolation_order`` may be ``"linear"`` for trilinear interpolation or
+    ``"cubic"`` for tensor-product cubic Lagrange interpolation on the reference
+    grid.  The cubic path is intended for high-order material SDF queries and
+    does not create a current-space SDF grid.
+    """
 
     origin: np.ndarray
     spacing: np.ndarray
     phi: np.ndarray
     gradient: np.ndarray | None = None
     valid_mask: np.ndarray | None = None
+    interpolation_order: str = "linear"
 
     def __post_init__(self) -> None:
         origin = _as_point(self.origin, "origin")
@@ -206,11 +220,17 @@ class MaterialSDFGrid:
             gradient = np.asarray(self.gradient, dtype=float)
         if gradient.shape != (*phi.shape, 3):
             raise ValueError("gradient must have shape (*phi.shape, 3)")
+        order = str(self.interpolation_order).lower()
+        if order not in {"linear", "cubic"}:
+            raise ValueError("interpolation_order must be 'linear' or 'cubic'")
+        if order == "cubic" and any(size < 4 for size in phi.shape):
+            raise ValueError("cubic material SDF interpolation requires at least four nodes per axis")
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "spacing", spacing)
         object.__setattr__(self, "phi", phi)
         object.__setattr__(self, "gradient", gradient)
         object.__setattr__(self, "valid_mask", valid)
+        object.__setattr__(self, "interpolation_order", order)
 
     @classmethod
     def from_phi_function(
@@ -221,6 +241,7 @@ class MaterialSDFGrid:
         shape: tuple[int, int, int],
         phi: PhiFunction,
         gradient: GradPhiFunction | None = None,
+        interpolation_order: str = "linear",
     ) -> "MaterialSDFGrid":
         """Sample a reference-grid SDF from callables."""
 
@@ -234,7 +255,7 @@ class MaterialSDFGrid:
             values[index] = float(phi(point))
             if gradient is not None:
                 gradients[index] = np.asarray(gradient(point), dtype=float)
-        return cls(origin=base, spacing=h, phi=values, gradient=gradients)
+        return cls(origin=base, spacing=h, phi=values, gradient=gradients, interpolation_order=interpolation_order)
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -257,18 +278,30 @@ class MaterialSDFGrid:
         )
 
     def query_phi(self, point: np.ndarray) -> float:
-        """Trilinearly interpolate ``phi0(X)``."""
+        """Interpolate ``phi0(X)`` in reference space."""
 
+        if self.interpolation_order == "cubic":
+            value, _grad = _tricubic_value_and_derivative(self.phi, self.origin, self.spacing, point)
+            return float(value)
         return self._as_narrow_grid().query_phi(point)
 
     def query_gradient(self, point: np.ndarray) -> np.ndarray:
         """Return the scalar-interpolation derivative of ``phi0``."""
 
-        grad = self._as_narrow_grid().query_spatial_derivative_phi(point)
+        grad = self.query_raw_gradient(point)
         norm = float(np.linalg.norm(grad))
         if norm <= 0.0:
             raise ValueError("material SDF gradient is zero at query point")
         return grad / norm
+
+    def query_raw_gradient(self, point: np.ndarray) -> np.ndarray:
+        """Return the unnormalized scalar-interpolation derivative."""
+
+        if self.interpolation_order == "cubic":
+            _value, grad = _tricubic_value_and_derivative(self.phi, self.origin, self.spacing, point)
+        else:
+            grad = self._as_narrow_grid().query_spatial_derivative_phi(point)
+        return np.asarray(grad, dtype=float)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +319,9 @@ class ReferencePatchBVH:
     aabb_min: np.ndarray
     aabb_max: np.ndarray
     padding: float
+    cell_size: float
+    cells: dict[tuple[int, int, int], tuple[int, ...]]
+    origin: np.ndarray
 
     @classmethod
     def from_material(
@@ -294,6 +330,7 @@ class ReferencePatchBVH:
         x_current: np.ndarray,
         *,
         padding: float | None = None,
+        cell_size: float | None = None,
     ) -> "ReferencePatchBVH":
         """Refit current AABBs from the same reference patch topology."""
 
@@ -306,21 +343,48 @@ class ReferencePatchBVH:
         triangles = X[material.boundary_faces]
         mins = triangles.min(axis=1) - pad
         maxs = triangles.max(axis=1) + pad
+        if mins.shape[0] == 0:
+            origin = np.zeros(3, dtype=float)
+            h = 1.0
+        else:
+            origin = mins.min(axis=0)
+            if cell_size is None:
+                extents = np.maximum(maxs - mins, 0.0)
+                positive = extents[extents > 0.0]
+                h = float(np.max(positive)) if positive.size else 1.0
+            else:
+                h = float(cell_size)
+        if h <= 0.0:
+            raise ValueError("cell_size must be positive")
+        cells: dict[tuple[int, int, int], list[int]] = {}
+        for patch_id in range(mins.shape[0]):
+            for key in _cell_keys_for_aabb(mins[patch_id], maxs[patch_id], origin, h):
+                cells.setdefault(key, []).append(int(patch_id))
         return cls(
             material=material,
             x_current=X,
             aabb_min=mins,
             aabb_max=maxs,
             padding=pad,
+            cell_size=h,
+            cells={key: tuple(values) for key, values in cells.items()},
+            origin=origin,
         )
 
-    def refit(self, x_current: np.ndarray, *, padding: float | None = None) -> "ReferencePatchBVH":
+    def refit(
+        self,
+        x_current: np.ndarray,
+        *,
+        padding: float | None = None,
+        cell_size: float | None = None,
+    ) -> "ReferencePatchBVH":
         """Return a refit index with unchanged reference patch topology."""
 
         return type(self).from_material(
             self.material,
             x_current,
             padding=self.padding if padding is None else padding,
+            cell_size=self.cell_size if cell_size is None else cell_size,
         )
 
     def candidates(
@@ -342,12 +406,18 @@ class ReferencePatchBVH:
         upper_delta = np.maximum(x - self.aabb_max, 0.0)
         dist2 = np.sum((lower_delta + upper_delta) ** 2, axis=1)
         if search_radius is None:
-            ids = np.arange(self.material.face_count, dtype=np.int64)
+            ids = self._hash_candidates_for_point(x)
+            if ids.size == 0:
+                ids = np.arange(self.material.face_count, dtype=np.int64)
         else:
             radius = float(search_radius)
             if radius < 0.0:
                 raise ValueError("search_radius must be non-negative")
-            ids = np.flatnonzero(dist2 <= radius * radius).astype(np.int64)
+            ids = self._hash_candidates_for_ball(x, radius)
+            if ids.size:
+                ids = ids[dist2[ids] <= radius * radius]
+            else:
+                ids = np.flatnonzero(dist2 <= radius * radius).astype(np.int64)
             if ids.size == 0 and dist2.size:
                 ids = np.asarray([int(np.argmin(dist2))], dtype=np.int64)
         ids = ids[np.argsort(dist2[ids], kind="stable")]
@@ -355,6 +425,28 @@ class ReferencePatchBVH:
             cached = int(cached_face_id)
             ids = np.asarray([cached, *[int(i) for i in ids if int(i) != cached]], dtype=np.int64)
         return ids
+
+    def _cell_index(self, point: np.ndarray) -> tuple[int, int, int]:
+        ijk = np.floor((point - self.origin) / self.cell_size).astype(np.int64)
+        return int(ijk[0]), int(ijk[1]), int(ijk[2])
+
+    def _hash_candidates_for_point(self, point: np.ndarray) -> np.ndarray:
+        ids = self.cells.get(self._cell_index(point), ())
+        if not ids:
+            return np.empty(0, dtype=np.int64)
+        unique = np.asarray(sorted(set(int(v) for v in ids)), dtype=np.int64)
+        contains = np.all((self.aabb_min[unique] <= point) & (point <= self.aabb_max[unique]), axis=1)
+        return unique[contains]
+
+    def _hash_candidates_for_ball(self, point: np.ndarray, radius: float) -> np.ndarray:
+        lower = point - float(radius)
+        upper = point + float(radius)
+        ids: set[int] = set()
+        for key in _cell_keys_for_aabb(lower, upper, self.origin, self.cell_size):
+            ids.update(self.cells.get(key, ()))
+        if not ids:
+            return np.empty(0, dtype=np.int64)
+        return np.asarray(sorted(ids), dtype=np.int64)
 
 
 def _as_nodes(value: np.ndarray, name: str) -> np.ndarray:
@@ -391,6 +483,76 @@ def _as_spacing(value: np.ndarray | float) -> np.ndarray:
     if np.any(arr <= 0.0):
         raise ValueError("spacing entries must be positive")
     return arr
+
+
+def _cell_keys_for_aabb(
+    lower: np.ndarray,
+    upper: np.ndarray,
+    origin: np.ndarray,
+    cell_size: float,
+):
+    lo = np.floor((lower - origin) / float(cell_size)).astype(np.int64)
+    hi = np.floor((upper - origin) / float(cell_size)).astype(np.int64)
+    for i in range(int(lo[0]), int(hi[0]) + 1):
+        for j in range(int(lo[1]), int(hi[1]) + 1):
+            for k in range(int(lo[2]), int(hi[2]) + 1):
+                yield i, j, k
+
+
+def _axis_cubic_indices_and_weights(u: float, size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    base = int(np.floor(float(u))) - 1
+    base = max(0, min(base, int(size) - 4))
+    nodes = np.arange(base, base + 4, dtype=np.int64)
+    t = float(u) - nodes.astype(float)
+    weights = np.ones(4, dtype=float)
+    derivatives = np.zeros(4, dtype=float)
+    for i in range(4):
+        wi = 1.0
+        for j in range(4):
+            if i == j:
+                continue
+            wi *= t[j] / float(nodes[i] - nodes[j])
+        weights[i] = wi
+        derivative = 0.0
+        for m in range(4):
+            if m == i:
+                continue
+            term = 1.0 / float(nodes[i] - nodes[m])
+            for j in range(4):
+                if j == i or j == m:
+                    continue
+                term *= t[j] / float(nodes[i] - nodes[j])
+            derivative += term
+        derivatives[i] = derivative
+    return nodes, weights, derivatives
+
+
+def _tricubic_value_and_derivative(
+    values: np.ndarray,
+    origin: np.ndarray,
+    spacing: np.ndarray,
+    point: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    p = _as_point(point, "point")
+    arr = np.asarray(values, dtype=float)
+    h = _as_spacing(spacing)
+    u = (p - _as_point(origin, "origin")) / h
+    if np.any(u < -1.0e-12) or np.any(u > np.asarray(arr.shape, dtype=float) - 1.0 + 1.0e-12):
+        raise ValueError("query point is outside the material SDF grid")
+    idx0, w0, dw0 = _axis_cubic_indices_and_weights(float(u[0]), arr.shape[0])
+    idx1, w1, dw1 = _axis_cubic_indices_and_weights(float(u[1]), arr.shape[1])
+    idx2, w2, dw2 = _axis_cubic_indices_and_weights(float(u[2]), arr.shape[2])
+    value = 0.0
+    grad_u = np.zeros(3, dtype=float)
+    for a, ia in enumerate(idx0):
+        for b, ib in enumerate(idx1):
+            for c, ic in enumerate(idx2):
+                phi = float(arr[int(ia), int(ib), int(ic)])
+                value += w0[a] * w1[b] * w2[c] * phi
+                grad_u[0] += dw0[a] * w1[b] * w2[c] * phi
+                grad_u[1] += w0[a] * dw1[b] * w2[c] * phi
+                grad_u[2] += w0[a] * w1[b] * dw2[c] * phi
+    return float(value), grad_u / h
 
 
 def _unit_normals(triangles: np.ndarray) -> np.ndarray:

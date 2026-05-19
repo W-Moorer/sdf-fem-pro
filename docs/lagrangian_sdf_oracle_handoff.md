@@ -2,21 +2,22 @@
 
 日期：2026-05-19
 
-## 背景
+## 目标定位
 
-`docs/final_aim.md` 的目标不是继续把当前构型 `DynamicNarrowBandSDF` grid build 做到更快，而是把主方法转向：
+`docs/final_aim.md` 指向的最终主线不是“每步重建 current-space SDF grid”，而是：
 
 ```text
 reference/material SDF phi0(X)
 + FEM deformation map chi(X,t)
-+ refit reference surface patch AABBs
-+ on-demand pull-back query
-+ local closest-point Newton corrector
++ refit reference surface patch bounds
++ cheap pull-back SDF query
++ constrained closest-point Newton corrector
++ FEM contact force/Jacobian scatter
 ```
 
-因此，本轮新增一个并行的新模块，保留现有 `DynamicNarrowBandSDF + field_contact` 作为兼容路径、对照路径和已验证实验路径。
+因此，本模块保留已有 `DynamicNarrowBandSDF + field_contact` 作为兼容、对照和消融路径，同时新增 deformation-aware / Lagrangian SDF contact oracle 作为 final-aim 主方法候选。
 
-## 新增代码
+## 已实现代码
 
 1. `src/sfc/sdf/material_sdf.py`
    - `MaterialSDF`
@@ -24,20 +25,24 @@ reference/material SDF phi0(X)
    - `MaterialPatchProjection`
    - `ReferencePatchBVH`
 
-2. `src/sfc/contact/lagrangian_sdf_oracle.py`
+2. `src/sfc/fem/deformation_map.py`
+   - `FEMDeformationMap`
+   - `DeformationMapEvaluation`
+   - TET4 affine `chi(X,t)`、pull-back、deformation gradient
+   - HEX8 isoparametric `chi(X,t)`、pull-back、deformation gradient
+
+3. `src/sfc/contact/lagrangian_sdf_oracle.py`
    - `LagrangianSDFContactOracle`
    - `LagrangianSDFQueryResult`
+   - `LagrangianPullbackQueryResult`
+   - `LagrangianPatchPairQueryResult`
    - `LagrangianOracleConstraint`
    - `LagrangianOracleContactResponse`
    - `lagrangian_oracle_constraint_from_sample(...)`
    - `lagrangian_oracle_jacobian_row(...)`
    - `lagrangian_oracle_penalty_response(...)`
-
-3. `src/sfc/fem/deformation_map.py`
-   - `FEMDeformationMap`
-   - `DeformationMapEvaluation`
-   - TET4 affine material/current inverse and `chi(X,t)` evaluation
-   - HEX8 isoparametric reference/current inverse and `chi(X,t)` evaluation
+   - `lagrangian_oracle_penalty_response_batch(...)`
+   - `lagrangian_patch_pair_query(...)`
 
 4. API exports
    - `sfc.sdf.MaterialSDF`
@@ -45,64 +50,75 @@ reference/material SDF phi0(X)
    - `sfc.sdf.ReferencePatchBVH`
    - `sfc.fem.FEMDeformationMap`
    - `sfc.contact.LagrangianSDFContactOracle`
+   - `sfc.contact.LagrangianPullbackQueryResult`
+   - `sfc.contact.LagrangianPatchPairQueryResult`
 
-## 当前算法语义
+## Material SDF
 
-`MaterialSDF` 存储参考节点、参考表面三角 patch、可选 `phi0(X)` 与 `grad_phi0(X)`，以及可选 `MaterialSDFGrid`。当没有显式 `phi0/grad_phi0` callable 或 reference grid 时，fallback 使用参考三角面片的局部有向距离。
+`MaterialSDF` 保存参考节点、参考边界三角 patch、可选 `phi0(X)`、可选 `grad_phi0(X)`、可选 `MaterialSDFGrid` 和窄带半径。当没有显式 callable 或 grid 时，fallback 使用参考三角面的局部有向距离。
 
-`MaterialSDFGrid` 是参考空间 regular SDF grid，保存：
+`MaterialSDFGrid` 是参考空间 regular SDF grid，不是 current-space dynamic SDF grid。它支持：
 
 - `phi0` grid；
 - finite-difference 或用户提供的 `grad_phi0`；
 - validity mask；
 - trilinear `query_phi(X)`；
-- scalar-interpolation derivative `query_gradient(X)`。
+- cubic tensor-product Lagrange `query_phi(X)`；
+- unnormalized scalar derivative `query_raw_gradient(X)`；
+- normalized `query_gradient(X)`。
 
-它是 material/reference grid，不是 current-space dynamic SDF grid。
+三次插值路径用于高阶 material SDF 查询。它不构建当前构型 SDF 场。
 
-`ReferencePatchBVH` 当前是 refit AABB patch index。它不构建当前构型 SDF grid；每次 FEM 节点更新时只基于同一组参考 patch topology 更新当前 AABB：
+## Reference Patch Index
+
+`ReferencePatchBVH` 现在是 refit AABB + spatial hash patch index。它不重建 current-space SDF grid；每次 FEM 节点更新时只更新同一组 reference patch 的当前 AABB：
 
 ```text
 reference patch C_k
 -> current vertices chi(C_k,t)
 -> current AABB B_k(t)
+-> spatial hash refit
 ```
 
-`FEMDeformationMap` 提供：
+`cached_face_id` 只改变候选排序，不允许改变候选集合的 exact fallback 结果。因此 active patch cache 不会改变最终 gap/normal。
 
-- `chi(X,t)`；
-- deformation gradient `F = d chi / dX`；
-- material/current pull-back；
-- TET4 和 HEX8 支持；
-- boundary face 到所属体单元的查找。
+## Oracle Query
 
-`LagrangianSDFContactOracle.query(...)` 的流程：
+精确 query 路径：
 
-1. 用 refit AABB index 取候选 reference patch；
-2. 若有 active patch cache，则把 cached patch 作为候选排序提示；
-3. 对每个候选 patch 做当前空间到 patch 参数域的 least-squares pull-back；
-4. 如果没有 `FEMDeformationMap`，在 patch 参数域里做 Newton corrector：
-   ```text
-   minimize 0.5 ||x - chi(u,v)||^2
-   ```
-5. 如果存在 `FEMDeformationMap`，执行 final-aim KKT/Gauss-Newton corrector：
-   ```text
-   F(X)^T (chi(X,t) - x) + lambda grad_X phi0(X) = 0
-   phi0(X) = 0
-   ```
-   并用
-   ```text
-   n = normalize(F^{-T} grad_X phi0)
-   g = dot(x - chi(X*,t), n)
-   ```
-6. 返回：
-   - signed gap `g = dot(x - chi(X*), n)`
-   - current normal
-   - closest current point
-   - closest material point
-   - face id
-   - barycentric coordinates
-   - master FEM node ids and shape weights
+1. 使用 refit patch index 取候选 reference patch；
+2. cached patch 只作为排序提示；
+3. 对候选 patch 做 current-space pull-back 初值；
+4. 无 `FEMDeformationMap` 时，在三角 patch 参数域中做 closest-point Newton；
+5. 有 `FEMDeformationMap` 时，执行 KKT/Gauss-Newton corrector：
+
+```text
+F(X)^T (chi(X,t) - x) + lambda grad_X phi0(X) = 0
+phi0(X) = 0
+```
+
+6. 输出：
+   - signed gap `g = dot(x - chi(X*), n)`；
+   - current normal `n = normalize(F^{-T} grad_X phi0)`；
+   - closest current point；
+   - closest material point；
+   - face id；
+   - barycentric coordinates；
+   - master FEM node ids and shape weights。
+
+## Cheap Pull-Back Query
+
+新增 `query_pullback(...)` 和 `query_pullback_gap_normal(...)`，对应 final-aim 两级算法的低成本阶段：
+
+```text
+X ~= chi^{-1}(x,t)
+g_tilde = phi0(X) / ||F^{-T} grad_X phi0(X)||
+n_tilde = normalize(F^{-T} grad_X phi0(X))
+```
+
+这一路径用于粗查询、初值、诊断或后续分层策略；它不替代精确 closest-point Newton corrector。
+
+## Contact Response
 
 `lagrangian_oracle_penalty_response(...)` 提供 point/sample-to-oracle 的无摩擦 penalty response：
 
@@ -114,57 +130,61 @@ f = J^T k<-g>_+
 K ~= k J^T J
 ```
 
-当前 corrector 使用三角 patch 参数化，因此约束 `X in Gamma0` 由 patch 参数域隐式满足。这是 `final_aim.md` 中 KKT 约束优化的第一版 surface-patch 实现。
+`lagrangian_oracle_penalty_response_batch(...)` 是稳定的批量入口。目前内部仍复用精确 scalar oracle，但调用点已经固定，后续可以无接口变更地下沉到 C++ fused backend。
 
-## Cache 语义
+## Patch-Pair Query
 
-active patch cache 只改变候选排序，不改变候选集合的 exact fallback。因此 cache 不允许改变最终最近 patch/gap/normal 结果。
+新增 `lagrangian_patch_pair_query(...)`，用于双柔性体 surface patch-pair 最近点查询。当前实现枚举给定 patch id 集合，并使用三角形-三角形最近点几何核返回：
 
-## 新增测试
+- closest point on body A；
+- closest point on body B；
+- material point A/B；
+- face id A/B；
+- barycentric A/B；
+- gap；
+- normal。
 
-`tests/test_lagrangian_sdf_oracle.py`
+这对应 final-aim 中“对重要接触区域、深穿透区域、边缘区域启用 patch-pair 优化”的第一版实现。
 
-覆盖：
+## 测试
+
+新增和保留的测试位于 `tests/test_lagrangian_sdf_oracle.py`，覆盖：
 
 1. 刚体平移/旋转下 gap 不变、normal 随刚体旋转；
-2. 大转角弯曲 surface 上，oracle 与当前表面 brute-force projection 一致；
+2. 大转角弯曲 surface 中 oracle 与当前表面 brute-force projection 一致；
 3. Newton-corrected gap 的 `dg/dx` 与 finite difference 一致；
-4. active patch cache 不改变 query 结果。
+4. active patch cache 不改变 query 结果；
 5. reference `MaterialSDFGrid + FEMDeformationMap + KKT` oracle 与当前表面 projection 一致；
-6. oracle query 不调用 `DynamicNarrowBandSDF.build(...)`，即不重建 current-space SDF grid；
-7. oracle master/slave Jacobian 与 finite difference 一致；
-8. oracle penalty response 满足 master/slave action-reaction。
+6. oracle query 不调用 `DynamicNarrowBandSDF.build(...)`；
+7. cheap pull-back query 在 affine plane case 中与解析结果一致；
+8. oracle master/slave Jacobian 与 finite difference 一致；
+9. oracle penalty response 满足 master/slave action-reaction；
+10. cubic material SDF interpolation 与三次多项式及其导数一致；
+11. reference patch spatial hash 与 exact AABB radius filter 一致；
+12. batch query 与 scalar loop 一致；
+13. batch penalty response 与 scalar response 一致；
+14. patch-pair query 在平行 surface case 中返回正确 gap/normal。
 
-局部测试结果：
+验证结果：
 
 ```text
 python -m pytest -q tests/test_lagrangian_sdf_oracle.py
-8 passed in 0.64s
+14 passed in 0.75s
+
+pytest -q
+324 passed in 642.18s (0:10:42)
 ```
 
-## 与现有 DynamicNarrowBandSDF 的关系
+## 与 DynamicNarrowBandSDF 的关系
 
-当前项目已有两条路线：
+当前项目有两条路线：
 
 | 路线 | 状态 | 用途 |
 | --- | --- | --- |
-| `DynamicNarrowBandSDF + field_contact` | 成熟、已验证 | 当前论文/实验兼容路径、对照路径、field-grid 方法证据 |
-| `MaterialSDF + LagrangianSDFContactOracle` | 新增原型 | `final_aim.md` 对应的新主线候选 |
+| `DynamicNarrowBandSDF + field_contact` | 已验证 | current-space field 兼容路径、对照路径、消融和已有实验基础 |
+| `MaterialSDF + LagrangianSDFContactOracle` | final-aim 核心原型 | deformation-aware material SDF contact oracle 主方法候选 |
 
-不要再把 C++ tangent/field build 优化误认为 `final_aim.md` 的核心实现。那些优化仍属于 current-space dynamic field pipeline。
-
-## 当前仍未完成
-
-1. 高阶 tricubic/B-spline `phi0(X)`；
-2. 真正树结构 BVH 或 spatial hash，而不仅是 vectorized AABB patch index；
-3. 双柔性体 patch-pair optimization；
-4. oracle-based surface-to-surface quadrature vectorized/C++ backend；
-5. 与 CalculiX/SFC 工程算例的完整 oracle 路径对比；
-6. 论文标题、摘要、方法、实验主线重写。
-
-## 论文主线判断
-
-如果坚持 `docs/final_aim.md`，论文主方法应从：
+如果论文坚持 `final_aim.md`，主方法应从：
 
 ```text
 dynamic narrow-band SDF field rebuilt from the current FEM surface
@@ -173,14 +193,30 @@ dynamic narrow-band SDF field rebuilt from the current FEM surface
 调整为：
 
 ```text
-deformation-aware / Lagrangian SDF contact oracle
+deformation-aware / Lagrangian material SDF contact oracle
 ```
 
-现有 dynamic field 结果可以保留，但应降级为：
+已有 dynamic field 结果可以作为 baseline、ablation、compatibility path 或 current-space field comparison，但不应再作为最终主方法。
 
-- baseline；
-- ablation；
-- compatibility path；
-- current-space field comparison。
+## 仍不应声称
 
-不能再把每步 current-space SDF rebuild 写成最终主方法。
+- friction；
+- self-contact；
+- nonlinear FEM 主求解器已完整覆盖；
+- GPU 实时；
+- barrier contact；
+- neural/POD/data-driven SDF；
+- Abaqus 依赖的核心求解；
+- production BVH superiority；
+- arbitrary non-manifold robust global SDF。
+
+## 后续工程化
+
+仍建议继续做，但它们不阻塞当前 final-aim 原型成立：
+
+1. C++ fused oracle backend；
+2. matrix-free tangent 与预条件求解；
+3. patch-pair 候选由 broad phase 自动生成；
+4. oracle-based surface-to-surface quadrature；
+5. 与 CalculiX/SFC 工程算例的完整 oracle 路径对比；
+6. 论文标题、摘要、方法和实验主线按 Lagrangian material SDF oracle 重写。

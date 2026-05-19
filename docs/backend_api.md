@@ -98,6 +98,36 @@ field.query_payload_batch(points)
 
 These wrappers are not yet promoted as stable API in this phase.
 
+## Lagrangian Material SDF Oracle API
+
+The final-aim path keeps the SDF in reference/material space and evaluates
+current contact queries through the FEM deformation map:
+
+```python
+from sfc.fem import FEMDeformationMap
+from sfc.sdf import MaterialSDF, MaterialSDFGrid
+from sfc.contact import LagrangianSDFContactOracle
+
+material = MaterialSDF.from_grid(reference_nodes, boundary_faces, material_grid)
+oracle = LagrangianSDFContactOracle(
+    material,
+    x_current,
+    search_radius=contact_radius,
+    deformation_map=FEMDeformationMap(volume_mesh, x_current),
+)
+
+coarse = oracle.query_pullback(x)
+result = oracle.query(x)
+gaps, normals = oracle.query_gap_normal_batch(points)
+```
+
+Semantics:
+
+- `query_pullback(x)` is the cheap stage: `X ~= chi^{-1}(x)`, `g_tilde = phi0(X) / ||F^{-T} grad_X phi0||`.
+- `query(x)` is the corrected stage: it solves the local closest-point problem on the deformed material SDF surface.
+- `query_gap_normal_batch(points)` is a stable Python batch entry point; it currently reuses the exact scalar oracle internally.
+- `lagrangian_patch_pair_query(...)` returns a first patch-pair closest-point result for two deformable material-SDF oracles.
+
 ## Visualization and Exchange
 
 `validation/run_external_visual_validation.py` exports diagnostic VTU/CSV/PNG/PDF files for:

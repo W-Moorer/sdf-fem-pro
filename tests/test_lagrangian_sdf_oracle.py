@@ -7,6 +7,8 @@ from sfc.contact.lagrangian_sdf_oracle import (
     lagrangian_oracle_constraint_from_sample,
     lagrangian_oracle_jacobian_row,
     lagrangian_oracle_penalty_response,
+    lagrangian_oracle_penalty_response_batch,
+    lagrangian_patch_pair_query,
 )
 from sfc.contact.narrow_phase import SurfaceSample
 from sfc.fem.deformation_map import FEMDeformationMap
@@ -235,6 +237,39 @@ def test_final_aim_oracle_query_does_not_build_current_sdf_grid(monkeypatch) -> 
     np.testing.assert_allclose(n, np.asarray([0.0, 0.0, 1.0]), atol=1.0e-12)
 
 
+def test_final_aim_pullback_query_matches_exact_affine_plane() -> None:
+    nodes, _faces, mesh, material = _tet_plane_volume_model()
+    A = np.asarray(
+        [
+            [1.2, 0.1, 0.0],
+            [-0.1, 0.9, 0.05],
+            [0.15, 0.0, 1.1],
+        ],
+        dtype=float,
+    )
+    translation = np.asarray([0.2, -0.25, 0.4], dtype=float)
+    current = nodes @ A.T + translation
+    oracle = LagrangianSDFContactOracle(
+        material,
+        current,
+        search_radius=0.6,
+        deformation_map=FEMDeformationMap(mesh, current),
+    )
+    material_point = np.asarray([0.24, 0.18, 0.06], dtype=float)
+    point = A @ material_point + translation
+    expected_covector = np.linalg.solve(A.T, np.asarray([0.0, 0.0, 1.0], dtype=float))
+    expected_scale = np.linalg.norm(expected_covector)
+
+    result = oracle.query_pullback(point)
+
+    np.testing.assert_allclose(result.material_point, material_point, atol=1.0e-12)
+    assert np.isclose(result.phi0, material_point[2], atol=1.0e-12)
+    assert np.isclose(result.gap, material_point[2] / expected_scale, atol=1.0e-12)
+    np.testing.assert_allclose(result.normal, expected_covector / expected_scale, atol=1.0e-12)
+    assert result.node_ids.shape == (4,)
+    assert np.isclose(float(np.sum(result.shape_values)), 1.0, atol=1.0e-12)
+
+
 def test_final_aim_oracle_contact_jacobian_matches_finite_difference() -> None:
     nodes, _faces, mesh, material = _tet_plane_volume_model()
     slave = np.asarray([[0.25, 0.25, -0.04]], dtype=float)
@@ -298,3 +333,141 @@ def test_final_aim_oracle_penalty_response_action_reaction() -> None:
     assert np.isclose(response.min_gap, -0.05, atol=1.0e-12)
     np.testing.assert_allclose(force[0] + force[1:].sum(axis=0), np.zeros(3), atol=1.0e-12)
     assert force[0, 2] > 0.0
+
+
+def test_material_sdf_grid_cubic_interpolation_matches_polynomial_and_derivative() -> None:
+    def phi(x: np.ndarray) -> float:
+        return float(x[0] ** 3 + 2.0 * x[1] ** 2 - 0.5 * x[2] + 0.25 * x[0] * x[1] * x[2])
+
+    def grad(x: np.ndarray) -> np.ndarray:
+        return np.asarray(
+            [
+                3.0 * x[0] ** 2 + 0.25 * x[1] * x[2],
+                4.0 * x[1] + 0.25 * x[0] * x[2],
+                -0.5 + 0.25 * x[0] * x[1],
+            ],
+            dtype=float,
+        )
+
+    grid = MaterialSDFGrid.from_phi_function(
+        origin=np.asarray([-1.0, -1.0, -1.0], dtype=float),
+        spacing=0.25,
+        shape=(9, 9, 9),
+        phi=phi,
+        interpolation_order="cubic",
+    )
+    point = np.asarray([0.17, -0.31, 0.44], dtype=float)
+    assert np.isclose(grid.query_phi(point), phi(point), atol=5.0e-14)
+    np.testing.assert_allclose(grid.query_raw_gradient(point), grad(point), atol=5.0e-13)
+    np.testing.assert_allclose(grid.query_gradient(point), grad(point) / np.linalg.norm(grad(point)), atol=5.0e-13)
+
+
+def test_reference_patch_spatial_hash_matches_exact_aabb_radius_filter() -> None:
+    nodes, faces = _strip_surface(nx=7, ny=4)
+    material = MaterialSDF.from_triangle_surface(nodes, faces, band_radius=0.05)
+    bvh = material.build_patch_bvh(nodes.copy(), padding=0.05, cell_size=0.25)
+    point = np.asarray([0.18, 0.03, 0.025], dtype=float)
+    radius = 0.11
+
+    lower_delta = np.maximum(bvh.aabb_min - point, 0.0)
+    upper_delta = np.maximum(point - bvh.aabb_max, 0.0)
+    dist2 = np.sum((lower_delta + upper_delta) ** 2, axis=1)
+    expected = set(int(i) for i in np.flatnonzero(dist2 <= radius * radius))
+    actual = set(int(i) for i in bvh.candidates(point, search_radius=radius))
+
+    assert bvh.cells
+    assert actual == expected
+
+
+def test_lagrangian_oracle_batch_query_matches_scalar_loop() -> None:
+    reference_nodes, faces = _square_surface()
+    material = MaterialSDF.from_triangle_surface(reference_nodes, faces, band_radius=0.35)
+    current = reference_nodes @ _rotation_y(0.35).T + np.asarray([0.2, -0.1, 0.05], dtype=float)
+    oracle = LagrangianSDFContactOracle(material, current, search_radius=0.5)
+    points = np.asarray(
+        [
+            [0.2, -0.1, 0.22],
+            [-0.15, 0.25, 0.18],
+            [0.55, -0.32, 0.12],
+        ],
+        dtype=float,
+    )
+
+    gaps, normals = oracle.query_gap_normal_batch(points, cache_keys=["a", "b", "c"])
+    scalar = [oracle.query(point, cache_key=f"scalar-{idx}") for idx, point in enumerate(points)]
+
+    np.testing.assert_allclose(gaps, np.asarray([result.gap for result in scalar]), atol=1.0e-14)
+    np.testing.assert_allclose(normals, np.vstack([result.normal for result in scalar]), atol=1.0e-14)
+
+
+def test_lagrangian_oracle_batch_penalty_response_matches_scalar_response() -> None:
+    nodes, _faces, mesh, material = _tet_plane_volume_model()
+    slave = np.asarray(
+        [
+            [0.25, 0.25, -0.05],
+            [0.35, 0.15, 0.04],
+        ],
+        dtype=float,
+    )
+    samples = [
+        SurfaceSample(
+            node_ids=np.asarray([0], dtype=np.int64),
+            weights=np.asarray([1.0], dtype=float),
+            candidate_face_ids=np.empty(0, dtype=np.int64),
+        ),
+        SurfaceSample(
+            node_ids=np.asarray([1], dtype=np.int64),
+            weights=np.asarray([1.0], dtype=float),
+            candidate_face_ids=np.empty(0, dtype=np.int64),
+        ),
+    ]
+    kwargs = dict(
+        pressure_stiffness=125.0,
+        n_total_dofs=18,
+        slave_dof_offset=0,
+        master_dof_offset=6,
+    )
+    scalar = lagrangian_oracle_penalty_response(
+        slave,
+        samples,
+        LagrangianSDFContactOracle(
+            material,
+            nodes.copy(),
+            search_radius=0.4,
+            deformation_map=FEMDeformationMap(mesh, nodes.copy()),
+        ),
+        **kwargs,
+    )
+    batch = lagrangian_oracle_penalty_response_batch(
+        slave,
+        samples,
+        LagrangianSDFContactOracle(
+            material,
+            nodes.copy(),
+            search_radius=0.4,
+            deformation_map=FEMDeformationMap(mesh, nodes.copy()),
+        ),
+        **kwargs,
+    )
+
+    assert batch.active_count == scalar.active_count == 1
+    np.testing.assert_allclose(batch.force, scalar.force, atol=1.0e-14)
+    np.testing.assert_allclose(batch.stiffness.toarray(), scalar.stiffness.toarray(), atol=1.0e-14)
+
+
+def test_lagrangian_patch_pair_query_parallel_surfaces() -> None:
+    nodes_a, faces = _square_surface()
+    nodes_b = nodes_a + np.asarray([0.0, 0.0, 0.2], dtype=float)
+    material_a = MaterialSDF.from_triangle_surface(nodes_a, faces, band_radius=0.3)
+    material_b = MaterialSDF.from_triangle_surface(nodes_b, faces, band_radius=0.3)
+    oracle_a = LagrangianSDFContactOracle(material_a, nodes_a.copy(), search_radius=0.4)
+    oracle_b = LagrangianSDFContactOracle(material_b, nodes_b.copy(), search_radius=0.4)
+
+    result = lagrangian_patch_pair_query(oracle_a, oracle_b)
+
+    assert result.candidates_evaluated == 4
+    assert np.isclose(result.gap, 0.2, atol=1.0e-12)
+    np.testing.assert_allclose(result.normal, np.asarray([0.0, 0.0, 1.0]), atol=1.0e-12)
+    np.testing.assert_allclose(result.point_b - result.point_a, np.asarray([0.0, 0.0, 0.2]), atol=1.0e-12)
+    assert np.isclose(float(np.sum(result.barycentric_a)), 1.0, atol=1.0e-12)
+    assert np.isclose(float(np.sum(result.barycentric_b)), 1.0, atol=1.0e-12)
