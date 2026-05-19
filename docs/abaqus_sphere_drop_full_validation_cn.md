@@ -86,3 +86,33 @@ pytest -q tests/test_abaqus_sphere_drop_full_validation.py tests/test_abaqus_sph
 5. 罚接触刚度会影响反弹高度、接触持续时间和应力峰值。
 
 因此，本轮结果可以作为“全程验证流水线已建立”的证据，不能直接作为“全程轨迹与 Abaqus 高精度等价”的论文证据。下一步应做接触律和耗散对齐：匹配 Abaqus hard contact / bulk viscosity 的等效 SFC 接触响应，或在论文中明确将该算例定位为外部参考诊断而非等价证明。
+
+## 接触律和耗散对齐进展
+
+已在 `validation/run_abaqus_sphere_drop_full_validation.py` 中加入显式参数化的耗散项：
+
+- `contact_damping`：法向接触 dashpot，仅在接触激活点且相对法向速度为闭合时产生耗散；
+- `mass_damping`：质量比例耗散，用于模拟 Abaqus/Explicit bulk viscosity 对冲击后振荡的等效耗散；
+- `stiffness_damping`：刚度比例耗散；
+- `damping_start_time`：耗散起始时间。为了不破坏自由落体接触前轨迹，推荐从首次接触时刻附近启动。
+
+对齐运行命令：
+
+```text
+python validation/run_abaqus_sphere_drop_full_validation.py --duration 3.0 --dt 0.001 --contact-stiffness 1.0e9 --mass-damping 0.5 --damping-start-time 0.064 --contact-damping 0.0 --stiffness-damping 0.0 --output-stride 1 --out-dir results/abaqus_sphere_drop_full_aligned_dissipation
+```
+
+对齐后关键结果：
+
+| 指标 | 未对齐 | 接触后耗散对齐 | 变化 |
+| --- | ---: | ---: | ---: |
+| 首次接触时间误差 | `5.829e-6 s` | `5.829e-6 s` | 保持 |
+| 最大质心高度误差 | `2.467e-2 m` | `1.664e-2 m` | 降低约 `32.6%` |
+| RMS 质心高度误差 | `1.109e-2 m` | `5.466e-3 m` | 降低约 `50.7%` |
+| 最大最小间隙误差 | `2.412e-2 m` | `1.680e-2 m` | 降低约 `30.3%` |
+| full z L2 error | `6.075e-1` | `2.995e-1` | 降低约 `50.7%` |
+| full min-gap L2 error | `5.996e-1` | `2.996e-1` | 降低约 `50.0%` |
+| Newton failed steps | `0` | `0` | 保持 |
+| SFC wall time | `117.26 s` | `115.88 s` | 基本持平 |
+
+当前可支持的结论是：接触律/耗散对齐显著改善了全程位移和间隙轨迹，同时不破坏首次接触时刻。尚不能声称应力/应变峰值已经与 Abaqus/Explicit 完全等价，因为 Abaqus hard contact、bulk viscosity、显式稳定积分和当前 SFC penalty contact 的局部冲击应力仍不完全一致。

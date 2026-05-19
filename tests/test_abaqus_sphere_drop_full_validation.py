@@ -29,6 +29,9 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
         duration=0.07,
         dt=0.002,
         contact_stiffness=1.0e8,
+        contact_damping=1.0e3,
+        mass_damping=0.1,
+        damping_start_time=0.02,
         output_stride=1,
         max_newton_iterations=4,
     )
@@ -38,6 +41,9 @@ def test_full_sfc_history_crosses_contact_with_lagrangian_oracle(tmp_path: Path)
     assert any(int(row["active_contact_count"]) > 0 for row in rows)
     assert _first_contact_time(rows) is not None
     assert all(float(row["sfc_solve_wall_seconds"]) > 0.0 for row in rows)
+    assert {float(row["contact_damping"]) for row in rows} == {1000.0}
+    assert {float(row["mass_damping"]) for row in rows} == {0.1}
+    assert {float(row["damping_start_time"]) for row in rows} == {0.02}
 
 
 def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path: Path) -> None:
@@ -56,6 +62,9 @@ def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path:
         duration=0.01,
         dt=0.002,
         contact_stiffness=1.0e8,
+        contact_damping=1.0e3,
+        mass_damping=0.1,
+        damping_start_time=0.02,
         output_stride=1,
         max_newton_iterations=4,
     )
@@ -67,4 +76,7 @@ def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path:
         metrics = {row["metric"]: row for row in csv.DictReader(handle)}
     assert metrics["core_abaqus_dependency"]["value"] == "false"
     assert metrics["sfc_contact_path"]["value"] == "MaterialSDF+LagrangianSDFContactOracle"
+    assert metrics["contact_damping"]["value"] == "1000.0"
+    assert metrics["mass_damping"]["value"] == "0.1"
+    assert metrics["damping_start_time"]["value"] == "0.02"
     assert "newton_failed_steps" in metrics

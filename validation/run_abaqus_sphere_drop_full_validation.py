@@ -22,7 +22,7 @@ from time import perf_counter
 from typing import Any
 
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,11 +70,14 @@ def _lagrangian_plane_contact_response(
     model: AbaqusSphereDropModel,
     x_current: np.ndarray,
     *,
+    v_current: np.ndarray | None = None,
     surface_nodes: np.ndarray,
     area_weights: np.ndarray,
     samples: list[SurfaceSample],
     oracle: LagrangianSDFContactOracle,
     contact_stiffness: float,
+    contact_damping: float = 0.0,
+    velocity_tangent_factor: float = 0.0,
     n_dofs: int,
 ) -> tuple[np.ndarray, csr_matrix, float, int, float, float]:
     """Return SFC Lagrangian-SDF contact force and tangent against the plane."""
@@ -100,8 +103,46 @@ def _lagrangian_plane_contact_response(
     gaps = np.asarray([constraint.g for constraint in response.constraints], dtype=float)
     penetration = np.maximum(-gaps, 0.0)
     Kc = response.stiffness[:n_dofs, :n_dofs].tocsr()
+    if contact_damping > 0.0 and v_current is not None and response.constraints:
+        damping_force = np.zeros(n_dofs, dtype=float)
+        rows: list[int] = []
+        cols: list[int] = []
+        data: list[float] = []
+        velocity_nodes = np.asarray(v_current, dtype=float).reshape((-1, 3))
+        for constraint, area in zip(response.constraints, active_weights, strict=True):
+            if not constraint.active:
+                continue
+            normal = np.asarray(constraint.normal, dtype=float)
+            sample_velocity = np.zeros(3, dtype=float)
+            for node, weight in zip(constraint.slave_node_ids, constraint.slave_weights, strict=True):
+                sample_velocity += float(weight) * velocity_nodes[int(node)]
+            normal_velocity = float(sample_velocity @ normal)
+            if normal_velocity >= 0.0:
+                continue
+            damping_scale = float(contact_damping) * float(area)
+            lambda_damping = damping_scale * (-normal_velocity)
+            tangent_scale = damping_scale * float(velocity_tangent_factor)
+            dofs: list[int] = []
+            vals: list[float] = []
+            for node, weight in zip(constraint.slave_node_ids, constraint.slave_weights, strict=True):
+                base = 3 * int(node)
+                for axis in range(3):
+                    dofs.append(base + axis)
+                    vals.append(float(weight) * float(normal[axis]))
+                    damping_force[base + axis] += float(weight) * lambda_damping * float(normal[axis])
+            if tangent_scale > 0.0:
+                for row_dof, row_value in zip(dofs, vals, strict=True):
+                    for col_dof, col_value in zip(dofs, vals, strict=True):
+                        rows.append(row_dof)
+                        cols.append(col_dof)
+                        data.append(tangent_scale * row_value * col_value)
+        if rows:
+            Kc = (Kc + coo_matrix((data, (rows, cols)), shape=(n_dofs, n_dofs)).tocsr()).tocsr()
+        force = response.force[:n_dofs] + damping_force
+    else:
+        force = response.force[:n_dofs]
     return (
-        response.force[:n_dofs],
+        force,
         Kc,
         float(np.min(gaps)) if gaps.size else min_gap,
         int(response.active_count),
@@ -121,6 +162,10 @@ def run_sfc_lagrangian_sdf_full_history(
     duration: float,
     dt: float,
     contact_stiffness: float,
+    contact_damping: float = 0.0,
+    mass_damping: float = 0.0,
+    stiffness_damping: float = 0.0,
+    damping_start_time: float = 0.0,
     output_stride: int = 1,
     max_newton_iterations: int = 8,
     tolerance: float = 1.0e-10,
@@ -131,6 +176,7 @@ def run_sfc_lagrangian_sdf_full_history(
     body = DeformableBody(mesh, {"E": model.young, "nu": model.poisson}, density=model.density)
     K = assemble_stiffness_matrix(body).tocsr()
     M = assemble_mass_matrix(body, kind="consistent").tocsr()
+    C_base = float(mass_damping) * M + float(stiffness_damping) * K
     f_gravity = assemble_gravity_force(body, (0.0, 0.0, -model.gravity))
     surface_faces = _boundary_faces(model.elements)
     surface_nodes, area_weights = _surface_node_area_weights(model.nodes, surface_faces)
@@ -144,14 +190,18 @@ def run_sfc_lagrangian_sdf_full_history(
     f_contact, K_contact, min_gap, active_count, max_pen, contact_energy = _lagrangian_plane_contact_response(
         model,
         x0,
+        v_current=v.reshape((-1, 3)),
         surface_nodes=surface_nodes,
         area_weights=area_weights,
         samples=samples,
         oracle=oracle,
         contact_stiffness=contact_stiffness,
+        contact_damping=contact_damping,
+        velocity_tangent_factor=0.0,
         n_dofs=n_dofs,
     )
-    a = np.asarray(spsolve(M.tocsc(), f_gravity + f_contact - K @ u), dtype=float)
+    C_initial = C_base if 0.0 >= float(damping_start_time) else csr_matrix(K.shape, dtype=float)
+    a = np.asarray(spsolve(M.tocsc(), f_gravity + f_contact - C_initial @ v - K @ u), dtype=float)
 
     beta = 0.25
     gamma = 0.5
@@ -169,11 +219,14 @@ def run_sfc_lagrangian_sdf_full_history(
             f_contact, _Kc, min_gap, active_count, max_pen, contact_energy = _lagrangian_plane_contact_response(
                 model,
                 current,
+                v_current=v.reshape((-1, 3)),
                 surface_nodes=surface_nodes,
                 area_weights=area_weights,
                 samples=samples,
                 oracle=oracle,
                 contact_stiffness=contact_stiffness,
+                contact_damping=contact_damping,
+                velocity_tangent_factor=0.0,
                 n_dofs=n_dofs,
             )
             max_vm, max_strain = _stress_metrics(model, u)
@@ -196,25 +249,31 @@ def run_sfc_lagrangian_sdf_full_history(
         if step == len(times) - 1:
             break
 
+        C = C_base if float(time) >= float(damping_start_time) else csr_matrix(K.shape, dtype=float)
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
+        c1 = gamma / (beta * dt)
         u_guess = u_pred.copy()
         converged = False
         for iteration in range(1, int(max_newton_iterations) + 1):
             current_guess = model.nodes + u_guess.reshape((-1, 3))
+            a_guess = c0 * (u_guess - u_pred)
+            v_guess = v_pred + gamma * dt * a_guess
             f_contact, K_contact, *_ = _lagrangian_plane_contact_response(
                 model,
                 current_guess,
+                v_current=v_guess.reshape((-1, 3)),
                 surface_nodes=surface_nodes,
                 area_weights=area_weights,
                 samples=samples,
                 oracle=oracle,
                 contact_stiffness=contact_stiffness,
+                contact_damping=contact_damping,
+                velocity_tangent_factor=c1,
                 n_dofs=n_dofs,
             )
-            a_guess = c0 * (u_guess - u_pred)
-            residual = M @ a_guess + K @ u_guess - f_gravity - f_contact
-            tangent = (c0 * M + K + K_contact).tocsc()
+            residual = M @ a_guess + C @ v_guess + K @ u_guess - f_gravity - f_contact
+            tangent = (c0 * M + c1 * C + K + K_contact).tocsc()
             correction = np.asarray(spsolve(tangent, -residual), dtype=float)
             u_guess += correction
             total_newton_iterations += 1
@@ -235,6 +294,10 @@ def run_sfc_lagrangian_sdf_full_history(
         row["sfc_element_count"] = int(model.elements.shape[0])
         row["sfc_surface_sample_count"] = int(len(samples))
         row["contact_stiffness"] = float(contact_stiffness)
+        row["contact_damping"] = float(contact_damping)
+        row["mass_damping"] = float(mass_damping)
+        row["stiffness_damping"] = float(stiffness_damping)
+        row["damping_start_time"] = float(damping_start_time)
         row["newton_iterations_total"] = int(total_newton_iterations)
         row["newton_failed_steps"] = int(failed_newton_steps)
     return rows
@@ -265,6 +328,11 @@ def _full_metric_rows(model: AbaqusSphereDropModel, comparison: list[Row], sfc_r
             {"metric": "full_min_gap_l2_error", "value": float(np.linalg.norm(gap_errors)), "status": "reported"},
             {"metric": "newton_iterations_total", "value": int(sfc_rows[0].get("newton_iterations_total", 0)) if sfc_rows else 0, "status": "reported"},
             {"metric": "newton_failed_steps", "value": int(sfc_rows[0].get("newton_failed_steps", 0)) if sfc_rows else 0, "status": "reported"},
+            {"metric": "contact_stiffness", "value": float(sfc_rows[0].get("contact_stiffness", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "contact_damping", "value": float(sfc_rows[0].get("contact_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "mass_damping", "value": float(sfc_rows[0].get("mass_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "stiffness_damping", "value": float(sfc_rows[0].get("stiffness_damping", 0.0)) if sfc_rows else 0.0, "status": "reported"},
+            {"metric": "damping_start_time", "value": float(sfc_rows[0].get("damping_start_time", 0.0)) if sfc_rows else 0.0, "status": "reported"},
         ]
     )
     return rows
@@ -318,6 +386,11 @@ def _write_full_summary(path: Path, metrics: list[Row], outputs: dict[str, Path]
         "max_von_mises_abs_error",
         "max_strain_norm_abs_error",
         "sfc_solve_wall_seconds",
+        "contact_stiffness",
+        "contact_damping",
+        "mass_damping",
+        "stiffness_damping",
+        "damping_start_time",
         "newton_failed_steps",
     ):
         row = by_metric[key]
@@ -336,6 +409,10 @@ def run_validation(
     duration: float = 3.0,
     dt: float = 0.001,
     contact_stiffness: float = 1.0e9,
+    contact_damping: float = 0.0,
+    mass_damping: float = 0.0,
+    stiffness_damping: float = 0.0,
+    damping_start_time: float = 0.0,
     output_stride: int = 1,
     max_newton_iterations: int = 8,
 ) -> dict[str, Path]:
@@ -347,6 +424,10 @@ def run_validation(
         duration=duration_value,
         dt=float(dt),
         contact_stiffness=float(contact_stiffness),
+        contact_damping=float(contact_damping),
+        mass_damping=float(mass_damping),
+        stiffness_damping=float(stiffness_damping),
+        damping_start_time=float(damping_start_time),
         output_stride=int(output_stride),
         max_newton_iterations=int(max_newton_iterations),
     )
@@ -386,6 +467,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--dt", type=float, default=0.001)
     parser.add_argument("--contact-stiffness", type=float, default=1.0e9)
+    parser.add_argument("--contact-damping", type=float, default=0.0)
+    parser.add_argument("--mass-damping", type=float, default=0.0)
+    parser.add_argument("--stiffness-damping", type=float, default=0.0)
+    parser.add_argument("--damping-start-time", type=float, default=0.0)
     parser.add_argument("--output-stride", type=int, default=1)
     parser.add_argument("--max-newton-iterations", type=int, default=8)
     return parser.parse_args()
@@ -400,6 +485,10 @@ def main() -> None:
         duration=float(args.duration),
         dt=float(args.dt),
         contact_stiffness=float(args.contact_stiffness),
+        contact_damping=float(args.contact_damping),
+        mass_damping=float(args.mass_damping),
+        stiffness_damping=float(args.stiffness_damping),
+        damping_start_time=float(args.damping_start_time),
         output_stride=int(args.output_stride),
         max_newton_iterations=int(args.max_newton_iterations),
     )
