@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.linalg import LinearOperator
 
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF, FieldQueryPayload
 
@@ -57,6 +58,7 @@ class FieldSurfaceContactResponse:
     constraints: tuple[FieldContactConstraint, ...]
     quadrature_weights: np.ndarray
     gaps: np.ndarray | None = None
+    stiffness_operator: "FieldContactMatrixFreeStiffness | None" = None
 
     @property
     def active_count(self) -> int:
@@ -82,6 +84,83 @@ class FieldSurfaceContactResponse:
         """Maximum sampled penetration depth."""
 
         return max(-self.min_gap, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class FieldContactMatrixFreeStiffness:
+    """Matrix-free contact stiffness action ``Kc v = J^T W J v``.
+
+    The operator stores the same active quadrature rows used by the explicit
+    Gauss-Newton contact tangent.  It avoids global ``Kc`` assembly and keeps
+    the result algebraically identical to ``_assemble_batch_contact_stiffness``.
+    """
+
+    n_total_dofs: int
+    scale: np.ndarray
+    slave_node_ids: np.ndarray
+    slave_weights: np.ndarray
+    gradients: np.ndarray
+    face_node_ids: np.ndarray
+    grid_weights: np.ndarray
+    barycentric: np.ndarray
+    normals: np.ndarray
+    slave_dof_offset: int
+    master_dof_offset: int
+
+    def matvec(self, vector: np.ndarray) -> np.ndarray:
+        """Apply the contact tangent to a full global vector."""
+
+        x = np.asarray(vector, dtype=float).reshape(-1)
+        if x.shape != (int(self.n_total_dofs),):
+            raise ValueError("vector size does not match n_total_dofs")
+        y = np.zeros(int(self.n_total_dofs), dtype=float)
+        if self.scale.size == 0:
+            return y
+
+        slave_cols = int(self.slave_dof_offset) + self.slave_node_ids[:, :, None] * 3 + np.arange(3, dtype=np.int64)
+        slave_values = x[slave_cols]
+        slave_jx = np.einsum("sa,sac,sc->s", self.slave_weights, slave_values, self.gradients)
+
+        master_cols = int(self.master_dof_offset) + self.face_node_ids[:, :, :, None] * 3 + np.arange(3, dtype=np.int64)
+        master_values = x[master_cols]
+        master_dot = np.einsum("slc,slac->sla", self.normals, master_values)
+        master_jx = -np.einsum("sl,sla,sla->s", self.grid_weights, self.barycentric, master_dot)
+
+        row_values = self.scale * (slave_jx + master_jx)
+        _accumulate_slave_force(
+            y,
+            self.slave_node_ids,
+            self.slave_weights,
+            self.gradients,
+            row_values,
+            int(self.slave_dof_offset),
+        )
+        _accumulate_master_force(
+            y,
+            self.face_node_ids,
+            self.grid_weights,
+            self.barycentric,
+            self.normals,
+            row_values,
+            int(self.master_dof_offset),
+        )
+        return y
+
+    def as_linear_operator(self, dof_indices: np.ndarray | None = None) -> LinearOperator:
+        """Return a SciPy ``LinearOperator`` for all DOFs or a free-DOF subset."""
+
+        if dof_indices is None:
+            n = int(self.n_total_dofs)
+            return LinearOperator((n, n), matvec=self.matvec, dtype=float)
+        indices = np.asarray(dof_indices, dtype=np.int64).ravel()
+        n = int(indices.size)
+
+        def restricted_matvec(vector: np.ndarray) -> np.ndarray:
+            full = np.zeros(int(self.n_total_dofs), dtype=float)
+            full[indices] = np.asarray(vector, dtype=float)
+            return self.matvec(full)[indices]
+
+        return LinearOperator((n, n), matvec=restricted_matvec, dtype=float)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,15 +385,16 @@ def surface_to_surface_field_penalty_response_vectorized(
     slave_dof_offset: int = 0,
     master_dof_offset: int = 0,
     assemble_stiffness: bool = False,
+    matrix_free_stiffness: bool = False,
 ) -> FieldSurfaceContactResponse:
     """Vectorized force assembly for area-integrated field contact.
 
     This is algebraically equivalent to
     ``surface_to_surface_field_penalty_response`` for the force vector, but it
     avoids per-point ``FieldContactConstraint`` objects and performs SDF field
-    interpolation and nodal force accumulation in batches. The tangent matrix is
-    intentionally left empty because the current validation solvers use the
-    contact force in fixed-point iterations.
+    interpolation and nodal force accumulation in batches.  The optional
+    tangent can be returned either as an explicit sparse matrix or as a
+    matrix-free ``J^T W J`` operator.
     """
 
     k = float(pressure_stiffness)
@@ -329,8 +409,16 @@ def surface_to_surface_field_penalty_response_vectorized(
     else:
         cache = quadrature_cache
     points = cache.points(X)
-    if compiled_field_contact_available() and not bool(assemble_stiffness):
-        from ._numba_field_contact import surface_penalty_response
+    if bool(assemble_stiffness) and bool(matrix_free_stiffness):
+        raise ValueError("assemble_stiffness and matrix_free_stiffness are mutually exclusive")
+    if compiled_field_contact_available() and not bool(assemble_stiffness) and not bool(matrix_free_stiffness):
+        try:
+            from ._cpp_field_contact import is_available as cpp_contact_available
+            from ._cpp_field_contact import surface_penalty_response
+        except Exception:
+            cpp_contact_available = lambda: False  # type: ignore[assignment]
+        if not cpp_contact_available():
+            from ._numba_field_contact import surface_penalty_response
 
         force, gaps = surface_penalty_response(
             points,
@@ -399,6 +487,19 @@ def surface_to_surface_field_penalty_response_vectorized(
         if bool(assemble_stiffness)
         else csr_matrix((n_dofs, n_dofs), dtype=float)
     )
+    stiffness_operator = (
+        _make_batch_contact_matrix_free_stiffness(
+            cache=cache,
+            batch=batch,
+            active=active,
+            pressure_stiffness=k,
+            n_total_dofs=n_dofs,
+            slave_dof_offset=int(slave_dof_offset),
+            master_dof_offset=int(master_dof_offset),
+        )
+        if bool(matrix_free_stiffness)
+        else None
+    )
 
     return FieldSurfaceContactResponse(
         force=force,
@@ -406,12 +507,21 @@ def surface_to_surface_field_penalty_response_vectorized(
         constraints=(),
         quadrature_weights=cache.area_weights.copy(),
         gaps=gaps.copy(),
+        stiffness_operator=stiffness_operator,
     )
 
 
 def compiled_field_contact_available() -> bool:
     """Return whether the optional compiled field-contact backend is available."""
 
+    try:
+        from ._cpp_field_contact import is_available as cpp_available
+    except Exception:
+        cpp = False
+    else:
+        cpp = bool(cpp_available())
+    if cpp:
+        return True
     try:
         from ._numba_field_contact import is_available
     except Exception:
@@ -747,6 +857,46 @@ def _assemble_batch_contact_stiffness(
     vals = np.concatenate((slave_vals_flat, master_vals_flat))
     J = coo_matrix((vals, (rows, cols)), shape=(active_rows.size, int(n_total_dofs))).tocsr()
     return (J.T @ J).tocsr()
+
+
+def _make_batch_contact_matrix_free_stiffness(
+    *,
+    cache: SurfaceQuadratureCache,
+    batch: dict[str, np.ndarray],
+    active: np.ndarray,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+) -> FieldContactMatrixFreeStiffness:
+    active = np.asarray(active, dtype=bool)
+    if not bool(np.any(active)):
+        return FieldContactMatrixFreeStiffness(
+            n_total_dofs=int(n_total_dofs),
+            scale=np.empty(0, dtype=float),
+            slave_node_ids=np.empty((0, 3), dtype=np.int64),
+            slave_weights=np.empty((0, 3), dtype=float),
+            gradients=np.empty((0, 3), dtype=float),
+            face_node_ids=np.empty((0, 8, 3), dtype=np.int64),
+            grid_weights=np.empty((0, 8), dtype=float),
+            barycentric=np.empty((0, 8, 3), dtype=float),
+            normals=np.empty((0, 8, 3), dtype=float),
+            slave_dof_offset=int(slave_dof_offset),
+            master_dof_offset=int(master_dof_offset),
+        )
+    return FieldContactMatrixFreeStiffness(
+        n_total_dofs=int(n_total_dofs),
+        scale=float(pressure_stiffness) * np.asarray(cache.area_weights[active], dtype=float).copy(),
+        slave_node_ids=np.asarray(cache.node_ids[active], dtype=np.int64).copy(),
+        slave_weights=np.asarray(cache.weights[active], dtype=float).copy(),
+        gradients=np.asarray(batch["gradients"][active], dtype=float).copy(),
+        face_node_ids=np.asarray(batch["face_node_ids"][active], dtype=np.int64).copy(),
+        grid_weights=np.asarray(batch["weights"][active], dtype=float).copy(),
+        barycentric=np.asarray(batch["barycentric"][active], dtype=float).copy(),
+        normals=np.asarray(batch["normals"][active], dtype=float).copy(),
+        slave_dof_offset=int(slave_dof_offset),
+        master_dof_offset=int(master_dof_offset),
+    )
 
 
 def _triangle_quadrature_rule(order: int) -> tuple[np.ndarray, np.ndarray]:

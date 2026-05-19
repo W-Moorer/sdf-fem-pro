@@ -4,6 +4,7 @@ from .broad_phase import UniformTriangleAABBHash, triangle_aabbs
 from .backends import ContactBackendResult, PenaltyContactBackend
 from .field_contact import (
     FieldContactConstraint,
+    FieldContactMatrixFreeStiffness,
     FieldSurfaceContactResponse,
     SurfaceQuadratureCache,
     assemble_field_contact_jacobian,
@@ -37,6 +38,7 @@ __all__ = [
     "ContactBackendResult",
     "DynamicSurfaceSDFContactGeometry",
     "FieldContactConstraint",
+    "FieldContactMatrixFreeStiffness",
     "FieldSurfaceContactResponse",
     "SurfaceQuadratureCache",
     "PenaltyContactBackend",

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse.linalg import factorized, spsolve
+from scipy.sparse.linalg import LinearOperator, cg, factorized, spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -108,6 +108,10 @@ class DynamicSurfaceConfig:
     sdf_batch_projection_threshold: int
     sdf_candidate_padding: float | None
     use_contact_tangent: bool
+    use_matrix_free_contact_tangent: bool
+    contact_tangent_cg_rtol: float
+    contact_tangent_cg_atol: float
+    contact_tangent_cg_maxiter: int
 
     @property
     def output_frequency(self) -> int:
@@ -126,6 +130,8 @@ class SFCDynamicResult:
     upper_mesh: BoxMesh | None = None
     upper_frames: list[tuple[float, np.ndarray]] | None = None
     upper_bottom_faces: np.ndarray | None = None
+    core_solve_seconds: float = 0.0
+    diagnostics_seconds: float = 0.0
 
 
 def _write_csv(path: Path, rows: list[Row]) -> None:
@@ -552,6 +558,8 @@ def run_sfc_pressure_dynamic(
     lower_free = free[free >= upper_dofs]
     upper_solve = factorized(effective[upper_free[:, None], upper_free]) if upper_free.size else None
     lower_solve = factorized(effective[lower_free[:, None], lower_free]) if lower_free.size else None
+    effective_free = effective[free[:, None], free].tocsr() if free.size else None
+    solve_effective_free = factorized(effective_free.tocsc()) if free.size and cfg.use_matrix_free_contact_tangent else None
 
     u = np.zeros(n_dofs, dtype=float)
     v = np.zeros(n_dofs, dtype=float)
@@ -561,6 +569,9 @@ def run_sfc_pressure_dynamic(
     lower_frames: list[tuple[float, np.ndarray]] = []
     upper_frames: list[tuple[float, np.ndarray]] = []
     steps = int(round(cfg.total_time / cfg.dt))
+    core_solve_seconds = 0.0
+    diagnostics_seconds = 0.0
+    accepted_response_cache: tuple[float, Any, Any, float, float] | None = None
 
     for step in range(steps + 1):
         t = float(step * dt)
@@ -569,27 +580,35 @@ def run_sfc_pressure_dynamic(
         u_lower = u[upper_dofs:].reshape((-1, 3))
         x_upper = upper.X + u_upper
         x_lower = lower.X + u_lower
-        q_points = contact_cache.points(x_upper)
-        build_t0 = time.perf_counter()
-        master_sdf = sdf_workspace.build(
-            x_lower,
-            lower_top_faces,
-            q_points,
-        )
-        build_elapsed = time.perf_counter() - build_t0
-        query_t0 = time.perf_counter()
-        response = surface_to_surface_field_penalty_response_vectorized(
-            x_upper,
-            upper_bottom_faces,
-            master_sdf,
-            pressure_stiffness=cfg.pressure_stiffness,
-            n_total_dofs=n_dofs,
-            slave_x_reference=upper.X,
-            quadrature_cache=contact_cache,
-            slave_dof_offset=0,
-            master_dof_offset=upper_dofs,
-        )
-        query_elapsed = time.perf_counter() - query_t0
+        reused_accepted_response = False
+        if accepted_response_cache is not None and abs(float(accepted_response_cache[0]) - t) <= 1.0e-12:
+            _cache_time, master_sdf, response, build_elapsed, query_elapsed = accepted_response_cache
+            accepted_response_cache = None
+            reused_accepted_response = True
+        else:
+            diagnostics_t0 = time.perf_counter()
+            q_points = contact_cache.points(x_upper)
+            build_t0 = time.perf_counter()
+            master_sdf = sdf_workspace.build(
+                x_lower,
+                lower_top_faces,
+                q_points,
+            )
+            build_elapsed = time.perf_counter() - build_t0
+            query_t0 = time.perf_counter()
+            response = surface_to_surface_field_penalty_response_vectorized(
+                x_upper,
+                upper_bottom_faces,
+                master_sdf,
+                pressure_stiffness=cfg.pressure_stiffness,
+                n_total_dofs=n_dofs,
+                slave_x_reference=upper.X,
+                quadrature_cache=contact_cache,
+                slave_dof_offset=0,
+                master_dof_offset=upper_dofs,
+            )
+            query_elapsed = time.perf_counter() - query_t0
+            diagnostics_seconds += time.perf_counter() - diagnostics_t0
         normal_force = _normal_force_from_response(response, cfg.pressure_stiffness)
         lower_frames.append((t, u_lower.copy()))
         upper_frames.append((t, u_upper.copy()))
@@ -613,6 +632,7 @@ def run_sfc_pressure_dynamic(
                 ),
                 "field_path": "RequiredPointSDFWorkspace.build -> field_contact",
                 "load_type": "top_pressure",
+                "accepted_response_reused": str(reused_accepted_response).lower(),
             }
         )
         timing.append(
@@ -624,6 +644,7 @@ def run_sfc_pressure_dynamic(
                 "field_query_seconds_per_sample": float(query_elapsed / max(contact_cache.area_weights.size, 1)),
                 "quadrature_points": int(contact_cache.area_weights.size),
                 "active_samples": int(response.active_count),
+                "accepted_response_reused": str(reused_accepted_response).lower(),
             }
         )
         if checkpoint_dir is not None and (step % max(1, int(checkpoint_stride)) == 0 or step == steps):
@@ -639,6 +660,7 @@ def run_sfc_pressure_dynamic(
             u_guess[fixed] = 0.0
         next_t = float((step + 1) * dt)
         for _iteration in range(max(1, cfg.newmark_iterations)):
+            core_t0 = time.perf_counter()
             pressure_next = _pressure_value(next_t, cfg)
             u_upper_guess = u_guess[:upper_dofs].reshape((-1, 3))
             u_lower_guess = u_guess[upper_dofs:].reshape((-1, 3))
@@ -661,6 +683,7 @@ def run_sfc_pressure_dynamic(
                 slave_dof_offset=0,
                 master_dof_offset=upper_dofs,
                 assemble_stiffness=cfg.use_contact_tangent,
+                matrix_free_stiffness=cfg.use_matrix_free_contact_tangent,
             )
             f_ext = np.zeros(n_dofs, dtype=float)
             f_ext[:upper_dofs] = pressure_next * unit_pressure_force_upper
@@ -668,7 +691,39 @@ def run_sfc_pressure_dynamic(
             v_guess = v_pred + gamma * dt * a_guess
             residual = M @ a_guess + cfg.damping_alpha * (M @ v_guess) + K @ u_guess - f_ext - response_next.force
             correction = np.zeros(n_dofs, dtype=float)
-            if cfg.use_contact_tangent:
+            if cfg.use_matrix_free_contact_tangent:
+                if response_next.stiffness_operator is None or effective_free is None or solve_effective_free is None:
+                    raise RuntimeError("matrix-free contact tangent was requested but no operator is available")
+                contact_free = response_next.stiffness_operator.as_linear_operator(free)
+
+                def tangent_matvec(value: np.ndarray) -> np.ndarray:
+                    return np.asarray(effective_free @ value, dtype=float) + np.asarray(contact_free @ value, dtype=float)
+
+                tangent_operator = LinearOperator((free.size, free.size), matvec=tangent_matvec, dtype=float)
+                preconditioner = LinearOperator(
+                    (free.size, free.size),
+                    matvec=lambda value: np.asarray(solve_effective_free(value), dtype=float),
+                    dtype=float,
+                )
+                cg_iterations = 0
+
+                def count_cg_iteration(_value: np.ndarray) -> None:
+                    nonlocal cg_iterations
+                    cg_iterations += 1
+
+                solution, info = cg(
+                    tangent_operator,
+                    -residual[free],
+                    M=preconditioner,
+                    rtol=float(cfg.contact_tangent_cg_rtol),
+                    atol=float(cfg.contact_tangent_cg_atol),
+                    maxiter=int(cfg.contact_tangent_cg_maxiter),
+                    callback=count_cg_iteration,
+                )
+                if info != 0:
+                    raise RuntimeError(f"matrix-free contact tangent CG did not converge, info={info}")
+                correction[free] = np.asarray(solution, dtype=float)
+            elif cfg.use_contact_tangent:
                 tangent = (effective + response_next.stiffness).tocsc()
                 tangent_free = tangent[free[:, None], free]
                 correction[free] = np.asarray(spsolve(tangent_free, -residual[free]), dtype=float)
@@ -680,6 +735,7 @@ def run_sfc_pressure_dynamic(
             u_guess[free] += correction[free]
             if fixed.size:
                 u_guess[fixed] = 0.0
+            core_solve_seconds += time.perf_counter() - core_t0
             if float(np.linalg.norm(correction[free])) <= 1.0e-9 * max(1.0, float(np.linalg.norm(u_guess[free]))):
                 break
         u = u_guess
@@ -689,6 +745,41 @@ def run_sfc_pressure_dynamic(
             u[fixed] = 0.0
             v[fixed] = 0.0
             a[fixed] = 0.0
+        if step + 1 <= steps:
+            diagnostics_t0 = time.perf_counter()
+            u_upper_final = u[:upper_dofs].reshape((-1, 3))
+            u_lower_final = u[upper_dofs:].reshape((-1, 3))
+            x_upper_final = upper.X + u_upper_final
+            x_lower_final = lower.X + u_lower_final
+            q_final = contact_cache.points(x_upper_final)
+            build_t0 = time.perf_counter()
+            sdf_final = sdf_workspace.build(
+                x_lower_final,
+                lower_top_faces,
+                q_final,
+            )
+            build_elapsed_final = time.perf_counter() - build_t0
+            query_t0 = time.perf_counter()
+            response_final = surface_to_surface_field_penalty_response_vectorized(
+                x_upper_final,
+                upper_bottom_faces,
+                sdf_final,
+                pressure_stiffness=cfg.pressure_stiffness,
+                n_total_dofs=n_dofs,
+                slave_x_reference=upper.X,
+                quadrature_cache=contact_cache,
+                slave_dof_offset=0,
+                master_dof_offset=upper_dofs,
+            )
+            query_elapsed_final = time.perf_counter() - query_t0
+            diagnostics_seconds += time.perf_counter() - diagnostics_t0
+            accepted_response_cache = (
+                float(next_t),
+                sdf_final,
+                response_final,
+                float(build_elapsed_final),
+                float(query_elapsed_final),
+            )
 
     return SFCDynamicResult(
         history=history,
@@ -701,6 +792,8 @@ def run_sfc_pressure_dynamic(
         upper_mesh=upper,
         upper_frames=upper_frames,
         upper_bottom_faces=upper_bottom_faces,
+        core_solve_seconds=float(core_solve_seconds),
+        diagnostics_seconds=float(diagnostics_seconds),
     )
 
 
@@ -1095,10 +1188,14 @@ def _summary_text(
         "- Query/integration -> `surface_to_surface_field_penalty_response_vectorized(...)`.",
         "- Projection is used only inside field construction; field contact queries use interpolation.",
         f"- Contact tangent in SFC iterations: `{bool(cfg.use_contact_tangent)}`.",
+        f"- Matrix-free contact tangent in SFC iterations: `{bool(cfg.use_matrix_free_contact_tangent)}`.",
+        "- Accepted-state response reuse: response is reused only after exact final-state reevaluation.",
         "",
         "## Timing",
         "",
         f"- Complete SFC dynamic solve wall time: `{float(sfc_wall_time_seconds):.6e}` s.",
+        f"- Core solve time, excluding diagnostics/postprocess: `{float(sfc.core_solve_seconds):.6e}` s.",
+        f"- Diagnostics/accepted-response time inside SFC trajectory: `{float(sfc.diagnostics_seconds):.6e}` s.",
         f"- Mean field update time, backend breakdown only: `{avg_update:.6e}` s/step.",
         f"- Mean field query/contact assembly time, backend breakdown only: `{avg_query:.6e}` s/step.",
         "",
@@ -1171,6 +1268,10 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
             sdf_batch_projection_threshold=250_000,
             sdf_candidate_padding=None,
             use_contact_tangent=False,
+            use_matrix_free_contact_tangent=False,
+            contact_tangent_cg_rtol=1.0e-10,
+            contact_tangent_cg_atol=1.0e-12,
+            contact_tangent_cg_maxiter=80,
         )
     return DynamicSurfaceConfig(
         nx=36,
@@ -1199,6 +1300,10 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
         sdf_batch_projection_threshold=250_000,
         sdf_candidate_padding=None,
         use_contact_tangent=False,
+        use_matrix_free_contact_tangent=False,
+        contact_tangent_cg_rtol=1.0e-10,
+        contact_tangent_cg_atol=1.0e-12,
+        contact_tangent_cg_maxiter=80,
     )
 
 
@@ -1296,6 +1401,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sdf-batch-projection-threshold", type=int, default=None, help="override SDF all-faces batch threshold")
     parser.add_argument("--sdf-candidate-padding", type=float, default=None, help="override exact-fallback AABB candidate padding")
     parser.add_argument("--contact-tangent", action="store_true", help="assemble and solve with the field-contact tangent")
+    parser.add_argument("--matrix-free-contact-tangent", action="store_true", help="solve with matrix-free field-contact tangent")
+    parser.add_argument("--contact-tangent-cg-rtol", type=float, default=None, help="matrix-free tangent CG relative tolerance")
+    parser.add_argument("--contact-tangent-cg-atol", type=float, default=None, help="matrix-free tangent CG absolute tolerance")
+    parser.add_argument("--contact-tangent-cg-maxiter", type=int, default=None, help="matrix-free tangent CG maximum iterations")
     return parser.parse_args(argv)
 
 
@@ -1324,10 +1433,17 @@ def main(argv: list[str] | None = None) -> int:
         "density": args.density,
         "sdf_batch_projection_threshold": args.sdf_batch_projection_threshold,
         "sdf_candidate_padding": args.sdf_candidate_padding,
+        "contact_tangent_cg_rtol": args.contact_tangent_cg_rtol,
+        "contact_tangent_cg_atol": args.contact_tangent_cg_atol,
+        "contact_tangent_cg_maxiter": args.contact_tangent_cg_maxiter,
     }
     cfg = replace(cfg, **{key: value for key, value in overrides.items() if value is not None})
+    if bool(args.contact_tangent) and bool(args.matrix_free_contact_tangent):
+        raise ValueError("--contact-tangent and --matrix-free-contact-tangent are mutually exclusive")
     if bool(args.contact_tangent):
         cfg = replace(cfg, use_contact_tangent=True)
+    if bool(args.matrix_free_contact_tangent):
+        cfg = replace(cfg, use_matrix_free_contact_tangent=True)
     outputs = run_benchmark(
         out_dir=args.out_dir,
         quick=bool(args.quick),

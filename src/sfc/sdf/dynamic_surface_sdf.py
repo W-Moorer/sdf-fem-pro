@@ -11,6 +11,7 @@ explicit optional refinement. The main dynamic SDF query API is
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 
 import numpy as np
@@ -226,7 +227,16 @@ def surface_projection_distance_kernel_batch_all_faces_compiled(
     if faces.shape[0] == 0:
         raise ValueError("boundary_faces must contain at least one triangle")
     _unit_triangle_normals(X[faces])
-    from ._numba_projection import closest_points_all_faces
+    use_cpp = os.environ.get("SFC_USE_CPP_PROJECTION", "0").strip().lower() in {"1", "true", "yes"}
+    if use_cpp:
+        try:
+            from ._cpp_projection import closest_points_all_faces, is_available as cpp_projection_available
+        except Exception:
+            cpp_projection_available = lambda: False  # type: ignore[assignment]
+        if not cpp_projection_available():
+            from ._numba_projection import closest_points_all_faces
+    else:
+        from ._numba_projection import closest_points_all_faces
 
     g, normals, face_id, bary, closest = closest_points_all_faces(P, X, faces)
     return SurfaceSDFBatchResult(
@@ -261,7 +271,16 @@ def surface_projection_distance_kernel_batch_padded_aabb_compiled(
     _unit_triangle_normals(triangles)
     aabb_min = triangles.min(axis=1) - delta
     aabb_max = triangles.max(axis=1) + delta
-    from ._numba_projection import closest_points_padded_aabb
+    use_cpp = os.environ.get("SFC_USE_CPP_PROJECTION", "0").strip().lower() in {"1", "true", "yes"}
+    if use_cpp:
+        try:
+            from ._cpp_projection import closest_points_padded_aabb, is_available as cpp_projection_available
+        except Exception:
+            cpp_projection_available = lambda: False  # type: ignore[assignment]
+        if not cpp_projection_available():
+            from ._numba_projection import closest_points_padded_aabb
+    else:
+        from ._numba_projection import closest_points_padded_aabb
 
     g, normals, face_id, bary, closest = closest_points_padded_aabb(
         P,
@@ -283,6 +302,14 @@ def surface_projection_distance_kernel_batch_padded_aabb_compiled(
 def compiled_projection_available() -> bool:
     """Return whether the optional compiled projection backend is available."""
 
+    try:
+        from ._cpp_projection import is_available as cpp_available
+    except Exception:
+        cpp = False
+    else:
+        cpp = bool(cpp_available())
+    if cpp:
+        return True
     try:
         from ._numba_projection import is_available
     except Exception:
