@@ -202,7 +202,7 @@ def test_compiled_padded_aabb_projection_matches_all_faces_in_band() -> None:
         points,
         X,
         faces,
-        delta_safe=0.25,
+        delta_safe=1.0e-4,
     )
     assert np.allclose(compiled.g, reference.g, atol=1.0e-13)
     assert np.allclose(compiled.n, reference.n, atol=1.0e-13)

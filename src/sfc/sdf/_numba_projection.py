@@ -350,6 +350,7 @@ if njit is not None:
         boundary_faces: np.ndarray,
         aabb_min: np.ndarray,
         aabb_max: np.ndarray,
+        fallback_distance: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         n_points = points.shape[0]
         n_faces = boundary_faces.shape[0]
@@ -374,6 +375,7 @@ if njit is not None:
             best_nx = 0.0
             best_ny = 0.0
             best_nz = 0.0
+            fallback_dist2 = fallback_distance * fallback_distance
 
             for pass_id in range(2):
                 for jf in range(n_faces):
@@ -384,7 +386,7 @@ if njit is not None:
                             continue
                         if pz < aabb_min[jf, 2] or pz > aabb_max[jf, 2]:
                             continue
-                    elif best_face != -1:
+                    elif best_face != -1 and best_dist2 <= fallback_dist2:
                         continue
 
                     ia = boundary_faces[jf, 0]
@@ -469,6 +471,7 @@ def closest_points_padded_aabb(
     boundary_faces: np.ndarray,
     aabb_min: np.ndarray,
     aabb_max: np.ndarray,
+    fallback_distance: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Evaluate projection using exact padded-AABB candidate screening."""
 
@@ -479,4 +482,5 @@ def closest_points_padded_aabb(
         np.ascontiguousarray(boundary_faces, dtype=np.int64),
         np.ascontiguousarray(aabb_min, dtype=np.float64),
         np.ascontiguousarray(aabb_max, dtype=np.float64),
+        float(fallback_distance),
     )

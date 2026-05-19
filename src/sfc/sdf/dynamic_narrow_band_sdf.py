@@ -466,6 +466,7 @@ class RequiredPointSDFWorkspace:
         cell_size: float | None = None,
         batch_projection_threshold: int = 5_000_000,
         projection_backend: str = "auto",
+        candidate_padding: float | None = None,
     ) -> None:
         h = _as_spacing(spacing)
         band = float(band_radius)
@@ -482,6 +483,7 @@ class RequiredPointSDFWorkspace:
         if projection_backend not in {"auto", "numpy", "compiled", "compiled_all_faces"}:
             raise ValueError("projection_backend must be 'auto', 'numpy', 'compiled', or 'compiled_all_faces'")
         self.projection_backend = projection_backend
+        self.candidate_padding = None if candidate_padding is None else float(candidate_padding)
         self.phi = np.full(grid_shape, np.nan, dtype=float)
         self.closest_face_id = np.full(grid_shape, -1, dtype=np.int64)
         self.barycentric = np.zeros((*grid_shape, 3), dtype=float)
@@ -502,6 +504,7 @@ class RequiredPointSDFWorkspace:
         cell_size: float | None = None,
         batch_projection_threshold: int = 5_000_000,
         projection_backend: str = "auto",
+        candidate_padding: float | None = None,
     ) -> "RequiredPointSDFWorkspace":
         """Create a reusable workspace from a reference surface grid spec."""
 
@@ -523,6 +526,7 @@ class RequiredPointSDFWorkspace:
             cell_size=cell_size,
             batch_projection_threshold=batch_projection_threshold,
             projection_backend=projection_backend,
+            candidate_padding=candidate_padding,
         )
 
     def _clear_previous(self) -> None:
@@ -554,7 +558,8 @@ class RequiredPointSDFWorkspace:
         self._clear_previous()
         self._previous_indices = required_indices.copy()
 
-        candidate_padding = self.band_radius + 0.5 * float(np.linalg.norm(self.spacing))
+        exact_fallback_distance = self.band_radius + 0.5 * float(np.linalg.norm(self.spacing))
+        candidate_padding = exact_fallback_distance if self.candidate_padding is None else float(self.candidate_padding)
         projection_start = perf_counter()
         pair_count = int(required_indices.shape[0]) * int(faces.shape[0])
         points_required = self.origin + self.spacing * required_indices.astype(float)
@@ -573,6 +578,7 @@ class RequiredPointSDFWorkspace:
                     X,
                     faces,
                     delta_safe=candidate_padding,
+                    fallback_distance=candidate_padding,
                 )
                 projection_mode = "compiled_padded_aabb"
             ids = np.arange(required_indices.shape[0], dtype=np.int64)
@@ -630,6 +636,7 @@ class RequiredPointSDFWorkspace:
             metadata={
                 "band_radius": self.band_radius,
                 "candidate_padding": candidate_padding,
+                "exact_fallback_distance": exact_fallback_distance,
                 "population_mode": "required_points_workspace",
                 "required_node_count": int(required_indices.shape[0]),
                 "batch_projection": bool(used_batch_projection),

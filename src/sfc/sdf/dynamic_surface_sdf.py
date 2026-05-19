@@ -244,6 +244,7 @@ def surface_projection_distance_kernel_batch_padded_aabb_compiled(
     boundary_faces: np.ndarray,
     *,
     delta_safe: float,
+    fallback_distance: float | None = None,
 ) -> SurfaceSDFBatchResult:
     """Evaluate projection with compiled padded-AABB candidate screening."""
 
@@ -262,7 +263,14 @@ def surface_projection_distance_kernel_batch_padded_aabb_compiled(
     aabb_max = triangles.max(axis=1) + delta
     from ._numba_projection import closest_points_padded_aabb
 
-    g, normals, face_id, bary, closest = closest_points_padded_aabb(P, X, faces, aabb_min, aabb_max)
+    g, normals, face_id, bary, closest = closest_points_padded_aabb(
+        P,
+        X,
+        faces,
+        aabb_min,
+        aabb_max,
+        delta if fallback_distance is None else float(fallback_distance),
+    )
     return SurfaceSDFBatchResult(
         g=g.astype(float, copy=False),
         n=normals,

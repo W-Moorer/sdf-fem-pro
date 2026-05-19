@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse.linalg import factorized
+from scipy.sparse.linalg import factorized, spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -106,6 +106,8 @@ class DynamicSurfaceConfig:
     newmark_iterations: int
     frame_stride: int
     sdf_batch_projection_threshold: int
+    sdf_candidate_padding: float | None
+    use_contact_tangent: bool
 
     @property
     def output_frequency(self) -> int:
@@ -345,6 +347,7 @@ def run_sfc_dynamic(
         padding=cfg.band_radius,
         cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
         batch_projection_threshold=cfg.sdf_batch_projection_threshold,
+        candidate_padding=cfg.sdf_candidate_padding,
     )
 
     beta = 0.25
@@ -536,6 +539,7 @@ def run_sfc_pressure_dynamic(
         padding=cfg.band_radius,
         cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
         batch_projection_threshold=cfg.sdf_batch_projection_threshold,
+        candidate_padding=cfg.sdf_candidate_padding,
     )
 
     beta = 0.25
@@ -656,6 +660,7 @@ def run_sfc_pressure_dynamic(
                 quadrature_cache=contact_cache,
                 slave_dof_offset=0,
                 master_dof_offset=upper_dofs,
+                assemble_stiffness=cfg.use_contact_tangent,
             )
             f_ext = np.zeros(n_dofs, dtype=float)
             f_ext[:upper_dofs] = pressure_next * unit_pressure_force_upper
@@ -663,10 +668,15 @@ def run_sfc_pressure_dynamic(
             v_guess = v_pred + gamma * dt * a_guess
             residual = M @ a_guess + cfg.damping_alpha * (M @ v_guess) + K @ u_guess - f_ext - response_next.force
             correction = np.zeros(n_dofs, dtype=float)
-            if upper_solve is not None:
-                correction[upper_free] = np.asarray(upper_solve(-residual[upper_free]), dtype=float)
-            if lower_solve is not None:
-                correction[lower_free] = np.asarray(lower_solve(-residual[lower_free]), dtype=float)
+            if cfg.use_contact_tangent:
+                tangent = (effective + response_next.stiffness).tocsc()
+                tangent_free = tangent[free[:, None], free]
+                correction[free] = np.asarray(spsolve(tangent_free, -residual[free]), dtype=float)
+            else:
+                if upper_solve is not None:
+                    correction[upper_free] = np.asarray(upper_solve(-residual[upper_free]), dtype=float)
+                if lower_solve is not None:
+                    correction[lower_free] = np.asarray(lower_solve(-residual[lower_free]), dtype=float)
             u_guess[free] += correction[free]
             if fixed.size:
                 u_guess[fixed] = 0.0
@@ -1084,6 +1094,7 @@ def _summary_text(
         "- Current lower master surface -> `RequiredPointSDFWorkspace.build(...)`.",
         "- Query/integration -> `surface_to_surface_field_penalty_response_vectorized(...)`.",
         "- Projection is used only inside field construction; field contact queries use interpolation.",
+        f"- Contact tangent in SFC iterations: `{bool(cfg.use_contact_tangent)}`.",
         "",
         "## Timing",
         "",
@@ -1158,6 +1169,8 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
             newmark_iterations=2,
             frame_stride=1,
             sdf_batch_projection_threshold=250_000,
+            sdf_candidate_padding=None,
+            use_contact_tangent=False,
         )
     return DynamicSurfaceConfig(
         nx=36,
@@ -1184,6 +1197,8 @@ def default_config(*, quick: bool) -> DynamicSurfaceConfig:
         newmark_iterations=3,
         frame_stride=5,
         sdf_batch_projection_threshold=250_000,
+        sdf_candidate_padding=None,
+        use_contact_tangent=False,
     )
 
 
@@ -1279,6 +1294,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--damping-alpha", type=float, default=None, help="override mass-proportional damping")
     parser.add_argument("--density", type=float, default=None, help="override material density")
     parser.add_argument("--sdf-batch-projection-threshold", type=int, default=None, help="override SDF all-faces batch threshold")
+    parser.add_argument("--sdf-candidate-padding", type=float, default=None, help="override exact-fallback AABB candidate padding")
+    parser.add_argument("--contact-tangent", action="store_true", help="assemble and solve with the field-contact tangent")
     return parser.parse_args(argv)
 
 
@@ -1306,8 +1323,11 @@ def main(argv: list[str] | None = None) -> int:
         "damping_alpha": args.damping_alpha,
         "density": args.density,
         "sdf_batch_projection_threshold": args.sdf_batch_projection_threshold,
+        "sdf_candidate_padding": args.sdf_candidate_padding,
     }
     cfg = replace(cfg, **{key: value for key, value in overrides.items() if value is not None})
+    if bool(args.contact_tangent):
+        cfg = replace(cfg, use_contact_tangent=True)
     outputs = run_benchmark(
         out_dir=args.out_dir,
         quick=bool(args.quick),

@@ -109,8 +109,21 @@ def test_vectorized_surface_response_matches_reference_force() -> None:
         quadrature_cache=cache,
         master_dof_offset=12,
     )
+    vectorized_with_stiffness = surface_to_surface_field_penalty_response_vectorized(
+        x,
+        faces,
+        sdf,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_order=7,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        assemble_stiffness=True,
+    )
 
     np.testing.assert_allclose(vectorized.force, reference.force, atol=1.0e-14)
+    np.testing.assert_allclose(vectorized_with_stiffness.force, reference.force, atol=1.0e-14)
+    np.testing.assert_allclose(vectorized_with_stiffness.stiffness.toarray(), reference.stiffness.toarray(), atol=1.0e-14)
     assert vectorized.active_count == reference.active_count
     assert vectorized.min_gap == pytest.approx(reference.min_gap)
 

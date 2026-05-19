@@ -218,3 +218,101 @@ python validation/run_large_area_dynamic_surface_contact.py \
 - fixed-point iteration overhead 已经解决；
 - 已完成 C++ production backend；
 - 已完成 consistent tangent。
+
+## 2026-05-19 追加：contact tangent 与 exact-fallback candidate padding
+
+目标：继续逼近“完整 solve time 快于 CalculiX”，同时不牺牲 SDF/contact 精度。
+
+### 已实现
+
+1. 可选 field-contact Gauss-Newton tangent
+   - `surface_to_surface_field_penalty_response_vectorized(..., assemble_stiffness=True)`
+   - 装配：
+     `K_c = sum_i k A_i J_i^T J_i`
+   - pressure-driven runner 增加：
+     `--contact-tangent`
+   - quick case 中，`--contact-tangent --newmark-iterations 2` 与 fixed-point 10 次迭代收敛参考一致到约 `1e-9`，说明切线方向和符号正确。
+
+2. exact-fallback candidate padding
+   - `RequiredPointSDFWorkspace(..., candidate_padding=...)`
+   - CLI：
+     `--sdf-candidate-padding`
+   - 含义：
+     使用较小 padded-AABB candidate padding 快速筛面；若候选结果的最近距离大于 padding，则自动 fallback 到 all-face exact search。
+   - 因此该优化不会丢失真正最近面；它只减少近场常见情况下的候选扫描量。
+
+### 关键结果
+
+1. `band_radius=8.0, sdf_candidate_padding=1.0` 的 0.1 s formal-size run 与原 `band_radius=8.0` 结果逐项一致：
+
+| 量 | 最大差异 |
+| --- | ---: |
+| upper mean z displacement | `0.0` |
+| lower top mean z displacement | `0.0` |
+| min gap | `0.0` |
+| max penetration | `0.0` |
+| normal force | `0.0` |
+| contact energy | `0.0` |
+
+2. 完整 1.0 s pressure-driven large-area dynamic run：
+
+| 版本 | complete SFC solve wall time |
+| --- | ---: |
+| 优化前 Python/NumPy 路径 | `1.791773e+03 s` |
+| compiled field/contact backend | `1.910167e+02 s` |
+| compiled backend + exact-fallback candidate padding | `1.567543e+02 s` |
+
+与 `compiled backend` 结果逐项一致：
+
+| 量 | 最大差异 |
+| --- | ---: |
+| upper mean z displacement | `0.0` |
+| lower top mean z displacement | `0.0` |
+| min gap | `0.0` |
+| max penetration | `0.0` |
+| normal force | `0.0` |
+| contact energy | `0.0` |
+
+3. `newmark_iterations=2` 的完整 1.0 s run：
+
+| 指标 | 数值 |
+| --- | ---: |
+| wall time | `1.219144e+02 s` |
+| max displacement difference vs 3 iterations | `1.309013e-06` |
+| max gap difference vs 3 iterations | `1.293584e-06` |
+| max normal force difference vs 3 iterations | `1.428707e+00` |
+
+该路径更快，但不是逐项完全一致，因此不能作为“不降低任何精度”的默认结论。
+
+4. 当前 `--contact-tangent` 在大规模 formal case 中不加速：
+   - 0.1 s formal-size tangent run wall time：`2.167395e+02 s`
+   - 非 tangent compiled run wall time：`2.500272e+01 s`
+   - 原因：直接装配和求解全局接触刚度矩阵太贵，抵消了减少迭代次数的收益。
+
+### 当前结论
+
+严格“不降低精度”的已验证最优完整 1.0 s 路径是：
+
+```text
+compiled projection/contact backend
++ exact-fallback candidate padding
++ newmark_iterations=3
+```
+
+对应 wall time：`1.567543e+02 s`。
+
+这已经比最初 `1.791773e+03 s` 快约 `11.4x`，但仍慢于此前 CalculiX native-contact reference 的 `5.362540e+01 s`。
+
+### 下一步要超过 CalculiX 的必要工程化
+
+1. 把当前 Numba backend 下沉为真正 C++ fused extension
+   - 一次调用完成 required-node generation、exact-fallback candidate projection、field payload fill、gap interpolation、force accumulation。
+   - 目标是消除 Python 调度、Numba wrapper、临时数组和 repeated object creation。
+
+2. contact tangent 必须改成 matrix-free 或 C++ 稀疏原生装配
+   - 现在 Python/SciPy 全局 `K_c` 装配太贵。
+   - 需要实现 `y = (K_eff + K_c) x` 的 matrix-free operator 或 C++ sparse assembly，再配合预条件迭代求解。
+
+3. 解算计时应拆分 core solve 与 diagnostics
+   - 当前 solver loop 每个时间步仍记录完整 contact diagnostics。
+   - 若按工程求解器定义，history/VTK/contact-cloud 可作为 postprocess，不应混入 core solver timing。

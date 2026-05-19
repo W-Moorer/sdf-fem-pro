@@ -305,6 +305,7 @@ def surface_to_surface_field_penalty_response_vectorized(
     quadrature_cache: SurfaceQuadratureCache | None = None,
     slave_dof_offset: int = 0,
     master_dof_offset: int = 0,
+    assemble_stiffness: bool = False,
 ) -> FieldSurfaceContactResponse:
     """Vectorized force assembly for area-integrated field contact.
 
@@ -328,7 +329,7 @@ def surface_to_surface_field_penalty_response_vectorized(
     else:
         cache = quadrature_cache
     points = cache.points(X)
-    if compiled_field_contact_available():
+    if compiled_field_contact_available() and not bool(assemble_stiffness):
         from ._numba_field_contact import surface_penalty_response
 
         force, gaps = surface_penalty_response(
@@ -385,10 +386,23 @@ def surface_to_surface_field_penalty_response_vectorized(
             active_lam,
             int(master_dof_offset),
         )
+    stiffness = (
+        _assemble_batch_contact_stiffness(
+            cache=cache,
+            batch=batch,
+            active=active,
+            pressure_stiffness=k,
+            n_total_dofs=n_dofs,
+            slave_dof_offset=int(slave_dof_offset),
+            master_dof_offset=int(master_dof_offset),
+        )
+        if bool(assemble_stiffness)
+        else csr_matrix((n_dofs, n_dofs), dtype=float)
+    )
 
     return FieldSurfaceContactResponse(
         force=force,
-        stiffness=csr_matrix((n_dofs, n_dofs), dtype=float),
+        stiffness=stiffness,
         constraints=(),
         quadrature_weights=cache.area_weights.copy(),
         gaps=gaps.copy(),
@@ -690,6 +704,49 @@ def _accumulate_master_force(
     values = contrib.reshape((-1, 3))
     for component in range(3):
         np.add.at(force, int(dof_offset) + nodes * 3 + component, values[:, component])
+
+
+def _assemble_batch_contact_stiffness(
+    *,
+    cache: SurfaceQuadratureCache,
+    batch: dict[str, np.ndarray],
+    active: np.ndarray,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+) -> csr_matrix:
+    active = np.asarray(active, dtype=bool)
+    if not bool(np.any(active)):
+        return csr_matrix((int(n_total_dofs), int(n_total_dofs)), dtype=float)
+    active_rows = np.arange(int(np.count_nonzero(active)), dtype=np.int64)
+    row_scale = np.sqrt(float(pressure_stiffness) * cache.area_weights[active])
+
+    slave_nodes = cache.node_ids[active]
+    slave_weights = cache.weights[active]
+    gradients = batch["gradients"][active]
+    slave_cols = int(slave_dof_offset) + slave_nodes[:, :, None] * 3 + np.arange(3, dtype=np.int64)
+    slave_vals = slave_weights[:, :, None] * gradients[:, None, :]
+    slave_rows = np.repeat(active_rows, slave_cols.shape[1] * slave_cols.shape[2])
+    slave_vals_flat = slave_vals.reshape(-1) * np.repeat(row_scale, slave_cols.shape[1] * slave_cols.shape[2])
+
+    face_node_ids = batch["face_node_ids"][active]
+    grid_weights = batch["weights"][active]
+    barycentric = batch["barycentric"][active]
+    normals = batch["normals"][active]
+    master_cols = int(master_dof_offset) + face_node_ids[:, :, :, None] * 3 + np.arange(3, dtype=np.int64)
+    master_vals = -grid_weights[:, :, None, None] * barycentric[:, :, :, None] * normals[:, :, None, :]
+    master_rows = np.repeat(active_rows, master_cols.shape[1] * master_cols.shape[2] * master_cols.shape[3])
+    master_vals_flat = master_vals.reshape(-1) * np.repeat(
+        row_scale,
+        master_cols.shape[1] * master_cols.shape[2] * master_cols.shape[3],
+    )
+
+    rows = np.concatenate((slave_rows, master_rows))
+    cols = np.concatenate((slave_cols.reshape(-1), master_cols.reshape(-1)))
+    vals = np.concatenate((slave_vals_flat, master_vals_flat))
+    J = coo_matrix((vals, (rows, cols)), shape=(active_rows.size, int(n_total_dofs))).tocsr()
+    return (J.T @ J).tocsr()
 
 
 def _triangle_quadrature_rule(order: int) -> tuple[np.ndarray, np.ndarray]:
