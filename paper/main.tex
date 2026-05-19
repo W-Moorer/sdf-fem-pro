@@ -386,7 +386,7 @@ To add a more engineering-like visual contact case without importing a frictiona
 
 \subsection{Large-Area Dynamic Surface Contact}
 
-To test the amortized field-contact backend under a naturally large contact patch, we add a prescribed dynamic indentation case with a \(10\times10\times2\) C3D8 lower mesh and a \(10\times10\) upper driver surface. The driver ramps into contact and then remains in sustained oscillatory contact, so the vectorized surface-to-surface formulation evaluates 1400 quadrature samples per step and reaches 1400 active samples after contact is established. For this solver-level comparison, the reported timing is the complete SFC dynamic solve time, not only the field-query kernel time. The same kinematic contact problem is solved independently in CalculiX using native \texttt{*CONTACT PAIR}; backend field update and field-query timings are reported only as a breakdown of the SFC solve.
+To test the field-contact backend under a naturally large contact patch, we add a pressure-driven two-body dynamic case with a \(10\times10\times2\) C3D8 lower mesh and a \(10\times10\times2\) C3D8 upper mesh. The upper body is not prescribed in the normal direction; instead, an equivalent top-surface pressure load drives it into contact. The run uses \(1.0\) s of physical time with \(\Delta t=10^{-3}\) s, evaluates 1400 surface quadrature samples per step, and reaches 1400 active samples after contact is established. For this solver-level comparison, the reported timing is the complete SFC dynamic solve time, not only the field-query kernel time. The same pressure-driven contact problem is solved independently in CalculiX using native \texttt{*CONTACT PAIR}; backend field update and field-query timings are reported only as a breakdown of the SFC solve.
 
 \begin{table}[t]
 \centering
@@ -397,7 +397,7 @@ To test the amortized field-contact backend under a naturally large contact patc
 \toprule
 Case & active & SFC (s) & CCX (s) & CCX/SFC \\
 \midrule
-prescribed dynamic & 1400 & 11.71 & 155.62 & 13.29 \\
+pressure-driven dynamic & 1400 & 1791.77 & 53.63 & 0.030 \\
 \bottomrule
 \end{tabular}
 
@@ -407,10 +407,11 @@ prescribed dynamic & 1400 & 11.71 & 155.62 & 13.29 \\
 \toprule
 Backend component & total time (s) & mean per step (s) \\
 \midrule
-SDF field update & 4.094 & 0.455 \\
-field query/contact assembly & 0.031 & 0.00346 \\
+SDF field update & 429.75 & 0.429 \\
+field query/contact assembly & 3.914 & 0.00391 \\
 \bottomrule
 \end{tabular}
+\parbox{0.94\linewidth}{\small The pressure-driven case supports physical dynamic-contact comparison, but it does not support a solver-level acceleration claim for the current Python prototype. The maximum upper-body mean-displacement absolute error is \(2.87\times10^{-2}\), and the relative \(L^2\) trajectory error is \(1.18\times10^{-1}\).}
 \end{table}
 
 \subsection{Backend and Timing Ablation}
@@ -441,7 +442,7 @@ Finally, an 11-step reduced-mesh backend ablation separates the preserved node-t
 
 \section{Scope of Claims}
 
-The reported experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, 21-step quasi-static native-contact agreement, three-second C3D8 dynamic field-contact histories, and SDF acceleration after the measured \(Q^\ast\) crossover. The solver-level tests support the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover. The large-area dynamic comparison supports a complete-solver timing statement for the reported case: SFC requires 11.71 s while CalculiX native contact requires 155.62 s. Field update and field-query timings are reported only as backend breakdowns, not as standalone solver speedups. The backend ablation documents both node-to-surface and surface-to-surface integration paths.
+The reported experiments support true dynamic narrow-band SDF field existence, interpolation-only query, field accuracy under the reported thresholds, slave/master field-contact Jacobian finite-difference consistency, 21-step quasi-static native-contact agreement, three-second C3D8 dynamic field-contact histories, and SDF acceleration after the measured \(Q^\ast\) crossover. The solver-level tests support the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover. The pressure-driven large-area dynamic comparison supports physical two-body dynamic-contact comparison, but it does not support a complete-solver acceleration claim for the current Python prototype: SFC requires 1791.77 s while CalculiX native contact requires 53.63 s. Field update and field-query timings are reported only as backend breakdowns, not as standalone solver speedups. The backend ablation documents both node-to-surface and surface-to-surface integration paths.
 
 The Fig.~6-inspired case supports physical auditability of displacement, strain, stress, gap, pressure, active-contact, and SDF-field visualizations in a more engineering-like geometry. It is not evidence for frictional stick-slip, and it is not used to prove the SDF acceleration claim.
 

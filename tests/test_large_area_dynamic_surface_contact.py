@@ -25,13 +25,13 @@ def test_large_area_dynamic_surface_contact_quick_outputs(tmp_path: Path) -> Non
         nz=1,
         driver_nx=4,
         driver_ny=4,
-        total_time=0.02,
+        total_time=0.05,
         dt=0.01,
-        ramp_time=0.01,
-        closure=0.08,
+        ramp_time=0.02,
         quadrature_order=3,
-        spacing=0.5,
-        band_radius=0.9,
+        spacing=0.6,
+        band_radius=2.0,
+        peak_pressure=2000.0,
         newmark_iterations=1,
     )
     outputs = run_benchmark(out_dir=tmp_path, quick=True, skip_calculix=True, cfg=cfg)
@@ -39,6 +39,7 @@ def test_large_area_dynamic_surface_contact_quick_outputs(tmp_path: Path) -> Non
     assert rows
     assert max(int(row["active_samples"]) for row in rows) > 0
     assert {row["field_path"] for row in rows} == {"DynamicNarrowBandSDF.build_required_points -> field_contact"}
+    assert {row["load_type"] for row in rows} == {"top_pressure"}
     assert Path(outputs["summary"]).exists()
     assert Path(outputs["vtk_pvd"]).exists()
     assert int(outputs["vtk_frame_count"]) >= 2

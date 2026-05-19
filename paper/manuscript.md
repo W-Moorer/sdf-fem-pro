@@ -258,25 +258,25 @@ Figures:
 
 ### 7.6 Large-Area Dynamic Surface Contact
 
-The large-area dynamic case tests the amortized field-contact backend under a sustained contact patch rather than a brief impact. A \(10\times10\times2\) C3D8 lower mesh is contacted by a \(10\times10\) prescribed driver surface. The driver ramps into contact and then remains in oscillatory contact, producing 1400 surface quadrature samples per step and 1400 active samples after contact is established. The solver-level comparison uses the complete SFC dynamic solve wall time, not the field-query kernel time alone.
+The large-area dynamic case tests the field-contact backend under a sustained contact patch rather than a brief impact. A \(10\times10\times2\) C3D8 lower mesh is contacted by a \(10\times10\times2\) C3D8 upper mesh. The upper body is not prescribed in the normal direction; instead, an equivalent top-surface pressure load drives it into contact. The formal run uses \(1.0\) s of physical time with \(\Delta t=10^{-3}\) s, producing 1400 surface quadrature samples per step and 1400 active samples after contact is established. The solver-level comparison uses the complete SFC dynamic solve wall time, not the field-query kernel time alone.
 
 | Case | Active samples | SFC solve (s) | CalculiX solve (s) | CCX/SFC |
 | --- | ---: | ---: | ---: | ---: |
-| prescribed dynamic surface contact | 1400 | 11.71 | 155.62 | 13.29 |
+| pressure-driven two-body dynamic contact | 1400 | 1791.77 | 53.63 | 0.030 |
 
 Backend breakdown for the same SFC run:
 
 | Component | Total time (s) | Mean per step (s) |
 | --- | ---: | ---: |
-| SDF field update | 4.094 | 0.455 |
-| field query/contact assembly | 0.031 | 0.00346 |
+| SDF field update | 429.75 | 0.429 |
+| field query/contact assembly | 3.914 | 0.00391 |
 
-The timing claim should use the first table: complete SFC solve time \(11.71\) s versus complete CalculiX native-contact solve time \(155.62\) s. The second table is only a backend breakdown explaining where the SFC time is spent; it must not be presented as the full solver acceleration. The same comparison reports a maximum top-displacement absolute error of \(4.68\times10^{-4}\) and a maximum normal-force relative error of \(1.88\times10^{-1}\), with the largest force mismatch occurring during contact establishment.
+This pressure-driven formal run supports a physical two-body dynamic-contact comparison, but it does not support a complete-solver acceleration claim for the current Python prototype. SFC requires \(1791.77\) s, while CalculiX native contact requires \(53.63\) s. The backend breakdown shows why: repeated SDF field updates dominate the current prototype at \(\Delta t=10^{-3}\) s. The same comparison reports a maximum upper-body mean-displacement absolute error of \(2.87\times10^{-2}\) and a relative \(L^2\) trajectory error of \(1.18\times10^{-1}\).
 
 Data:
 
 - `paper/numerical_experiments/large_area_dynamic_surface_contact/large_area_dynamic_solver_timing.csv`
-- `results/large_area_dynamic_surface_contact_quick_final/large_area_dynamic_comparison.csv`
+- `results/large_area_pressure_dynamic_1s_dt001/large_area_dynamic_comparison.csv`
 
 ### 7.7 Backend and Timing Ablation
 
@@ -300,7 +300,7 @@ Supported for the reported experiments:
 - The 21-step quasi-static native-contact curves support scoped SFC/CalculiX agreement for the reported geometries.
 - The three-second C3D8 dynamic case supports time-history and field-cloud auditability for deformable SDF contact.
 - The Fig. 6-inspired case supports engineering-style three-dimensional displacement, strain, stress, gap, pressure, active-mask, and SDF-field visualization, without any stick-slip or friction claim.
-- The large-area dynamic comparison supports complete-solver timing for the reported case: SFC \(11.71\) s versus CalculiX native contact \(155.62\) s; field update/query timings are backend breakdowns only.
+- The pressure-driven large-area dynamic comparison supports physical two-body dynamic-contact comparison, but not complete-solver acceleration for the current Python prototype: SFC \(1791.77\) s versus CalculiX native contact \(53.63\) s; field update/query timings are backend breakdowns only.
 - Solver-level timing supports the scoped statement that the optimized true-field backend can reduce contact-dominated TET4/HEX8 step time after the measured crossover.
 - The backend contains both node-to-surface and surface-to-surface contact integration paths.
 
