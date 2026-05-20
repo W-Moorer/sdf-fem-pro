@@ -4,6 +4,7 @@ import csv
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +90,25 @@ def test_contact_estimate_damping_policy_preserves_precontact_free_fall(tmp_path
     assert final["damping_start_policy"] == "contact-estimate"
     assert float(final["z_cm"]) == pytest.approx(expected_z, abs=5.0e-8)
     assert all(int(row["active_contact_count"]) == 0 for row in rows)
+
+
+def test_backward_euler_integrator_runs_short_contact_history(tmp_path: Path) -> None:
+    inp = tmp_path / "sphere_drop.inp"
+    inp.write_text(build_input_text("sphere_drop"), encoding="ascii")
+    model = parse_sphere_drop_inp(inp)
+
+    rows = run_sfc_lagrangian_sdf_full_history(
+        model,
+        duration=0.01,
+        dt=0.005,
+        contact_stiffness=1.0e8,
+        integrator="bwe",
+        max_newton_iterations=3,
+    )
+
+    assert rows
+    assert {row["time_integrator"] for row in rows} == {"bwe"}
+    assert all(np.isfinite(float(row["z_cm"])) for row in rows)
 
 
 def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path: Path) -> None:

@@ -292,11 +292,11 @@ def run_sfc_lagrangian_sdf_full_history(
     u = np.zeros(n_dofs, dtype=float)
     v = np.zeros(n_dofs, dtype=float)
     integrator_name = str(integrator).lower()
-    if integrator_name not in {"newmark", "hht"}:
-        raise ValueError("integrator must be 'newmark' or 'hht'")
+    if integrator_name not in {"newmark", "hht", "bwe"}:
+        raise ValueError("integrator must be 'newmark', 'hht', or 'bwe'")
     alpha = float(hht_alpha) if integrator_name == "hht" else 0.0
-    if not (-1.0 / 3.0 <= alpha <= 0.0):
-        raise ValueError("hht_alpha must lie in [-1/3, 0]")
+    if not (-0.5 <= alpha <= 0.0):
+        raise ValueError("hht_alpha must lie in [-0.5, 0]")
     output_dt = float(dt)
     min_h = float(min_increment)
     max_h = output_dt if max_increment is None else min(float(max_increment), output_dt)
@@ -391,12 +391,22 @@ def run_sfc_lagrangian_sdf_full_history(
         previous_min_gap = float(min_gap)
         while not accepted:
             C = C_base if float(current_time) >= effective_damping_start_time else csr_matrix(K.shape, dtype=float)
-            old_internal = C @ v + K @ u - f_gravity - f_contact_old
-            c0 = 1.0 / (beta * h_trial * h_trial)
-            c1 = gamma / (beta * h_trial)
-            u_pred = u + h_trial * v + h_trial * h_trial * (0.5 - beta) * a
-            v_pred = v + h_trial * (1.0 - gamma) * a
-            u_guess = u_pred.copy()
+            if integrator_name == "bwe":
+                c0 = 1.0 / (h_trial * h_trial)
+                c1 = 1.0 / h_trial
+                u_old = u.copy()
+                v_old = v.copy()
+                u_guess = u + h_trial * v + h_trial * h_trial * a
+                old_internal = None
+                u_pred = None
+                v_pred = None
+            else:
+                old_internal = C @ v + K @ u - f_gravity - f_contact_old
+                c0 = 1.0 / (beta * h_trial * h_trial)
+                c1 = gamma / (beta * h_trial)
+                u_pred = u + h_trial * v + h_trial * h_trial * (0.5 - beta) * a
+                v_pred = v + h_trial * (1.0 - gamma) * a
+                u_guess = u_pred.copy()
             converged = False
             accepted_contact_force = f_contact_old
             accepted_min_gap = previous_min_gap
@@ -405,8 +415,12 @@ def run_sfc_lagrangian_sdf_full_history(
             iteration_used = 0
             for iteration in range(1, int(max_newton_iterations) + 1):
                 current_guess = model.nodes + u_guess.reshape((-1, 3))
-                a_guess = c0 * (u_guess - u_pred)
-                v_guess = v_pred + gamma * h_trial * a_guess
+                if integrator_name == "bwe":
+                    v_guess = (u_guess - u_old) / h_trial
+                    a_guess = (v_guess - v_old) / h_trial
+                else:
+                    a_guess = c0 * (u_guess - u_pred)
+                    v_guess = v_pred + gamma * h_trial * a_guess
                 f_contact, K_contact, gap_guess, active_guess, *_ = _lagrangian_plane_contact_response(
                     model,
                     current_guess,
@@ -423,10 +437,14 @@ def run_sfc_lagrangian_sdf_full_history(
                 accepted_min_gap = float(gap_guess)
                 accepted_active = int(active_guess)
                 new_internal = C @ v_guess + K @ u_guess - f_gravity - f_contact
-                residual = M @ a_guess + (1.0 + alpha) * new_internal - alpha * old_internal
+                if integrator_name == "bwe":
+                    residual = M @ a_guess + new_internal
+                    tangent = (c0 * M + c1 * C + K + K_contact).tocsc()
+                else:
+                    residual = M @ a_guess + (1.0 + alpha) * new_internal - alpha * old_internal
+                    tangent = (c0 * M + (1.0 + alpha) * (c1 * C + K + K_contact)).tocsc()
                 force_scale = max(1.0, float(np.linalg.norm(f_gravity)), float(np.linalg.norm(K @ u_guess)), float(np.linalg.norm(f_contact)))
                 residual_ok = float(np.linalg.norm(residual)) <= float(residual_tolerance) * force_scale
-                tangent = (c0 * M + (1.0 + alpha) * (c1 * C + K + K_contact)).tocsc()
                 correction = np.asarray(spsolve(tangent, -residual), dtype=float)
                 u_guess += correction
                 total_newton_iterations += 1
@@ -445,8 +463,12 @@ def run_sfc_lagrangian_sdf_full_history(
             if converged:
                 accepted = True
                 u_new = u_guess
-                a_new = c0 * (u_new - u_pred)
-                v_new = v_pred + gamma * h_trial * a_new
+                if integrator_name == "bwe":
+                    v_new = (u_new - u_old) / h_trial
+                    a_new = (v_new - v_old) / h_trial
+                else:
+                    a_new = c0 * (u_new - u_pred)
+                    v_new = v_pred + gamma * h_trial * a_new
                 u, v, a = u_new, v_new, a_new
                 f_contact_old = accepted_contact_force
                 min_gap = accepted_min_gap
@@ -466,8 +488,12 @@ def run_sfc_lagrangian_sdf_full_history(
                 if not bool(adaptive_increments) or h_trial <= min_h * (1.0 + 1.0e-12):
                     accepted = True
                     u_new = u_guess
-                    a_new = c0 * (u_new - u_pred)
-                    v_new = v_pred + gamma * h_trial * a_new
+                    if integrator_name == "bwe":
+                        v_new = (u_new - u_old) / h_trial
+                        a_new = (v_new - v_old) / h_trial
+                    else:
+                        a_new = c0 * (u_new - u_pred)
+                        v_new = v_pred + gamma * h_trial * a_new
                     u, v, a = u_new, v_new, a_new
                     f_contact_old = accepted_contact_force
                     min_gap = accepted_min_gap
@@ -816,7 +842,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stiffness-damping", type=float, default=0.0)
     parser.add_argument("--damping-start-time", type=float, default=0.0)
     parser.add_argument("--damping-start-policy", choices=DAMPING_START_POLICIES, default="time")
-    parser.add_argument("--integrator", choices=("newmark", "hht"), default="newmark")
+    parser.add_argument("--integrator", choices=("newmark", "hht", "bwe"), default="newmark")
     parser.add_argument("--hht-alpha", type=float, default=0.0)
     parser.add_argument("--contact-integration", choices=("node", "surface", "hybrid"), default="node")
     parser.add_argument("--quadrature-order", type=int, choices=(1, 3, 7), default=3)
