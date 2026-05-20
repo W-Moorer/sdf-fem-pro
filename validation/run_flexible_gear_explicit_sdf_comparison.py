@@ -900,6 +900,82 @@ def _write_comparison_plots(out_dir: Path, abaqus_rows: list[Row], sfc_rows: lis
     return plot_path
 
 
+def write_long_run_estimate(
+    out_dir: Path,
+    *,
+    duration: float,
+    fixed_dt: float,
+    baseline_duration: float,
+    baseline_abaqus_wall: float,
+    baseline_sfc_wall: float,
+    baseline_frame_count: int,
+    estimated_vtk_frame_mb: float = 67.5,
+) -> Path:
+    """Write an engineering estimate for a long explicit validation run."""
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    increments = math.ceil(float(duration) / float(fixed_dt))
+    baseline_increments = math.ceil(float(baseline_duration) / float(fixed_dt))
+    scale = float(increments) / max(float(baseline_increments), 1.0)
+    abaqus_seconds = float(baseline_abaqus_wall) * scale
+    sfc_seconds = float(baseline_sfc_wall) * scale
+    if baseline_duration > 0.0:
+        output_interval = 1.0e-3
+        frame_count = math.floor(float(duration) / output_interval) + 1
+    else:
+        frame_count = 0
+    vtk_gb = frame_count * float(estimated_vtk_frame_mb) / 1024.0
+    rows = [
+        {
+            "duration": float(duration),
+            "fixed_dt": float(fixed_dt),
+            "increments": int(increments),
+            "baseline_duration": float(baseline_duration),
+            "baseline_increments": int(baseline_increments),
+            "estimated_abaqus_wall_seconds": float(abaqus_seconds),
+            "estimated_abaqus_wall_days": float(abaqus_seconds / 86400.0),
+            "estimated_sfc_wall_seconds": float(sfc_seconds),
+            "estimated_sfc_wall_days": float(sfc_seconds / 86400.0),
+            "output_interval_for_estimate": output_interval,
+            "estimated_frame_count": int(frame_count),
+            "estimated_single_solver_vtk_gb": float(vtk_gb),
+        }
+    ]
+    csv_path = out_dir / "flexible_gear_1s_long_run_estimate.csv"
+    _write_csv(csv_path, rows)
+    md_path = out_dir / "flexible_gear_1s_long_run_estimate.md"
+    md_path.write_text(
+        "\n".join(
+            [
+                "# Flexible Gear 1 s Explicit Long-Run Estimate",
+                "",
+                f"- Requested duration: `{duration}` s",
+                f"- Accuracy-preserving fixed explicit step: `{fixed_dt}` s",
+                f"- Required increments: `{increments}`",
+                f"- Baseline run: `{baseline_duration}` s, `{baseline_increments}` increments",
+                f"- Baseline Abaqus/Explicit reported wall time: `{baseline_abaqus_wall}` s",
+                f"- Baseline SFC Lagrangian-SDF replay wall time: `{baseline_sfc_wall}` s",
+                "",
+                "## Linear Extrapolation",
+                "",
+                f"- Estimated Abaqus analysis wall time: `{abaqus_seconds:.3f}` s = `{abaqus_seconds / 86400.0:.3f}` days",
+                f"- Estimated SFC replay wall time: `{sfc_seconds:.3f}` s = `{sfc_seconds / 86400.0:.3f}` days",
+                f"- Estimated VTK frames at 1 ms output interval: `{frame_count}`",
+                f"- Estimated VTK storage per solver: `{vtk_gb:.2f}` GB",
+                "",
+                "## Decision",
+                "",
+                "A direct 1 s run with the same explicit step is not suitable for an interactive validation turn.",
+                "Starting it without a job scheduler would occupy the workstation for several days and generate large VTK output.",
+                "To perform a true 1 s validation without reducing contact or time-integration accuracy, run it as a scheduled batch job with sparse output and checkpointing.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return md_path
+
+
 def run_workflow(
     out_dir: Path,
     *,
@@ -1007,11 +1083,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-contact-samples", type=int, default=1000)
     parser.add_argument("--max-abaqus-contact-faces", type=int, default=0)
     parser.add_argument("--skip-abaqus", action="store_true")
+    parser.add_argument("--estimate-long-run", action="store_true")
+    parser.add_argument("--baseline-duration", type=float, default=5.0e-5)
+    parser.add_argument("--baseline-abaqus-wall", type=float, default=37.0)
+    parser.add_argument("--baseline-sfc-wall", type=float, default=17.3868073000001)
+    parser.add_argument("--baseline-frame-count", type=int, default=6)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if bool(args.estimate_long_run):
+        report = write_long_run_estimate(
+            args.out_dir,
+            duration=float(args.duration),
+            fixed_dt=float(args.fixed_dt),
+            baseline_duration=float(args.baseline_duration),
+            baseline_abaqus_wall=float(args.baseline_abaqus_wall),
+            baseline_sfc_wall=float(args.baseline_sfc_wall),
+            baseline_frame_count=int(args.baseline_frame_count),
+        )
+        print(f"Long-run estimate: {report}")
+        return
     outputs = run_workflow(
         args.out_dir,
         source=args.source,

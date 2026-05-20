@@ -48,3 +48,24 @@ The Abaqus/Explicit stable time increment estimate for the parsed model was `9.4
 | SFC Lagrangian-SDF replay core time | 17.39 s |
 
 This comparison supports the scoped validation claim that the Lagrangian-SDF contact geometry path can replay the same gear kinematics with lower core runtime than the Abaqus/Explicit external reference for this short flexible-gear case. It is not a claim of full source-level Abaqus equivalence.
+
+## 1 s Long-Run Feasibility
+
+The same model cannot be launched as an interactive 1 s validation run without changing the numerical setting. Abaqus/Explicit reported a stable time increment of `9.42063e-9 s`; the reproduced accuracy-preserving run used `dt = 5e-9 s`. Therefore, a 1 s run would require `200,000,000` increments.
+
+Using the completed `5e-5 s` run as a linear wall-time baseline:
+
+| Quantity | Estimate |
+|---|---:|
+| Required increments | 200,000,000 |
+| Abaqus/Explicit analysis wall time | 740,000 s = 8.56 days |
+| SFC Lagrangian-SDF replay wall time | 347,736 s = 4.02 days |
+| VTK frames at 1 ms output interval | 1,001 |
+| VTK storage per solver | 65.98 GB |
+
+The generated estimate files are:
+
+- `results/flexible_gear_explicit_sdf/flexible_gear_1s_long_run_estimate.csv`
+- `results/flexible_gear_explicit_sdf/flexible_gear_1s_long_run_estimate.md`
+
+A true 1 s validation should be submitted as a scheduled batch job with sparse output and checkpointing. Increasing the explicit time step or using mass scaling would change the numerical setting, so it is not used for the accuracy-preserving estimate.
