@@ -49,6 +49,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 from sfc.contact.field_contact import (  # noqa: E402
     FieldSurfaceContactResponse,
     SurfaceQuadratureCache,
+    _gauss_legendre_1d,
+    _q4_shape_derivatives,
+    _q4_shape_functions,
     quadrilateral_surface_quadrature_cache,
     surface_to_surface_field_penalty_response_vectorized,
 )
@@ -375,6 +378,102 @@ def _filtered_cache(cache: SurfaceQuadratureCache, mask: np.ndarray) -> SurfaceQ
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _QuadSurfaceQuadratureWorkspace:
+    """Reusable Q4 surface quadrature topology with current-area updates."""
+
+    node_ids: np.ndarray
+    weights: np.ndarray
+    dxi: np.ndarray
+    deta: np.ndarray
+    unit_weights: np.ndarray
+
+    @classmethod
+    def build(cls, slave_quads: np.ndarray, *, order: int) -> "_QuadSurfaceQuadratureWorkspace":
+        quads = np.asarray(slave_quads, dtype=np.int64)
+        if quads.ndim != 2 or quads.shape[1] != 4:
+            raise ValueError("slave_quads must have shape (n_faces, 4)")
+        points_1d, weights_1d = _gauss_legendre_1d(order)
+        node_ids: list[np.ndarray] = []
+        sample_weights: list[np.ndarray] = []
+        dxi_values: list[np.ndarray] = []
+        deta_values: list[np.ndarray] = []
+        unit_weights: list[float] = []
+        for quad in quads:
+            for xi, wx in zip(points_1d, weights_1d, strict=True):
+                for eta, wy in zip(points_1d, weights_1d, strict=True):
+                    node_ids.append(quad.copy())
+                    sample_weights.append(_q4_shape_functions(float(xi), float(eta)))
+                    dxi, deta = _q4_shape_derivatives(float(xi), float(eta))
+                    dxi_values.append(dxi)
+                    deta_values.append(deta)
+                    unit_weights.append(float(wx) * float(wy))
+        if not node_ids:
+            return cls(
+                node_ids=np.empty((0, 4), dtype=np.int64),
+                weights=np.empty((0, 4), dtype=float),
+                dxi=np.empty((0, 4), dtype=float),
+                deta=np.empty((0, 4), dtype=float),
+                unit_weights=np.empty(0, dtype=float),
+            )
+        return cls(
+            node_ids=np.vstack(node_ids).astype(np.int64, copy=False),
+            weights=np.vstack(sample_weights).astype(float, copy=False),
+            dxi=np.vstack(dxi_values).astype(float, copy=False),
+            deta=np.vstack(deta_values).astype(float, copy=False),
+            unit_weights=np.asarray(unit_weights, dtype=float),
+        )
+
+    def cache(self, slave_x_current: np.ndarray) -> SurfaceQuadratureCache:
+        X = np.asarray(slave_x_current, dtype=float)
+        if X.ndim != 2 or X.shape[1] != 3:
+            raise ValueError("slave_x_current must have shape (n_nodes, 3)")
+        if self.node_ids.size and int(self.node_ids.max()) >= X.shape[0]:
+            raise ValueError("quadrature workspace references nodes outside slave_x_current")
+        if self.node_ids.size == 0:
+            return SurfaceQuadratureCache(
+                node_ids=np.empty((0, 4), dtype=np.int64),
+                weights=np.empty((0, 4), dtype=float),
+                area_weights=np.empty(0, dtype=float),
+            )
+        coords = X[self.node_ids]
+        tangent_xi = np.einsum("qa,qad->qd", self.dxi, coords)
+        tangent_eta = np.einsum("qa,qad->qd", self.deta, coords)
+        area_weights = np.linalg.norm(np.cross(tangent_xi, tangent_eta), axis=1) * self.unit_weights
+        keep = area_weights > 0.0
+        return SurfaceQuadratureCache(
+            node_ids=self.node_ids[keep].copy(),
+            weights=self.weights[keep].copy(),
+            area_weights=area_weights[keep].astype(float, copy=True),
+        )
+
+
+def _nodal_smoothed_pressure(
+    cache: SurfaceQuadratureCache,
+    gaps: np.ndarray | None,
+    *,
+    pressure_stiffness: float,
+    n_slave_nodes: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project quadrature pressures to slave nodes with area-weighted smoothing."""
+
+    nodal_area = np.zeros(int(n_slave_nodes), dtype=float)
+    nodal_pressure_area = np.zeros(int(n_slave_nodes), dtype=float)
+    if gaps is None or cache.area_weights.size == 0:
+        return np.zeros(int(n_slave_nodes), dtype=float), nodal_area
+    gap_values = np.asarray(gaps, dtype=float).reshape(-1)
+    if gap_values.shape != cache.area_weights.shape:
+        raise ValueError("gaps must match quadrature cache size")
+    q_pressure = float(pressure_stiffness) * np.maximum(-gap_values, 0.0)
+    weighted_area = cache.area_weights[:, None] * cache.weights
+    np.add.at(nodal_area, cache.node_ids.ravel(), weighted_area.ravel())
+    np.add.at(nodal_pressure_area, cache.node_ids.ravel(), (q_pressure[:, None] * weighted_area).ravel())
+    nodal_pressure = np.zeros(int(n_slave_nodes), dtype=float)
+    mask = nodal_area > 0.0
+    nodal_pressure[mask] = nodal_pressure_area[mask] / nodal_area[mask]
+    return nodal_pressure, nodal_area
+
+
 def _empty_contact_response(n_total_dofs: int) -> FieldSurfaceContactResponse:
     return FieldSurfaceContactResponse(
         force=np.zeros(int(n_total_dofs), dtype=float),
@@ -652,7 +751,8 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
     lower_contact_ids = _contact_lower_top_element_ids(lower, upper, cfg)
     lower_contact_quads = _top_quads_for_element_ids(lower, lower_contact_ids)
     upper_bottom_faces = _upper_bottom_triangles(upper)
-    contact_cache = quadrilateral_surface_quadrature_cache(lower_contact_quads, lower.X, order=max(1, min(3, cfg.quadrature_order)))
+    contact_order = max(1, min(3, cfg.quadrature_order))
+    contact_quadrature = _QuadSurfaceQuadratureWorkspace.build(lower_contact_quads, order=contact_order)
     sdf_workspace = _workspace_from_contact_envelope(lower, upper, lower_contact_quads, cfg)
     beta, gamma = _hht_parameters(float(cfg.hht_alpha))
     alpha = float(cfg.hht_alpha)
@@ -687,6 +787,7 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
         lower_u, upper_u = _split_displacement(u, lower, upper)
         lower_x = lower.X + lower_u
         upper_x = upper.X + upper_u
+        contact_cache = contact_quadrature.cache(lower_x)
         all_q = contact_cache.points(lower_x)
         active_cache = _filtered_cache(
             contact_cache,
@@ -733,9 +834,18 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
         strain = np.concatenate((lower_fields["engineering_strain_norm"], upper_fields["engineering_strain_norm"]))
         external_force = _upper_top_x_load(t, cfg, upper, lower_dofs, total_dofs)
         balance = M @ a + K @ u - response.force - external_force
+        q_penetration = np.maximum(-np.asarray(response.gaps), 0.0)
         contact_integral_force = float(
-            np.sum(cfg.pressure_stiffness * active_cache.area_weights * np.maximum(-np.asarray(response.gaps), 0.0))
+            np.sum(cfg.pressure_stiffness * active_cache.area_weights * q_penetration)
         )
+        nodal_pressure, _nodal_pressure_area = _nodal_smoothed_pressure(
+            active_cache,
+            response.gaps,
+            pressure_stiffness=cfg.pressure_stiffness,
+            n_slave_nodes=lower.X.shape[0],
+        )
+        nodal_pressure_on_top = nodal_pressure[lower_top_nodes] if lower_top_nodes.size else nodal_pressure
+        positive_nodal_pressure = nodal_pressure_on_top[nodal_pressure_on_top > 0.0]
         upper_reaction_force = float(abs(np.sum(balance[upper_top_z_dofs])))
         history.append(
             {
@@ -756,12 +866,18 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
                 "min_gap": float(response.min_gap),
                 "max_penetration": float(response.max_penetration),
                 "active_samples": int(response.active_count),
+                "active_area": float(np.sum(active_cache.area_weights[q_penetration > 0.0])),
+                "active_pressure_nodes": int(np.count_nonzero(nodal_pressure_on_top > 0.0)),
                 "contact_integral_force": contact_integral_force,
                 "normal_force": contact_integral_force,
                 "upper_reaction_force": upper_reaction_force,
                 "tangential_force": float(_tangential_force_state(t, cfg)),
                 "min_contact_opening": float(response.min_gap),
-                "max_contact_pressure": float(cfg.pressure_stiffness * response.max_penetration),
+                "max_contact_pressure": float(np.max(nodal_pressure_on_top)) if nodal_pressure_on_top.size else 0.0,
+                "p95_contact_pressure": float(np.percentile(positive_nodal_pressure, 95.0))
+                if positive_nodal_pressure.size
+                else 0.0,
+                "max_sample_contact_pressure": float(cfg.pressure_stiffness * response.max_penetration),
             }
         )
         timing.append(
@@ -790,9 +906,10 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
             lower_guess_u, upper_guess_u = _split_displacement(u_guess, lower, upper)
             lower_guess_x = lower.X + lower_guess_u
             upper_guess_x = upper.X + upper_guess_u
-            all_q_next = contact_cache.points(lower_guess_x)
+            contact_cache_next = contact_quadrature.cache(lower_guess_x)
+            all_q_next = contact_cache_next.points(lower_guess_x)
             active_cache_next = _filtered_cache(
-                contact_cache,
+                contact_cache_next,
                 _footprint_mask(all_q_next, upper_guess_x, tolerance=cfg.spacing, bottom_node_ids=upper_bottom_nodes),
             )
             q_next = active_cache_next.points(lower_guess_x)
@@ -969,6 +1086,7 @@ try:
                 "upper_reaction_force",
                 "min_contact_opening",
                 "max_contact_pressure",
+                "p95_contact_pressure",
                 "p95_von_mises",
                 "max_von_mises",
                 "p95_strain_norm",
@@ -1085,6 +1203,7 @@ try:
                     "upper_reaction_force": abs(rf3),
                     "min_contact_opening": min(opening_values) if opening_values else "",
                     "max_contact_pressure": max(pressure_values) if pressure_values else "",
+                    "p95_contact_pressure": percentile(pressure_values, 95.0),
                     "p95_von_mises": percentile(vm_values, 95.0),
                     "max_von_mises": max(vm_values) if vm_values else "",
                     "p95_strain_norm": percentile(strain_values, 95.0),
@@ -1111,6 +1230,11 @@ def run_abaqus(cfg: FlexibleCubeConfig, out_dir: Path, *, abaqus_command: str | 
             cwd=run_dir,
             log_path=out_dir / "abaqus_stdout.log",
         )
+        dat = run_dir / f"{JOB_NAME}.dat"
+        if dat.exists():
+            dat_text = dat.read_text(encoding="utf-8", errors="ignore")
+            if "FATAL ERRORS" in dat_text or "EXECUTION IS TERMINATED" in dat_text:
+                raise RuntimeError(f"Abaqus input processing failed; inspect {dat}")
         odb = run_dir / f"{JOB_NAME}.odb"
         if not odb.exists():
             raise RuntimeError(f"Abaqus did not produce {odb}")
@@ -1177,6 +1301,7 @@ def load_abaqus_history(metrics_csv: Path) -> list[Row]:
             "upper_reaction_force",
             "min_contact_opening",
             "max_contact_pressure",
+            "p95_contact_pressure",
             "p95_von_mises",
             "max_von_mises",
             "p95_strain_norm",
@@ -1228,6 +1353,7 @@ def _plot_curves(
         ("top_mean_z_displacement", "lower top mean z displacement"),
         ("surface_gap_mean_z", "mean surface gap"),
         ("max_contact_pressure", "maximum contact pressure"),
+        ("p95_contact_pressure", "95th percentile contact pressure"),
         ("max_displacement_norm", "max displacement norm"),
         ("p95_von_mises", "95th percentile von Mises"),
         ("p95_strain_norm", "95th percentile strain norm"),
@@ -1272,6 +1398,7 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
             "upper_bottom_mean_x_displacement",
             "surface_gap_mean_z",
             "max_contact_pressure",
+            "p95_contact_pressure",
             "max_displacement_norm",
             "p95_von_mises",
             "p95_strain_norm",

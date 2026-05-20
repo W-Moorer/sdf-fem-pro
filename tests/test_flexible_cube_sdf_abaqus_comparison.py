@@ -13,11 +13,13 @@ if str(ROOT) not in sys.path:
 from validation.run_flexible_cube_sdf_abaqus_comparison import (  # noqa: E402
     FlexibleCubeConfig,
     _contact_lower_top_element_ids,
+    _nodal_smoothed_pressure,
     _top_quads_for_element_ids,
     _upper_bottom_triangles,
     build_abaqus_input_text,
     make_geometry,
 )
+from sfc.contact import SurfaceQuadratureCache  # noqa: E402
 
 
 def test_flexible_cube_deck_uses_two_c3d8_flexible_bodies() -> None:
@@ -30,6 +32,7 @@ def test_flexible_cube_deck_uses_two_c3d8_flexible_bodies() -> None:
     assert "*Rigid Body" not in text
     assert "*Element, type=R3D4" not in text
     assert "LOWER_TOP_SURF, UPPER_BOTTOM_SURF" in text
+    assert "*Contact Pair, interaction=LINEAR_FRICTIONLESS, type=SURFACE TO SURFACE" in text
     assert "*Surface Behavior, pressure-overclosure=LINEAR" in text
     assert "*Friction\n0." in text
     assert "*Contact Output" in text
@@ -118,3 +121,20 @@ def test_flexible_cube_contact_surfaces_have_expected_topology() -> None:
     tri = upper.X[master_tris[0]]
     normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
     assert normal[2] < 0.0
+
+
+def test_nodal_smoothed_pressure_projects_quadrature_pressure_by_area() -> None:
+    cache = SurfaceQuadratureCache(
+        node_ids=np.asarray([[0, 1], [0, 1]], dtype=np.int64),
+        weights=np.asarray([[0.75, 0.25], [0.25, 0.75]], dtype=float),
+        area_weights=np.asarray([2.0, 6.0], dtype=float),
+    )
+    pressure, nodal_area = _nodal_smoothed_pressure(
+        cache,
+        np.asarray([-0.1, -0.3], dtype=float),
+        pressure_stiffness=10.0,
+        n_slave_nodes=2,
+    )
+
+    assert nodal_area.tolist() == pytest.approx([3.0, 5.0])
+    assert pressure.tolist() == pytest.approx([(1.0 * 1.5 + 3.0 * 1.5) / 3.0, (1.0 * 0.5 + 3.0 * 4.5) / 5.0])
