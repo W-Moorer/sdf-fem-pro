@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse.linalg import factorized
+from scipy.sparse.linalg import factorized, spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -46,6 +46,7 @@ matplotlib.rcParams.update(
 import matplotlib.pyplot as plt  # noqa: E402
 
 from sfc.contact.field_contact import (  # noqa: E402
+    SurfaceQuadratureCache,
     surface_to_surface_field_penalty_response_vectorized,
     triangle_surface_quadrature_cache,
 )
@@ -66,8 +67,6 @@ from validation.run_fig6_inspired_frictionless_contact import (  # noqa: E402
     _free_dofs,
     _structured_hex_box,
     _surface_grid,
-    _top_cell_ids_for_points,
-    _top_triangles,
 )
 
 Row = dict[str, Any]
@@ -94,6 +93,8 @@ class Fig9Config:
     poisson_ratio: float = 0.30
     density: float = 1.0
     newmark_iterations: int = 4
+    use_contact_tangent: bool = True
+    contact_tolerance: float = 1.0e-9
     output_stride: int = 1
 
 
@@ -147,6 +148,102 @@ def _driver_positions(driver_ref: np.ndarray, time_value: float, cfg: Fig9Config
     return np.asarray(driver_ref, dtype=float) + _driver_offset(time_value, cfg)
 
 
+def _driver_master_faces(driver_faces: np.ndarray) -> np.ndarray:
+    """Flip the rigid driver surface so its SDF normal points toward lower top."""
+
+    faces = np.asarray(driver_faces, dtype=np.int64)
+    return faces[:, [0, 2, 1]].copy()
+
+
+def _driver_swept_xy_bounds(driver_ref: np.ndarray, cfg: Fig9Config) -> tuple[float, float, float, float]:
+    start = np.asarray(driver_ref, dtype=float)
+    end = start + np.asarray((cfg.shift_x, 0.0, -cfg.closure), dtype=float)
+    both = np.vstack((start, end))
+    return (
+        float(np.min(both[:, 0])),
+        float(np.max(both[:, 0])),
+        float(np.min(both[:, 1])),
+        float(np.max(both[:, 1])),
+    )
+
+
+def _lower_contact_top_element_ids(mesh: BoxMesh, driver_ref: np.ndarray, cfg: Fig9Config) -> np.ndarray:
+    """Return 1-based top element ids in the swept driver footprint plus one cell pad."""
+
+    xmin, xmax, ymin, ymax = _driver_swept_xy_bounds(driver_ref, cfg)
+    cell_pad = max(float(mesh.size[0]) / float(mesh.nx), float(mesh.size[1]) / float(mesh.ny), float(cfg.band_radius))
+    ids: list[int] = []
+    for j in range(mesh.ny):
+        for i in range(mesh.nx):
+            eid = (mesh.nz - 1) * mesh.ny * mesh.nx + j * mesh.nx + i
+            centroid = np.mean(mesh.X[mesh.elements[eid]], axis=0)
+            if xmin - cell_pad <= centroid[0] <= xmax + cell_pad and ymin - cell_pad <= centroid[1] <= ymax + cell_pad:
+                ids.append(eid + 1)
+    if not ids:
+        raise RuntimeError("driver swept footprint selected no lower top elements")
+    return np.asarray(ids, dtype=np.int64)
+
+
+def _top_triangles_for_element_ids(mesh: BoxMesh, element_ids_1based: np.ndarray) -> np.ndarray:
+    faces: list[tuple[int, int, int]] = []
+    for element_id in np.asarray(element_ids_1based, dtype=np.int64):
+        element = mesh.elements[int(element_id) - 1]
+        quad = element[[4, 5, 6, 7]]
+        faces.append((int(quad[0]), int(quad[1]), int(quad[2])))
+        faces.append((int(quad[0]), int(quad[2]), int(quad[3])))
+    return np.asarray(faces, dtype=np.int64)
+
+
+def _workspace_from_contact_envelope(
+    lower: BoxMesh,
+    driver_ref: np.ndarray,
+    lower_contact_faces: np.ndarray,
+    cfg: Fig9Config,
+) -> RequiredPointSDFWorkspace:
+    """Create a reusable required-point grid covering the full driver sweep."""
+
+    h = np.full(3, float(cfg.spacing), dtype=float)
+    lower_contact_points = lower.X[np.asarray(lower_contact_faces, dtype=np.int64).ravel()]
+    driver_start = np.asarray(driver_ref, dtype=float)
+    driver_end = driver_start + np.asarray((cfg.shift_x, 0.0, -cfg.closure), dtype=float)
+    envelope = np.vstack((lower_contact_points, driver_start, driver_end))
+    cell_pad = max(float(lower.size[0]) / float(lower.nx), float(lower.size[1]) / float(lower.ny), float(cfg.band_radius))
+    effective_band = max(float(cfg.band_radius), abs(float(cfg.shift_x)) + 2.0 * cell_pad + 2.0 * float(cfg.spacing))
+    padding = effective_band + 2.0 * float(cfg.spacing)
+    origin = np.min(envelope, axis=0) - padding
+    upper = np.max(envelope, axis=0) + padding
+    shape = tuple((np.ceil((upper - origin) / h).astype(np.int64) + 2).tolist())
+    return RequiredPointSDFWorkspace(
+        spacing=h,
+        band_radius=effective_band,
+        origin=origin,
+        shape=shape,
+        cell_size=max(2.0 * float(cfg.spacing), effective_band),
+        batch_projection_threshold=256,
+        candidate_padding=effective_band,
+    )
+
+
+def _driver_footprint_mask(points: np.ndarray, driver_x: np.ndarray, *, tolerance: float = 1.0e-10) -> np.ndarray:
+    """Keep slave quadrature points whose projection lies on the rigid driver face."""
+
+    p = np.asarray(points, dtype=float)
+    d = np.asarray(driver_x, dtype=float)
+    xmin, xmax = float(np.min(d[:, 0])), float(np.max(d[:, 0]))
+    ymin, ymax = float(np.min(d[:, 1])), float(np.max(d[:, 1]))
+    tol = float(tolerance)
+    return (p[:, 0] >= xmin - tol) & (p[:, 0] <= xmax + tol) & (p[:, 1] >= ymin - tol) & (p[:, 1] <= ymax + tol)
+
+
+def _filtered_cache(cache: SurfaceQuadratureCache, mask: np.ndarray) -> SurfaceQuadratureCache:
+    keep = np.asarray(mask, dtype=bool)
+    return SurfaceQuadratureCache(
+        node_ids=cache.node_ids[keep].copy(),
+        weights=cache.weights[keep].copy(),
+        area_weights=cache.area_weights[keep].copy(),
+    )
+
+
 def _append_ids(lines: list[str], ids: list[int] | np.ndarray, *, per_line: int = 16) -> None:
     values = [int(value) for value in ids]
     for offset in range(0, len(values), per_line):
@@ -167,6 +264,7 @@ def _driver_quads(driver_nx: int, driver_ny: int) -> list[tuple[int, int, int, i
 
 def build_abaqus_input_text(cfg: Fig9Config) -> str:
     lower, driver_ref, _driver_faces = make_geometry(cfg)
+    top_element_ids = _lower_contact_top_element_ids(lower, driver_ref, cfg)
     lines: list[str] = [
         "*Heading",
         "** Figure-9-style implicit dynamic validation: frictionless linear contact, no damping.",
@@ -185,7 +283,6 @@ def build_abaqus_input_text(cfg: Fig9Config) -> str:
     bottom_nodes = np.flatnonzero(np.isclose(lower.X[:, 2], lower.X[:, 2].min())) + 1
     lines.append("*Nset, nset=LOWER_BOTTOM")
     _append_ids(lines, bottom_nodes)
-    top_element_ids = np.asarray([(cfg.nz - 1) * cfg.nx * cfg.ny + j * cfg.nx + i + 1 for j in range(cfg.ny) for i in range(cfg.nx)], dtype=np.int64)
     lines.append("*Elset, elset=LOWER_TOP")
     _append_ids(lines, top_element_ids)
     lines.extend(
@@ -252,7 +349,7 @@ def build_abaqus_input_text(cfg: Fig9Config) -> str:
             f"0., 0., {cfg.closure_time:.12e}, 1., {cfg.total_time:.12e}, 1.",
             "*Amplitude, name=SHIFT_AMP, time=TOTAL TIME",
             f"0., 0., {cfg.closure_time:.12e}, 0., {cfg.total_time:.12e}, 1.",
-            "*Step, name=FIG9_LINEAR_IMPLICIT, nlgeom=YES, inc=10000",
+            "*Step, name=FIG9_LINEAR_IMPLICIT, nlgeom=NO, inc=10000",
             "*Dynamic, DIRECT, NOHAF",
             f"{cfg.dt:.12e}, {cfg.total_time:.12e}",
             "*Boundary",
@@ -267,8 +364,10 @@ def build_abaqus_input_text(cfg: Fig9Config) -> str:
             "*Node Output",
             "U, V",
             "*Element Output, directions=YES",
-            "S, LE",
+            "S, E, LE",
             f"*Output, history, time interval={cfg.dt * max(1, cfg.output_stride):.12e}",
+            "*Node Output, nset=DRIVER_RP",
+            "U3, RF3, CF3",
             "*Energy Output",
             "ALLKE, ALLIE, ALLSE, ALLWK, ETOTAL",
             "*End Step",
@@ -288,25 +387,19 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
     M = assemble_mass_matrix(body, kind="consistent").tocsr()
     fixed = _fixed_bottom_dofs(lower)
     free = _free_dofs(body.n_dofs, fixed)
-    lower_top_faces = _top_triangles(lower)
-    contact_cache = triangle_surface_quadrature_cache(driver_faces, driver_ref, order=cfg.quadrature_order)
-    sdf_workspace = RequiredPointSDFWorkspace.from_surface(
-        lower.X,
-        lower_top_faces,
-        spacing=cfg.spacing,
-        band_radius=cfg.band_radius,
-        padding=cfg.band_radius,
-        cell_size=max(2.0 * cfg.spacing, cfg.band_radius),
-        batch_projection_threshold=256,
-        candidate_padding=cfg.spacing,
-    )
+    lower_contact_element_ids = _lower_contact_top_element_ids(lower, driver_ref, cfg)
+    lower_contact_faces = _top_triangles_for_element_ids(lower, lower_contact_element_ids)
+    driver_master_faces = _driver_master_faces(driver_faces)
+    contact_cache = triangle_surface_quadrature_cache(lower_contact_faces, lower.X, order=cfg.quadrature_order)
+    sdf_workspace = _workspace_from_contact_envelope(lower, driver_ref, lower_contact_faces, cfg)
     beta = 0.25
     gamma = 0.5
     dt = float(cfg.dt)
     c0 = 1.0 / (beta * dt * dt)
     effective_free = (M * c0 + K).tocsc()[free[:, None], free]
     solve_free = factorized(effective_free) if free.size else None
-    n_slave_dofs = 3 * driver_ref.shape[0]
+    n_driver_dofs = 3 * driver_ref.shape[0]
+    n_total_contact_dofs = body.n_dofs + n_driver_dofs
     u = np.zeros(body.n_dofs, dtype=float)
     v = np.zeros(body.n_dofs, dtype=float)
     a = np.zeros(body.n_dofs, dtype=float)
@@ -317,23 +410,25 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
     steps = int(round(cfg.total_time / cfg.dt))
     for step in range(steps + 1):
         t = float(step * dt)
-        x_master = lower.X + u.reshape((-1, 3))
+        x_slave = lower.X + u.reshape((-1, 3))
         driver_x = _driver_positions(driver_ref, t, cfg)
-        q_points = contact_cache.points(driver_x)
+        all_q_points = contact_cache.points(x_slave)
+        active_cache = _filtered_cache(contact_cache, _driver_footprint_mask(all_q_points, driver_x, tolerance=-0.25 * cfg.spacing))
+        q_points = active_cache.points(x_slave)
         field_t0 = time.perf_counter()
-        master_sdf = sdf_workspace.build(x_master, lower_top_faces, q_points)
+        master_sdf = sdf_workspace.build(driver_x, driver_master_faces, q_points)
         field_elapsed = time.perf_counter() - field_t0
         query_t0 = time.perf_counter()
         response = surface_to_surface_field_penalty_response_vectorized(
-            driver_x,
-            driver_faces,
+            x_slave,
+            lower_contact_faces,
             master_sdf,
             pressure_stiffness=cfg.pressure_stiffness,
-            n_total_dofs=n_slave_dofs + body.n_dofs,
-            slave_x_reference=driver_ref,
-            quadrature_cache=contact_cache,
+            n_total_dofs=n_total_contact_dofs,
+            slave_x_reference=lower.X,
+            quadrature_cache=active_cache,
             slave_dof_offset=0,
-            master_dof_offset=n_slave_dofs,
+            master_dof_offset=body.n_dofs,
         )
         query_elapsed = time.perf_counter() - query_t0
         fields = _element_fields(lower, u, E=cfg.young_modulus, nu=cfg.poisson_ratio)
@@ -350,7 +445,7 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
                 "min_gap": float(response.min_gap),
                 "max_penetration": float(response.max_penetration),
                 "active_samples": int(response.active_count),
-                "normal_force": float(np.sum(cfg.pressure_stiffness * contact_cache.area_weights * np.maximum(-np.asarray(response.gaps), 0.0))),
+                "normal_force": float(np.sum(cfg.pressure_stiffness * active_cache.area_weights * np.maximum(-np.asarray(response.gaps), 0.0))),
             }
         )
         timing.append(
@@ -360,7 +455,7 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
                 "field_query_seconds": float(query_elapsed),
                 "field_elapsed_seconds": float(field_elapsed),
                 "active_samples": int(response.active_count),
-                "quadrature_points": int(contact_cache.area_weights.size),
+                "quadrature_points": int(active_cache.area_weights.size),
             }
         )
         if step == steps:
@@ -372,29 +467,36 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
         for _iteration in range(max(1, cfg.newmark_iterations)):
             x_guess = lower.X + u_guess.reshape((-1, 3))
             driver_next = _driver_positions(driver_ref, next_t, cfg)
-            q_next = contact_cache.points(driver_next)
-            sdf_next = sdf_workspace.build(x_guess, lower_top_faces, q_next)
+            all_q_next = contact_cache.points(x_guess)
+            active_cache_next = _filtered_cache(contact_cache, _driver_footprint_mask(all_q_next, driver_next, tolerance=-0.25 * cfg.spacing))
+            q_next = active_cache_next.points(x_guess)
+            sdf_next = sdf_workspace.build(driver_next, driver_master_faces, q_next)
             response_next = surface_to_surface_field_penalty_response_vectorized(
-                driver_next,
-                driver_faces,
+                x_guess,
+                lower_contact_faces,
                 sdf_next,
                 pressure_stiffness=cfg.pressure_stiffness,
-                n_total_dofs=n_slave_dofs + body.n_dofs,
-                slave_x_reference=driver_ref,
-                quadrature_cache=contact_cache,
+                n_total_dofs=n_total_contact_dofs,
+                slave_x_reference=lower.X,
+                quadrature_cache=active_cache_next,
                 slave_dof_offset=0,
-                master_dof_offset=n_slave_dofs,
+                master_dof_offset=body.n_dofs,
+                assemble_stiffness=bool(cfg.use_contact_tangent),
             )
-            f_contact = response_next.force[n_slave_dofs:]
+            f_contact = response_next.force[: body.n_dofs]
             a_guess = c0 * (u_guess - u_pred)
             residual = M @ a_guess + K @ u_guess - f_contact
             correction = np.zeros(body.n_dofs, dtype=float)
             if solve_free is not None:
-                correction[free] = np.asarray(solve_free(-residual[free]), dtype=float)
+                if bool(cfg.use_contact_tangent):
+                    tangent = (M * c0 + K + response_next.stiffness[: body.n_dofs, : body.n_dofs]).tocsc()
+                    correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
+                else:
+                    correction[free] = np.asarray(solve_free(-residual[free]), dtype=float)
             u_guess[free] += correction[free]
             if fixed.size:
                 u_guess[fixed] = 0.0
-            if float(np.linalg.norm(correction[free])) <= 1.0e-9 * max(1.0, float(np.linalg.norm(u_guess[free]))):
+            if float(np.linalg.norm(correction[free])) <= float(cfg.contact_tolerance) * max(1.0, float(np.linalg.norm(u_guess[free]))):
                 break
         u = u_guess
         a = c0 * (u - u_pred)
@@ -404,6 +506,159 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
             v[fixed] = 0.0
             a[fixed] = 0.0
     return history, timing, time.perf_counter() - start
+
+
+def _abaqus_driver_history_export_script() -> str:
+    return r'''
+from __future__ import print_function
+
+import csv
+import sys
+
+from odbAccess import openOdb
+
+
+odb_path = sys.argv[1]
+out_path = sys.argv[2]
+odb = openOdb(path=odb_path, readOnly=True)
+try:
+    step = odb.steps[list(odb.steps.keys())[0]]
+    selected = None
+    for region_name, region in step.historyRegions.items():
+        keys = set(region.historyOutputs.keys())
+        if "RF3" in keys or "CF3" in keys:
+            selected = region
+            break
+    rows = {}
+    if selected is not None:
+        for key in ("U3", "RF3", "CF3"):
+            if key not in selected.historyOutputs:
+                continue
+            output = selected.historyOutputs[key]
+            for time_value, value in output.data:
+                rows.setdefault(float(time_value), {})[key.lower()] = float(value)
+    with open(out_path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["time", "u3", "rf3", "cf3", "normal_force"])
+        writer.writeheader()
+        for time_value in sorted(rows):
+            row = rows[time_value]
+            rf3 = row.get("rf3", "")
+            cf3 = row.get("cf3", "")
+            source = rf3 if rf3 != "" else cf3
+            writer.writerow(
+                {
+                    "time": time_value,
+                    "u3": row.get("u3", ""),
+                    "rf3": rf3,
+                    "cf3": cf3,
+                    "normal_force": "" if source == "" else abs(float(source)),
+                }
+            )
+finally:
+    odb.close()
+'''
+
+
+def _abaqus_frame_metrics_export_script() -> str:
+    return r'''
+from __future__ import print_function
+
+import csv
+import math
+import sys
+
+from odbAccess import openOdb
+
+
+def tensor_norm(data):
+    values = [float(v) for v in data]
+    return math.sqrt(sum(v * v for v in values))
+
+
+def percentile(values, pct):
+    if not values:
+        return ""
+    ordered = sorted(values)
+    idx = int(round((len(ordered) - 1) * pct / 100.0))
+    return ordered[idx]
+
+
+odb_path = sys.argv[1]
+out_path = sys.argv[2]
+odb = openOdb(path=odb_path, readOnly=True)
+try:
+    step = odb.steps[list(odb.steps.keys())[0]]
+    with open(out_path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["time", "p95_small_strain_norm", "max_small_strain_norm"])
+        writer.writeheader()
+        for frame in step.frames:
+            strain_values = []
+            if "E" in frame.fieldOutputs:
+                field = frame.fieldOutputs["E"]
+            elif "LE" in frame.fieldOutputs:
+                field = frame.fieldOutputs["LE"]
+            else:
+                field = None
+            if field is not None:
+                for value in field.values:
+                    instance = getattr(value, "instance", None)
+                    if instance is not None and "LOWER" not in instance.name.upper():
+                        continue
+                    strain_values.append(tensor_norm(value.data))
+            writer.writerow(
+                {
+                    "time": float(frame.frameValue),
+                    "p95_small_strain_norm": percentile(strain_values, 95.0),
+                    "max_small_strain_norm": max(strain_values) if strain_values else "",
+                }
+            )
+finally:
+    odb.close()
+'''
+
+
+def _read_abaqus_driver_history(path: Path | None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    if path is None or not path.exists() or path.stat().st_size == 0:
+        return {}
+    with path.open(newline="", encoding="ascii") as handle:
+        rows = list(csv.DictReader(handle))
+    result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for key in ("u3", "rf3", "cf3", "normal_force"):
+        t: list[float] = []
+        y: list[float] = []
+        for row in rows:
+            value = row.get(key, "")
+            if value == "":
+                continue
+            t.append(float(row["time"]))
+            y.append(float(value))
+        if t:
+            result[key] = (np.asarray(t, dtype=float), np.asarray(y, dtype=float))
+    return result
+
+
+def _read_abaqus_frame_metrics(path: Path | None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    if path is None or not path.exists() or path.stat().st_size == 0:
+        return {}
+    with path.open(newline="", encoding="ascii") as handle:
+        rows = list(csv.DictReader(handle))
+    result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    mapping = {
+        "p95_small_strain_norm": "p95_strain_norm",
+        "max_small_strain_norm": "max_strain_norm",
+    }
+    for csv_key, public_key in mapping.items():
+        t: list[float] = []
+        y: list[float] = []
+        for row in rows:
+            value = row.get(csv_key, "")
+            if value == "":
+                continue
+            t.append(float(row["time"]))
+            y.append(float(value))
+        if t:
+            result[public_key] = (np.asarray(t, dtype=float), np.asarray(y, dtype=float))
+    return result
 
 
 def _read_vtk_vectors(path: Path, name: str, count: int) -> np.ndarray:
@@ -425,9 +680,17 @@ def _read_vtk_scalar(path: Path, name: str, cell_count: int) -> np.ndarray:
     raise ValueError(f"VTK file has no scalar field {name}: {path}")
 
 
-def load_abaqus_history(manifest: Path, cfg: Fig9Config) -> list[Row]:
+def load_abaqus_history(
+    manifest: Path,
+    cfg: Fig9Config,
+    *,
+    driver_history: Path | None = None,
+    frame_metrics: Path | None = None,
+) -> list[Row]:
     lower, _driver_ref, _driver_faces = make_geometry(cfg)
     top_nodes = np.flatnonzero(np.isclose(lower.X[:, 2], lower.X[:, 2].max()))
+    driver_series = _read_abaqus_driver_history(driver_history)
+    frame_series = _read_abaqus_frame_metrics(frame_metrics)
     rows: list[Row] = []
     with manifest.open(newline="", encoding="ascii") as handle:
         manifest_rows = list(csv.DictReader(handle))
@@ -436,18 +699,25 @@ def load_abaqus_history(manifest: Path, cfg: Fig9Config) -> list[Row]:
         U = _read_vtk_vectors(vtk, "U", lower.X.shape[0])
         vm = _read_vtk_scalar(vtk, "von_mises", lower.elements.shape[0])
         le = _read_vtk_scalar(vtk, "logarithmic_strain_norm", lower.elements.shape[0])
-        rows.append(
-            {
-                "source": "abaqus_standard_implicit",
-                "time": float(row["time"]),
-                "top_mean_z_displacement": float(np.mean(U[top_nodes, 2])),
-                "max_displacement_norm": float(np.max(np.linalg.norm(U, axis=1))),
-                "max_von_mises": float(np.max(vm)),
-                "p95_von_mises": float(np.percentile(vm, 95.0)),
-                "max_strain_norm": float(np.max(le)),
-                "p95_strain_norm": float(np.percentile(le, 95.0)),
-            }
-        )
+        time_value = float(row["time"])
+        item: Row = {
+            "source": "abaqus_standard_implicit",
+            "time": time_value,
+            "top_mean_z_displacement": float(np.mean(U[top_nodes, 2])),
+            "max_displacement_norm": float(np.max(np.linalg.norm(U, axis=1))),
+            "max_von_mises": float(np.max(vm)),
+            "p95_von_mises": float(np.percentile(vm, 95.0)),
+            "max_strain_norm": float(np.max(le)),
+            "p95_strain_norm": float(np.percentile(le, 95.0)),
+        }
+        for key, (times, values) in driver_series.items():
+            item[f"driver_{key}"] = float(np.interp(time_value, times, values))
+        if "normal_force" in driver_series:
+            times, values = driver_series["normal_force"]
+            item["normal_force"] = float(np.interp(time_value, times, values))
+        for key, (times, values) in frame_series.items():
+            item[key] = float(np.interp(time_value, times, values))
+        rows.append(item)
     return rows
 
 
@@ -484,20 +754,25 @@ def _plot_curves(out_dir: Path, abaqus_rows: list[Row], sfc_rows: list[Row], met
     keys = [
         ("top_mean_z_displacement", "top mean z displacement"),
         ("max_displacement_norm", "max displacement norm"),
+        ("normal_force", "driver/contact normal force"),
         ("p95_von_mises", "95th percentile von Mises"),
         ("p95_strain_norm", "95th percentile strain norm"),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
-    for axis, (key, title) in zip(axes.ravel(), keys, strict=True):
+    fig, axes = plt.subplots(3, 2, figsize=(7.2, 7.0), constrained_layout=True)
+    flat_axes = axes.ravel()
+    for axis, (key, title) in zip(flat_axes, keys, strict=False):
         t_abq, y_abq = _series(abaqus_rows, key)
         t_sfc, y_sfc = _series(sfc_rows, key)
-        err = float(metric_by_name[key]["l2_relative_error"])
+        raw_err = metric_by_name.get(key, {}).get("l2_relative_error", "")
+        err_label = "missing" if raw_err == "" else f"{float(raw_err):.2%}"
         axis.plot(t_abq, y_abq, "-", lw=1.3, label="Abaqus/Standard")
         axis.plot(t_sfc, y_sfc, "--", lw=1.3, label="SFC Lagrangian SDF")
-        axis.set_title(f"{title} (L2 err. {err:.2%})", fontsize=9)
+        axis.set_title(f"{title} (L2 err. {err_label})", fontsize=9)
         axis.set_xlabel("time (s)")
         axis.grid(True, alpha=0.25, linewidth=0.5)
         axis.legend(loc="best", fontsize=7, frameon=False)
+    for axis in flat_axes[len(keys) :]:
+        axis.axis("off")
     path = out_dir / "fig9_linear_implicit_curves.png"
     fig.savefig(path, dpi=300)
     fig.savefig(out_dir / "fig9_linear_implicit_curves.pdf")
@@ -505,7 +780,7 @@ def _plot_curves(out_dir: Path, abaqus_rows: list[Row], sfc_rows: list[Row], met
     return path
 
 
-def run_abaqus(cfg: Fig9Config, out_dir: Path, *, abaqus_command: str | None, skip_abaqus: bool) -> tuple[Path, Row]:
+def run_abaqus(cfg: Fig9Config, out_dir: Path, *, abaqus_command: str | None, skip_abaqus: bool) -> tuple[Path, Path, Path, Row]:
     run_dir = out_dir / "abaqus_run"
     vtk_dir = out_dir / "abaqus_vtk"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -537,9 +812,29 @@ def run_abaqus(cfg: Fig9Config, out_dir: Path, *, abaqus_command: str | None, sk
             "frame",
         ]
         export_wall = _run_command(command_parts, cwd=run_dir, log_path=out_dir / "abaqus_odb_to_vtk_stdout.log")
+        history_csv = out_dir / "abaqus_driver_reaction_history.csv"
+        history_script = run_dir / "export_driver_reaction_history.py"
+        history_script.write_text(_abaqus_driver_history_export_script(), encoding="ascii")
+        history_export_wall = _run_command(
+            [command, "python", str(history_script.resolve()), str(odb.resolve()), str(history_csv.resolve())],
+            cwd=run_dir,
+            log_path=out_dir / "abaqus_driver_history_stdout.log",
+        )
+        frame_metrics_csv = out_dir / "abaqus_frame_metrics.csv"
+        frame_metrics_script = run_dir / "export_frame_metrics.py"
+        frame_metrics_script.write_text(_abaqus_frame_metrics_export_script(), encoding="ascii")
+        frame_metrics_wall = _run_command(
+            [command, "python", str(frame_metrics_script.resolve()), str(odb.resolve()), str(frame_metrics_csv.resolve())],
+            cwd=run_dir,
+            log_path=out_dir / "abaqus_frame_metrics_stdout.log",
+        )
     else:
         wall = 0.0
         export_wall = 0.0
+        history_export_wall = 0.0
+        history_csv = out_dir / "abaqus_driver_reaction_history.csv"
+        frame_metrics_wall = 0.0
+        frame_metrics_csv = out_dir / "abaqus_frame_metrics.csv"
     manifest = vtk_dir / "frame_manifest.csv"
     if skip_abaqus and not manifest.exists():
         raise FileNotFoundError(f"--skip-abaqus requires an existing manifest: {manifest}")
@@ -547,22 +842,29 @@ def run_abaqus(cfg: Fig9Config, out_dir: Path, *, abaqus_command: str | None, sk
         odb = run_dir / f"{JOB_NAME}.odb"
         export_odb_to_vtk(odb, vtk_dir, stem="frame")
     reported = _abaqus_reported_wallclock_seconds(run_dir / f"{JOB_NAME}.sta")
-    return manifest, {
+    return manifest, history_csv, frame_metrics_csv, {
         "solver": "abaqus_standard_implicit",
         "analysis_wall_seconds": "" if skip_abaqus else float(wall),
         "reported_wall_seconds": "" if reported is None else float(reported),
         "export_wall_seconds": "" if skip_abaqus else float(export_wall),
+        "history_export_wall_seconds": "" if skip_abaqus else float(history_export_wall),
+        "frame_metrics_wall_seconds": "" if skip_abaqus else float(frame_metrics_wall),
     }
 
 
 def run_workflow(out_dir: Path, *, cfg: Fig9Config, abaqus_command: str | None, skip_abaqus: bool = False) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest, abaqus_timing = run_abaqus(cfg, out_dir, abaqus_command=abaqus_command, skip_abaqus=skip_abaqus)
-    abaqus_rows = load_abaqus_history(manifest, cfg)
+    manifest, abaqus_driver_history, abaqus_frame_metrics, abaqus_timing = run_abaqus(
+        cfg,
+        out_dir,
+        abaqus_command=abaqus_command,
+        skip_abaqus=skip_abaqus,
+    )
+    abaqus_rows = load_abaqus_history(manifest, cfg, driver_history=abaqus_driver_history, frame_metrics=abaqus_frame_metrics)
     sfc_rows, sfc_timing_rows, sfc_wall = run_sfc(cfg)
     metrics = [
         _metric(sfc_rows, abaqus_rows, key)
-        for key in ("top_mean_z_displacement", "max_displacement_norm", "p95_von_mises", "p95_strain_norm")
+        for key in ("top_mean_z_displacement", "max_displacement_norm", "normal_force", "p95_von_mises", "p95_strain_norm")
     ]
     timing = [
         abaqus_timing,
@@ -609,6 +911,8 @@ def run_workflow(out_dir: Path, *, cfg: Fig9Config, abaqus_command: str | None, 
         "field_timing": out_dir / "fig9_linear_implicit_sfc_field_timing.csv",
         "plot": plot,
         "abaqus_manifest": manifest,
+        "abaqus_driver_history": abaqus_driver_history,
+        "abaqus_frame_metrics": abaqus_frame_metrics,
     }
 
 
