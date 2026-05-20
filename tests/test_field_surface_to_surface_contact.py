@@ -7,6 +7,7 @@ from scipy.sparse import eye
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF
 from sfc.contact import (
     node_to_surface_field_penalty_response,
+    quadrilateral_master_surface_penalty_response,
     quadrilateral_surface_quadrature_cache,
     surface_to_surface_field_penalty_response,
     surface_to_surface_field_penalty_response_vectorized,
@@ -62,7 +63,7 @@ def test_quadrilateral_surface_quadrature_integrates_face_area_and_shape_weights
     )
     quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
 
-    for order, expected_count in [(1, 1), (2, 4), (3, 9)]:
+    for order, expected_count in [(1, 1), (2, 4), (3, 9), (5, 25)]:
         cache = quadrilateral_surface_quadrature_cache(quads, x, order=order)
         assert cache.node_ids.shape == (expected_count, 4)
         assert cache.weights.shape == (expected_count, 4)
@@ -111,6 +112,49 @@ def test_vectorized_quadrilateral_surface_response_integrates_constant_plane_gap
     assert response.min_gap == pytest.approx(-0.1)
     assert float(np.sum(response.quadrature_weights)) == pytest.approx(1.0)
     assert float(np.sum(response.force[:12].reshape((-1, 3))[:, 2])) == pytest.approx(1.0)
+
+
+def test_quadrilateral_master_surface_response_uses_q4_master_weights() -> None:
+    slave_x = np.asarray(
+        [
+            [0.0, 0.0, 0.1],
+            [1.0, 0.0, 0.1],
+            [1.0, 1.0, 0.1],
+            [0.0, 1.0, 0.1],
+        ],
+        dtype=float,
+    )
+    slave_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    cache = quadrilateral_surface_quadrature_cache(slave_quads, slave_x, order=2)
+    master_x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    master_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+
+    response = quadrilateral_master_surface_penalty_response(
+        slave_x,
+        master_x,
+        master_quads,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        master_normal_sign=-1.0,
+        assemble_stiffness=True,
+    )
+
+    assert response.active_count == 4
+    assert response.min_gap == pytest.approx(-0.1)
+    assert float(np.sum(response.quadrature_weights)) == pytest.approx(1.0)
+    assert float(np.sum(response.force[:12].reshape((-1, 3))[:, 2])) == pytest.approx(-1.0)
+    assert float(np.sum(response.force[12:].reshape((-1, 3))[:, 2])) == pytest.approx(1.0)
+    assert response.stiffness.shape == (24, 24)
 
 
 def test_surface_to_surface_response_area_integrates_constant_plane_gap() -> None:

@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 from scipy.sparse.linalg import LinearOperator
 
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF, FieldQueryPayload
@@ -587,6 +587,100 @@ def surface_to_surface_field_penalty_response_vectorized(
     )
 
 
+def quadrilateral_master_surface_penalty_response(
+    slave_x_current: np.ndarray,
+    master_x_current: np.ndarray,
+    master_quads: np.ndarray,
+    *,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    quadrature_cache: SurfaceQuadratureCache,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+    master_normal_sign: float = 1.0,
+    assemble_stiffness: bool = False,
+) -> FieldSurfaceContactResponse:
+    """Assemble surface contact against four-node master faces.
+
+    This is the quadrilateral counterpart of the field-contact master payload:
+    slave quadrature points are integrated on their original Q4 faces, and the
+    master closest-feature sensitivity is distributed with the closest Q4 face
+    shape functions instead of a triangle split.  The gap and Jacobian row use
+    the same closest quadrilateral patch, so this path is a generic
+    surface-to-surface contact response for C3D8/HEX8 faces.
+    """
+
+    k = float(pressure_stiffness)
+    if k <= 0.0:
+        raise ValueError("pressure_stiffness must be positive")
+    slave_x = np.asarray(slave_x_current, dtype=float)
+    master_x = np.asarray(master_x_current, dtype=float)
+    quads = np.asarray(master_quads, dtype=np.int64)
+    if slave_x.ndim != 2 or slave_x.shape[1] != 3:
+        raise ValueError("slave_x_current must have shape (n_nodes, 3)")
+    if master_x.ndim != 2 or master_x.shape[1] != 3:
+        raise ValueError("master_x_current must have shape (n_nodes, 3)")
+    if quads.ndim != 2 or quads.shape[1] != 4:
+        raise ValueError("master_quads must have shape (n_faces, 4)")
+    if quads.size and (int(quads.min()) < 0 or int(quads.max()) >= master_x.shape[0]):
+        raise ValueError("master_quads reference nodes outside master_x_current")
+
+    points = quadrature_cache.points(slave_x)
+    gaps, normals, master_node_ids, master_weights = _closest_points_on_master_quads(
+        points,
+        master_x,
+        quads,
+        normal_sign=float(master_normal_sign),
+    )
+    penetration = np.maximum(-gaps, 0.0)
+    lambdas = k * quadrature_cache.area_weights * penetration
+    active = lambdas > 0.0
+
+    n_dofs = int(n_total_dofs)
+    force = np.zeros(n_dofs, dtype=float)
+    if bool(np.any(active)):
+        _accumulate_slave_force(
+            force,
+            quadrature_cache.node_ids[active],
+            quadrature_cache.weights[active],
+            normals[active],
+            lambdas[active],
+            int(slave_dof_offset),
+        )
+        _accumulate_slave_force(
+            force,
+            master_node_ids[active],
+            master_weights[active],
+            normals[active],
+            -lambdas[active],
+            int(master_dof_offset),
+        )
+
+    stiffness = (
+        _assemble_quad_master_contact_stiffness(
+            slave_node_ids=quadrature_cache.node_ids[active],
+            slave_weights=quadrature_cache.weights[active],
+            master_node_ids=master_node_ids[active],
+            master_weights=master_weights[active],
+            normals=normals[active],
+            scale=k * quadrature_cache.area_weights[active],
+            n_total_dofs=n_dofs,
+            slave_dof_offset=int(slave_dof_offset),
+            master_dof_offset=int(master_dof_offset),
+        )
+        if bool(assemble_stiffness)
+        else csr_matrix((n_dofs, n_dofs), dtype=float)
+    )
+
+    return FieldSurfaceContactResponse(
+        force=force,
+        stiffness=stiffness,
+        constraints=(),
+        quadrature_weights=quadrature_cache.area_weights.copy(),
+        gaps=gaps.copy(),
+    )
+
+
 def compiled_field_contact_available() -> bool:
     """Return whether the optional compiled field-contact backend is available."""
 
@@ -935,6 +1029,44 @@ def _assemble_batch_contact_stiffness(
     return (J.T @ J).tocsr()
 
 
+def _assemble_quad_master_contact_stiffness(
+    *,
+    slave_node_ids: np.ndarray,
+    slave_weights: np.ndarray,
+    master_node_ids: np.ndarray,
+    master_weights: np.ndarray,
+    normals: np.ndarray,
+    scale: np.ndarray,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+) -> csr_matrix:
+    sample_count = int(np.asarray(scale, dtype=float).size)
+    if sample_count == 0:
+        return csr_matrix((int(n_total_dofs), int(n_total_dofs)), dtype=float)
+    active_rows = np.arange(sample_count, dtype=np.int64)
+
+    slave_nodes = np.asarray(slave_node_ids, dtype=np.int64)
+    slave_shape = np.asarray(slave_weights, dtype=float)
+    master_nodes = np.asarray(master_node_ids, dtype=np.int64)
+    master_shape = np.asarray(master_weights, dtype=float)
+    n = np.asarray(normals, dtype=float)
+
+    slave_cols = int(slave_dof_offset) + slave_nodes[:, :, None] * 3 + np.arange(3, dtype=np.int64)
+    slave_vals = slave_shape[:, :, None] * n[:, None, :]
+    slave_rows = np.repeat(active_rows, slave_cols.shape[1] * slave_cols.shape[2])
+
+    master_cols = int(master_dof_offset) + master_nodes[:, :, None] * 3 + np.arange(3, dtype=np.int64)
+    master_vals = -master_shape[:, :, None] * n[:, None, :]
+    master_rows = np.repeat(active_rows, master_cols.shape[1] * master_cols.shape[2])
+
+    rows = np.concatenate((slave_rows, master_rows))
+    cols = np.concatenate((slave_cols.reshape(-1), master_cols.reshape(-1)))
+    vals = np.concatenate((slave_vals.reshape(-1), master_vals.reshape(-1)))
+    J = coo_matrix((vals, (rows, cols)), shape=(sample_count, int(n_total_dofs))).tocsr()
+    return (J.T @ diags(np.asarray(scale, dtype=float), format="csr") @ J).tocsr()
+
+
 def _make_batch_contact_matrix_free_stiffness(
     *,
     cache: SurfaceQuadratureCache,
@@ -976,15 +1108,11 @@ def _make_batch_contact_matrix_free_stiffness(
 
 
 def _gauss_legendre_1d(order: int) -> tuple[np.ndarray, np.ndarray]:
-    if int(order) == 1:
-        return np.asarray([0.0], dtype=float), np.asarray([2.0], dtype=float)
-    if int(order) == 2:
-        a = 1.0 / np.sqrt(3.0)
-        return np.asarray([-a, a], dtype=float), np.asarray([1.0, 1.0], dtype=float)
-    if int(order) == 3:
-        a = np.sqrt(3.0 / 5.0)
-        return np.asarray([-a, 0.0, a], dtype=float), np.asarray([5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0], dtype=float)
-    raise ValueError("quadrilateral quadrature order must be 1, 2, or 3")
+    normalized = int(order)
+    if normalized <= 0:
+        raise ValueError("quadrilateral quadrature order must be positive")
+    points, weights = np.polynomial.legendre.leggauss(normalized)
+    return points.astype(float, copy=False), weights.astype(float, copy=False)
 
 
 def _q4_shape_functions(xi: float, eta: float) -> np.ndarray:
@@ -1019,6 +1147,103 @@ def _q4_shape_derivatives(xi: float, eta: float) -> tuple[np.ndarray, np.ndarray
         dtype=float,
     )
     return dxi, deta
+
+
+def _closest_points_on_master_quads(
+    points: np.ndarray,
+    master_x_current: np.ndarray,
+    master_quads: np.ndarray,
+    *,
+    normal_sign: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    P = np.asarray(points, dtype=float)
+    X = np.asarray(master_x_current, dtype=float)
+    quads = np.asarray(master_quads, dtype=np.int64)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError("points must have shape (n, 3)")
+    if quads.size == 0:
+        raise RuntimeError("master_quads must contain at least one face")
+    quad_coords = X[quads]
+    sign = -1.0 if float(normal_sign) < 0.0 else 1.0
+    natural = np.zeros((P.shape[0], quads.shape[0], 2), dtype=float)
+    for _ in range(10):
+        shape, dxi, deta = _q4_shape_function_batch(natural[..., 0], natural[..., 1])
+        closest = np.einsum("pmk,mkd->pmd", shape, quad_coords)
+        tangent_xi = np.einsum("pmk,mkd->pmd", dxi, quad_coords)
+        tangent_eta = np.einsum("pmk,mkd->pmd", deta, quad_coords)
+        residual = closest - P[:, None, :]
+        grad0 = np.einsum("pmd,pmd->pm", residual, tangent_xi)
+        grad1 = np.einsum("pmd,pmd->pm", residual, tangent_eta)
+        h00 = np.einsum("pmd,pmd->pm", tangent_xi, tangent_xi)
+        h01 = np.einsum("pmd,pmd->pm", tangent_xi, tangent_eta)
+        h11 = np.einsum("pmd,pmd->pm", tangent_eta, tangent_eta)
+        det = h00 * h11 - h01 * h01
+        valid = np.abs(det) > 1.0e-18
+        step0 = np.zeros_like(grad0)
+        step1 = np.zeros_like(grad1)
+        rhs0 = -grad0
+        rhs1 = -grad1
+        step0[valid] = (rhs0[valid] * h11[valid] - h01[valid] * rhs1[valid]) / det[valid]
+        step1[valid] = (h00[valid] * rhs1[valid] - h01[valid] * rhs0[valid]) / det[valid]
+        next_natural = np.empty_like(natural)
+        next_natural[..., 0] = np.clip(natural[..., 0] + step0, -1.0, 1.0)
+        next_natural[..., 1] = np.clip(natural[..., 1] + step1, -1.0, 1.0)
+        if float(np.max(np.linalg.norm(next_natural - natural, axis=2))) <= 1.0e-12:
+            natural = next_natural
+            break
+        natural = next_natural
+
+    shape, dxi, deta = _q4_shape_function_batch(natural[..., 0], natural[..., 1])
+    closest = np.einsum("pmk,mkd->pmd", shape, quad_coords)
+    tangent_xi = np.einsum("pmk,mkd->pmd", dxi, quad_coords)
+    tangent_eta = np.einsum("pmk,mkd->pmd", deta, quad_coords)
+    normal = sign * np.cross(tangent_xi, tangent_eta)
+    normal_norm = np.linalg.norm(normal, axis=2)
+    if bool(np.any(normal_norm <= 0.0)):
+        raise ValueError("master quadrilateral has zero surface normal")
+    normal = normal / normal_norm[:, :, None]
+    delta = closest - P[:, None, :]
+    dist2 = np.einsum("pmd,pmd->pm", delta, delta)
+    best = np.argmin(dist2, axis=1)
+    rows = np.arange(P.shape[0], dtype=np.int64)
+    best_closest = closest[rows, best]
+    best_normals = normal[rows, best]
+    best_shape = shape[rows, best]
+    gaps = np.einsum("pd,pd->p", P - best_closest, best_normals)
+    return gaps.astype(float, copy=False), best_normals, quads[best].copy(), best_shape.astype(float, copy=False)
+
+
+def _q4_shape_function_batch(xi: np.ndarray, eta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    r = np.asarray(xi, dtype=float)
+    s = np.asarray(eta, dtype=float)
+    shape = 0.25 * np.stack(
+        (
+            (1.0 - r) * (1.0 - s),
+            (1.0 + r) * (1.0 - s),
+            (1.0 + r) * (1.0 + s),
+            (1.0 - r) * (1.0 + s),
+        ),
+        axis=-1,
+    )
+    dxi = 0.25 * np.stack(
+        (
+            -(1.0 - s),
+            1.0 - s,
+            1.0 + s,
+            -(1.0 + s),
+        ),
+        axis=-1,
+    )
+    deta = 0.25 * np.stack(
+        (
+            -(1.0 - r),
+            -(1.0 + r),
+            1.0 + r,
+            1.0 - r,
+        ),
+        axis=-1,
+    )
+    return shape, dxi, deta
 
 
 def _triangle_quadrature_rule(order: int) -> tuple[np.ndarray, np.ndarray]:

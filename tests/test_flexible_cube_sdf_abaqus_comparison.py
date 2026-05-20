@@ -14,6 +14,7 @@ from validation.run_flexible_cube_sdf_abaqus_comparison import (  # noqa: E402
     FlexibleCubeConfig,
     _contact_lower_top_element_ids,
     _footprint_mask,
+    _amplitude_sample_count,
     _nodal_smoothed_pressure,
     _smooth_nodal_scalar,
     _top_surface_node_adjacency,
@@ -43,11 +44,18 @@ def test_flexible_cube_deck_uses_two_c3d8_flexible_bodies() -> None:
     assert "CSTRESS, CDISP" in text
     assert "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO" in text
     assert "*Dynamic, ALPHA=-5.000000000000e-02, HAFTOL=1.0e-4" in text
+    assert "1.000000000000e-03, 4.000000000000e-03, 1.000000000000e-03, 1.000000000000e-03" in text
     assert "*Amplitude, name=CLOSURE_AMP, time=TOTAL TIME, smooth=0." in text
     assert "UPPER_TOP_ASM, 1, 2, 0." in text
     assert "*Cload, amplitude=TANGENTIAL_AMP" not in text
     assert "S, E, LE" in text
     assert "U, V, RF" in text
+
+
+def test_abaqus_amplitude_uses_at_least_one_sample_per_step() -> None:
+    assert _amplitude_sample_count(0.2, 0.001) == 201
+    assert _amplitude_sample_count(0.8, 0.001) == 801
+    assert _amplitude_sample_count(0.01, 0.001) == 33
 
 
 def test_flexible_cube_deck_can_apply_tangential_force() -> None:

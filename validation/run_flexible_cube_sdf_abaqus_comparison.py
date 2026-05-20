@@ -52,7 +52,7 @@ from sfc.contact.field_contact import (  # noqa: E402
     _gauss_legendre_1d,
     _q4_shape_derivatives,
     _q4_shape_functions,
-    quadrilateral_surface_quadrature_cache,
+    quadrilateral_master_surface_penalty_response,
     surface_to_surface_field_penalty_response_vectorized,
 )
 from sfc.fem import DeformableBody  # noqa: E402
@@ -122,6 +122,7 @@ class FlexibleCubeConfig:
     force_tolerance: float = 1.0e-8
     pressure_smoothing_passes: int = 1
     output_stride: int = 1
+    master_surface_mode: str = "quadrilateral_oracle"
 
 
 def make_geometry(cfg: FlexibleCubeConfig) -> tuple[BoxMesh, BoxMesh]:
@@ -184,6 +185,15 @@ def _top_quads_for_element_ids(mesh: BoxMesh, element_ids_1based: np.ndarray) ->
     for element_id in np.asarray(element_ids_1based, dtype=np.int64):
         element = mesh.elements[int(element_id) - 1]
         quad = element[[4, 5, 6, 7]]
+        quads.append((int(quad[0]), int(quad[1]), int(quad[2]), int(quad[3])))
+    return np.asarray(quads, dtype=np.int64)
+
+
+def _bottom_quads_for_element_ids(mesh: BoxMesh, element_ids_1based: np.ndarray) -> np.ndarray:
+    quads: list[tuple[int, int, int, int]] = []
+    for element_id in np.asarray(element_ids_1based, dtype=np.int64):
+        element = mesh.elements[int(element_id) - 1]
+        quad = element[[0, 1, 2, 3]]
         quads.append((int(quad[0]), int(quad[1]), int(quad[2]), int(quad[3])))
     return np.asarray(quads, dtype=np.int64)
 
@@ -386,6 +396,14 @@ def _append_smooth_ramp_amplitude(
             row = []
     if row:
         lines.append(", ".join(row))
+
+
+def _amplitude_sample_count(ramp_time: float, dt: float) -> int:
+    """Use at least one amplitude sample per solver step on smooth ramps."""
+
+    if float(ramp_time) <= 0.0:
+        return 2
+    return max(33, int(math.ceil(float(ramp_time) / max(float(dt), 1.0e-15))) + 1)
 
 
 def _validate_tangential_controls(cfg: FlexibleCubeConfig) -> None:
@@ -778,6 +796,7 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
         start=0.0,
         ramp_time=float(cfg.closure_time),
         total_time=float(cfg.total_time),
+        samples=_amplitude_sample_count(float(cfg.closure_time), float(cfg.dt)),
     )
     if has_tangential_load:
         force_per_node = float(cfg.tangential_force) / float(len(upper_top_nodes))
@@ -787,6 +806,7 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             start=tangential_start,
             ramp_time=tangential_end - tangential_start,
             total_time=float(cfg.total_time),
+            samples=_amplitude_sample_count(tangential_end - tangential_start, float(cfg.dt)),
         )
         load_lines.extend(
             [
@@ -801,6 +821,7 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             start=tangential_motion_start,
             ramp_time=tangential_motion_end - tangential_motion_start,
             total_time=float(cfg.total_time),
+            samples=_amplitude_sample_count(tangential_motion_end - tangential_motion_start, float(cfg.dt)),
         )
         tangential_motion_lines.extend(
             [
@@ -836,7 +857,7 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             *tangential_amplitude_lines,
             "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO, inc=10000",
             f"*Dynamic, ALPHA={cfg.hht_alpha:.12e}, HAFTOL=1.0e-4",
-            f"{cfg.dt:.12e}, {cfg.total_time:.12e}, {cfg.dt * 1.0e-3:.12e}, {cfg.dt:.12e}",
+            f"{cfg.dt:.12e}, {cfg.total_time:.12e}, {cfg.dt:.12e}, {cfg.dt:.12e}",
             "*Boundary",
             *boundary_lines,
             "*Boundary, amplitude=CLOSURE_AMP",
@@ -891,9 +912,13 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
     lower_contact_ids = _contact_lower_top_element_ids(lower, upper, cfg)
     lower_contact_quads = _top_quads_for_element_ids(lower, lower_contact_ids)
     upper_bottom_faces = _upper_bottom_triangles(upper)
-    contact_order = max(1, min(3, cfg.quadrature_order))
+    upper_bottom_quads = _bottom_quads_for_element_ids(upper, _bottom_element_ids(upper))
+    contact_order = max(1, int(cfg.quadrature_order))
     contact_quadrature = _QuadSurfaceQuadratureWorkspace.build(lower_contact_quads, order=contact_order)
     sdf_workspace = _workspace_from_contact_envelope(lower, upper, lower_contact_quads, cfg)
+    master_surface_mode = str(cfg.master_surface_mode).lower()
+    if master_surface_mode not in {"quadrilateral_oracle", "triangulated_field"}:
+        raise ValueError("master_surface_mode must be 'quadrilateral_oracle' or 'triangulated_field'")
     beta, gamma = _hht_parameters(float(cfg.hht_alpha))
     alpha = float(cfg.hht_alpha)
     dt = float(cfg.dt)
@@ -901,13 +926,10 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
     u = np.zeros(total_dofs, dtype=float)
     v = np.zeros(total_dofs, dtype=float)
     a = np.zeros(total_dofs, dtype=float)
-    dofs0, u0, _v0, _a0 = _dirichlet_state(0.0, cfg, lower, upper, lower_dofs)
+    dofs0, u0, v0, a0 = _dirichlet_state(0.0, cfg, lower, upper, lower_dofs)
     u[dofs0] = u0
-    # Displacement boundary conditions are enforced on u. Boundary velocities
-    # and accelerations are then induced by the same Newmark/HHT recurrence as
-    # the free DOFs, matching Abaqus' displacement-control semantics.
-    v[dofs0] = 0.0
-    a[dofs0] = 0.0
+    v[dofs0] = v0
+    a[dofs0] = a0
     free = _free_dofs(total_dofs, dofs0)
     upper_top_nodes = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.max(upper.X[:, 2]))))
     upper_top_z_dofs = lower_dofs + 3 * upper_top_nodes + 2
@@ -942,11 +964,26 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
         )
         q_points = active_cache.points(lower_x)
         field_t0 = time.perf_counter()
+        master_sdf = None
         if q_points.size == 0:
-            master_sdf = None
             response = _empty_contact_response(total_dofs)
             field_elapsed = 0.0
             query_elapsed = 0.0
+        elif master_surface_mode == "quadrilateral_oracle":
+            field_elapsed = 0.0
+            query_t0 = time.perf_counter()
+            response = quadrilateral_master_surface_penalty_response(
+                lower_x,
+                upper_x,
+                upper_bottom_quads,
+                pressure_stiffness=cfg.pressure_stiffness,
+                n_total_dofs=total_dofs,
+                quadrature_cache=active_cache,
+                slave_dof_offset=0,
+                master_dof_offset=lower_dofs,
+                master_normal_sign=-1.0,
+            )
+            query_elapsed = time.perf_counter() - query_t0
         else:
             master_sdf = sdf_workspace.build(upper_x, upper_bottom_faces, q_points)
             field_elapsed = time.perf_counter() - field_t0
@@ -963,94 +1000,96 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
                 master_dof_offset=lower_dofs,
             )
             query_elapsed = time.perf_counter() - query_t0
-        lower_fields = _element_fields(lower, u[:lower_dofs], E=cfg.lower_young_modulus, nu=cfg.poisson_ratio)
-        upper_fields = _element_fields(upper, u[lower_dofs:], E=cfg.upper_young_modulus, nu=cfg.poisson_ratio)
-        if vtk_dir is not None and (step % max(1, int(cfg.output_stride)) == 0 or step == steps):
-            frame_path = vtk_dir / f"sfc_frame_{len(vtk_frames):04d}.vtk"
-            _write_sfc_vtk_frame(
-                frame_path,
-                lower=lower,
-                upper=upper,
-                lower_u=lower_u,
-                upper_u=upper_u,
-                lower_fields=lower_fields,
-                upper_fields=upper_fields,
-            )
-            vtk_frames.append((len(vtk_frames), t, frame_path))
-        vm = np.concatenate((lower_fields["von_mises"], upper_fields["von_mises"]))
-        strain = np.concatenate((lower_fields["engineering_strain_norm"], upper_fields["engineering_strain_norm"]))
-        displacement_norms = np.concatenate((np.linalg.norm(lower_u, axis=1), np.linalg.norm(upper_u, axis=1)))
         external_force = _upper_top_x_load(t, cfg, upper, lower_dofs, total_dofs)
-        balance = M @ a + K @ u - response.force - external_force
-        q_penetration = np.maximum(-np.asarray(response.gaps), 0.0)
-        contact_integral_force = float(
-            np.sum(cfg.pressure_stiffness * active_cache.area_weights * q_penetration)
-        )
-        nodal_pressure, _nodal_pressure_area = _nodal_smoothed_pressure(
-            active_cache,
-            response.gaps,
-            pressure_stiffness=cfg.pressure_stiffness,
-            n_slave_nodes=lower.X.shape[0],
-            nodal_area_denominator=lower_top_nodal_area,
-        )
-        nodal_pressure = _smooth_nodal_scalar(
-            nodal_pressure,
-            lower_top_adjacency,
-            passes=cfg.pressure_smoothing_passes,
-        )
-        nodal_pressure_on_top = nodal_pressure[lower_top_nodes] if lower_top_nodes.size else nodal_pressure
-        positive_nodal_pressure = nodal_pressure_on_top[nodal_pressure_on_top > 0.0]
-        upper_reaction_force = float(abs(np.sum(balance[upper_top_z_dofs])))
-        history.append(
-            {
-                "source": "sfc_lagrangian_sdf_two_flexible",
-                "time": t,
-                "top_mean_z_displacement": float(np.mean(lower_u[lower_top_nodes, 2])),
-                "upper_top_mean_x_displacement": float(np.mean(upper_u[upper_top_nodes, 0])),
-                "upper_bottom_mean_x_displacement": float(np.mean(upper_u[upper_bottom_nodes, 0])),
-                "tangential_displacement_target": float(_tangential_displacement_state(t, cfg)[0]),
-                "upper_bottom_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2])),
-                "upper_top_mean_z": float(np.mean(upper_x[upper_top_nodes, 2])),
-                "surface_gap_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2]) - np.mean(lower_x[lower_top_nodes, 2])),
-                "max_displacement_norm": float(np.max(displacement_norms)),
-                "p95_displacement_norm": float(np.percentile(displacement_norms, 95.0)),
-                "max_von_mises": float(np.max(vm)),
-                "p95_von_mises": float(np.percentile(vm, 95.0)),
-                "max_strain_norm": float(np.max(strain)),
-                "p95_strain_norm": float(np.percentile(strain, 95.0)),
-                "min_gap": float(response.min_gap),
-                "max_penetration": float(response.max_penetration),
-                "active_samples": int(response.active_count),
-                "active_area": float(np.sum(active_cache.area_weights[q_penetration > 0.0])),
-                "active_pressure_nodes": int(np.count_nonzero(nodal_pressure_on_top > 0.0)),
-                "contact_integral_force": contact_integral_force,
-                "normal_force": contact_integral_force,
-                "upper_reaction_force": upper_reaction_force,
-                "tangential_force": float(_tangential_force_state(t, cfg)),
-                "min_contact_opening": float(response.min_gap),
-                "max_contact_pressure": float(np.max(nodal_pressure_on_top)) if nodal_pressure_on_top.size else 0.0,
-                "p95_contact_pressure": float(np.percentile(positive_nodal_pressure, 95.0))
-                if positive_nodal_pressure.size
-                else 0.0,
-                "max_sample_contact_pressure": float(cfg.pressure_stiffness * response.max_penetration),
-            }
-        )
-        timing.append(
-            {
-                "time": t,
-                "field_update_seconds": 0.0 if master_sdf is None else float(master_sdf.stats.update_seconds),
-                "field_query_seconds": float(query_elapsed),
-                "field_elapsed_seconds": float(field_elapsed),
-                "active_samples": int(response.active_count),
-                "quadrature_points": int(active_cache.area_weights.size),
-            }
-        )
+        record_step = step % max(1, int(cfg.output_stride)) == 0 or step == steps
+        if record_step:
+            lower_fields = _element_fields(lower, u[:lower_dofs], E=cfg.lower_young_modulus, nu=cfg.poisson_ratio)
+            upper_fields = _element_fields(upper, u[lower_dofs:], E=cfg.upper_young_modulus, nu=cfg.poisson_ratio)
+            if vtk_dir is not None:
+                frame_path = vtk_dir / f"sfc_frame_{len(vtk_frames):04d}.vtk"
+                _write_sfc_vtk_frame(
+                    frame_path,
+                    lower=lower,
+                    upper=upper,
+                    lower_u=lower_u,
+                    upper_u=upper_u,
+                    lower_fields=lower_fields,
+                    upper_fields=upper_fields,
+                )
+                vtk_frames.append((len(vtk_frames), t, frame_path))
+            vm = np.concatenate((lower_fields["von_mises"], upper_fields["von_mises"]))
+            strain = np.concatenate((lower_fields["engineering_strain_norm"], upper_fields["engineering_strain_norm"]))
+            displacement_norms = np.concatenate((np.linalg.norm(lower_u, axis=1), np.linalg.norm(upper_u, axis=1)))
+            balance = M @ a + K @ u - response.force - external_force
+            q_penetration = np.maximum(-np.asarray(response.gaps), 0.0)
+            contact_integral_force = float(
+                np.sum(cfg.pressure_stiffness * active_cache.area_weights * q_penetration)
+            )
+            nodal_pressure, _nodal_pressure_area = _nodal_smoothed_pressure(
+                active_cache,
+                response.gaps,
+                pressure_stiffness=cfg.pressure_stiffness,
+                n_slave_nodes=lower.X.shape[0],
+                nodal_area_denominator=lower_top_nodal_area,
+            )
+            nodal_pressure = _smooth_nodal_scalar(
+                nodal_pressure,
+                lower_top_adjacency,
+                passes=cfg.pressure_smoothing_passes,
+            )
+            nodal_pressure_on_top = nodal_pressure[lower_top_nodes] if lower_top_nodes.size else nodal_pressure
+            positive_nodal_pressure = nodal_pressure_on_top[nodal_pressure_on_top > 0.0]
+            upper_reaction_force = float(abs(np.sum(balance[upper_top_z_dofs])))
+            history.append(
+                {
+                    "source": "sfc_lagrangian_sdf_two_flexible",
+                    "time": t,
+                    "top_mean_z_displacement": float(np.mean(lower_u[lower_top_nodes, 2])),
+                    "upper_top_mean_x_displacement": float(np.mean(upper_u[upper_top_nodes, 0])),
+                    "upper_bottom_mean_x_displacement": float(np.mean(upper_u[upper_bottom_nodes, 0])),
+                    "tangential_displacement_target": float(_tangential_displacement_state(t, cfg)[0]),
+                    "upper_bottom_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2])),
+                    "upper_top_mean_z": float(np.mean(upper_x[upper_top_nodes, 2])),
+                    "surface_gap_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2]) - np.mean(lower_x[lower_top_nodes, 2])),
+                    "max_displacement_norm": float(np.max(displacement_norms)),
+                    "p95_displacement_norm": float(np.percentile(displacement_norms, 95.0)),
+                    "max_von_mises": float(np.max(vm)),
+                    "p95_von_mises": float(np.percentile(vm, 95.0)),
+                    "max_strain_norm": float(np.max(strain)),
+                    "p95_strain_norm": float(np.percentile(strain, 95.0)),
+                    "min_gap": float(response.min_gap),
+                    "max_penetration": float(response.max_penetration),
+                    "active_samples": int(response.active_count),
+                    "active_area": float(np.sum(active_cache.area_weights[q_penetration > 0.0])),
+                    "active_pressure_nodes": int(np.count_nonzero(nodal_pressure_on_top > 0.0)),
+                    "contact_integral_force": contact_integral_force,
+                    "normal_force": contact_integral_force,
+                    "upper_reaction_force": upper_reaction_force,
+                    "tangential_force": float(_tangential_force_state(t, cfg)),
+                    "min_contact_opening": float(response.min_gap),
+                    "max_contact_pressure": float(np.max(nodal_pressure_on_top)) if nodal_pressure_on_top.size else 0.0,
+                    "p95_contact_pressure": float(np.percentile(positive_nodal_pressure, 95.0))
+                    if positive_nodal_pressure.size
+                    else 0.0,
+                    "max_sample_contact_pressure": float(cfg.pressure_stiffness * response.max_penetration),
+                }
+            )
+            timing.append(
+                {
+                    "time": t,
+                    "field_update_seconds": 0.0 if master_sdf is None else float(master_sdf.stats.update_seconds),
+                    "field_query_seconds": float(query_elapsed),
+                    "field_elapsed_seconds": float(field_elapsed),
+                    "active_samples": int(response.active_count),
+                    "quadrature_points": int(active_cache.area_weights.size),
+                }
+            )
         if step == steps:
             break
         previous_rhs_balance = response.force + external_force - K @ u
         next_t = float((step + 1) * dt)
         current_external_force = _upper_top_x_load(next_t, cfg, upper, lower_dofs, total_dofs)
-        next_dofs, next_u_bc, _next_v_bc, _next_a_bc = _dirichlet_state(next_t, cfg, lower, upper, lower_dofs)
+        next_dofs, next_u_bc, next_v_bc, next_a_bc = _dirichlet_state(next_t, cfg, lower, upper, lower_dofs)
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
         u_guess = u_pred.copy()
@@ -1075,6 +1114,19 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
             q_next = active_cache_next.points(lower_guess_x)
             if q_next.size == 0:
                 response_next = _empty_contact_response(total_dofs)
+            elif master_surface_mode == "quadrilateral_oracle":
+                response_next = quadrilateral_master_surface_penalty_response(
+                    lower_guess_x,
+                    upper_guess_x,
+                    upper_bottom_quads,
+                    pressure_stiffness=cfg.pressure_stiffness,
+                    n_total_dofs=total_dofs,
+                    quadrature_cache=active_cache_next,
+                    slave_dof_offset=0,
+                    master_dof_offset=lower_dofs,
+                    master_normal_sign=-1.0,
+                    assemble_stiffness=True,
+                )
             else:
                 sdf_next = sdf_workspace.build(upper_guess_x, upper_bottom_faces, q_next)
                 response_next = surface_to_surface_field_penalty_response_vectorized(
@@ -1129,6 +1181,8 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
         a = c0 * (u - u_pred)
         v = v_pred + gamma * dt * a
         u[next_dofs] = next_u_bc
+        v[next_dofs] = next_v_bc
+        a[next_dofs] = next_a_bc
     if vtk_dir is not None:
         vtk_manifest = vtk_dir / "sfc_frame_manifest.csv"
         _write_csv(
@@ -1698,6 +1752,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pressure-smoothing-passes", type=int, default=1)
     parser.add_argument("--output-stride", type=int, default=1)
     parser.add_argument("--quadrature-order", type=int, default=None)
+    parser.add_argument("--master-surface-mode", choices=("quadrilateral_oracle", "triangulated_field"), default="quadrilateral_oracle")
     parser.add_argument("--tangential-force", type=float, default=0.0)
     parser.add_argument("--tangential-start-time", type=float, default=None)
     parser.add_argument("--tangential-ramp-time", type=float, default=None)
@@ -1737,6 +1792,7 @@ def main() -> None:
         pressure_smoothing_passes=int(args.pressure_smoothing_passes),
         quadrature_order=(2 if args.quadrature_order is None else int(args.quadrature_order)),
         output_stride=max(1, int(args.output_stride)),
+        master_surface_mode=str(args.master_surface_mode),
     )
     outputs = run_workflow(args.out_dir, cfg=cfg, abaqus_command=args.abaqus_command, skip_abaqus=bool(args.skip_abaqus))
     print("Two-flexible-body SDF comparison complete.")
