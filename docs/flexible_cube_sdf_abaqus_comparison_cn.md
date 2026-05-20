@@ -14,7 +14,7 @@
 - 原文包含 friction / stick-slip，摩擦系数为 `0.5`；
 - Fig. 6 的前两行展示法向压缩后的 `ux, uy, uz, sigma_xx, sigma_yy, sigma_zz`，后两行展示切向运动后的同类场。
 
-当前 `run_flexible_cube_sdf_abaqus_comparison.py` 只对应这个 PDF 工况中的 **法向压缩接触阶段**，用于 SFC 与 Abaqus 原生无摩擦法向接触的曲线对齐。它不是完整 Fig. 6 frictional stick-slip 复现，也不是滑行摩擦验证。完整的 Fig. 6 风格“法向压缩后横向扫掠”应写成 `Fig. 6-inspired frictionless normal-to-tangential motion`：可以保留几何和加载路径，但必须明确 contact law remains frictionless。
+当前 `run_flexible_cube_sdf_abaqus_comparison.py` 的默认设置对应这个 PDF 工况中的 **法向压缩接触阶段**，用于 SFC 与 Abaqus 原生无摩擦法向接触的曲线对齐。脚本现在也支持可选的 `--tangential-force` 阶段：法向压紧后释放上柔性体顶面 x 向位移约束，并施加分布式 x 向外力。这个阶段仍然是 **无摩擦线性接触**，不是完整 Fig. 6 frictional stick-slip 复现，也不是滑行摩擦验证。完整的 Fig. 6 风格“法向压缩后横向扫掠”应写成 `Fig. 6-inspired frictionless normal-to-tangential loading`：可以保留几何和加载路径，但必须明确 contact law remains frictionless。
 
 ## 通用修复
 
@@ -37,6 +37,21 @@ python validation\run_flexible_cube_sdf_abaqus_comparison.py `
   --dt 0.001 `
   --closure 0.20 `
   --initial-gap 0.01 `
+  --abaqus-command C:\SIMULIA\Commands\abaqus.bat
+```
+
+可选切向载荷阶段示例：
+
+```powershell
+python validation\run_flexible_cube_sdf_abaqus_comparison.py `
+  --out-dir results\flexible_cube_sdf_abaqus_tangential `
+  --total-time 0.04 `
+  --dt 0.001 `
+  --closure 0.20 `
+  --initial-gap 0.01 `
+  --tangential-force 2000 `
+  --tangential-start-time 0.02 `
+  --tangential-ramp-time 0.02 `
   --abaqus-command C:\SIMULIA\Commands\abaqus.bat
 ```
 

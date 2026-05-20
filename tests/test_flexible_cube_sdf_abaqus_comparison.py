@@ -35,8 +35,34 @@ def test_flexible_cube_deck_uses_two_c3d8_flexible_bodies() -> None:
     assert "CSTRESS, CDISP" in text
     assert "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO" in text
     assert "*Dynamic, ALPHA=-5.000000000000e-02, HAFTOL=1.0e-4" in text
+    assert "UPPER_TOP_ASM, 1, 2, 0." in text
+    assert "*Cload, amplitude=TANGENTIAL_AMP" not in text
     assert "S, E, LE" in text
     assert "U, V, RF" in text
+
+
+def test_flexible_cube_deck_can_apply_tangential_force() -> None:
+    cfg = FlexibleCubeConfig(
+        lower_nx=4,
+        lower_ny=2,
+        lower_nz=1,
+        upper_nx=2,
+        upper_ny=2,
+        upper_nz=1,
+        total_time=0.004,
+        closure_time=0.002,
+        tangential_force=2000.0,
+        tangential_start_time=0.002,
+        tangential_ramp_time=0.002,
+    )
+    text = build_abaqus_input_text(cfg)
+
+    assert "*Amplitude, name=TANGENTIAL_AMP, time=TOTAL TIME" in text
+    assert "*Cload, amplitude=TANGENTIAL_AMP" in text
+    assert "UPPER_TOP_ASM, 1," in text
+    assert "UPPER_TOP_ASM, 2, 2, 0." in text
+    assert "UPPER_TOP_ASM, 1, 2, 0." not in text
+    assert "2.000000000000e-03" in text
 
 
 def test_flexible_cube_contact_surfaces_have_expected_topology() -> None:

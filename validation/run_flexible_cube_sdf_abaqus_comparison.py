@@ -95,6 +95,9 @@ class FlexibleCubeConfig:
     dt: float = 0.001
     closure_time: float = 0.02
     closure: float = 0.20
+    tangential_force: float = 0.0
+    tangential_start_time: float | None = None
+    tangential_ramp_time: float | None = None
     initial_gap: float = 0.01
     spacing: float = 0.30
     band_radius: float = 0.90
@@ -201,6 +204,25 @@ def _closure_state(time_value: float, cfg: FlexibleCubeConfig) -> tuple[float, f
     return -cfg.closure * amp, -cfg.closure * vel, -cfg.closure * acc
 
 
+def _tangential_force_state(time_value: float, cfg: FlexibleCubeConfig) -> float:
+    """Return the total prescribed x-force on the upper top surface."""
+
+    total_force = float(cfg.tangential_force)
+    if abs(total_force) <= 0.0:
+        return 0.0
+    start = float(cfg.closure_time if cfg.tangential_start_time is None else cfg.tangential_start_time)
+    remaining = max(float(cfg.total_time) - start, float(cfg.dt))
+    ramp_time = float(remaining if cfg.tangential_ramp_time is None else cfg.tangential_ramp_time)
+    t = float(np.clip(time_value, 0.0, cfg.total_time))
+    if t <= start:
+        return 0.0
+    if ramp_time <= 0.0:
+        return total_force
+    tau = float(np.clip((t - start) / ramp_time, 0.0, 1.0))
+    amp = 0.5 * (1.0 - math.cos(math.pi * tau))
+    return total_force * amp
+
+
 def _dirichlet_state(
     time_value: float,
     cfg: FlexibleCubeConfig,
@@ -220,8 +242,11 @@ def _dirichlet_state(
         a_values.append(0.0)
     upper_top = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.max(upper.X[:, 2]))))
     uz, vz, az = _closure_state(time_value, cfg)
+    fixed_components = ((1, 0.0, 0.0, 0.0), (2, uz, vz, az))
+    if abs(float(cfg.tangential_force)) <= 0.0:
+        fixed_components = ((0, 0.0, 0.0, 0.0), *fixed_components)
     for node in upper_top:
-        for component, u_value, v_value, a_value in ((0, 0.0, 0.0, 0.0), (1, 0.0, 0.0, 0.0), (2, uz, vz, az)):
+        for component, u_value, v_value, a_value in fixed_components:
             dofs.append(int(upper_offset + 3 * int(node) + component))
             u_values.append(float(u_value))
             v_values.append(float(v_value))
@@ -259,6 +284,26 @@ def _workspace_from_contact_envelope(
         batch_projection_threshold=256,
         candidate_padding=effective_band,
     )
+
+
+def _upper_top_x_load(
+    time_value: float,
+    cfg: FlexibleCubeConfig,
+    upper: BoxMesh,
+    upper_offset: int,
+    n_total_dofs: int,
+) -> np.ndarray:
+    """Distribute the prescribed tangential force over the upper top nodes."""
+
+    f = np.zeros(int(n_total_dofs), dtype=float)
+    total_force = _tangential_force_state(time_value, cfg)
+    if abs(total_force) <= 0.0:
+        return f
+    upper_top = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.max(upper.X[:, 2]))))
+    if upper_top.size == 0:
+        return f
+    f[upper_offset + 3 * upper_top] = total_force / float(upper_top.size)
+    return f
 
 
 def _footprint_mask(
@@ -354,6 +399,38 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
     _append_ids(lines, lower_bottom_nodes)
     lines.append("*Nset, nset=UPPER_TOP_ASM, instance=UPPER-1")
     _append_ids(lines, upper_top_nodes)
+    tangential_start = float(cfg.closure_time if cfg.tangential_start_time is None else cfg.tangential_start_time)
+    tangential_ramp = float(
+        max(float(cfg.total_time) - tangential_start, float(cfg.dt))
+        if cfg.tangential_ramp_time is None
+        else cfg.tangential_ramp_time
+    )
+    tangential_end = min(float(cfg.total_time), tangential_start + max(tangential_ramp, 0.0))
+    has_tangential_load = abs(float(cfg.tangential_force)) > 0.0
+    boundary_lines = ["LOWER_BOTTOM_ASM, 1, 3, 0."]
+    if has_tangential_load:
+        boundary_lines.append("UPPER_TOP_ASM, 2, 2, 0.")
+    else:
+        boundary_lines.append("UPPER_TOP_ASM, 1, 2, 0.")
+    tangential_amplitude_lines: list[str] = []
+    load_lines: list[str] = []
+    if has_tangential_load:
+        force_per_node = float(cfg.tangential_force) / float(len(upper_top_nodes))
+        amplitude_values = f"0., 0., {tangential_start:.12e}, 0., {tangential_end:.12e}, 1."
+        if tangential_end < float(cfg.total_time):
+            amplitude_values += f", {cfg.total_time:.12e}, 1."
+        tangential_amplitude_lines.extend(
+            [
+                "*Amplitude, name=TANGENTIAL_AMP, time=TOTAL TIME",
+                amplitude_values,
+            ]
+        )
+        load_lines.extend(
+            [
+                "*Cload, amplitude=TANGENTIAL_AMP",
+                f"UPPER_TOP_ASM, 1, {force_per_node:.12e}",
+            ]
+        )
     lines.extend(
         [
             "*Surface, type=ELEMENT, name=LOWER_TOP_SURF",
@@ -380,14 +457,15 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             "LOWER_TOP_SURF, UPPER_BOTTOM_SURF",
             "*Amplitude, name=CLOSURE_AMP, time=TOTAL TIME",
             f"0., 0., {cfg.closure_time:.12e}, 1., {cfg.total_time:.12e}, 1.",
+            *tangential_amplitude_lines,
             "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO, inc=10000",
             f"*Dynamic, ALPHA={cfg.hht_alpha:.12e}, HAFTOL=1.0e-4",
             f"{cfg.dt:.12e}, {cfg.total_time:.12e}, {cfg.dt * 1.0e-3:.12e}, {cfg.dt:.12e}",
             "*Boundary",
-            "LOWER_BOTTOM_ASM, 1, 3, 0.",
-            "UPPER_TOP_ASM, 1, 2, 0.",
+            *boundary_lines,
             "*Boundary, amplitude=CLOSURE_AMP",
             f"UPPER_TOP_ASM, 3, 3, {-cfg.closure:.12e}",
+            *load_lines,
             f"*Output, field, time interval={cfg.dt * max(1, cfg.output_stride):.12e}",
             "*Node Output",
             "U, V, RF",
@@ -498,7 +576,8 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
         upper_fields = _element_fields(upper, u[lower_dofs:], E=cfg.upper_young_modulus, nu=cfg.poisson_ratio)
         vm = np.concatenate((lower_fields["von_mises"], upper_fields["von_mises"]))
         strain = np.concatenate((lower_fields["engineering_strain_norm"], upper_fields["engineering_strain_norm"]))
-        balance = M @ a + K @ u - response.force
+        external_force = _upper_top_x_load(t, cfg, upper, lower_dofs, total_dofs)
+        balance = M @ a + K @ u - response.force - external_force
         contact_integral_force = float(
             np.sum(cfg.pressure_stiffness * active_cache.area_weights * np.maximum(-np.asarray(response.gaps), 0.0))
         )
@@ -508,6 +587,8 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
                 "source": "sfc_lagrangian_sdf_two_flexible",
                 "time": t,
                 "top_mean_z_displacement": float(np.mean(lower_u[lower_top_nodes, 2])),
+                "upper_top_mean_x_displacement": float(np.mean(upper_u[upper_top_nodes, 0])),
+                "upper_bottom_mean_x_displacement": float(np.mean(upper_u[upper_bottom_nodes, 0])),
                 "upper_bottom_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2])),
                 "upper_top_mean_z": float(np.mean(upper_x[upper_top_nodes, 2])),
                 "surface_gap_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2]) - np.mean(lower_x[lower_top_nodes, 2])),
@@ -522,6 +603,7 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
                 "contact_integral_force": contact_integral_force,
                 "normal_force": contact_integral_force,
                 "upper_reaction_force": upper_reaction_force,
+                "tangential_force": float(_tangential_force_state(t, cfg)),
                 "min_contact_opening": float(response.min_gap),
                 "max_contact_pressure": float(cfg.pressure_stiffness * response.max_penetration),
             }
@@ -538,8 +620,9 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
         )
         if step == steps:
             break
-        previous_rhs_balance = response.force - K @ u
+        previous_rhs_balance = response.force + external_force - K @ u
         next_t = float((step + 1) * dt)
+        current_external_force = _upper_top_x_load(next_t, cfg, upper, lower_dofs, total_dofs)
         next_dofs, next_u_bc, _next_v_bc, _next_a_bc = _dirichlet_state(next_t, cfg, lower, upper, lower_dofs)
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
@@ -575,7 +658,11 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
                 )
             f_contact = response_next.force
             a_guess = c0 * (u_guess - u_pred)
-            residual = M @ a_guess + (1.0 + alpha) * (K @ u_guess - f_contact) + alpha * previous_rhs_balance
+            residual = (
+                M @ a_guess
+                + (1.0 + alpha) * (K @ u_guess - f_contact - current_external_force)
+                + alpha * previous_rhs_balance
+            )
             correction = np.zeros(total_dofs, dtype=float)
             residual_norm = float(np.linalg.norm(residual[free])) if free.size else 0.0
             residual_scale = max(
@@ -583,6 +670,7 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
                 float(np.linalg.norm((M @ a_guess)[free])) if free.size else 0.0,
                 float(np.linalg.norm(((1.0 + alpha) * K @ u_guess)[free])) if free.size else 0.0,
                 float(np.linalg.norm(f_contact[free])) if free.size else 0.0,
+                float(np.linalg.norm(current_external_force[free])) if free.size else 0.0,
             )
             force_delta = 0.0 if previous_contact_force is None else float(np.linalg.norm(f_contact - previous_contact_force))
             force_scale = max(1.0, float(np.linalg.norm(f_contact)))
@@ -704,6 +792,8 @@ try:
             fieldnames=[
                 "time",
                 "top_mean_z_displacement",
+                "upper_top_mean_x_displacement",
+                "upper_bottom_mean_x_displacement",
                 "upper_bottom_mean_z",
                 "upper_top_mean_z",
                 "surface_gap_mean_z",
@@ -723,6 +813,8 @@ try:
         for frame in step.frames:
             u_values = []
             lower_top_u3 = []
+            upper_top_u1 = []
+            upper_bottom_u1 = []
             upper_bottom_z = []
             upper_top_z = []
             if "U" in frame.fieldOutputs:
@@ -734,8 +826,10 @@ try:
                     if inst.name.upper() == "LOWER-1" and int(value.nodeLabel) in lower_top:
                         lower_top_u3.append(float(value.data[2]))
                     if inst.name.upper() == "UPPER-1" and int(value.nodeLabel) in upper_bottom:
+                        upper_bottom_u1.append(float(value.data[0]))
                         upper_bottom_z.append(float(upper.nodes[int(value.nodeLabel) - 1].coordinates[2]) + float(value.data[2]))
                     if inst.name.upper() == "UPPER-1" and int(value.nodeLabel) in upper_top:
+                        upper_top_u1.append(float(value.data[0]))
                         upper_top_z.append(float(upper.nodes[int(value.nodeLabel) - 1].coordinates[2]) + float(value.data[2]))
             rf3 = 0.0
             if "RF" in frame.fieldOutputs:
@@ -814,6 +908,8 @@ try:
                 {
                     "time": float(frame.frameValue),
                     "top_mean_z_displacement": sum(lower_top_u3) / len(lower_top_u3) if lower_top_u3 else "",
+                    "upper_top_mean_x_displacement": sum(upper_top_u1) / len(upper_top_u1) if upper_top_u1 else "",
+                    "upper_bottom_mean_x_displacement": sum(upper_bottom_u1) / len(upper_bottom_u1) if upper_bottom_u1 else "",
                     "upper_bottom_mean_z": sum(upper_bottom_z) / len(upper_bottom_z) if upper_bottom_z else "",
                     "upper_top_mean_z": sum(upper_top_z) / len(upper_top_z) if upper_top_z else "",
                     "surface_gap_mean_z": (sum(upper_bottom_z) / len(upper_bottom_z) - (lower_zmax + sum(lower_top_u3) / len(lower_top_u3))) if upper_bottom_z and lower_top_u3 else "",
@@ -903,6 +999,8 @@ def load_abaqus_history(metrics_csv: Path) -> list[Row]:
         item: Row = {"source": "abaqus_standard_flexible_cube", "time": float(row["time"])}
         for key in (
             "top_mean_z_displacement",
+            "upper_top_mean_x_displacement",
+            "upper_bottom_mean_x_displacement",
             "upper_bottom_mean_z",
             "upper_top_mean_z",
             "surface_gap_mean_z",
@@ -950,7 +1048,14 @@ def _metric(source: list[Row], reference: list[Row], key: str) -> Row:
     }
 
 
-def _plot_curves(out_dir: Path, abaqus_rows: list[Row], sfc_rows: list[Row], metrics: list[Row]) -> Path:
+def _plot_curves(
+    out_dir: Path,
+    abaqus_rows: list[Row],
+    sfc_rows: list[Row],
+    metrics: list[Row],
+    *,
+    include_tangential: bool = False,
+) -> Path:
     metric_by_name = {str(row["metric"]): row for row in metrics}
     keys = [
         ("top_mean_z_displacement", "lower top mean z displacement"),
@@ -960,8 +1065,13 @@ def _plot_curves(out_dir: Path, abaqus_rows: list[Row], sfc_rows: list[Row], met
         ("p95_von_mises", "95th percentile von Mises"),
         ("p95_strain_norm", "95th percentile strain norm"),
     ]
-    fig, axes = plt.subplots(3, 2, figsize=(7.2, 7.0), constrained_layout=True)
-    flat_axes = axes.ravel()
+    if include_tangential:
+        keys.insert(1, ("upper_top_mean_x_displacement", "upper top mean x displacement"))
+        keys.insert(2, ("upper_bottom_mean_x_displacement", "upper bottom mean x displacement"))
+    ncols = 2
+    nrows = int(math.ceil(len(keys) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.2, 2.35 * nrows), constrained_layout=True)
+    flat_axes = np.atleast_1d(axes).ravel()
     for axis, (key, title) in zip(flat_axes, keys, strict=False):
         t_abq, y_abq = _series(abaqus_rows, key)
         t_sfc, y_sfc = _series(sfc_rows, key)
@@ -991,6 +1101,8 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
         _metric(sfc_rows, abaqus_rows, key)
         for key in (
             "top_mean_z_displacement",
+            "upper_top_mean_x_displacement",
+            "upper_bottom_mean_x_displacement",
             "surface_gap_mean_z",
             "max_contact_pressure",
             "max_displacement_norm",
@@ -1012,20 +1124,30 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
     _write_csv(out_dir / "flexible_cube_sdf_abaqus_metrics.csv", metrics)
     _write_csv(out_dir / "flexible_cube_sdf_abaqus_timing.csv", timing)
     _write_csv(out_dir / "flexible_cube_sdf_field_timing.csv", sfc_timing_rows)
-    plot = _plot_curves(out_dir, abaqus_rows, sfc_rows, metrics)
+    include_tangential = abs(float(cfg.tangential_force)) > 0.0
+    plot = _plot_curves(out_dir, abaqus_rows, sfc_rows, metrics, include_tangential=include_tangential)
+    if include_tangential:
+        start_time = cfg.closure_time if cfg.tangential_start_time is None else cfg.tangential_start_time
+        tangential_stage = (
+            f"frictionless normal compression followed by a distributed x-force of `{cfg.tangential_force}` "
+            f"starting at `{start_time}` s"
+        )
+    else:
+        tangential_stage = "disabled"
     summary = out_dir / "flexible_cube_sdf_abaqus_summary.md"
     lines = [
         "# Two-Flexible-Body SDF Contact Comparison",
         "",
         "This case is the normal-compression subset of the FuzzyContact Benchmark 2 / Fig. 5--6 working condition: "
         "a stationary lower block and a smaller moving upper block. The reference paper subsequently applies "
-        "tangential loading with frictional stick-slip; this SFC runner intentionally excludes that frictional stage "
-        "and compares only frictionless normal contact.",
+        "tangential loading with frictional stick-slip; this runner keeps the contact law frictionless and can "
+        "optionally apply a tangential external load as a Fig. 6-inspired loading stage.",
         "",
         f"- Lower mesh: `{cfg.lower_nx}x{cfg.lower_ny}x{cfg.lower_nz}` C3D8",
         f"- Upper mesh: `{cfg.upper_nx}x{cfg.upper_ny}x{cfg.upper_nz}` C3D8",
         "- Reference geometry family: stationary body `20 x 10 x 2 mm^3`; moving body footprint `4.5 x 4.5 mm^2`",
-        "- Reference loading path: normal compression followed by tangential loading; current runner: normal compression only",
+        "- Reference loading path: normal compression followed by tangential loading; current runner: frictionless contact only",
+        f"- Tangential loading stage: {tangential_stage}",
         f"- Duration: `{cfg.total_time}` s",
         f"- Time step: `{cfg.dt}` s",
         f"- Contact stiffness: `{cfg.pressure_stiffness}`",
@@ -1067,6 +1189,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-time", type=float, default=0.04)
     parser.add_argument("--closure", type=float, default=0.20)
     parser.add_argument("--initial-gap", type=float, default=0.01)
+    parser.add_argument("--tangential-force", type=float, default=0.0)
+    parser.add_argument("--tangential-start-time", type=float, default=None)
+    parser.add_argument("--tangential-ramp-time", type=float, default=None)
     return parser.parse_args()
 
 
@@ -1083,6 +1208,9 @@ def main() -> None:
         total_time=float(args.total_time),
         closure_time=0.5 * float(args.total_time),
         closure=float(args.closure),
+        tangential_force=float(args.tangential_force),
+        tangential_start_time=None if args.tangential_start_time is None else float(args.tangential_start_time),
+        tangential_ramp_time=None if args.tangential_ramp_time is None else float(args.tangential_ramp_time),
         initial_gap=float(args.initial_gap),
     )
     outputs = run_workflow(args.out_dir, cfg=cfg, abaqus_command=args.abaqus_command, skip_abaqus=bool(args.skip_abaqus))
