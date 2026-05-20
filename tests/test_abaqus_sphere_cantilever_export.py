@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from validation.abaqus_odb_to_vtk import _tensor_from_symmetric6, _von_mises_from_symmetric6
+from validation.run_abaqus_sphere_cantilever_explicit import (
+    DEFAULT_OUT_DIR,
+    ModelConfig,
+    _abaqus_reported_wallclock_seconds,
+    _beam_mesh,
+    _sphere_mesh,
+    build_input_text,
+)
+
+
+def test_sphere_cantilever_input_requests_explicit_contact_outputs() -> None:
+    text = build_input_text(ModelConfig())
+
+    assert "*Dynamic, Explicit, DIRECT USER CONTROL" in text
+    assert "1.000000000000e-05, 3.000000000000e+00" in text
+    assert "*Surface Behavior, pressure-overclosure=LINEAR" in text
+    assert "5.000000000000e+09" in text
+    assert "*Bulk Viscosity\n0., 0." in text
+    assert "*Contact Inclusions, ALL EXTERIOR" in text
+    assert "U, V" in text
+    assert "S, LE" in text
+    assert "C3D8R" in text
+    assert "C3D4" in text
+
+
+def test_default_output_directory_is_not_under_results() -> None:
+    assert "results" not in DEFAULT_OUT_DIR.parts
+    assert DEFAULT_OUT_DIR.parts[-2:] == ("commercial_software_comparison", "abaqus_sphere_cantilever")
+
+
+def test_generated_meshes_are_nonempty_and_deterministic() -> None:
+    cfg = ModelConfig()
+    beam_nodes, beam_elements, fixed_nodes = _beam_mesh(cfg)
+    sphere_nodes, sphere_elements, sphere_all = _sphere_mesh(cfg)
+
+    assert len(beam_nodes) == (cfg.beam_nx + 1) * (cfg.beam_ny + 1) * (cfg.beam_nz + 1)
+    assert len(beam_elements) == cfg.beam_nx * cfg.beam_ny * cfg.beam_nz
+    assert len(fixed_nodes) == (cfg.beam_ny + 1) * (cfg.beam_nz + 1)
+    assert len(sphere_nodes) == 3 + (cfg.sphere_latitudes - 1) * cfg.sphere_longitudes
+    assert len(sphere_elements) == 2 * cfg.sphere_longitudes * (cfg.sphere_latitudes - 1)
+    assert sphere_all == list(range(1, len(sphere_nodes) + 1))
+
+
+def test_default_model_uses_fine_three_second_stiff_beam_case() -> None:
+    cfg = ModelConfig()
+
+    assert (cfg.beam_nx, cfg.beam_ny, cfg.beam_nz) == (60, 8, 4)
+    assert (cfg.sphere_latitudes, cfg.sphere_longitudes) == (24, 48)
+    assert cfg.duration == 3.0
+    assert cfg.output_interval == 0.001
+    assert cfg.fixed_dt == 1.0e-5
+    assert cfg.beam_young == 2.5e9
+    assert cfg.sphere_young == 5.0e6
+    assert cfg.sphere_young < cfg.beam_young
+
+
+def test_abaqus_tensor_helpers_use_symmetric_3d_order() -> None:
+    tensor = _tensor_from_symmetric6((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+
+    assert tensor == ((1.0, 4.0, 5.0), (4.0, 2.0, 6.0), (5.0, 6.0, 3.0))
+    assert _von_mises_from_symmetric6((1.0, 1.0, 1.0, 0.0, 0.0, 0.0)) == 0.0
+
+
+def test_parse_abaqus_reported_wallclock_seconds(tmp_path: Path) -> None:
+    sta = tmp_path / "job.sta"
+    sta.write_text(
+        "\n".join(
+            [
+                "  EXPLICIT EXECUTABLE TIME SUMMARY",
+                "       USER TIME (SEC)      =   779.70",
+                "       SYSTEM TIME (SEC)    =   16.700",
+                "       WALLCLOCK TIME (SEC) =         1239",
+            ]
+        ),
+        encoding="ascii",
+    )
+
+    assert _abaqus_reported_wallclock_seconds(sta) == 1239.0

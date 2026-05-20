@@ -16,6 +16,11 @@ boundary, input/output data, figures, and acceptance thresholds.
   Young's modulus. This creates a visibly softer impact response and stores
   the corresponding displacement, P95 strain/stress curves, errors, and
   timing metrics.
+- `commercial_sphere_cantilever_soft_explicit/`: flexible sphere impact on a
+  flexible cantilever beam, using Abaqus/Explicit fixed-step linear-penalty
+  contact as the external reference and SFC lumped-mass explicit
+  Lagrangian-SDF contact as the standalone solver path. The sphere is softer
+  than the beam and both bodies are deformable.
 - `block_drop_dynamic_sdf_calculix_1s/`: scoped dynamic contact trajectory
   comparison between SFC dynamic-SDF contact and CalculiX for the locked
   block-plane drop case.

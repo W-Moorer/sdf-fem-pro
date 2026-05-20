@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,8 +13,10 @@ if str(ROOT) not in sys.path:
 from validation.run_commercial_sphere_cantilever_short_comparison import (  # noqa: E402
     DEFAULT_ABAQUS_INP,
     build_short_model,
+    run_sfc_lagrangian_short,
     write_calculix_input,
 )
+from validation.run_abaqus_sphere_cantilever_explicit import ModelConfig, build_input_text  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not DEFAULT_ABAQUS_INP.exists(),
@@ -47,3 +50,45 @@ def test_short_model_uses_bottom_sphere_samples_and_beam_top_material_surface() 
     assert model.sphere_elements.shape[1] == 4
     assert model.duration == 0.05
     assert model.dt == 0.001
+
+
+def test_short_model_parses_direct_explicit_dt_and_soft_sphere(tmp_path: Path) -> None:
+    inp = tmp_path / "sphere_cantilever_explicit.inp"
+    inp.write_text(build_input_text(ModelConfig(duration=0.05, fixed_dt=1.0e-5, sphere_young=5.0e6)), encoding="ascii")
+
+    model = build_short_model(duration=None, dt=None, inp_path=inp)
+
+    assert model.duration == 0.05
+    assert model.dt == 1.0e-5
+    assert model.sphere_material.young == pytest.approx(5.0e6)
+    assert model.sphere_material.young < model.beam_material.young
+
+
+def test_explicit_sfc_structured_top_backend_runs_small_soft_model(tmp_path: Path) -> None:
+    inp = tmp_path / "sphere_cantilever_explicit.inp"
+    cfg = ModelConfig(
+        beam_nx=2,
+        beam_ny=2,
+        beam_nz=1,
+        sphere_latitudes=6,
+        sphere_longitudes=12,
+        duration=2.0e-5,
+        fixed_dt=1.0e-5,
+        beam_young=2.5e8,
+        sphere_young=5.0e6,
+    )
+    inp.write_text(build_input_text(cfg), encoding="ascii")
+    model = build_short_model(duration=None, dt=None, inp_path=inp)
+
+    rows, command = run_sfc_lagrangian_short(
+        model,
+        contact_stiffness=5.0e9,
+        damping_alpha=0.0,
+        integrator="explicit",
+        contact_backend="structured-top",
+    )
+
+    assert len(rows) == 3
+    assert command["time_integrator"] == "explicit"
+    assert command["sfc_contact_backend"] == "structured-top"
+    assert all(np.isfinite(float(row["sphere_mean_uz"])) for row in rows)

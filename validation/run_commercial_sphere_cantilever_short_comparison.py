@@ -71,6 +71,15 @@ DEFAULT_ABAQUS_INP = DEFAULT_ABAQUS_DIR / "abaqus_run" / "sphere_cantilever_expl
 
 
 @dataclass(frozen=True, slots=True)
+class ExplicitContactState:
+    """Force and diagnostics for one explicit contact evaluation."""
+
+    force: np.ndarray
+    min_gap: float
+    active_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class InpMaterial:
     """Material values parsed from the Abaqus input deck."""
 
@@ -246,6 +255,7 @@ def _read_abaqus_input_model(inp_path: Path, *, duration: float | None = None, d
     gravity = 9.81
     deck_duration = 3.0
     output_interval = 0.001
+    deck_dt = output_interval
     current_material = ""
     i = 0
     while i < len(lines):
@@ -292,7 +302,10 @@ def _read_abaqus_input_model(inp_path: Path, *, duration: float | None = None, d
             i, block = _parse_numeric_data_block(lines, i + 1)
             if block:
                 numeric = [float(value) for row in block[:1] for value in row if _is_float(value)]
-                if numeric:
+                if len(numeric) >= 2:
+                    deck_dt = float(numeric[0])
+                    deck_duration = float(numeric[-1])
+                elif numeric:
                     deck_duration = numeric[-1]
             continue
         if key == "*dload":
@@ -324,7 +337,7 @@ def _read_abaqus_input_model(inp_path: Path, *, duration: float | None = None, d
     return CommercialShortModel(
         source_inp=inp_path,
         duration=float(deck_duration if duration is None else duration),
-        dt=float(output_interval if dt is None else dt),
+        dt=float(deck_dt if dt is None else dt),
         initial_velocity_z=float(initial_velocity_z),
         gravity=float(gravity),
         beam_material=beam_material,
@@ -399,10 +412,17 @@ def _triangle_areas(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
 
 
-def build_short_model(*, duration: float, dt: float, inp_path: Path = DEFAULT_ABAQUS_INP) -> CommercialShortModel:
+def build_short_model(
+    *,
+    duration: float | None,
+    dt: float | None,
+    inp_path: Path = DEFAULT_ABAQUS_INP,
+) -> CommercialShortModel:
     """Build the short model by parsing the commercial Abaqus input deck."""
 
-    return _read_abaqus_input_model(Path(inp_path), duration=float(duration), dt=float(dt))
+    duration_value = None if duration is None else float(duration)
+    dt_value = None if dt is None else float(dt)
+    return _read_abaqus_input_model(Path(inp_path), duration=duration_value, dt=dt_value)
 
 
 def write_calculix_input(
@@ -554,10 +574,18 @@ def _read_manifest_rows(manifest_path: Path, *, duration: float) -> list[dict[st
     return [row for row in rows if float(row["time"]) <= float(duration) + 1.0e-12]
 
 
+def _read_runtime_metrics(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    with path.open(newline="", encoding="ascii", errors="ignore") as handle:
+        return {str(row["metric"]): str(row["value"]) for row in csv.DictReader(handle)}
+
+
 def _read_vtk_displacement(path: Path, *, node_count: int) -> np.ndarray:
     lines = path.read_text(encoding="ascii", errors="ignore").splitlines()
     for idx, line in enumerate(lines):
-        if line.strip().lower() == "vectors displacement float":
+        normalized = line.strip().lower()
+        if normalized in {"vectors displacement float", "vectors u float"}:
             values = []
             for offset in range(node_count):
                 parts = lines[idx + 1 + offset].split()
@@ -615,6 +643,98 @@ def _sphere_samples(model: CommercialShortModel) -> list[SurfaceSample]:
         )
         for face in model.sphere_sample_faces
     ]
+
+
+def _structured_beam_top_grid(model: CommercialShortModel) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    top_z = float(np.max(model.beam_nodes[:, 2]))
+    top_ids = np.flatnonzero(np.isclose(model.beam_nodes[:, 2], top_z))
+    xs = np.unique(np.round(model.beam_nodes[top_ids, 0], 14))
+    ys = np.unique(np.round(model.beam_nodes[top_ids, 1], 14))
+    node_grid = np.empty((ys.size, xs.size), dtype=np.int64)
+    lookup = {
+        (round(float(model.beam_nodes[node, 0]), 14), round(float(model.beam_nodes[node, 1]), 14)): int(node)
+        for node in top_ids
+    }
+    for j, y in enumerate(ys):
+        for i, x in enumerate(xs):
+            node_grid[j, i] = lookup[(round(float(x), 14), round(float(y), 14))]
+    return xs.astype(float), ys.astype(float), node_grid
+
+
+def _structured_top_contact_state(
+    model: CommercialShortModel,
+    u_value: np.ndarray,
+    *,
+    contact_stiffness: float,
+    top_grid: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> ExplicitContactState:
+    xs, ys, node_grid = top_grid
+    n_total = 3 * model.sphere_node_count + 3 * model.beam_node_count
+    force = np.zeros(n_total, dtype=float)
+    sphere_u = u_value[: 3 * model.sphere_node_count].reshape((-1, 3))
+    beam_u = u_value[3 * model.sphere_node_count :].reshape((-1, 3))
+    sphere_x = model.sphere_nodes + sphere_u
+    beam_x = model.beam_nodes + beam_u
+    faces = np.asarray(model.sphere_sample_faces, dtype=np.int64)
+    if faces.size == 0:
+        return ExplicitContactState(force=force, min_gap=0.0, active_count=0)
+    sample_points = sphere_x[faces].mean(axis=1)
+    dx = float(xs[1] - xs[0])
+    dy = float(ys[1] - ys[0])
+    i0 = np.floor((sample_points[:, 0] - xs[0]) / dx).astype(np.int64)
+    j0 = np.floor((sample_points[:, 1] - ys[0]) / dy).astype(np.int64)
+    inside = (i0 >= 0) & (i0 < xs.size - 1) & (j0 >= 0) & (j0 < ys.size - 1)
+    if not np.any(inside):
+        return ExplicitContactState(force=force, min_gap=float("inf"), active_count=0)
+    active_candidates = np.nonzero(inside)[0]
+    i0 = i0[inside]
+    j0 = j0[inside]
+    p = sample_points[inside]
+    tx = np.clip((p[:, 0] - xs[i0]) / dx, 0.0, 1.0)
+    ty = np.clip((p[:, 1] - ys[j0]) / dy, 0.0, 1.0)
+    n00 = node_grid[j0, i0]
+    n10 = node_grid[j0, i0 + 1]
+    n01 = node_grid[j0 + 1, i0]
+    n11 = node_grid[j0 + 1, i0 + 1]
+    p00 = beam_x[n00]
+    p10 = beam_x[n10]
+    p01 = beam_x[n01]
+    p11 = beam_x[n11]
+    w00 = (1.0 - tx) * (1.0 - ty)
+    w10 = tx * (1.0 - ty)
+    w01 = (1.0 - tx) * ty
+    w11 = tx * ty
+    q = w00[:, None] * p00 + w10[:, None] * p10 + w01[:, None] * p01 + w11[:, None] * p11
+    dqdx = ((1.0 - ty)[:, None] * (p10 - p00) + ty[:, None] * (p11 - p01)) / dx
+    dqdy = ((1.0 - tx)[:, None] * (p01 - p00) + tx[:, None] * (p11 - p10)) / dy
+    normals = np.cross(dqdx, dqdy)
+    normal_norm = np.linalg.norm(normals, axis=1)
+    valid_normal = normal_norm > 0.0
+    normals[valid_normal] /= normal_norm[valid_normal, None]
+    flip = normals[:, 2] < 0.0
+    normals[flip] *= -1.0
+    gaps = np.einsum("ij,ij->i", p - q, normals)
+    min_gap = float(np.min(gaps)) if gaps.size else 0.0
+    active_local = np.nonzero((gaps < 0.0) & valid_normal)[0]
+    if active_local.size == 0:
+        return ExplicitContactState(force=force, min_gap=min_gap, active_count=0)
+    sample_ids = active_candidates[active_local]
+    scales = float(contact_stiffness) * model.sphere_sample_areas[sample_ids] * (-gaps[active_local])
+    contact_vectors = scales[:, None] * normals[active_local]
+    for local_pos, sample_id in enumerate(sample_ids):
+        slave_nodes = faces[int(sample_id)]
+        f_slave = contact_vectors[local_pos] / 3.0
+        for node in slave_nodes:
+            force[3 * int(node) : 3 * int(node) + 3] += f_slave
+    master_weights = (w00[active_local], w10[active_local], w01[active_local], w11[active_local])
+    master_nodes = (n00[active_local], n10[active_local], n01[active_local], n11[active_local])
+    master_offset = 3 * model.sphere_node_count
+    for weights, nodes in zip(master_weights, master_nodes, strict=True):
+        weighted = -weights[:, None] * contact_vectors
+        for row, node in enumerate(nodes):
+            base = master_offset + 3 * int(node)
+            force[base : base + 3] += weighted[row]
+    return ExplicitContactState(force=force, min_gap=min_gap, active_count=int(active_local.size))
 
 
 def _append_gap_diagnostics(rows: list[Row], model: CommercialShortModel, *, contact_stiffness: float) -> None:
@@ -698,8 +818,174 @@ def _sfc_contact_response(
     )
 
 
-def run_sfc_lagrangian_short(model: CommercialShortModel, *, contact_stiffness: float, damping_alpha: float) -> tuple[list[Row], Row]:
+def _run_sfc_lagrangian_explicit_short(
+    model: CommercialShortModel,
+    *,
+    contact_stiffness: float,
+    contact_backend: str,
+) -> tuple[list[Row], Row]:
+    """Run the flexible-sphere/flexible-cantilever case with central difference."""
+
+    dt = float(model.dt)
+    if dt <= 0.0:
+        raise ValueError("dt must be positive")
+    steps_float = float(model.duration) / dt
+    steps = int(round(steps_float))
+    if not np.isclose(steps * dt, float(model.duration), rtol=0.0, atol=max(1.0e-12, 1.0e-9 * dt)):
+        raise ValueError("explicit SFC run requires duration to be an integer multiple of dt")
+
+    start = time.perf_counter()
+    oracle: LagrangianSDFContactOracle | None = None
+    if str(contact_backend) == "oracle":
+        material = MaterialSDF.from_triangle_surface(
+            model.beam_nodes,
+            model.beam_top_faces,
+            band_radius=0.12,
+        )
+        oracle = LagrangianSDFContactOracle(
+            material=material,
+            x_current=model.beam_nodes,
+            search_radius=0.08,
+            patch_cell_size=0.025,
+            cache_enabled=True,
+        )
+    samples = _sphere_samples(model)
+    top_grid = _structured_beam_top_grid(model)
+
+    def contact_response(u_value: np.ndarray) -> Any:
+        if str(contact_backend) == "structured-top":
+            return _structured_top_contact_state(
+                model,
+                u_value,
+                contact_stiffness=float(contact_stiffness),
+                top_grid=top_grid,
+            )
+        if oracle is None:
+            raise RuntimeError("oracle backend was requested but not initialized")
+        sphere_u = u_value[: 3 * model.sphere_node_count].reshape((-1, 3))
+        beam_u = u_value[3 * model.sphere_node_count :].reshape((-1, 3))
+        oracle.refit(model.beam_nodes + beam_u)
+        return lagrangian_oracle_penalty_response(
+            model.sphere_nodes + sphere_u,
+            samples,
+            oracle,
+            pressure_stiffness=float(contact_stiffness),
+            n_total_dofs=3 * model.sphere_node_count + 3 * model.beam_node_count,
+            sample_area_weights=model.sphere_sample_areas,
+            slave_dof_offset=0,
+            master_dof_offset=3 * model.sphere_node_count,
+        )
+
+    sphere_body = DeformableBody(
+        mesh=VolumeMesh(model.sphere_nodes, model.sphere_elements, element_type="C3D4"),
+        material={"E": model.sphere_material.young, "nu": model.sphere_material.poisson},
+        density=model.sphere_material.density,
+    )
+    beam_body = DeformableBody(
+        mesh=VolumeMesh(model.beam_nodes, model.beam_elements, element_type="C3D8"),
+        material={"E": model.beam_material.young, "nu": model.beam_material.poisson},
+        density=model.beam_material.density,
+    )
+    K = block_diag((assemble_stiffness_matrix(sphere_body), assemble_stiffness_matrix(beam_body)), format="csr")
+    m_sphere = assemble_mass_matrix(sphere_body, kind="lumped").diagonal()
+    m_beam = assemble_mass_matrix(beam_body, kind="lumped").diagonal()
+    mass_diag = np.concatenate((np.asarray(m_sphere, dtype=float), np.asarray(m_beam, dtype=float)))
+    if np.any(mass_diag <= 0.0):
+        raise ValueError("explicit integration requires strictly positive lumped masses")
+    f_ext = np.concatenate(
+        (
+            assemble_gravity_force(sphere_body, (0.0, 0.0, -model.gravity)),
+            assemble_gravity_force(beam_body, (0.0, 0.0, -model.gravity)),
+        )
+    )
+    n_dofs = int(K.shape[0])
+    fixed = np.asarray(
+        [3 * model.sphere_node_count + 3 * int(node) + axis for node in model.beam_fixed_nodes for axis in range(3)],
+        dtype=np.int64,
+    )
+    u = np.zeros(n_dofs, dtype=float)
+    v0 = np.zeros(n_dofs, dtype=float)
+    v0[: 3 * model.sphere_node_count].reshape((-1, 3))[:, 2] = float(model.initial_velocity_z)
+    v0[fixed] = 0.0
+    rows: list[Row] = []
+
+    def combined_displacement(u_value: np.ndarray) -> np.ndarray:
+        return np.vstack(
+            (
+                u_value[3 * model.sphere_node_count :].reshape((-1, 3)),
+                u_value[: 3 * model.sphere_node_count].reshape((-1, 3)),
+            )
+        )
+
+    def append_output(step: int, response: Any) -> None:
+        U = combined_displacement(u)
+        row = _history_metrics("sfc_lagrangian_sdf", model, step * dt, U)
+        row["min_gap"] = float(response.min_gap)
+        row["active_samples"] = int(response.active_count)
+        rows.append(row)
+
+    response = contact_response(u)
+    a = (f_ext + response.force - K @ u) / mass_diag
+    a[fixed] = 0.0
+    v_half = v0 - 0.5 * dt * a
+    v_half[fixed] = 0.0
+    for step in range(steps + 1):
+        response = contact_response(u)
+        append_output(step, response)
+        if step == steps:
+            break
+        a = (f_ext + response.force - K @ u) / mass_diag
+        a[fixed] = 0.0
+        v_half += dt * a
+        v_half[fixed] = 0.0
+        u += dt * v_half
+        u[fixed] = 0.0
+        if not np.all(np.isfinite(u)):
+            raise FloatingPointError("SFC explicit sphere-cantilever state became non-finite")
+
+    wall = time.perf_counter() - start
+    for row in rows:
+        row["sfc_solve_wall_seconds"] = float(wall)
+        row["time_integrator"] = "explicit"
+        row["mass_matrix"] = "lumped"
+        row["explicit_algorithm"] = "central_difference"
+        row["contact_path"] = "MaterialSDF+LagrangianSDFContactOracle"
+        row["sfc_contact_backend"] = str(contact_backend)
+        row["contact_stiffness"] = float(contact_stiffness)
+    return rows, {
+        "solver": "sfc_lagrangian_sdf",
+        "wall_time_seconds": float(wall),
+        "contact_path": "MaterialSDF+LagrangianSDFContactOracle",
+        "sfc_contact_backend": str(contact_backend),
+        "time_integrator": "explicit",
+        "mass_matrix": "lumped",
+        "duration": float(model.duration),
+        "dt": float(model.dt),
+    }
+
+
+def run_sfc_lagrangian_short(
+    model: CommercialShortModel,
+    *,
+    contact_stiffness: float,
+    damping_alpha: float,
+    integrator: str = "explicit",
+    contact_backend: str = "structured-top",
+) -> tuple[list[Row], Row]:
     """Run an independent SFC Lagrangian-SDF short transient solve."""
+
+    if str(integrator).lower() == "explicit":
+        if abs(float(damping_alpha)) > 0.0:
+            raise ValueError("explicit SFC sphere-cantilever run is undamped")
+        if str(contact_backend) not in {"structured-top", "oracle"}:
+            raise ValueError("contact_backend must be 'structured-top' or 'oracle'")
+        return _run_sfc_lagrangian_explicit_short(
+            model,
+            contact_stiffness=contact_stiffness,
+            contact_backend=str(contact_backend),
+        )
+    if str(integrator).lower() != "newmark":
+        raise ValueError("integrator must be 'explicit' or 'newmark'")
 
     start = time.perf_counter()
     material = MaterialSDF.from_triangle_surface(
@@ -908,12 +1194,12 @@ def _write_summary(
         "## Scope",
         "",
         f"- Duration: `{duration}` s.",
-        f"- Time increment/output interval: `{dt}` s.",
+        f"- SFC integration increment: `{dt}` s.",
         f"- Authoritative model input deck: `{inp_path}`.",
         f"- Commercial reference directory: `{abaqus_dir}`.",
         "- Abaqus is used only through pre-existing VTK reference frames; it is not a core solver dependency.",
         "- CalculiX is used only as an external native-contact reference.",
-        "- SFC path: `MaterialSDF + LagrangianSDFContactOracle`.",
+        "- SFC path: `MaterialSDF + LagrangianSDFContactOracle`; the explicit short run uses the structured top-patch fast path for the regular cantilever surface.",
         "",
         "## Error Metrics vs Abaqus",
         "",
@@ -935,7 +1221,7 @@ def _write_summary(
             "",
             "## Interpretation",
             "",
-            "This is a short 0.05 s alignment check, not the final 3 s paper run. The comparison uses curve errors rather than bar charts. Contact-gap diagnostics are recomputed from the same Lagrangian SDF oracle for all three displacement histories so that the geometric metric is evaluated consistently.",
+            f"This is a short {duration:g} s alignment check, not the final 3 s paper run. The comparison uses curve errors rather than bar charts. The SFC timing reports the standalone solver path only; Abaqus timing reports the external analysis wall time when available.",
             "",
         ]
     )
@@ -948,23 +1234,29 @@ def run_short_comparison(
     abaqus_dir: Path,
     inp_path: Path,
     duration: float = 0.05,
-    dt: float = 0.001,
-    contact_stiffness: float = 5.0e10,
+    dt: float | None = None,
+    contact_stiffness: float = 5.0e9,
     damping_alpha: float = 0.0,
     skip_calculix: bool = False,
     skip_sfc: bool = False,
     calculix_timeout_seconds: int = 600,
     calculix_direct_dynamic: bool = False,
+    sfc_integrator: str = "explicit",
+    sfc_contact_backend: str = "structured-top",
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = build_short_model(duration=duration, dt=dt, inp_path=inp_path)
+    dt = float(model.dt)
     abaqus_rows = load_abaqus_reference_history(model, abaqus_dir, duration=duration, contact_stiffness=contact_stiffness)
+    abaqus_runtime = _read_runtime_metrics(abaqus_dir / "runtime_metrics.csv")
     rows_by_source: dict[str, list[Row]] = {"abaqus": abaqus_rows}
     command_rows: list[Row] = [
         {
             "solver": "abaqus",
-            "wall_time_seconds": "",
-            "details": "pre-existing commercial VTK reference frames loaded from disk",
+            "wall_time_seconds": abaqus_runtime.get("abaqus_analysis_wall_seconds", ""),
+            "total_workflow_wall_seconds": abaqus_runtime.get("total_workflow_wall_seconds", ""),
+            "fixed_dt_seconds": abaqus_runtime.get("fixed_dt_seconds", ""),
+            "details": "commercial VTK reference frames loaded from validation-only output directory",
         }
     ]
     if not skip_calculix:
@@ -985,6 +1277,8 @@ def run_short_comparison(
             model,
             contact_stiffness=contact_stiffness,
             damping_alpha=damping_alpha,
+            integrator=sfc_integrator,
+            contact_backend=sfc_contact_backend,
         )
         rows_by_source["sfc_lagrangian_sdf"] = sfc_rows
         command_rows.append(command_row)
@@ -1028,13 +1322,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--abaqus-dir", type=Path, default=DEFAULT_ABAQUS_DIR)
     parser.add_argument("--inp", type=Path, default=DEFAULT_ABAQUS_INP, help="Abaqus input deck used as the authoritative model source.")
     parser.add_argument("--duration", type=float, default=0.05)
-    parser.add_argument("--dt", type=float, default=0.001)
-    parser.add_argument("--contact-stiffness", type=float, default=5.0e10)
+    parser.add_argument("--dt", type=float, default=None, help="SFC integration increment; defaults to the direct Explicit increment parsed from the input deck.")
+    parser.add_argument("--contact-stiffness", type=float, default=5.0e9)
     parser.add_argument("--damping-alpha", type=float, default=0.0)
     parser.add_argument("--skip-calculix", action="store_true")
     parser.add_argument("--skip-sfc", action="store_true")
     parser.add_argument("--calculix-timeout-seconds", type=int, default=600)
     parser.add_argument("--calculix-direct-dynamic", action="store_true", help="Use fixed direct increments; default uses CalculiX automatic increments.")
+    parser.add_argument("--sfc-integrator", choices=("explicit", "newmark"), default="explicit")
+    parser.add_argument("--sfc-contact-backend", choices=("structured-top", "oracle"), default="structured-top")
     return parser.parse_args()
 
 
@@ -1045,13 +1341,15 @@ def main() -> None:
         abaqus_dir=args.abaqus_dir,
         inp_path=args.inp,
         duration=float(args.duration),
-        dt=float(args.dt),
+        dt=None if args.dt is None else float(args.dt),
         contact_stiffness=float(args.contact_stiffness),
         damping_alpha=float(args.damping_alpha),
         skip_calculix=bool(args.skip_calculix),
         skip_sfc=bool(args.skip_sfc),
         calculix_timeout_seconds=int(args.calculix_timeout_seconds),
         calculix_direct_dynamic=bool(args.calculix_direct_dynamic),
+        sfc_integrator=str(args.sfc_integrator),
+        sfc_contact_backend=str(args.sfc_contact_backend),
     )
     print("Commercial sphere-cantilever short comparison complete.")
     for key, path in outputs.items():
