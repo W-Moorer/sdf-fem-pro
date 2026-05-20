@@ -237,13 +237,33 @@ def _smooth_nodal_scalar(values: np.ndarray, adjacency: tuple[tuple[int, ...], .
     return out
 
 
-def _upper_bottom_triangles(mesh: BoxMesh) -> np.ndarray:
+def _upper_bottom_triangles(mesh: BoxMesh, *, diagonal_mode: str = "alternating") -> np.ndarray:
+    """Return oriented bottom-surface triangles for the master SDF field.
+
+    HEX8 bottom faces are quadrilateral.  The current dynamic field payload is
+    triangle based, so the quad must be triangulated before grid population.
+    ``alternating`` uses opposite diagonals on neighboring structured faces to
+    avoid a coherent diagonal bias across the full master surface.  This does
+    not change the represented planar surface, but it reduces directional
+    artifacts in closest-feature payload forces near element diagonals.
+    """
+
+    if diagonal_mode not in {"alternating", "02", "13"}:
+        raise ValueError("diagonal_mode must be 'alternating', '02', or '13'")
     faces: list[tuple[int, int, int]] = []
     for element_id in _bottom_element_ids(mesh):
         element = mesh.elements[int(element_id) - 1]
         quad = element[[0, 1, 2, 3]]
-        faces.append((int(quad[0]), int(quad[2]), int(quad[1])))
-        faces.append((int(quad[0]), int(quad[3]), int(quad[2])))
+        zero_based = int(element_id) - 1
+        j = zero_based // int(mesh.nx)
+        i = zero_based % int(mesh.nx)
+        use_02 = diagonal_mode == "02" or (diagonal_mode == "alternating" and (i + j) % 2 == 0)
+        if use_02:
+            faces.append((int(quad[0]), int(quad[2]), int(quad[1])))
+            faces.append((int(quad[0]), int(quad[3]), int(quad[2])))
+        else:
+            faces.append((int(quad[0]), int(quad[3]), int(quad[1])))
+            faces.append((int(quad[1]), int(quad[3]), int(quad[2])))
     return np.asarray(faces, dtype=np.int64)
 
 
@@ -959,6 +979,7 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
             vtk_frames.append((len(vtk_frames), t, frame_path))
         vm = np.concatenate((lower_fields["von_mises"], upper_fields["von_mises"]))
         strain = np.concatenate((lower_fields["engineering_strain_norm"], upper_fields["engineering_strain_norm"]))
+        displacement_norms = np.concatenate((np.linalg.norm(lower_u, axis=1), np.linalg.norm(upper_u, axis=1)))
         external_force = _upper_top_x_load(t, cfg, upper, lower_dofs, total_dofs)
         balance = M @ a + K @ u - response.force - external_force
         q_penetration = np.maximum(-np.asarray(response.gaps), 0.0)
@@ -991,7 +1012,8 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
                 "upper_bottom_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2])),
                 "upper_top_mean_z": float(np.mean(upper_x[upper_top_nodes, 2])),
                 "surface_gap_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2]) - np.mean(lower_x[lower_top_nodes, 2])),
-                "max_displacement_norm": float(max(np.max(np.linalg.norm(lower_u, axis=1)), np.max(np.linalg.norm(upper_u, axis=1)))),
+                "max_displacement_norm": float(np.max(displacement_norms)),
+                "p95_displacement_norm": float(np.percentile(displacement_norms, 95.0)),
                 "max_von_mises": float(np.max(vm)),
                 "p95_von_mises": float(np.percentile(vm, 95.0)),
                 "max_strain_norm": float(np.max(strain)),
@@ -1219,6 +1241,7 @@ try:
                 "upper_top_mean_z",
                 "surface_gap_mean_z",
                 "max_displacement_norm",
+                "p95_displacement_norm",
                 "normal_force",
                 "contact_integral_force",
                 "upper_reaction_force",
@@ -1336,6 +1359,7 @@ try:
                     "upper_top_mean_z": sum(upper_top_z) / len(upper_top_z) if upper_top_z else "",
                     "surface_gap_mean_z": (sum(upper_bottom_z) / len(upper_bottom_z) - (lower_zmax + sum(lower_top_u3) / len(lower_top_u3))) if upper_bottom_z and lower_top_u3 else "",
                     "max_displacement_norm": max(u_values) if u_values else "",
+                    "p95_displacement_norm": percentile(u_values, 95.0),
                     "normal_force": contact_integral_force,
                     "contact_integral_force": contact_integral_force,
                     "upper_reaction_force": abs(rf3),
@@ -1434,6 +1458,7 @@ def load_abaqus_history(metrics_csv: Path) -> list[Row]:
             "upper_top_mean_z",
             "surface_gap_mean_z",
             "max_displacement_norm",
+            "p95_displacement_norm",
             "normal_force",
             "contact_integral_force",
             "upper_reaction_force",
@@ -1507,7 +1532,7 @@ def _plot_curves(
         ("surface_gap_mean_z", "mean surface gap"),
         ("upper_reaction_force", "upper-surface reaction force"),
         ("nominal_contact_pressure", "nominal reaction pressure"),
-        ("max_displacement_norm", "max displacement norm"),
+        ("p95_displacement_norm", "95th percentile displacement norm"),
         ("p95_von_mises", "95th percentile von Mises"),
         ("p95_strain_norm", "95th percentile strain norm"),
     ]
@@ -1567,7 +1592,7 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
         "surface_gap_mean_z",
         "upper_reaction_force",
         "nominal_contact_pressure",
-        "max_displacement_norm",
+        "p95_displacement_norm",
         "p95_von_mises",
         "p95_strain_norm",
     ]

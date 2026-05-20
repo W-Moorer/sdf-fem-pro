@@ -128,6 +128,21 @@ def test_flexible_cube_contact_surfaces_have_expected_topology() -> None:
     assert normal[2] < 0.0
 
 
+def test_upper_bottom_triangles_alternate_diagonals_without_flipping_normals() -> None:
+    cfg = FlexibleCubeConfig(lower_nx=4, lower_ny=2, lower_nz=1, upper_nx=2, upper_ny=2, upper_nz=1)
+    _lower, upper = make_geometry(cfg)
+    fixed = _upper_bottom_triangles(upper, diagonal_mode="02")
+    alternating = _upper_bottom_triangles(upper, diagonal_mode="alternating")
+
+    assert fixed.shape == alternating.shape
+    assert not np.array_equal(fixed, alternating)
+    normals = np.cross(
+        upper.X[alternating[:, 1]] - upper.X[alternating[:, 0]],
+        upper.X[alternating[:, 2]] - upper.X[alternating[:, 0]],
+    )
+    assert np.all(normals[:, 2] < 0.0)
+
+
 def test_nodal_smoothed_pressure_projects_quadrature_pressure_by_area() -> None:
     cache = SurfaceQuadratureCache(
         node_ids=np.asarray([[0, 1], [0, 1]], dtype=np.int64),
