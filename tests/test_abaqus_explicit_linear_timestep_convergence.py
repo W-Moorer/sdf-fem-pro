@@ -29,6 +29,18 @@ def test_explicit_linear_input_uses_fixed_user_time_increment_and_no_bulk_viscos
     assert "*Output, field, time interval=1.000000000000e-03" in text
     assert "*Energy Output" in text
     assert "ALLKE, ALLIE, ALLSE, ALLVD, ALLWK, ETOTAL" in text
+    assert "*Contact Damping" not in text
+
+
+def test_explicit_linear_input_can_disable_default_contact_damping() -> None:
+    text = build_input_text(
+        ExplicitLinearConfig(duration=1.0, output_interval=0.001, fixed_dt=1.0e-6, contact_damping_fraction=0.0)
+    )
+
+    assert "*Contact Damping, definition=CRITICAL DAMPING FRACTION" in text
+    assert "0.000000000000e+00" in text
+    assert text.index("*Contact Damping") > text.index("*Surface Behavior")
+    assert text.index("*Contact Damping") < text.index("*Friction")
 
 
 def test_explicit_linear_config_preserves_sphere_drop_material_values() -> None:
@@ -40,6 +52,7 @@ def test_explicit_linear_config_preserves_sphere_drop_material_values() -> None:
     assert cfg.density == 1200.0
     assert cfg.young == 5.0e7
     assert cfg.poisson == 0.30
+    assert cfg.contact_damping_fraction is None
 
 
 def test_case_name_preserves_fractional_scientific_mantissa() -> None:

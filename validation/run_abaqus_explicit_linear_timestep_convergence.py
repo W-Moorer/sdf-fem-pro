@@ -75,6 +75,7 @@ class ExplicitLinearConfig:
     initial_gap: float = 0.02
     plane_half_width: float = 0.30
     contact_stiffness: float = LINEAR_PENALTY_STIFFNESS
+    contact_damping_fraction: float | None = None
 
     def common(self) -> CommonConfig:
         return CommonConfig(
@@ -90,7 +91,7 @@ class ExplicitLinearConfig:
 
 
 def _material_lines(cfg: ExplicitLinearConfig) -> list[str]:
-    return [
+    lines = [
         "*Material, name=BODY_MAT",
         "*Density",
         f"{cfg.density:.12e}",
@@ -99,9 +100,16 @@ def _material_lines(cfg: ExplicitLinearConfig) -> list[str]:
         "*Surface Interaction, name=FRICTIONLESS_LINEAR_PENALTY",
         "*Surface Behavior, pressure-overclosure=LINEAR",
         f"{cfg.contact_stiffness:.12e}",
-        "*Friction",
-        "0.",
     ]
+    if cfg.contact_damping_fraction is not None:
+        lines.extend(
+            [
+                "*Contact Damping, definition=CRITICAL DAMPING FRACTION",
+                f"{float(cfg.contact_damping_fraction):.12e}",
+            ]
+        )
+    lines.extend(["*Friction", "0."])
+    return lines
 
 
 def build_input_text(cfg: ExplicitLinearConfig) -> str:
@@ -301,6 +309,7 @@ def _run_case(
         "node_count": int(node_count),
         "element_count": int(element_count),
         "contact_stiffness": float(cfg.contact_stiffness),
+        "contact_damping_fraction": "" if cfg.contact_damping_fraction is None else float(cfg.contact_damping_fraction),
         "bulk_viscosity_linear": 0.0,
         "bulk_viscosity_quadratic": 0.0,
         "status": status,
@@ -329,6 +338,7 @@ def _failed_case_row(cfg: ExplicitLinearConfig, out_root: Path, exc: BaseExcepti
         "node_count": int(node_count),
         "element_count": int(element_count),
         "contact_stiffness": float(cfg.contact_stiffness),
+        "contact_damping_fraction": "" if cfg.contact_damping_fraction is None else float(cfg.contact_damping_fraction),
         "bulk_viscosity_linear": 0.0,
         "bulk_viscosity_quadratic": 0.0,
         "status": "command_failed",
@@ -568,6 +578,7 @@ def run_convergence(
     abaqus_command: str | None = None,
     convert_odb: bool = True,
     extract_energy: bool = True,
+    contact_damping_fraction: float | None = None,
 ) -> dict[str, Path]:
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -575,7 +586,12 @@ def run_convergence(
     histories: dict[str, list[Row]] = {}
     energy_histories: dict[str, list[Row]] = {}
     for fixed_dt in dt_values:
-        cfg = ExplicitLinearConfig(duration=float(duration), output_interval=float(output_interval), fixed_dt=float(fixed_dt))
+        cfg = ExplicitLinearConfig(
+            duration=float(duration),
+            output_interval=float(output_interval),
+            fixed_dt=float(fixed_dt),
+            contact_damping_fraction=contact_damping_fraction,
+        )
         try:
             row = _run_case(cfg, out_dir, abaqus_command=abaqus_command, convert_odb=convert_odb, extract_energy=extract_energy)
         except Exception as exc:  # Keep the rest of the time-step sweep running.
@@ -636,6 +652,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-interval", type=float, default=DEFAULT_OUTPUT_INTERVAL)
     parser.add_argument("--dt-values", type=float, nargs="+", default=list(DEFAULT_DT_VALUES))
     parser.add_argument("--abaqus-command", type=str, default=None)
+    parser.add_argument(
+        "--contact-damping-fraction",
+        type=float,
+        default=None,
+        help="Explicit critical damping fraction for Abaqus contact damping. Omit to keep Abaqus defaults.",
+    )
     parser.add_argument("--skip-odb-conversion", action="store_true")
     parser.add_argument("--skip-energy-extraction", action="store_true")
     return parser.parse_args()
@@ -651,6 +673,7 @@ def main() -> None:
         abaqus_command=args.abaqus_command,
         convert_odb=not bool(args.skip_odb_conversion),
         extract_energy=not bool(args.skip_energy_extraction),
+        contact_damping_fraction=args.contact_damping_fraction,
     )
     print("Abaqus Explicit linear-contact time-step convergence complete.")
     for key, value in outputs.items():
