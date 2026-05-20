@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse import block_diag
-from scipy.sparse.linalg import factorized, spsolve
+from scipy.sparse import block_diag, csr_matrix
+from scipy.sparse.linalg import spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -47,6 +47,7 @@ matplotlib.rcParams.update(
 import matplotlib.pyplot as plt  # noqa: E402
 
 from sfc.contact.field_contact import (  # noqa: E402
+    FieldSurfaceContactResponse,
     SurfaceQuadratureCache,
     quadrilateral_surface_quadrature_cache,
     surface_to_surface_field_penalty_response_vectorized,
@@ -73,6 +74,15 @@ Row = dict[str, Any]
 JOB_NAME = "flexible_cube_sdf_contact"
 
 
+def _hht_parameters(alpha: float) -> tuple[float, float]:
+    """Return the HHT/Newmark parameters used by the SFC implicit step."""
+
+    alpha_value = float(alpha)
+    if not (-1.0 / 3.0 <= alpha_value <= 0.0):
+        raise ValueError("HHT alpha must lie in [-1/3, 0]")
+    return 0.25 * (1.0 - alpha_value) ** 2, 0.5 - alpha_value
+
+
 @dataclass(frozen=True, slots=True)
 class FlexibleCubeConfig:
     lower_nx: int = 12
@@ -85,7 +95,7 @@ class FlexibleCubeConfig:
     dt: float = 0.001
     closure_time: float = 0.02
     closure: float = 0.20
-    initial_gap: float = -0.02
+    initial_gap: float = 0.01
     spacing: float = 0.30
     band_radius: float = 0.90
     quadrature_order: int = 2
@@ -94,7 +104,9 @@ class FlexibleCubeConfig:
     upper_young_modulus: float = 1200.0
     poisson_ratio: float = 0.30
     density: float = 1.0
+    mass_kind: str = "lumped"
     newmark_iterations: int = 12
+    hht_alpha: float = -0.05
     contact_tolerance: float = 1.0e-9
     residual_tolerance: float = 1.0e-8
     force_tolerance: float = 1.0e-8
@@ -249,8 +261,17 @@ def _workspace_from_contact_envelope(
     )
 
 
-def _footprint_mask(points: np.ndarray, upper_x: np.ndarray, *, tolerance: float) -> np.ndarray:
-    bottom = upper_x[np.isclose(upper_x[:, 2], float(np.min(upper_x[:, 2])), atol=1.0e-8)]
+def _footprint_mask(
+    points: np.ndarray,
+    upper_x: np.ndarray,
+    *,
+    tolerance: float,
+    bottom_node_ids: np.ndarray | None = None,
+) -> np.ndarray:
+    if bottom_node_ids is None:
+        bottom = upper_x[np.isclose(upper_x[:, 2], float(np.min(upper_x[:, 2])), atol=1.0e-8)]
+    else:
+        bottom = upper_x[np.asarray(bottom_node_ids, dtype=np.int64)]
     p = np.asarray(points, dtype=float)
     xmin, xmax = float(np.min(bottom[:, 0])), float(np.max(bottom[:, 0]))
     ymin, ymax = float(np.min(bottom[:, 1])), float(np.max(bottom[:, 1]))
@@ -264,6 +285,16 @@ def _filtered_cache(cache: SurfaceQuadratureCache, mask: np.ndarray) -> SurfaceQ
         node_ids=cache.node_ids[keep].copy(),
         weights=cache.weights[keep].copy(),
         area_weights=cache.area_weights[keep].copy(),
+    )
+
+
+def _empty_contact_response(n_total_dofs: int) -> FieldSurfaceContactResponse:
+    return FieldSurfaceContactResponse(
+        force=np.zeros(int(n_total_dofs), dtype=float),
+        stiffness=csr_matrix((int(n_total_dofs), int(n_total_dofs)), dtype=float),
+        constraints=(),
+        quadrature_weights=np.empty(0, dtype=float),
+        gaps=np.empty(0, dtype=float),
     )
 
 
@@ -350,8 +381,8 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             "*Amplitude, name=CLOSURE_AMP, time=TOTAL TIME",
             f"0., 0., {cfg.closure_time:.12e}, 1., {cfg.total_time:.12e}, 1.",
             "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO, inc=10000",
-            "*Dynamic, DIRECT, NOHAF",
-            f"{cfg.dt:.12e}, {cfg.total_time:.12e}",
+            f"*Dynamic, ALPHA={cfg.hht_alpha:.12e}, HAFTOL=1.0e-4",
+            f"{cfg.dt:.12e}, {cfg.total_time:.12e}, {cfg.dt * 1.0e-3:.12e}, {cfg.dt:.12e}",
             "*Boundary",
             "LOWER_BOTTOM_ASM, 1, 3, 0.",
             "UPPER_TOP_ASM, 1, 2, 0.",
@@ -362,6 +393,8 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             "U, V, RF",
             "*Element Output, directions=YES",
             "S, E, LE",
+            "*Contact Output",
+            "CSTRESS, CDISP",
             f"*Output, history, time interval={cfg.dt * max(1, cfg.output_stride):.12e}",
             "*Energy Output",
             "ALLKE, ALLIE, ALLSE, ALLWK, ETOTAL",
@@ -392,31 +425,37 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
     upper_dofs = upper_body.n_dofs
     total_dofs = lower_dofs + upper_dofs
     K = block_diag((assemble_stiffness_matrix(lower_body).tocsr(), assemble_stiffness_matrix(upper_body).tocsr()), format="csr")
-    M = block_diag((assemble_mass_matrix(lower_body, kind="consistent").tocsr(), assemble_mass_matrix(upper_body, kind="consistent").tocsr()), format="csr")
+    M = block_diag(
+        (
+            assemble_mass_matrix(lower_body, kind=cfg.mass_kind).tocsr(),
+            assemble_mass_matrix(upper_body, kind=cfg.mass_kind).tocsr(),
+        ),
+        format="csr",
+    )
     lower_contact_ids = _contact_lower_top_element_ids(lower, upper, cfg)
     lower_contact_quads = _top_quads_for_element_ids(lower, lower_contact_ids)
     upper_bottom_faces = _upper_bottom_triangles(upper)
     contact_cache = quadrilateral_surface_quadrature_cache(lower_contact_quads, lower.X, order=max(1, min(3, cfg.quadrature_order)))
     sdf_workspace = _workspace_from_contact_envelope(lower, upper, lower_contact_quads, cfg)
-    beta = 0.25
-    gamma = 0.5
+    beta, gamma = _hht_parameters(float(cfg.hht_alpha))
+    alpha = float(cfg.hht_alpha)
     dt = float(cfg.dt)
     c0 = 1.0 / (beta * dt * dt)
     u = np.zeros(total_dofs, dtype=float)
     v = np.zeros(total_dofs, dtype=float)
     a = np.zeros(total_dofs, dtype=float)
-    dofs0, u0, v0, a0 = _dirichlet_state(0.0, cfg, lower, upper, lower_dofs)
+    dofs0, u0, _v0, _a0 = _dirichlet_state(0.0, cfg, lower, upper, lower_dofs)
     u[dofs0] = u0
-    v[dofs0] = v0
-    # Abaqus reports zero initial reaction before the first dynamic increment.
-    # The prescribed boundary acceleration is enforced from the first step.
+    # Displacement boundary conditions are enforced on u. Boundary velocities
+    # and accelerations are then induced by the same Newmark/HHT recurrence as
+    # the free DOFs, matching Abaqus' displacement-control semantics.
+    v[dofs0] = 0.0
     a[dofs0] = 0.0
     free = _free_dofs(total_dofs, dofs0)
     upper_top_nodes = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.max(upper.X[:, 2]))))
     upper_top_z_dofs = lower_dofs + 3 * upper_top_nodes + 2
-    effective_free = (M * c0 + K).tocsc()[free[:, None], free]
-    solve_free = factorized(effective_free) if free.size else None
     lower_top_nodes = np.flatnonzero(np.isclose(lower.X[:, 2], float(np.max(lower.X[:, 2]))))
+    upper_bottom_nodes = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.min(upper.X[:, 2]))))
     history: list[Row] = []
     timing: list[Row] = []
     start = time.perf_counter()
@@ -428,34 +467,50 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
         lower_x = lower.X + lower_u
         upper_x = upper.X + upper_u
         all_q = contact_cache.points(lower_x)
-        active_cache = _filtered_cache(contact_cache, _footprint_mask(all_q, upper_x, tolerance=-0.25 * cfg.spacing))
+        active_cache = _filtered_cache(
+            contact_cache,
+            _footprint_mask(all_q, upper_x, tolerance=cfg.spacing, bottom_node_ids=upper_bottom_nodes),
+        )
         q_points = active_cache.points(lower_x)
         field_t0 = time.perf_counter()
-        master_sdf = sdf_workspace.build(upper_x, upper_bottom_faces, q_points)
-        field_elapsed = time.perf_counter() - field_t0
-        query_t0 = time.perf_counter()
-        response = surface_to_surface_field_penalty_response_vectorized(
-            lower_x,
-            lower_contact_quads,
-            master_sdf,
-            pressure_stiffness=cfg.pressure_stiffness,
-            n_total_dofs=total_dofs,
-            slave_x_reference=lower.X,
-            quadrature_cache=active_cache,
-            slave_dof_offset=0,
-            master_dof_offset=lower_dofs,
-        )
-        query_elapsed = time.perf_counter() - query_t0
+        if q_points.size == 0:
+            master_sdf = None
+            response = _empty_contact_response(total_dofs)
+            field_elapsed = 0.0
+            query_elapsed = 0.0
+        else:
+            master_sdf = sdf_workspace.build(upper_x, upper_bottom_faces, q_points)
+            field_elapsed = time.perf_counter() - field_t0
+            query_t0 = time.perf_counter()
+            response = surface_to_surface_field_penalty_response_vectorized(
+                lower_x,
+                lower_contact_quads,
+                master_sdf,
+                pressure_stiffness=cfg.pressure_stiffness,
+                n_total_dofs=total_dofs,
+                slave_x_reference=lower.X,
+                quadrature_cache=active_cache,
+                slave_dof_offset=0,
+                master_dof_offset=lower_dofs,
+            )
+            query_elapsed = time.perf_counter() - query_t0
         lower_fields = _element_fields(lower, u[:lower_dofs], E=cfg.lower_young_modulus, nu=cfg.poisson_ratio)
         upper_fields = _element_fields(upper, u[lower_dofs:], E=cfg.upper_young_modulus, nu=cfg.poisson_ratio)
         vm = np.concatenate((lower_fields["von_mises"], upper_fields["von_mises"]))
         strain = np.concatenate((lower_fields["engineering_strain_norm"], upper_fields["engineering_strain_norm"]))
         balance = M @ a + K @ u - response.force
+        contact_integral_force = float(
+            np.sum(cfg.pressure_stiffness * active_cache.area_weights * np.maximum(-np.asarray(response.gaps), 0.0))
+        )
+        upper_reaction_force = float(abs(np.sum(balance[upper_top_z_dofs])))
         history.append(
             {
                 "source": "sfc_lagrangian_sdf_two_flexible",
                 "time": t,
                 "top_mean_z_displacement": float(np.mean(lower_u[lower_top_nodes, 2])),
+                "upper_bottom_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2])),
+                "upper_top_mean_z": float(np.mean(upper_x[upper_top_nodes, 2])),
+                "surface_gap_mean_z": float(np.mean(upper_x[upper_bottom_nodes, 2]) - np.mean(lower_x[lower_top_nodes, 2])),
                 "max_displacement_norm": float(max(np.max(np.linalg.norm(lower_u, axis=1)), np.max(np.linalg.norm(upper_u, axis=1)))),
                 "max_von_mises": float(np.max(vm)),
                 "p95_von_mises": float(np.percentile(vm, 95.0)),
@@ -464,14 +519,17 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
                 "min_gap": float(response.min_gap),
                 "max_penetration": float(response.max_penetration),
                 "active_samples": int(response.active_count),
-                "contact_integral_force": float(np.sum(cfg.pressure_stiffness * active_cache.area_weights * np.maximum(-np.asarray(response.gaps), 0.0))),
-                "normal_force": float(abs(np.sum(balance[upper_top_z_dofs]))),
+                "contact_integral_force": contact_integral_force,
+                "normal_force": contact_integral_force,
+                "upper_reaction_force": upper_reaction_force,
+                "min_contact_opening": float(response.min_gap),
+                "max_contact_pressure": float(cfg.pressure_stiffness * response.max_penetration),
             }
         )
         timing.append(
             {
                 "time": t,
-                "field_update_seconds": float(master_sdf.stats.update_seconds),
+                "field_update_seconds": 0.0 if master_sdf is None else float(master_sdf.stats.update_seconds),
                 "field_query_seconds": float(query_elapsed),
                 "field_elapsed_seconds": float(field_elapsed),
                 "active_samples": int(response.active_count),
@@ -480,8 +538,9 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
         )
         if step == steps:
             break
+        previous_rhs_balance = response.force - K @ u
         next_t = float((step + 1) * dt)
-        next_dofs, next_u_bc, next_v_bc, next_a_bc = _dirichlet_state(next_t, cfg, lower, upper, lower_dofs)
+        next_dofs, next_u_bc, _next_v_bc, _next_a_bc = _dirichlet_state(next_t, cfg, lower, upper, lower_dofs)
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
         u_guess = u_pred.copy()
@@ -493,38 +552,43 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
             lower_guess_x = lower.X + lower_guess_u
             upper_guess_x = upper.X + upper_guess_u
             all_q_next = contact_cache.points(lower_guess_x)
-            active_cache_next = _filtered_cache(contact_cache, _footprint_mask(all_q_next, upper_guess_x, tolerance=-0.25 * cfg.spacing))
-            q_next = active_cache_next.points(lower_guess_x)
-            sdf_next = sdf_workspace.build(upper_guess_x, upper_bottom_faces, q_next)
-            response_next = surface_to_surface_field_penalty_response_vectorized(
-                lower_guess_x,
-                lower_contact_quads,
-                sdf_next,
-                pressure_stiffness=cfg.pressure_stiffness,
-                n_total_dofs=total_dofs,
-                slave_x_reference=lower.X,
-                quadrature_cache=active_cache_next,
-                slave_dof_offset=0,
-                master_dof_offset=lower_dofs,
-                assemble_stiffness=True,
+            active_cache_next = _filtered_cache(
+                contact_cache,
+                _footprint_mask(all_q_next, upper_guess_x, tolerance=cfg.spacing, bottom_node_ids=upper_bottom_nodes),
             )
+            q_next = active_cache_next.points(lower_guess_x)
+            if q_next.size == 0:
+                response_next = _empty_contact_response(total_dofs)
+            else:
+                sdf_next = sdf_workspace.build(upper_guess_x, upper_bottom_faces, q_next)
+                response_next = surface_to_surface_field_penalty_response_vectorized(
+                    lower_guess_x,
+                    lower_contact_quads,
+                    sdf_next,
+                    pressure_stiffness=cfg.pressure_stiffness,
+                    n_total_dofs=total_dofs,
+                    slave_x_reference=lower.X,
+                    quadrature_cache=active_cache_next,
+                    slave_dof_offset=0,
+                    master_dof_offset=lower_dofs,
+                    assemble_stiffness=True,
+                )
             f_contact = response_next.force
             a_guess = c0 * (u_guess - u_pred)
-            a_guess[next_dofs] = next_a_bc
-            residual = M @ a_guess + K @ u_guess - f_contact
+            residual = M @ a_guess + (1.0 + alpha) * (K @ u_guess - f_contact) + alpha * previous_rhs_balance
             correction = np.zeros(total_dofs, dtype=float)
             residual_norm = float(np.linalg.norm(residual[free])) if free.size else 0.0
             residual_scale = max(
                 1.0,
                 float(np.linalg.norm((M @ a_guess)[free])) if free.size else 0.0,
-                float(np.linalg.norm((K @ u_guess)[free])) if free.size else 0.0,
+                float(np.linalg.norm(((1.0 + alpha) * K @ u_guess)[free])) if free.size else 0.0,
                 float(np.linalg.norm(f_contact[free])) if free.size else 0.0,
             )
             force_delta = 0.0 if previous_contact_force is None else float(np.linalg.norm(f_contact - previous_contact_force))
             force_scale = max(1.0, float(np.linalg.norm(f_contact)))
             active_stable = previous_active_count is not None and int(response_next.active_count) == int(previous_active_count)
-            if solve_free is not None:
-                tangent = (M * c0 + K + response_next.stiffness).tocsc()
+            if free.size:
+                tangent = (M * c0 + (K + response_next.stiffness) * (1.0 + alpha)).tocsc()
                 correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
             u_guess[free] += correction[free]
             u_guess[next_dofs] = next_u_bc
@@ -544,8 +608,6 @@ def run_sfc(cfg: FlexibleCubeConfig) -> tuple[list[Row], list[Row], float]:
         a = c0 * (u - u_pred)
         v = v_pred + gamma * dt * a
         u[next_dofs] = next_u_bc
-        v[next_dofs] = next_v_bc
-        a[next_dofs] = next_a_bc
     return history, timing, time.perf_counter() - start
 
 
@@ -566,6 +628,29 @@ def norm3(data):
 
 def tensor_norm(data):
     return math.sqrt(sum(float(v) * float(v) for v in data))
+
+
+def scalar_data(data):
+    try:
+        return float(data)
+    except Exception:
+        return float(data[0])
+
+
+def tri_area(a, b, c):
+    ax, ay, az = [float(v) for v in a]
+    bx, by, bz = [float(v) for v in b]
+    cx, cy, cz = [float(v) for v in c]
+    ux, uy, uz = bx - ax, by - ay, bz - az
+    vx, vy, vz = cx - ax, cy - ay, cz - az
+    wx = uy * vz - uz * vy
+    wy = uz * vx - ux * vz
+    wz = ux * vy - uy * vx
+    return 0.5 * math.sqrt(wx * wx + wy * wy + wz * wz)
+
+
+def quad_area(coords):
+    return tri_area(coords[0], coords[1], coords[2]) + tri_area(coords[0], coords[2], coords[3])
 
 
 def von_mises(data):
@@ -590,17 +675,44 @@ try:
     upper = assembly.instances["UPPER-1"]
     lower_zmax = max(float(node.coordinates[2]) for node in lower.nodes)
     upper_zmax = max(float(node.coordinates[2]) for node in upper.nodes)
+    lower_node_coords = dict((int(node.label), tuple(float(v) for v in node.coordinates)) for node in lower.nodes)
     lower_top = set(int(node.label) for node in lower.nodes if abs(float(node.coordinates[2]) - lower_zmax) < 1.0e-8)
     upper_top = set(int(node.label) for node in upper.nodes if abs(float(node.coordinates[2]) - upper_zmax) < 1.0e-8)
+    upper_zmin = min(float(node.coordinates[2]) for node in upper.nodes)
+    upper_bottom = set(int(node.label) for node in upper.nodes if abs(float(node.coordinates[2]) - upper_zmin) < 1.0e-8)
+    lower_top_area = dict((label, 0.0) for label in lower_top)
+    for element in lower.elements:
+        conn = [int(label) for label in element.connectivity]
+        if len(conn) < 8:
+            continue
+        face = conn[4:8]
+        if not all(label in lower_top for label in face):
+            continue
+        area = quad_area([lower_node_coords[label] for label in face])
+        for label in face:
+            lower_top_area[label] = lower_top_area.get(label, 0.0) + 0.25 * area
     step = odb.steps[list(odb.steps.keys())[0]]
+    keys_path = out_path + ".field_outputs.csv"
+    with open(keys_path, "w", newline="") as key_handle:
+        key_writer = csv.writer(key_handle)
+        key_writer.writerow(["time", "field_outputs"])
+        for frame in step.frames:
+            key_writer.writerow([float(frame.frameValue), ";".join(sorted(frame.fieldOutputs.keys()))])
     with open(out_path, "w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
                 "time",
                 "top_mean_z_displacement",
+                "upper_bottom_mean_z",
+                "upper_top_mean_z",
+                "surface_gap_mean_z",
                 "max_displacement_norm",
                 "normal_force",
+                "contact_integral_force",
+                "upper_reaction_force",
+                "min_contact_opening",
+                "max_contact_pressure",
                 "p95_von_mises",
                 "max_von_mises",
                 "p95_strain_norm",
@@ -611,6 +723,8 @@ try:
         for frame in step.frames:
             u_values = []
             lower_top_u3 = []
+            upper_bottom_z = []
+            upper_top_z = []
             if "U" in frame.fieldOutputs:
                 for value in frame.fieldOutputs["U"].values:
                     inst = getattr(value, "instance", None)
@@ -619,6 +733,10 @@ try:
                     u_values.append(norm3(value.data))
                     if inst.name.upper() == "LOWER-1" and int(value.nodeLabel) in lower_top:
                         lower_top_u3.append(float(value.data[2]))
+                    if inst.name.upper() == "UPPER-1" and int(value.nodeLabel) in upper_bottom:
+                        upper_bottom_z.append(float(upper.nodes[int(value.nodeLabel) - 1].coordinates[2]) + float(value.data[2]))
+                    if inst.name.upper() == "UPPER-1" and int(value.nodeLabel) in upper_top:
+                        upper_top_z.append(float(upper.nodes[int(value.nodeLabel) - 1].coordinates[2]) + float(value.data[2]))
             rf3 = 0.0
             if "RF" in frame.fieldOutputs:
                 for value in frame.fieldOutputs["RF"].values:
@@ -643,12 +761,68 @@ try:
                     inst = getattr(value, "instance", None)
                     if inst is not None and inst.name.upper() in ("LOWER-1", "UPPER-1"):
                         strain_values.append(tensor_norm(value.data))
+            pressure_by_node = {}
+            pressure_values = []
+            for prefix in ("CPRESS", "CSTRESS"):
+                matching_fields = [
+                    field
+                    for name, field in frame.fieldOutputs.items()
+                    if str(name).strip().upper().startswith(prefix)
+                ]
+                for field in matching_fields:
+                    for value in field.values:
+                        inst = getattr(value, "instance", None)
+                        node_label = getattr(value, "nodeLabel", None)
+                        if node_label is None:
+                            continue
+                        if inst is not None and inst.name.upper() != "LOWER-1":
+                            continue
+                        if int(node_label) not in lower_top_area:
+                            continue
+                        pressure = abs(scalar_data(value.data))
+                        pressure_by_node[int(node_label)] = max(pressure_by_node.get(int(node_label), 0.0), pressure)
+                        pressure_values.append(pressure)
+                if pressure_by_node:
+                    break
+            contact_integral_force = ""
+            if pressure_by_node:
+                total = 0.0
+                for label, pressure in pressure_by_node.items():
+                    total += float(pressure) * float(lower_top_area.get(int(label), 0.0))
+                contact_integral_force = total
+            opening_values = []
+            for prefix in ("COPEN", "CDISP"):
+                matching_fields = [
+                    field
+                    for name, field in frame.fieldOutputs.items()
+                    if str(name).strip().upper().startswith(prefix)
+                ]
+                for field in matching_fields:
+                    for value in field.values:
+                        inst = getattr(value, "instance", None)
+                        node_label = getattr(value, "nodeLabel", None)
+                        if node_label is None:
+                            continue
+                        if inst is not None and inst.name.upper() != "LOWER-1":
+                            continue
+                        if int(node_label) not in lower_top_area:
+                            continue
+                        opening_values.append(scalar_data(value.data))
+                if opening_values:
+                    break
             writer.writerow(
                 {
                     "time": float(frame.frameValue),
                     "top_mean_z_displacement": sum(lower_top_u3) / len(lower_top_u3) if lower_top_u3 else "",
+                    "upper_bottom_mean_z": sum(upper_bottom_z) / len(upper_bottom_z) if upper_bottom_z else "",
+                    "upper_top_mean_z": sum(upper_top_z) / len(upper_top_z) if upper_top_z else "",
+                    "surface_gap_mean_z": (sum(upper_bottom_z) / len(upper_bottom_z) - (lower_zmax + sum(lower_top_u3) / len(lower_top_u3))) if upper_bottom_z and lower_top_u3 else "",
                     "max_displacement_norm": max(u_values) if u_values else "",
-                    "normal_force": abs(rf3),
+                    "normal_force": contact_integral_force,
+                    "contact_integral_force": contact_integral_force,
+                    "upper_reaction_force": abs(rf3),
+                    "min_contact_opening": min(opening_values) if opening_values else "",
+                    "max_contact_pressure": max(pressure_values) if pressure_values else "",
                     "p95_von_mises": percentile(vm_values, 95.0),
                     "max_von_mises": max(vm_values) if vm_values else "",
                     "p95_strain_norm": percentile(strain_values, 95.0),
@@ -729,8 +903,15 @@ def load_abaqus_history(metrics_csv: Path) -> list[Row]:
         item: Row = {"source": "abaqus_standard_flexible_cube", "time": float(row["time"])}
         for key in (
             "top_mean_z_displacement",
+            "upper_bottom_mean_z",
+            "upper_top_mean_z",
+            "surface_gap_mean_z",
             "max_displacement_norm",
             "normal_force",
+            "contact_integral_force",
+            "upper_reaction_force",
+            "min_contact_opening",
+            "max_contact_pressure",
             "p95_von_mises",
             "max_von_mises",
             "p95_strain_norm",
@@ -773,8 +954,9 @@ def _plot_curves(out_dir: Path, abaqus_rows: list[Row], sfc_rows: list[Row], met
     metric_by_name = {str(row["metric"]): row for row in metrics}
     keys = [
         ("top_mean_z_displacement", "lower top mean z displacement"),
+        ("surface_gap_mean_z", "mean surface gap"),
+        ("max_contact_pressure", "maximum contact pressure"),
         ("max_displacement_norm", "max displacement norm"),
-        ("normal_force", "upper-top reaction force"),
         ("p95_von_mises", "95th percentile von Mises"),
         ("p95_strain_norm", "95th percentile strain norm"),
     ]
@@ -807,7 +989,14 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
     sfc_rows, sfc_timing_rows, sfc_wall = run_sfc(cfg)
     metrics = [
         _metric(sfc_rows, abaqus_rows, key)
-        for key in ("top_mean_z_displacement", "max_displacement_norm", "normal_force", "p95_von_mises", "p95_strain_norm")
+        for key in (
+            "top_mean_z_displacement",
+            "surface_gap_mean_z",
+            "max_contact_pressure",
+            "max_displacement_norm",
+            "p95_von_mises",
+            "p95_strain_norm",
+        )
     ]
     timing = [
         abaqus_timing,
@@ -833,6 +1022,7 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
         f"- Duration: `{cfg.total_time}` s",
         f"- Time step: `{cfg.dt}` s",
         f"- Contact stiffness: `{cfg.pressure_stiffness}`",
+        f"- Mass matrix: `{cfg.mass_kind}`",
         "- Contact: frictionless linear pressure-overclosure, two flexible bodies",
         f"- Plot: `{plot}`",
         "",
@@ -869,7 +1059,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=0.001)
     parser.add_argument("--total-time", type=float, default=0.04)
     parser.add_argument("--closure", type=float, default=0.20)
-    parser.add_argument("--initial-gap", type=float, default=-0.02)
+    parser.add_argument("--initial-gap", type=float, default=0.01)
     return parser.parse_args()
 
 

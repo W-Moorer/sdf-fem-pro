@@ -31,7 +31,10 @@ def test_flexible_cube_deck_uses_two_c3d8_flexible_bodies() -> None:
     assert "LOWER_TOP_SURF, UPPER_BOTTOM_SURF" in text
     assert "*Surface Behavior, pressure-overclosure=LINEAR" in text
     assert "*Friction\n0." in text
+    assert "*Contact Output" in text
+    assert "CSTRESS, CDISP" in text
     assert "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO" in text
+    assert "*Dynamic, ALPHA=-5.000000000000e-02, HAFTOL=1.0e-4" in text
     assert "S, E, LE" in text
     assert "U, V, RF" in text
 
