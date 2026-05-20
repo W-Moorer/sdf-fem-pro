@@ -13,6 +13,7 @@ from validation.run_fig9_linear_implicit_sfc_abaqus_comparison import (
     Fig9Config,
     _driver_master_faces,
     _lower_contact_top_element_ids,
+    _top_quads_for_element_ids,
     build_abaqus_input_text,
     make_geometry,
 )
@@ -62,3 +63,14 @@ def test_fig9_contact_patch_tracks_driver_sweep() -> None:
     selected = _lower_contact_top_element_ids(lower, driver_ref, cfg)
 
     assert 0 < selected.size < lower.nx * lower.ny
+
+
+def test_fig9_contact_patch_uses_c3d8_top_quads() -> None:
+    cfg = Fig9Config(nx=12, ny=6, nz=3, driver_nx=6, driver_ny=6, shift_x=2.0)
+    lower, driver_ref, _driver_faces = make_geometry(cfg)
+    selected = _lower_contact_top_element_ids(lower, driver_ref, cfg)
+    quads = _top_quads_for_element_ids(lower, selected)
+
+    assert quads.shape == (selected.size, 4)
+    assert np.all(quads >= 0)
+    assert int(quads.max()) < lower.X.shape[0]

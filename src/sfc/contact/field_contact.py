@@ -186,7 +186,7 @@ class FieldContactMatrixFreeStiffness:
 
 @dataclass(frozen=True, slots=True)
 class SurfaceQuadratureCache:
-    """Cached slave-triangle quadrature topology and area weights."""
+    """Cached slave-surface quadrature topology and area weights."""
 
     node_ids: np.ndarray
     weights: np.ndarray
@@ -329,6 +329,61 @@ def triangle_surface_quadrature_cache(
         node_ids=np.vstack(node_ids).astype(np.int64, copy=False),
         weights=np.vstack(sample_weights).astype(float, copy=False),
         area_weights=np.asarray(weights, dtype=float),
+    )
+
+
+def quadrilateral_surface_quadrature_cache(
+    slave_quads: np.ndarray,
+    slave_x_reference: np.ndarray,
+    *,
+    order: int = 2,
+) -> SurfaceQuadratureCache:
+    """Build reusable tensor-product Gauss quadrature for four-node faces.
+
+    The node ordering is expected to be the physical face loop
+    ``[(-1,-1), (1,-1), (1,1), (-1,1)]``.  The returned shape weights are the
+    bilinear Q4 face functions evaluated at the Gauss points, and
+    ``area_weights`` contain the physical surface Jacobian multiplied by the
+    tensor-product Gauss weights.
+    """
+
+    quads = np.asarray(slave_quads, dtype=np.int64)
+    X = np.asarray(slave_x_reference, dtype=float)
+    if quads.ndim != 2 or quads.shape[1] != 4:
+        raise ValueError("slave_quads must have shape (n_faces, 4)")
+    if X.ndim != 2 or X.shape[1] != 3:
+        raise ValueError("slave_x_reference must have shape (n_nodes, 3)")
+    if quads.size and (int(quads.min()) < 0 or int(quads.max()) >= X.shape[0]):
+        raise ValueError("slave_quads reference nodes outside slave_x_reference")
+
+    points_1d, weights_1d = _gauss_legendre_1d(order)
+    node_ids: list[np.ndarray] = []
+    sample_weights: list[np.ndarray] = []
+    area_weights: list[float] = []
+    for quad in quads:
+        coords = X[quad]
+        for xi, wx in zip(points_1d, weights_1d, strict=True):
+            for eta, wy in zip(points_1d, weights_1d, strict=True):
+                shape = _q4_shape_functions(float(xi), float(eta))
+                dxi, deta = _q4_shape_derivatives(float(xi), float(eta))
+                tangent_xi = dxi @ coords
+                tangent_eta = deta @ coords
+                jac = float(np.linalg.norm(np.cross(tangent_xi, tangent_eta)))
+                if jac <= 0.0:
+                    continue
+                node_ids.append(quad.copy())
+                sample_weights.append(shape)
+                area_weights.append(jac * float(wx) * float(wy))
+    if not node_ids:
+        return SurfaceQuadratureCache(
+            node_ids=np.empty((0, 4), dtype=np.int64),
+            weights=np.empty((0, 4), dtype=float),
+            area_weights=np.empty(0, dtype=float),
+        )
+    return SurfaceQuadratureCache(
+        node_ids=np.vstack(node_ids).astype(np.int64, copy=False),
+        weights=np.vstack(sample_weights).astype(float, copy=False),
+        area_weights=np.asarray(area_weights, dtype=float),
     )
 
 
@@ -918,6 +973,52 @@ def _make_batch_contact_matrix_free_stiffness(
         slave_dof_offset=int(slave_dof_offset),
         master_dof_offset=int(master_dof_offset),
     )
+
+
+def _gauss_legendre_1d(order: int) -> tuple[np.ndarray, np.ndarray]:
+    if int(order) == 1:
+        return np.asarray([0.0], dtype=float), np.asarray([2.0], dtype=float)
+    if int(order) == 2:
+        a = 1.0 / np.sqrt(3.0)
+        return np.asarray([-a, a], dtype=float), np.asarray([1.0, 1.0], dtype=float)
+    if int(order) == 3:
+        a = np.sqrt(3.0 / 5.0)
+        return np.asarray([-a, 0.0, a], dtype=float), np.asarray([5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0], dtype=float)
+    raise ValueError("quadrilateral quadrature order must be 1, 2, or 3")
+
+
+def _q4_shape_functions(xi: float, eta: float) -> np.ndarray:
+    return 0.25 * np.asarray(
+        [
+            (1.0 - xi) * (1.0 - eta),
+            (1.0 + xi) * (1.0 - eta),
+            (1.0 + xi) * (1.0 + eta),
+            (1.0 - xi) * (1.0 + eta),
+        ],
+        dtype=float,
+    )
+
+
+def _q4_shape_derivatives(xi: float, eta: float) -> tuple[np.ndarray, np.ndarray]:
+    dxi = 0.25 * np.asarray(
+        [
+            -(1.0 - eta),
+            1.0 - eta,
+            1.0 + eta,
+            -(1.0 + eta),
+        ],
+        dtype=float,
+    )
+    deta = 0.25 * np.asarray(
+        [
+            -(1.0 - xi),
+            -(1.0 + xi),
+            1.0 + xi,
+            1.0 - xi,
+        ],
+        dtype=float,
+    )
+    return dxi, deta
 
 
 def _triangle_quadrature_rule(order: int) -> tuple[np.ndarray, np.ndarray]:

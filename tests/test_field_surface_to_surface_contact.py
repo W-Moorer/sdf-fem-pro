@@ -7,6 +7,7 @@ from scipy.sparse import eye
 from sfc.sdf.dynamic_narrow_band_sdf import DynamicNarrowBandSDF
 from sfc.contact import (
     node_to_surface_field_penalty_response,
+    quadrilateral_surface_quadrature_cache,
     surface_to_surface_field_penalty_response,
     surface_to_surface_field_penalty_response_vectorized,
     triangle_surface_quadrature_cache,
@@ -47,6 +48,69 @@ def test_triangle_surface_quadrature_weights_integrate_face_area() -> None:
         for sample in samples:
             assert set(sample.node_ids.tolist()) == {0, 1, 2}
             assert float(np.sum(sample.weights)) == pytest.approx(1.0)
+
+
+def test_quadrilateral_surface_quadrature_integrates_face_area_and_shape_weights() -> None:
+    x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+
+    for order, expected_count in [(1, 1), (2, 4), (3, 9)]:
+        cache = quadrilateral_surface_quadrature_cache(quads, x, order=order)
+        assert cache.node_ids.shape == (expected_count, 4)
+        assert cache.weights.shape == (expected_count, 4)
+        assert cache.area_weights.shape == (expected_count,)
+        assert float(np.sum(cache.area_weights)) == pytest.approx(2.0)
+        assert np.allclose(np.sum(cache.weights, axis=1), 1.0)
+        assert np.all(cache.weights >= 0.0)
+
+
+def test_vectorized_quadrilateral_surface_response_integrates_constant_plane_gap() -> None:
+    slave_x = np.asarray(
+        [
+            [0.0, 0.0, -0.1],
+            [1.0, 0.0, -0.1],
+            [1.0, 1.0, -0.1],
+            [0.0, 1.0, -0.1],
+        ],
+        dtype=float,
+    )
+    slave_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    cache = quadrilateral_surface_quadrature_cache(slave_quads, slave_x, order=2)
+    master_x = np.asarray([[-1.0, -1.0, 0.0], [2.0, -1.0, 0.0], [2.0, 2.0, 0.0], [-1.0, 2.0, 0.0]])
+    master_faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+    sdf = DynamicNarrowBandSDF.build_required_points(
+        master_x,
+        master_faces,
+        cache.points(slave_x),
+        spacing=0.25,
+        band_radius=0.5,
+        padding=0.5,
+        cell_size=0.25,
+    )
+
+    response = surface_to_surface_field_penalty_response_vectorized(
+        slave_x,
+        slave_quads,
+        sdf,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        assemble_stiffness=True,
+    )
+
+    assert response.active_count == 4
+    assert response.min_gap == pytest.approx(-0.1)
+    assert float(np.sum(response.quadrature_weights)) == pytest.approx(1.0)
+    assert float(np.sum(response.force[:12].reshape((-1, 3))[:, 2])) == pytest.approx(1.0)
 
 
 def test_surface_to_surface_response_area_integrates_constant_plane_gap() -> None:

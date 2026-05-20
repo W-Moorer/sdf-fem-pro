@@ -47,8 +47,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from sfc.contact.field_contact import (  # noqa: E402
     SurfaceQuadratureCache,
+    quadrilateral_surface_quadrature_cache,
     surface_to_surface_field_penalty_response_vectorized,
-    triangle_surface_quadrature_cache,
 )
 from sfc.fem import DeformableBody  # noqa: E402
 from sfc.fem.assembler import assemble_mass_matrix, assemble_stiffness_matrix  # noqa: E402
@@ -92,9 +92,11 @@ class Fig9Config:
     young_modulus: float = 1200.0
     poisson_ratio: float = 0.30
     density: float = 1.0
-    newmark_iterations: int = 4
+    newmark_iterations: int = 12
     use_contact_tangent: bool = True
     contact_tolerance: float = 1.0e-9
+    residual_tolerance: float = 1.0e-8
+    force_tolerance: float = 1.0e-8
     output_stride: int = 1
 
 
@@ -184,13 +186,12 @@ def _lower_contact_top_element_ids(mesh: BoxMesh, driver_ref: np.ndarray, cfg: F
     return np.asarray(ids, dtype=np.int64)
 
 
-def _top_triangles_for_element_ids(mesh: BoxMesh, element_ids_1based: np.ndarray) -> np.ndarray:
-    faces: list[tuple[int, int, int]] = []
+def _top_quads_for_element_ids(mesh: BoxMesh, element_ids_1based: np.ndarray) -> np.ndarray:
+    faces: list[tuple[int, int, int, int]] = []
     for element_id in np.asarray(element_ids_1based, dtype=np.int64):
         element = mesh.elements[int(element_id) - 1]
         quad = element[[4, 5, 6, 7]]
-        faces.append((int(quad[0]), int(quad[1]), int(quad[2])))
-        faces.append((int(quad[0]), int(quad[2]), int(quad[3])))
+        faces.append((int(quad[0]), int(quad[1]), int(quad[2]), int(quad[3])))
     return np.asarray(faces, dtype=np.int64)
 
 
@@ -388,9 +389,9 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
     fixed = _fixed_bottom_dofs(lower)
     free = _free_dofs(body.n_dofs, fixed)
     lower_contact_element_ids = _lower_contact_top_element_ids(lower, driver_ref, cfg)
-    lower_contact_faces = _top_triangles_for_element_ids(lower, lower_contact_element_ids)
+    lower_contact_faces = _top_quads_for_element_ids(lower, lower_contact_element_ids)
     driver_master_faces = _driver_master_faces(driver_faces)
-    contact_cache = triangle_surface_quadrature_cache(lower_contact_faces, lower.X, order=cfg.quadrature_order)
+    contact_cache = quadrilateral_surface_quadrature_cache(lower_contact_faces, lower.X, order=max(1, min(3, cfg.quadrature_order)))
     sdf_workspace = _workspace_from_contact_envelope(lower, driver_ref, lower_contact_faces, cfg)
     beta = 0.25
     gamma = 0.5
@@ -464,6 +465,8 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
         u_pred = u + dt * v + dt * dt * (0.5 - beta) * a
         v_pred = v + dt * (1.0 - gamma) * a
         u_guess = u_pred.copy()
+        previous_contact_force: np.ndarray | None = None
+        previous_active_count: int | None = None
         for _iteration in range(max(1, cfg.newmark_iterations)):
             x_guess = lower.X + u_guess.reshape((-1, 3))
             driver_next = _driver_positions(driver_ref, next_t, cfg)
@@ -487,6 +490,20 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
             a_guess = c0 * (u_guess - u_pred)
             residual = M @ a_guess + K @ u_guess - f_contact
             correction = np.zeros(body.n_dofs, dtype=float)
+            residual_norm = float(np.linalg.norm(residual[free])) if free.size else 0.0
+            residual_scale = max(
+                1.0,
+                float(np.linalg.norm((M @ a_guess)[free])) if free.size else 0.0,
+                float(np.linalg.norm((K @ u_guess)[free])) if free.size else 0.0,
+                float(np.linalg.norm(f_contact[free])) if free.size else 0.0,
+            )
+            force_delta = (
+                0.0
+                if previous_contact_force is None
+                else float(np.linalg.norm(f_contact - previous_contact_force))
+            )
+            force_scale = max(1.0, float(np.linalg.norm(f_contact)))
+            active_stable = previous_active_count is not None and int(response_next.active_count) == int(previous_active_count)
             if solve_free is not None:
                 if bool(cfg.use_contact_tangent):
                     tangent = (M * c0 + K + response_next.stiffness[: body.n_dofs, : body.n_dofs]).tocsc()
@@ -496,7 +513,17 @@ def run_sfc(cfg: Fig9Config) -> tuple[list[Row], list[Row], float]:
             u_guess[free] += correction[free]
             if fixed.size:
                 u_guess[fixed] = 0.0
-            if float(np.linalg.norm(correction[free])) <= float(cfg.contact_tolerance) * max(1.0, float(np.linalg.norm(u_guess[free]))):
+            correction_norm = float(np.linalg.norm(correction[free])) if free.size else 0.0
+            correction_scale = max(1.0, float(np.linalg.norm(u_guess[free])) if free.size else 0.0)
+            converged = (
+                residual_norm <= float(cfg.residual_tolerance) * residual_scale
+                and correction_norm <= float(cfg.contact_tolerance) * correction_scale
+                and force_delta <= float(cfg.force_tolerance) * force_scale
+                and (active_stable or int(response_next.active_count) == 0)
+            )
+            previous_contact_force = f_contact.copy()
+            previous_active_count = int(response_next.active_count)
+            if converged:
                 break
         u = u_guess
         a = c0 * (u - u_pred)
