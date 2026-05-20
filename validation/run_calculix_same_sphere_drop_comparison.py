@@ -70,6 +70,8 @@ def build_calculix_model_from_abaqus(
     hht_alpha: float,
     output_frequency: int = 1,
     direct_dynamic: bool = False,
+    explicit_dynamic: bool = False,
+    friction_coefficient: float | None = None,
 ) -> DropModel:
     """Return a CalculiX model using the same C3D4 body and physical settings."""
 
@@ -111,6 +113,8 @@ def build_calculix_model_from_abaqus(
         contact_smoothing_epsilon=0.0,
         hht_alpha=float(hht_alpha),
         model_source="abaqus_implicit_sphere_drop_inp",
+        explicit_dynamic=bool(explicit_dynamic),
+        friction_coefficient=friction_coefficient,
     )
 
 

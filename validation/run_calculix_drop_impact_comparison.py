@@ -112,6 +112,8 @@ class DropModel:
     contact_smoothing_epsilon: float
     hht_alpha: float
     model_source: str
+    explicit_dynamic: bool = False
+    friction_coefficient: float | None = None
 
     @property
     def id_to_index(self) -> dict[int, int]:
@@ -443,7 +445,9 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
 
     id_from_index = model.node_ids
     dynamic_keyword = f"*dynamic, alpha={model.hht_alpha:.12g}"
-    if model.direct_dynamic:
+    if model.explicit_dynamic:
+        dynamic_keyword = "*dynamic, direct, explicit"
+    elif model.direct_dynamic:
         dynamic_keyword = f"*dynamic, direct, alpha={model.hht_alpha:.12g}"
     min_dt = max(1.0e-9, 1.0e-4 * model.dt)
     output_frequency = max(1, int(model.output_frequency))
@@ -495,9 +499,22 @@ def write_calculix_input(model: DropModel, path: Path) -> None:
             "*surface interaction, name=contact",
             "*surface behavior, pressure-overclosure=linear",
             f"{model.contact_stiffness:.12g}",
+        ]
+    )
+    if model.friction_coefficient is not None and float(model.friction_coefficient) > 0.0:
+        lines.extend(
+            [
+                "*friction",
+                f"{float(model.friction_coefficient):.12g}",
+            ]
+        )
+    lines.extend(
+        [
             "*step, nlgeom, inc=1000000",
             dynamic_keyword,
-            f"{model.dt:.12g}, {model.total_time:.12g}, {min_dt:.12g}, {model.dt:.12g}",
+            f"{model.dt:.12g}, {model.total_time:.12g}"
+            if model.explicit_dynamic and model.direct_dynamic
+            else f"{model.dt:.12g}, {model.total_time:.12g}, {min_dt:.12g}, {model.dt:.12g}",
             "*dload",
             f"elall, grav, {model.gravity:.12g}, 0.0, 0.0, -1.0",
             f"*node print, nset=nall, frequency={output_frequency}",
