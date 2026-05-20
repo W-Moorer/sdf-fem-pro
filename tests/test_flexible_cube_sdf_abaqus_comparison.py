@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -63,6 +64,45 @@ def test_flexible_cube_deck_can_apply_tangential_force() -> None:
     assert "UPPER_TOP_ASM, 2, 2, 0." in text
     assert "UPPER_TOP_ASM, 1, 2, 0." not in text
     assert "2.000000000000e-03" in text
+
+
+def test_flexible_cube_deck_can_apply_bounded_tangential_displacement() -> None:
+    cfg = FlexibleCubeConfig(
+        lower_nx=4,
+        lower_ny=2,
+        lower_nz=1,
+        upper_nx=2,
+        upper_ny=2,
+        upper_nz=1,
+        total_time=0.004,
+        closure_time=0.002,
+        tangential_displacement=0.5,
+        tangential_motion_start_time=0.002,
+        tangential_motion_ramp_time=0.002,
+    )
+    text = build_abaqus_input_text(cfg)
+
+    assert "*Amplitude, name=TANGENTIAL_MOTION_AMP, time=TOTAL TIME" in text
+    assert "*Boundary, amplitude=TANGENTIAL_MOTION_AMP" in text
+    assert "UPPER_TOP_ASM, 1, 1, 5.000000000000e-01" in text
+    assert "UPPER_TOP_ASM, 2, 2, 0." in text
+    assert "*Cload, amplitude=TANGENTIAL_AMP" not in text
+
+
+def test_flexible_cube_deck_rejects_two_tangential_controls() -> None:
+    cfg = FlexibleCubeConfig(
+        lower_nx=4,
+        lower_ny=2,
+        lower_nz=1,
+        upper_nx=2,
+        upper_ny=2,
+        upper_nz=1,
+        tangential_force=1.0,
+        tangential_displacement=0.5,
+    )
+
+    with pytest.raises(ValueError, match="either tangential_force or tangential_displacement"):
+        build_abaqus_input_text(cfg)
 
 
 def test_flexible_cube_contact_surfaces_have_expected_topology() -> None:
