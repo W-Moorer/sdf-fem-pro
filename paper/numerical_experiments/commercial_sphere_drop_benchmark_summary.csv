@@ -1,0 +1,3 @@
+case,young_modulus,dt,total_time,abaqus_analysis_wall_seconds,abaqus_total_wall_seconds,sfc_solve_wall_seconds,speedup_vs_abaqus_analysis,speedup_vs_abaqus_total,max_z_cm_abs_error,rms_z_cm_abs_error,max_min_gap_abs_error,abaqus_max_p95_strain_norm,sfc_max_p95_strain_norm
+commercial_sphere_drop_linear_elastic,5.0e7,5.0e-6,1.0,54.84324390022084,109.08434669999406,28.662549200002104,1.91,3.81,2.620857548957384e-4,9.513284595429342e-5,8.251592139528283e-4,9.572005184641033e-3,5.001139661054739e-3
+commercial_sphere_drop_soft_large_deformation,5.0e6,5.0e-6,1.0,43.39265190018341,95.75483019975945,23.48670110013336,1.85,4.08,6.664331569776957e-4,1.9611240341594274e-4,1.228723401044542e-3,7.705068004982424e-2,2.2777315398360067e-2

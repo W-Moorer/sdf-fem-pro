@@ -575,6 +575,13 @@ def run_convergence(
     dt_values: tuple[float, ...] = DEFAULT_DT_VALUES,
     duration: float = DEFAULT_DURATION,
     output_interval: float = DEFAULT_OUTPUT_INTERVAL,
+    density: float = 1200.0,
+    young: float = 5.0e7,
+    poisson: float = 0.30,
+    gravity: float = 9.81,
+    initial_gap: float = 0.02,
+    plane_half_width: float = 0.30,
+    contact_stiffness: float = LINEAR_PENALTY_STIFFNESS,
     abaqus_command: str | None = None,
     convert_odb: bool = True,
     extract_energy: bool = True,
@@ -590,6 +597,13 @@ def run_convergence(
             duration=float(duration),
             output_interval=float(output_interval),
             fixed_dt=float(fixed_dt),
+            density=float(density),
+            young=float(young),
+            poisson=float(poisson),
+            gravity=float(gravity),
+            initial_gap=float(initial_gap),
+            plane_half_width=float(plane_half_width),
+            contact_stiffness=float(contact_stiffness),
             contact_damping_fraction=contact_damping_fraction,
         )
         try:
@@ -651,6 +665,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=DEFAULT_DURATION)
     parser.add_argument("--output-interval", type=float, default=DEFAULT_OUTPUT_INTERVAL)
     parser.add_argument("--dt-values", type=float, nargs="+", default=list(DEFAULT_DT_VALUES))
+    parser.add_argument("--density", type=float, default=1200.0)
+    parser.add_argument("--young", type=float, default=5.0e7)
+    parser.add_argument("--poisson", type=float, default=0.30)
+    parser.add_argument("--gravity", type=float, default=9.81)
+    parser.add_argument("--initial-gap", type=float, default=0.02)
+    parser.add_argument("--plane-half-width", type=float, default=0.30)
+    parser.add_argument("--contact-stiffness", type=float, default=LINEAR_PENALTY_STIFFNESS)
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument(
         "--contact-damping-fraction",
@@ -670,6 +691,13 @@ def main() -> None:
         dt_values=tuple(float(value) for value in args.dt_values),
         duration=float(args.duration),
         output_interval=float(args.output_interval),
+        density=float(args.density),
+        young=float(args.young),
+        poisson=float(args.poisson),
+        gravity=float(args.gravity),
+        initial_gap=float(args.initial_gap),
+        plane_half_width=float(args.plane_half_width),
+        contact_stiffness=float(args.contact_stiffness),
         abaqus_command=args.abaqus_command,
         convert_odb=not bool(args.skip_odb_conversion),
         extract_energy=not bool(args.skip_energy_extraction),

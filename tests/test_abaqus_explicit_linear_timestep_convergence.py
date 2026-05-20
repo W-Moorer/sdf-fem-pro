@@ -13,6 +13,7 @@ from validation.run_abaqus_explicit_linear_timestep_convergence import (  # noqa
     _case_name,
     _energy_audit_rows,
     build_input_text,
+    run_convergence,
 )
 
 
@@ -53,6 +54,25 @@ def test_explicit_linear_config_preserves_sphere_drop_material_values() -> None:
     assert cfg.young == 5.0e7
     assert cfg.poisson == 0.30
     assert cfg.contact_damping_fraction is None
+
+
+def test_convergence_runner_accepts_soft_material_without_running_abaqus(tmp_path: Path) -> None:
+    outputs = run_convergence(
+        tmp_path,
+        dt_values=(5.0e-6,),
+        duration=0.1,
+        output_interval=0.001,
+        young=5.0e6,
+        contact_damping_fraction=0.0,
+        convert_odb=False,
+        extract_energy=False,
+    )
+
+    inp = tmp_path / "dt_5em06" / "abaqus_run" / "sphere_drop_explicit_linear_dt_5em06.inp"
+    text = inp.read_text(encoding="ascii")
+    assert "5.000000000000e+06, 3.000000000000e-01" in text
+    assert "*Contact Damping, definition=CRITICAL DAMPING FRACTION" in text
+    assert outputs["case_metrics"].is_file()
 
 
 def test_case_name_preserves_fractional_scientific_mantissa() -> None:

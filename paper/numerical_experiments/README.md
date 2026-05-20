@@ -6,6 +6,16 @@ boundary, input/output data, figures, and acceptance thresholds.
 
 ## Cases
 
+- `commercial_sphere_drop_linear_elastic/`: first commercial-software
+  benchmark for Abaqus/Explicit 2024 vs independent SFC Lagrangian-SDF
+  explicit dynamics. The case uses a no-damping, frictionless linear-penalty
+  flexible sphere drop and locks displacement/stress curves, error metrics,
+  and solve-time comparisons.
+- `commercial_sphere_drop_soft_large_deformation/`: matching commercial
+  benchmark with the same geometry and contact law but a ten-times lower
+  Young's modulus. This creates a visibly softer impact response and stores
+  the corresponding displacement, P95 strain/stress curves, errors, and
+  timing metrics.
 - `block_drop_dynamic_sdf_calculix_1s/`: scoped dynamic contact trajectory
   comparison between SFC dynamic-SDF contact and CalculiX for the locked
   block-plane drop case.
