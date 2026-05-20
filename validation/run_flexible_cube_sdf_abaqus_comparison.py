@@ -1017,8 +1017,15 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
     lines = [
         "# Two-Flexible-Body SDF Contact Comparison",
         "",
+        "This case is the normal-compression subset of the FuzzyContact Benchmark 2 / Fig. 5--6 working condition: "
+        "a stationary lower block and a smaller moving upper block. The reference paper subsequently applies "
+        "tangential loading with frictional stick-slip; this SFC runner intentionally excludes that frictional stage "
+        "and compares only frictionless normal contact.",
+        "",
         f"- Lower mesh: `{cfg.lower_nx}x{cfg.lower_ny}x{cfg.lower_nz}` C3D8",
         f"- Upper mesh: `{cfg.upper_nx}x{cfg.upper_ny}x{cfg.upper_nz}` C3D8",
+        "- Reference geometry family: stationary body `20 x 10 x 2 mm^3`; moving body footprint `4.5 x 4.5 mm^2`",
+        "- Reference loading path: normal compression followed by tangential loading; current runner: normal compression only",
         f"- Duration: `{cfg.total_time}` s",
         f"- Time step: `{cfg.dt}` s",
         f"- Contact stiffness: `{cfg.pressure_stiffness}`",

@@ -2,6 +2,20 @@
 
 本算例用于检查 SFC Lagrangian-SDF 接触后端在“双柔性体接触”中的结果口径。Abaqus 只作为外部参考求解器；SFC 独立完成 FEM 组装、隐式动力学步进、SDF 接触查询和接触力装配。
 
+## 与 assets PDF 工况的对应关系
+
+`assets/uzun_korsunsky_2026_fuzzycontact_sigmoidal_traction_law.pdf` 中的 Benchmark 2 / Fig. 5--6 是 combined normal and tangential loading 工况。原文设置为：
+
+- stationary lower body：`20 x 10 x 2 mm^3`；
+- moving upper body：`4.5 x 4.5 x 1 mm^3`；
+- 材料：isotropic linear elastic，`E = 200 GPa`，`nu = 0.3`；
+- 第一步：对上部体施加 `-2000 N` z 向分布压缩载荷，建立法向接触；
+- 第二步：达到平衡后施加 `+2000 N` x 向切向载荷；
+- 原文包含 friction / stick-slip，摩擦系数为 `0.5`；
+- Fig. 6 的前两行展示法向压缩后的 `ux, uy, uz, sigma_xx, sigma_yy, sigma_zz`，后两行展示切向运动后的同类场。
+
+当前 `run_flexible_cube_sdf_abaqus_comparison.py` 只对应这个 PDF 工况中的 **法向压缩接触阶段**，用于 SFC 与 Abaqus 原生无摩擦法向接触的曲线对齐。它不是完整 Fig. 6 frictional stick-slip 复现，也不是滑行摩擦验证。完整的 Fig. 6 风格“法向压缩后横向扫掠”应写成 `Fig. 6-inspired frictionless normal-to-tangential motion`：可以保留几何和加载路径，但必须明确 contact law remains frictionless。
+
 ## 通用修复
 
 本轮修复没有引入针对单一曲线的特化参数，主要改动是通用求解语义对齐：

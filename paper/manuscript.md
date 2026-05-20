@@ -249,7 +249,7 @@ Figures:
 
 ### 7.5 Fig. 6-Inspired Complex Frictionless Contact
 
-The engineering-style case uses the Fig. 6 loading sketch as geometry/loading inspiration only: a \(20\times10\times2\) mm lower C3D8 block and a \(4.5\times4.5\) mm upper rectangular driver. The driver first applies normal closure and then a lateral offset, but the contact law remains frictionless. The shifted stage uses a \(24\times12\times4\) C3D8 lower mesh, 672 active quadrature samples, and reaches a minimum gap of \(-2.92\times10^{-2}\) mm.
+The engineering-style case follows the working-condition layout of the FuzzyContact Benchmark 2 / Fig. 5--6 example. The reference problem uses a stationary \(20\times10\times2\) mm body and a smaller \(4.5\times4.5\times1\) mm moving body. It first establishes normal compression and then applies tangential loading with frictional stick-slip. Our paper-facing version uses this normal-to-tangential loading sequence as geometry and visualization inspiration only: the driver first applies normal closure and then a lateral offset, but the contact law remains frictionless. The shifted stage uses a \(24\times12\times4\) C3D8 lower mesh, 672 active quadrature samples, and reaches a minimum gap of \(-2.92\times10^{-2}\) mm.
 
 Figures:
 
