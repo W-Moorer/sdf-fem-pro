@@ -27,16 +27,26 @@ the SFC core solver does not import Abaqus or read ODB files.
 
 | Metric | Value |
 |---|---:|
-| SFC sphere mean `u_z` L2 relative error vs Abaqus | `4.9157e-3` |
-| SFC beam-tip mean `u_z` L2 relative error vs Abaqus | `2.5437e-2` |
+| SFC sphere mean `u_z` L2 relative error vs Abaqus | `4.9061e-3` |
+| SFC beam-tip mean `u_z` L2 relative error vs Abaqus | `2.5440e-2` |
 | Abaqus/Explicit analysis wall time | `18.555 s` |
-| SFC explicit Lagrangian-SDF solve wall time | `7.332 s` |
-| Solve-time speedup, Abaqus analysis / SFC | `2.53x` |
+| SFC explicit Lagrangian-SDF solve wall time | `7.417 s` |
+| Solve-time speedup, Abaqus analysis / SFC | `2.50x` |
 
 The SFC run uses lumped-mass central difference and the structured top-patch
 Lagrangian contact backend for this regular cantilever surface. This is a
 validation fast path for the same current-surface contact geometry, not an
 Abaqus dependency.
+
+## Stiff-Beam Optimization Check
+
+The same script was also rerun on the original stiffer-beam input
+(`E_beam=2.5e9`, `E_sphere=5.0e6`, `dt=1.0e-6 s`). Before the runner
+optimization, this case took `36.47 s` in SFC versus `28.10 s` in
+Abaqus/Explicit. After output thinning, vectorized contact scatter, and
+persistent structured-contact workspace reuse, the SFC solve time is
+`25.50 s`, giving a `1.10x` speedup over the Abaqus analysis wall time while
+preserving the displacement-curve errors.
 
 ## Files
 
@@ -44,5 +54,9 @@ Abaqus dependency.
 - `data/time_history.csv`: Abaqus and SFC displacement histories.
 - `data/sfc_vs_abaqus_metrics.csv`: curve error metrics.
 - `data/solver_timing.csv`: solver wall-time comparison.
+- `data/stiff_beam_optimized_sfc_vs_abaqus_metrics.csv`: original stiff-beam
+  optimization-check curve metrics.
+- `data/stiff_beam_optimized_solver_timing.csv`: original stiff-beam
+  optimization-check timing.
 - `figures/sphere_mean_uz.png`: sphere displacement curve.
 - `figures/beam_tip_mean_uz.png`: cantilever tip displacement curve.

@@ -1,3 +1,3 @@
-solver,wall_time_seconds,total_workflow_wall_seconds,fixed_dt_seconds,details,contact_path,sfc_contact_backend,time_integrator,mass_matrix,duration,dt
-abaqus,18.555270,32.694148,1.000000000000e-05,commercial VTK reference frames loaded from validation-only output directory,,,,,,
-sfc_lagrangian_sdf,7.332142800092697,,,,MaterialSDF+LagrangianSDFContactOracle,structured-top,explicit,lumped,0.02,1e-05
+solver,wall_time_seconds,total_workflow_wall_seconds,fixed_dt_seconds,details,contact_path,sfc_contact_backend,time_integrator,mass_matrix,duration,dt,output_interval,output_stride
+abaqus,18.555270,32.694148,1.000000000000e-05,commercial VTK reference frames loaded from validation-only output directory,,,,,,,,
+sfc_lagrangian_sdf,7.416741800028831,,,,MaterialSDF+LagrangianSDFContactOracle,structured-top,explicit,lumped,0.02,1e-05,0.001,100

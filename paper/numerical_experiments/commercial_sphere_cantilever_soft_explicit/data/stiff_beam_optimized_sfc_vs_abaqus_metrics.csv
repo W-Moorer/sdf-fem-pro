@@ -1,0 +1,4 @@
+source,metric,l2_relative_error,max_abs_error,status
+sfc_lagrangian_sdf,sphere_mean_uz,0.021172095060829125,0.0003031558446941621,computed
+sfc_lagrangian_sdf,beam_tip_mean_uz,0.044895626451848816,0.001084477195077765,computed
+sfc_lagrangian_sdf,min_gap,,,missing

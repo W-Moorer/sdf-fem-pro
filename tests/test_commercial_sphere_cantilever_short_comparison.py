@@ -88,7 +88,8 @@ def test_explicit_sfc_structured_top_backend_runs_small_soft_model(tmp_path: Pat
         contact_backend="structured-top",
     )
 
-    assert len(rows) == 3
+    assert len(rows) == 2
     assert command["time_integrator"] == "explicit"
     assert command["sfc_contact_backend"] == "structured-top"
+    assert command["output_stride"] == 100
     assert all(np.isfinite(float(row["sphere_mean_uz"])) for row in rows)

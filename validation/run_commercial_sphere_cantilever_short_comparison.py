@@ -79,6 +79,29 @@ class ExplicitContactState:
     active_count: int
 
 
+@dataclass(slots=True)
+class StructuredTopContactWorkspace:
+    """Reusable arrays for the regular cantilever top-patch contact path."""
+
+    force: np.ndarray
+    sphere_x: np.ndarray
+    beam_x: np.ndarray
+    sample_points: np.ndarray
+    face_node_ids: np.ndarray
+    sample_areas: np.ndarray
+
+    @classmethod
+    def from_model(cls, model: "CommercialShortModel") -> "StructuredTopContactWorkspace":
+        return cls(
+            force=np.zeros(3 * model.sphere_node_count + 3 * model.beam_node_count, dtype=float),
+            sphere_x=np.empty_like(model.sphere_nodes, dtype=float),
+            beam_x=np.empty_like(model.beam_nodes, dtype=float),
+            sample_points=np.empty((model.sphere_sample_faces.shape[0], 3), dtype=float),
+            face_node_ids=np.asarray(model.sphere_sample_faces, dtype=np.int64),
+            sample_areas=np.asarray(model.sphere_sample_areas, dtype=float),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class InpMaterial:
     """Material values parsed from the Abaqus input deck."""
@@ -95,6 +118,7 @@ class CommercialShortModel:
     source_inp: Path
     duration: float
     dt: float
+    output_interval: float
     initial_velocity_z: float
     gravity: float
     beam_material: InpMaterial
@@ -338,6 +362,7 @@ def _read_abaqus_input_model(inp_path: Path, *, duration: float | None = None, d
         source_inp=inp_path,
         duration=float(deck_duration if duration is None else duration),
         dt=float(deck_dt if dt is None else dt),
+        output_interval=float(output_interval),
         initial_velocity_z=float(initial_velocity_z),
         gravity=float(gravity),
         beam_material=beam_material,
@@ -667,18 +692,27 @@ def _structured_top_contact_state(
     *,
     contact_stiffness: float,
     top_grid: tuple[np.ndarray, np.ndarray, np.ndarray],
+    workspace: StructuredTopContactWorkspace | None = None,
 ) -> ExplicitContactState:
     xs, ys, node_grid = top_grid
     n_total = 3 * model.sphere_node_count + 3 * model.beam_node_count
-    force = np.zeros(n_total, dtype=float)
+    ws = StructuredTopContactWorkspace.from_model(model) if workspace is None else workspace
+    force = ws.force
+    force.fill(0.0)
     sphere_u = u_value[: 3 * model.sphere_node_count].reshape((-1, 3))
     beam_u = u_value[3 * model.sphere_node_count :].reshape((-1, 3))
-    sphere_x = model.sphere_nodes + sphere_u
-    beam_x = model.beam_nodes + beam_u
-    faces = np.asarray(model.sphere_sample_faces, dtype=np.int64)
+    np.add(model.sphere_nodes, sphere_u, out=ws.sphere_x)
+    np.add(model.beam_nodes, beam_u, out=ws.beam_x)
+    sphere_x = ws.sphere_x
+    beam_x = ws.beam_x
+    faces = ws.face_node_ids
     if faces.size == 0:
         return ExplicitContactState(force=force, min_gap=0.0, active_count=0)
-    sample_points = sphere_x[faces].mean(axis=1)
+    sample_points = ws.sample_points
+    sample_points[:] = sphere_x[faces[:, 0]]
+    sample_points += sphere_x[faces[:, 1]]
+    sample_points += sphere_x[faces[:, 2]]
+    sample_points *= 1.0 / 3.0
     dx = float(xs[1] - xs[0])
     dy = float(ys[1] - ys[0])
     i0 = np.floor((sample_points[:, 0] - xs[0]) / dx).astype(np.int64)
@@ -719,21 +753,19 @@ def _structured_top_contact_state(
     if active_local.size == 0:
         return ExplicitContactState(force=force, min_gap=min_gap, active_count=0)
     sample_ids = active_candidates[active_local]
-    scales = float(contact_stiffness) * model.sphere_sample_areas[sample_ids] * (-gaps[active_local])
+    scales = float(contact_stiffness) * ws.sample_areas[sample_ids] * (-gaps[active_local])
     contact_vectors = scales[:, None] * normals[active_local]
-    for local_pos, sample_id in enumerate(sample_ids):
-        slave_nodes = faces[int(sample_id)]
-        f_slave = contact_vectors[local_pos] / 3.0
-        for node in slave_nodes:
-            force[3 * int(node) : 3 * int(node) + 3] += f_slave
-    master_weights = (w00[active_local], w10[active_local], w01[active_local], w11[active_local])
-    master_nodes = (n00[active_local], n10[active_local], n01[active_local], n11[active_local])
+    axes = np.arange(3, dtype=np.int64)
+    slave_nodes = faces[sample_ids].reshape(-1)
+    slave_values = np.repeat(contact_vectors / 3.0, 3, axis=0)
+    slave_indices = (3 * slave_nodes[:, None] + axes[None, :]).reshape(-1)
+    np.add.at(force, slave_indices, slave_values.reshape(-1))
+    master_weights = np.stack((w00[active_local], w10[active_local], w01[active_local], w11[active_local]), axis=1)
+    master_nodes = np.stack((n00[active_local], n10[active_local], n01[active_local], n11[active_local]), axis=1)
     master_offset = 3 * model.sphere_node_count
-    for weights, nodes in zip(master_weights, master_nodes, strict=True):
-        weighted = -weights[:, None] * contact_vectors
-        for row, node in enumerate(nodes):
-            base = master_offset + 3 * int(node)
-            force[base : base + 3] += weighted[row]
+    master_values = -(master_weights[:, :, None] * contact_vectors[:, None, :]).reshape(-1, 3)
+    master_indices = (master_offset + 3 * master_nodes.reshape(-1)[:, None] + axes[None, :]).reshape(-1)
+    np.add.at(force, master_indices, master_values.reshape(-1))
     return ExplicitContactState(force=force, min_gap=min_gap, active_count=int(active_local.size))
 
 
@@ -851,14 +883,20 @@ def _run_sfc_lagrangian_explicit_short(
         )
     samples = _sphere_samples(model)
     top_grid = _structured_beam_top_grid(model)
+    structured_workspace = (
+        StructuredTopContactWorkspace.from_model(model) if str(contact_backend) == "structured-top" else None
+    )
 
     def contact_response(u_value: np.ndarray) -> Any:
         if str(contact_backend) == "structured-top":
+            if structured_workspace is None:
+                raise RuntimeError("structured top workspace was not initialized")
             return _structured_top_contact_state(
                 model,
                 u_value,
                 contact_stiffness=float(contact_stiffness),
                 top_grid=top_grid,
+                workspace=structured_workspace,
             )
         if oracle is None:
             raise RuntimeError("oracle backend was requested but not initialized")
@@ -908,6 +946,7 @@ def _run_sfc_lagrangian_explicit_short(
     v0[: 3 * model.sphere_node_count].reshape((-1, 3))[:, 2] = float(model.initial_velocity_z)
     v0[fixed] = 0.0
     rows: list[Row] = []
+    output_stride = max(1, int(round(float(model.output_interval) / dt)))
 
     def combined_displacement(u_value: np.ndarray) -> np.ndarray:
         return np.vstack(
@@ -931,7 +970,8 @@ def _run_sfc_lagrangian_explicit_short(
     v_half[fixed] = 0.0
     for step in range(steps + 1):
         response = contact_response(u)
-        append_output(step, response)
+        if step % output_stride == 0 or step == steps:
+            append_output(step, response)
         if step == steps:
             break
         a = (f_ext + response.force - K @ u) / mass_diag
@@ -952,6 +992,7 @@ def _run_sfc_lagrangian_explicit_short(
         row["contact_path"] = "MaterialSDF+LagrangianSDFContactOracle"
         row["sfc_contact_backend"] = str(contact_backend)
         row["contact_stiffness"] = float(contact_stiffness)
+        row["output_stride"] = int(output_stride)
     return rows, {
         "solver": "sfc_lagrangian_sdf",
         "wall_time_seconds": float(wall),
@@ -961,6 +1002,8 @@ def _run_sfc_lagrangian_explicit_short(
         "mass_matrix": "lumped",
         "duration": float(model.duration),
         "dt": float(model.dt),
+        "output_interval": float(model.output_interval),
+        "output_stride": int(output_stride),
     }
 
 
