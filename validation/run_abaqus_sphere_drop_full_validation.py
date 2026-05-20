@@ -39,6 +39,8 @@ from sfc.contact import (  # noqa: E402
     triangle_surface_quadrature_cache,
 )
 from sfc.fem import DeformableBody, assemble_gravity_force, assemble_mass_matrix, assemble_stiffness_matrix  # noqa: E402
+from sfc.fem.material import isotropic_linear_elasticity_matrix  # noqa: E402
+from sfc.fem.tet4 import tet4_strain_displacement_matrix, tet4_volume  # noqa: E402
 from sfc.mesh import VolumeMesh  # noqa: E402
 from validation.run_abaqus_sphere_drop_short_validation import (  # noqa: E402
     DEFAULT_INP,
@@ -48,6 +50,7 @@ from validation.run_abaqus_sphere_drop_short_validation import (  # noqa: E402
     _boundary_faces,
     _comparison_rows,
     _configure_plot_style,
+    _field_summary,
     _mass_weighted_center_z,
     _metric_rows,
     _node_samples,
@@ -80,6 +83,34 @@ def _surface_sample_points(samples: list[SurfaceSample], x_current: np.ndarray) 
         return np.empty((0, 3), dtype=float)
     X = np.asarray(x_current, dtype=float)
     return np.vstack([sample.point(X) for sample in samples])
+
+
+def _sample_flat_arrays(samples: list[SurfaceSample]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return flattened node/weight arrays for fast repeated sample evaluation."""
+
+    if not samples:
+        empty_i = np.empty(0, dtype=np.int64)
+        empty_f = np.empty(0, dtype=float)
+        return empty_i, empty_f, empty_i.copy(), np.asarray([0], dtype=np.int64)
+    nodes: list[np.ndarray] = []
+    weights: list[np.ndarray] = []
+    sample_ids: list[np.ndarray] = []
+    offsets = [0]
+    for sample_id, sample in enumerate(samples):
+        node_ids = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        shape = np.asarray(sample.weights, dtype=float).reshape(-1)
+        if node_ids.shape != shape.shape:
+            raise ValueError("surface sample node ids and weights must have the same shape")
+        nodes.append(node_ids)
+        weights.append(shape)
+        sample_ids.append(np.full(node_ids.shape, int(sample_id), dtype=np.int64))
+        offsets.append(offsets[-1] + int(node_ids.size))
+    return (
+        np.concatenate(nodes),
+        np.concatenate(weights),
+        np.concatenate(sample_ids),
+        np.asarray(offsets, dtype=np.int64),
+    )
 
 
 def _node_surface_samples(surface_nodes: np.ndarray) -> list[SurfaceSample]:
@@ -206,6 +237,60 @@ def _lagrangian_plane_contact_response(
     )
 
 
+def _lagrangian_plane_contact_response_vectorized(
+    model: AbaqusSphereDropModel,
+    x_current: np.ndarray,
+    *,
+    area_weights: np.ndarray,
+    flat_nodes: np.ndarray,
+    flat_weights: np.ndarray,
+    flat_sample_ids: np.ndarray,
+    offsets: np.ndarray,
+    contact_stiffness: float,
+    n_dofs: int,
+) -> tuple[np.ndarray, float, int, float, float, float]:
+    """Fast rigid-plane Lagrangian-SDF response for explicit dynamics.
+
+    The material SDF of the reference plane is exactly
+    ``phi0(X)=X_z-plane_z`` with normal ``e_z``.  For this rigid-plane
+    validation case, the deformation-aware oracle therefore reduces to the
+    current sample z-coordinate without changing the gap definition.  The
+    routine keeps the same sample weights and pressure integration as the
+    scalar oracle path while avoiding per-step Python dataclass assembly.
+    """
+
+    if flat_nodes.size == 0:
+        return np.zeros(n_dofs, dtype=float), 0.0, 0, 0.0, 0.0, 0.0
+    X = np.asarray(x_current, dtype=float)
+    nodal_samples = (
+        flat_nodes.size == len(area_weights)
+        and offsets.size == flat_nodes.size + 1
+        and np.all(np.diff(offsets) == 1)
+        and np.allclose(flat_weights, 1.0)
+    )
+    sample_z = X[flat_nodes, 2] if nodal_samples else np.add.reduceat(flat_weights * X[flat_nodes, 2], offsets[:-1])
+    gaps = sample_z - float(model.plane_z)
+    penetration = np.maximum(-gaps, 0.0)
+    active = penetration > 0.0
+    force = np.zeros(n_dofs, dtype=float)
+    if np.any(active):
+        scales = float(contact_stiffness) * np.asarray(area_weights, dtype=float) * penetration
+        if nodal_samples:
+            force[3 * flat_nodes + 2] = scales
+        else:
+            nodal_z = np.zeros(X.shape[0], dtype=float)
+            np.add.at(nodal_z, flat_nodes, flat_weights * scales[flat_sample_ids])
+            force[2::3] = nodal_z
+    return (
+        force,
+        float(np.min(gaps)) if gaps.size else 0.0,
+        int(np.count_nonzero(active)),
+        float(np.max(penetration)) if penetration.size else 0.0,
+        float(0.5 * float(contact_stiffness) * np.sum(np.asarray(area_weights, dtype=float) * penetration**2)),
+        float(np.sum(np.asarray(area_weights, dtype=float)[active])) if np.any(active) else 0.0,
+    )
+
+
 def _first_contact_time(rows: list[Row]) -> float | None:
     active = [float(row["time"]) for row in rows if int(row["active_contact_count"]) > 0 or float(row["max_penetration"]) > 0.0]
     return None if not active else min(active)
@@ -233,6 +318,174 @@ def _resolve_damping_start_time(
     if policy == "time":
         return requested
     return max(requested, _ballistic_contact_time(model))
+
+
+def _run_sfc_lagrangian_sdf_explicit_history(
+    model: AbaqusSphereDropModel,
+    *,
+    duration: float,
+    dt: float,
+    contact_stiffness: float,
+    contact_integration: str,
+    quadrature_order: int,
+    hybrid_node_area_fraction: float,
+    output_stride: int,
+) -> list[Row]:
+    """Run Abaqus/Explicit-style lumped-mass central-difference dynamics."""
+
+    h = float(dt)
+    if h <= 0.0:
+        raise ValueError("dt must be positive")
+    n_steps_float = float(duration) / h
+    n_steps = int(round(n_steps_float))
+    if not np.isclose(n_steps * h, float(duration), rtol=0.0, atol=max(1.0e-12, 1.0e-9 * h)):
+        raise ValueError("explicit integration requires duration to be an integer multiple of dt")
+
+    mesh = VolumeMesh(model.nodes, model.elements, element_type="tet4")
+    body = DeformableBody(mesh, {"E": model.young, "nu": model.poisson}, density=model.density)
+    K = assemble_stiffness_matrix(body).tocsr()
+    M_lumped = assemble_mass_matrix(body, kind="lumped").tocsr()
+    mass_diag = np.asarray(M_lumped.diagonal(), dtype=float)
+    if np.any(mass_diag <= 0.0):
+        raise ValueError("explicit integration requires strictly positive lumped nodal masses")
+    f_gravity = assemble_gravity_force(body, (0.0, 0.0, -model.gravity))
+    surface_faces = _boundary_faces(model.elements)
+    surface_nodes, area_weights = _surface_node_area_weights(model.nodes, surface_faces)
+    samples, sample_area_weights = _contact_samples(
+        model,
+        surface_faces,
+        surface_nodes,
+        area_weights,
+        contact_integration=contact_integration,
+        quadrature_order=quadrature_order,
+        hybrid_node_area_fraction=float(hybrid_node_area_fraction),
+    )
+    flat_nodes, flat_weights, flat_sample_ids, offsets = _sample_flat_arrays(samples)
+    nodal_samples = (
+        flat_nodes.size == len(sample_area_weights)
+        and offsets.size == flat_nodes.size + 1
+        and np.all(np.diff(offsets) == 1)
+        and np.allclose(flat_weights, 1.0)
+    )
+    sample_area_weights_array = np.asarray(sample_area_weights, dtype=float)
+    n_dofs = body.n_dofs
+    u = np.zeros(n_dofs, dtype=float)
+    v0 = np.zeros(n_dofs, dtype=float)
+    output_stride_value = max(1, int(output_stride))
+    rows: list[Row] = []
+    C_elastic = isotropic_linear_elasticity_matrix(model.young, model.poisson)
+    B_mats = np.stack([tet4_strain_displacement_matrix(model.nodes[element]) for element in model.elements], axis=0)
+    element_volumes = np.asarray([tet4_volume(model.nodes[element]) for element in model.elements], dtype=float)
+
+    def stress_summary_fast(u_value: np.ndarray) -> dict[str, float]:
+        u_elements = u_value.reshape((-1, 3))[model.elements].reshape((model.elements.shape[0], 12))
+        strains = np.einsum("eij,ej->ei", B_mats, u_elements, optimize=True)
+        stresses = strains @ C_elastic.T
+        sxx, syy, szz, sxy, syz, sxz = stresses.T
+        von_mises = np.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3.0 * (sxy**2 + syz**2 + sxz**2))
+        strain_norms = np.linalg.norm(strains, axis=1)
+        stress_summary = _field_summary(von_mises, element_volumes)
+        strain_summary = _field_summary(strain_norms, element_volumes)
+        return {
+            "max_von_mises": stress_summary["max"],
+            "p95_von_mises": stress_summary["p95"],
+            "volume_mean_von_mises": stress_summary["volume_mean"],
+            "max_strain_norm": strain_summary["max"],
+            "p95_strain_norm": strain_summary["p95"],
+            "volume_mean_strain_norm": strain_summary["volume_mean"],
+        }
+
+    def contact_response(u_value: np.ndarray) -> tuple[np.ndarray, float, int, float, float, float]:
+        if nodal_samples:
+            u_nodes = u_value.reshape((-1, 3))
+            gaps = model.nodes[flat_nodes, 2] + u_nodes[flat_nodes, 2] - float(model.plane_z)
+            penetration = np.maximum(-gaps, 0.0)
+            active = penetration > 0.0
+            force = np.zeros(n_dofs, dtype=float)
+            if np.any(active):
+                force[3 * flat_nodes + 2] = float(contact_stiffness) * sample_area_weights_array * penetration
+            return (
+                force,
+                float(np.min(gaps)) if gaps.size else 0.0,
+                int(np.count_nonzero(active)),
+                float(np.max(penetration)) if penetration.size else 0.0,
+                float(0.5 * float(contact_stiffness) * np.sum(sample_area_weights_array * penetration**2)),
+                float(np.sum(sample_area_weights_array[active])) if np.any(active) else 0.0,
+            )
+        return _lagrangian_plane_contact_response_vectorized(
+            model,
+            model.nodes + u_value.reshape((-1, 3)),
+            area_weights=sample_area_weights,
+            flat_nodes=flat_nodes,
+            flat_weights=flat_weights,
+            flat_sample_ids=flat_sample_ids,
+            offsets=offsets,
+            contact_stiffness=float(contact_stiffness),
+            n_dofs=n_dofs,
+        )
+
+    def append_output(step: int, time_value: float) -> None:
+        current = model.nodes + u.reshape((-1, 3))
+        f_out, min_gap, active_count, max_pen, contact_energy, active_area = contact_response(u)
+        stress_summary = stress_summary_fast(u)
+        rows.append(
+            {
+                "source": "sfc_lagrangian_sdf_full",
+                "step": int(step),
+                "time": float(time_value),
+                "z_cm": _mass_weighted_center_z(model.nodes, model.elements, current),
+                "min_gap": float(min_gap),
+                "active_contact_count": int(active_count),
+                "active_contact_area": float(active_area),
+                "max_penetration": float(max_pen),
+                "normal_force_z": float(np.sum(f_out[2::3])),
+                "contact_energy": float(contact_energy),
+                **stress_summary,
+                "contact_path": "MaterialSDF+LagrangianSDFContactOracle",
+                "contact_integration": str(contact_integration),
+                "time_integrator": "explicit",
+            }
+        )
+
+    solve_start = perf_counter()
+    f_contact, *_ = contact_response(u)
+    a = (f_gravity + f_contact - K @ u) / mass_diag
+    v_half = v0 - 0.5 * h * a
+    append_output(0, 0.0)
+    for step in range(1, n_steps + 1):
+        f_contact, *_ = contact_response(u)
+        a = (f_gravity + f_contact - K @ u) / mass_diag
+        v_half = v_half + h * a
+        u = u + h * v_half
+        if step % output_stride_value == 0 or step == n_steps:
+            append_output(step, step * h)
+    elapsed = perf_counter() - solve_start
+    for row in rows:
+        row["sfc_solve_wall_seconds"] = float(elapsed)
+        row["sfc_node_count"] = int(model.nodes.shape[0])
+        row["sfc_element_count"] = int(model.elements.shape[0])
+        row["sfc_surface_sample_count"] = int(len(samples))
+        row["contact_stiffness"] = float(contact_stiffness)
+        row["contact_damping"] = 0.0
+        row["mass_damping"] = 0.0
+        row["stiffness_damping"] = 0.0
+        row["damping_start_time"] = 0.0
+        row["requested_damping_start_time"] = 0.0
+        row["damping_start_policy"] = "time"
+        row["hht_alpha"] = 0.0
+        row["quadrature_order"] = int(quadrature_order)
+        row["hybrid_node_area_fraction"] = float(hybrid_node_area_fraction)
+        row["adaptive_increments"] = "false"
+        row["accepted_increment_count"] = int(n_steps)
+        row["cutback_count"] = 0
+        row["min_accepted_increment"] = float(h)
+        row["max_accepted_increment"] = float(h)
+        row["residual_tolerance"] = 0.0
+        row["newton_iterations_total"] = 0
+        row["newton_failed_steps"] = 0
+        row["mass_matrix"] = "lumped"
+        row["explicit_algorithm"] = "central_difference"
+    return rows
 
 
 def run_sfc_lagrangian_sdf_full_history(
@@ -265,6 +518,23 @@ def run_sfc_lagrangian_sdf_full_history(
 ) -> list[Row]:
     """Run the full SFC sphere-drop solve with Lagrangian-SDF contact."""
 
+    integrator_name = str(integrator).lower()
+    if integrator_name == "explicit":
+        if any(abs(float(value)) > 0.0 for value in (contact_damping, mass_damping, stiffness_damping)):
+            raise ValueError("explicit integrator path is scoped to undamped fixed-step runs")
+        if bool(adaptive_increments):
+            raise ValueError("explicit integrator path uses fixed time increments")
+        return _run_sfc_lagrangian_sdf_explicit_history(
+            model,
+            duration=float(duration),
+            dt=float(dt),
+            contact_stiffness=float(contact_stiffness),
+            contact_integration=str(contact_integration),
+            quadrature_order=int(quadrature_order),
+            hybrid_node_area_fraction=float(hybrid_node_area_fraction),
+            output_stride=int(output_stride),
+        )
+
     effective_damping_start_time = _resolve_damping_start_time(
         model,
         damping_start_time=float(damping_start_time),
@@ -291,9 +561,8 @@ def run_sfc_lagrangian_sdf_full_history(
     n_dofs = body.n_dofs
     u = np.zeros(n_dofs, dtype=float)
     v = np.zeros(n_dofs, dtype=float)
-    integrator_name = str(integrator).lower()
     if integrator_name not in {"newmark", "hht", "bwe"}:
-        raise ValueError("integrator must be 'newmark', 'hht', or 'bwe'")
+        raise ValueError("integrator must be 'newmark', 'hht', 'bwe', or 'explicit'")
     alpha = float(hht_alpha) if integrator_name == "hht" else 0.0
     if not (-0.5 <= alpha <= 0.0):
         raise ValueError("hht_alpha must lie in [-0.5, 0]")
@@ -842,7 +1111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stiffness-damping", type=float, default=0.0)
     parser.add_argument("--damping-start-time", type=float, default=0.0)
     parser.add_argument("--damping-start-policy", choices=DAMPING_START_POLICIES, default="time")
-    parser.add_argument("--integrator", choices=("newmark", "hht", "bwe"), default="newmark")
+    parser.add_argument("--integrator", choices=("newmark", "hht", "bwe", "explicit"), default="newmark")
     parser.add_argument("--hht-alpha", type=float, default=0.0)
     parser.add_argument("--contact-integration", choices=("node", "surface", "hybrid"), default="node")
     parser.add_argument("--quadrature-order", type=int, choices=(1, 3, 7), default=3)

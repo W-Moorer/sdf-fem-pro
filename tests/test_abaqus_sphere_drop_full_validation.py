@@ -111,6 +111,57 @@ def test_backward_euler_integrator_runs_short_contact_history(tmp_path: Path) ->
     assert all(np.isfinite(float(row["z_cm"])) for row in rows)
 
 
+def test_explicit_integrator_uses_lumped_mass_central_difference_precontact(tmp_path: Path) -> None:
+    inp = tmp_path / "sphere_drop.inp"
+    inp.write_text(build_input_text("sphere_drop"), encoding="ascii")
+    model = parse_sphere_drop_inp(inp)
+    duration = 5.0e-5
+
+    rows = run_sfc_lagrangian_sdf_full_history(
+        model,
+        duration=duration,
+        dt=5.0e-6,
+        contact_stiffness=1.0e8,
+        integrator="explicit",
+        output_stride=1,
+    )
+
+    initial_z = float(rows[0]["z_cm"])
+    expected_z = initial_z - 0.5 * model.gravity * duration * duration
+    assert rows[-1]["time_integrator"] == "explicit"
+    assert rows[-1]["mass_matrix"] == "lumped"
+    assert rows[-1]["explicit_algorithm"] == "central_difference"
+    assert int(rows[-1]["accepted_increment_count"]) == 10
+    assert int(rows[-1]["newton_iterations_total"]) == 0
+    assert float(rows[-1]["z_cm"]) == pytest.approx(expected_z, abs=5.0e-8)
+    assert all(int(row["active_contact_count"]) == 0 for row in rows)
+
+
+def test_explicit_integrator_rejects_damping_and_adaptive_steps(tmp_path: Path) -> None:
+    inp = tmp_path / "sphere_drop.inp"
+    inp.write_text(build_input_text("sphere_drop"), encoding="ascii")
+    model = parse_sphere_drop_inp(inp)
+
+    with pytest.raises(ValueError, match="undamped"):
+        run_sfc_lagrangian_sdf_full_history(
+            model,
+            duration=0.01,
+            dt=0.005,
+            contact_stiffness=1.0e8,
+            integrator="explicit",
+            mass_damping=0.1,
+        )
+    with pytest.raises(ValueError, match="fixed time"):
+        run_sfc_lagrangian_sdf_full_history(
+            model,
+            duration=0.01,
+            dt=0.005,
+            contact_stiffness=1.0e8,
+            integrator="explicit",
+            adaptive_increments=True,
+        )
+
+
 def test_full_validation_runner_writes_outputs_with_existing_reference(tmp_path: Path) -> None:
     if not (
         ROOT
