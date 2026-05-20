@@ -107,6 +107,7 @@ class FlexibleCubeConfig:
     initial_gap: float = 0.01
     spacing: float = 0.30
     band_radius: float = 0.90
+    contact_footprint_tolerance: float = 0.0
     quadrature_order: int = 2
     pressure_stiffness: float = 4500.0
     lower_young_modulus: float = 1200.0
@@ -119,6 +120,7 @@ class FlexibleCubeConfig:
     contact_tolerance: float = 1.0e-9
     residual_tolerance: float = 1.0e-8
     force_tolerance: float = 1.0e-8
+    pressure_smoothing_passes: int = 1
     output_stride: int = 1
 
 
@@ -184,6 +186,55 @@ def _top_quads_for_element_ids(mesh: BoxMesh, element_ids_1based: np.ndarray) ->
         quad = element[[4, 5, 6, 7]]
         quads.append((int(quad[0]), int(quad[1]), int(quad[2]), int(quad[3])))
     return np.asarray(quads, dtype=np.int64)
+
+
+def _quad_area(points: np.ndarray) -> float:
+    pts = np.asarray(points, dtype=float)
+    if pts.shape != (4, 3):
+        raise ValueError("quad points must have shape (4, 3)")
+    return 0.5 * float(
+        np.linalg.norm(np.cross(pts[1] - pts[0], pts[2] - pts[0]))
+        + np.linalg.norm(np.cross(pts[2] - pts[0], pts[3] - pts[0]))
+    )
+
+
+def _top_surface_nodal_area(mesh: BoxMesh) -> np.ndarray:
+    """Return the lumped top-surface support area for each node."""
+
+    areas = np.zeros(mesh.X.shape[0], dtype=float)
+    for element_id in _top_element_ids(mesh):
+        element = mesh.elements[int(element_id) - 1]
+        quad = element[[4, 5, 6, 7]]
+        area = _quad_area(mesh.X[quad])
+        for node_id in quad:
+            areas[int(node_id)] += 0.25 * area
+    return areas
+
+
+def _top_surface_node_adjacency(mesh: BoxMesh) -> tuple[tuple[int, ...], ...]:
+    """Return one-ring top-surface node adjacency for diagnostic smoothing."""
+
+    neighbors: list[set[int]] = [set() for _ in range(mesh.X.shape[0])]
+    for element_id in _top_element_ids(mesh):
+        element = mesh.elements[int(element_id) - 1]
+        quad = [int(node) for node in element[[4, 5, 6, 7]]]
+        for node_id in quad:
+            neighbors[node_id].update(quad)
+    return tuple(tuple(sorted(item)) for item in neighbors)
+
+
+def _smooth_nodal_scalar(values: np.ndarray, adjacency: tuple[tuple[int, ...], ...], *, passes: int) -> np.ndarray:
+    """Apply topology-preserving nodal averaging for diagnostic fields only."""
+
+    out = np.asarray(values, dtype=float).copy()
+    for _ in range(max(0, int(passes))):
+        next_values = out.copy()
+        for node_id, neighbor_ids in enumerate(adjacency):
+            if not neighbor_ids:
+                continue
+            next_values[node_id] = float(np.mean(out[np.asarray(neighbor_ids, dtype=np.int64)]))
+        out = next_values
+    return out
 
 
 def _upper_bottom_triangles(mesh: BoxMesh) -> np.ndarray:
@@ -257,6 +308,64 @@ def _tangential_displacement_state(time_value: float, cfg: FlexibleCubeConfig) -
     vel = 0.5 * total_displacement * omega * math.sin(omega * local_t)
     acc = 0.5 * total_displacement * omega * omega * math.cos(omega * local_t)
     return disp, vel, acc
+
+
+def _smooth_ramp_value(time_value: float, *, start: float, ramp_time: float) -> float:
+    """Half-cosine ramp used by the SFC Dirichlet/loading history."""
+
+    if ramp_time <= 0.0:
+        return 1.0 if float(time_value) >= float(start) else 0.0
+    tau = float(np.clip((float(time_value) - float(start)) / float(ramp_time), 0.0, 1.0))
+    return 0.5 * (1.0 - math.cos(math.pi * tau))
+
+
+def _append_smooth_ramp_amplitude(
+    lines: list[str],
+    *,
+    name: str,
+    start: float,
+    ramp_time: float,
+    total_time: float,
+    samples: int = 33,
+) -> None:
+    """Append an Abaqus amplitude that matches the SFC half-cosine ramp.
+
+    Abaqus/Standard applies smoothing to sparse tabular amplitudes in dynamic
+    procedures unless it is disabled explicitly.  We therefore sample the same
+    half-cosine history used by SFC and request ``smooth=0`` so the two solvers
+    are driven by the same prescribed displacement/load curve.
+    """
+
+    start_value = max(0.0, float(start))
+    end_value = min(float(total_time), start_value + max(float(ramp_time), 0.0))
+    sample_count = max(2, int(samples))
+    pairs: list[tuple[float, float]] = [(0.0, 0.0)]
+    if start_value > 0.0:
+        pairs.append((start_value, 0.0))
+    if end_value > start_value:
+        for value in np.linspace(start_value, end_value, sample_count):
+            pairs.append((float(value), _smooth_ramp_value(value, start=start_value, ramp_time=end_value - start_value)))
+    else:
+        pairs.append((start_value, 1.0))
+    if end_value < float(total_time):
+        pairs.append((float(total_time), 1.0))
+
+    deduped: list[tuple[float, float]] = []
+    for time_value, amplitude in pairs:
+        if deduped and abs(time_value - deduped[-1][0]) <= 1.0e-14:
+            deduped[-1] = (float(time_value), float(amplitude))
+        else:
+            deduped.append((float(time_value), float(amplitude)))
+
+    lines.append(f"*Amplitude, name={name}, time=TOTAL TIME, smooth=0.")
+    row: list[str] = []
+    for time_value, amplitude in deduped:
+        row.extend([f"{time_value:.12e}", f"{amplitude:.12e}"])
+        if len(row) >= 8:
+            lines.append(", ".join(row))
+            row = []
+    if row:
+        lines.append(", ".join(row))
 
 
 def _validate_tangential_controls(cfg: FlexibleCubeConfig) -> None:
@@ -366,6 +475,8 @@ def _footprint_mask(
     xmin, xmax = float(np.min(bottom[:, 0])), float(np.max(bottom[:, 0]))
     ymin, ymax = float(np.min(bottom[:, 1])), float(np.max(bottom[:, 1]))
     tol = float(tolerance)
+    if tol < 0.0:
+        raise ValueError("footprint tolerance must be non-negative")
     return (p[:, 0] >= xmin - tol) & (p[:, 0] <= xmax + tol) & (p[:, 1] >= ymin - tol) & (p[:, 1] <= ymax + tol)
 
 
@@ -454,6 +565,7 @@ def _nodal_smoothed_pressure(
     *,
     pressure_stiffness: float,
     n_slave_nodes: int,
+    nodal_area_denominator: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Project quadrature pressures to slave nodes with area-weighted smoothing."""
 
@@ -468,6 +580,11 @@ def _nodal_smoothed_pressure(
     weighted_area = cache.area_weights[:, None] * cache.weights
     np.add.at(nodal_area, cache.node_ids.ravel(), weighted_area.ravel())
     np.add.at(nodal_pressure_area, cache.node_ids.ravel(), (q_pressure[:, None] * weighted_area).ravel())
+    if nodal_area_denominator is not None:
+        denominator = np.asarray(nodal_area_denominator, dtype=float).reshape(-1)
+        if denominator.shape != nodal_area.shape:
+            raise ValueError("nodal_area_denominator must match n_slave_nodes")
+        nodal_area = np.maximum(nodal_area, denominator)
     nodal_pressure = np.zeros(int(n_slave_nodes), dtype=float)
     mask = nodal_area > 0.0
     nodal_pressure[mask] = nodal_pressure_area[mask] / nodal_area[mask]
@@ -634,16 +751,22 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
     tangential_amplitude_lines: list[str] = []
     tangential_motion_lines: list[str] = []
     load_lines: list[str] = []
+    closure_amplitude_lines: list[str] = []
+    _append_smooth_ramp_amplitude(
+        closure_amplitude_lines,
+        name="CLOSURE_AMP",
+        start=0.0,
+        ramp_time=float(cfg.closure_time),
+        total_time=float(cfg.total_time),
+    )
     if has_tangential_load:
         force_per_node = float(cfg.tangential_force) / float(len(upper_top_nodes))
-        amplitude_values = f"0., 0., {tangential_start:.12e}, 0., {tangential_end:.12e}, 1."
-        if tangential_end < float(cfg.total_time):
-            amplitude_values += f", {cfg.total_time:.12e}, 1."
-        tangential_amplitude_lines.extend(
-            [
-                "*Amplitude, name=TANGENTIAL_AMP, time=TOTAL TIME",
-                amplitude_values,
-            ]
+        _append_smooth_ramp_amplitude(
+            tangential_amplitude_lines,
+            name="TANGENTIAL_AMP",
+            start=tangential_start,
+            ramp_time=tangential_end - tangential_start,
+            total_time=float(cfg.total_time),
         )
         load_lines.extend(
             [
@@ -652,14 +775,12 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             ]
         )
     if has_tangential_motion:
-        amplitude_values = f"0., 0., {tangential_motion_start:.12e}, 0., {tangential_motion_end:.12e}, 1."
-        if tangential_motion_end < float(cfg.total_time):
-            amplitude_values += f", {cfg.total_time:.12e}, 1."
-        tangential_amplitude_lines.extend(
-            [
-                "*Amplitude, name=TANGENTIAL_MOTION_AMP, time=TOTAL TIME",
-                amplitude_values,
-            ]
+        _append_smooth_ramp_amplitude(
+            tangential_amplitude_lines,
+            name="TANGENTIAL_MOTION_AMP",
+            start=tangential_motion_start,
+            ramp_time=tangential_motion_end - tangential_motion_start,
+            total_time=float(cfg.total_time),
         )
         tangential_motion_lines.extend(
             [
@@ -691,8 +812,7 @@ def build_abaqus_input_text(cfg: FlexibleCubeConfig) -> str:
             "0.",
             "*Contact Pair, interaction=LINEAR_FRICTIONLESS, type=SURFACE TO SURFACE",
             "LOWER_TOP_SURF, UPPER_BOTTOM_SURF",
-            "*Amplitude, name=CLOSURE_AMP, time=TOTAL TIME",
-            f"0., 0., {cfg.closure_time:.12e}, 1., {cfg.total_time:.12e}, 1.",
+            *closure_amplitude_lines,
             *tangential_amplitude_lines,
             "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO, inc=10000",
             f"*Dynamic, ALPHA={cfg.hht_alpha:.12e}, HAFTOL=1.0e-4",
@@ -772,6 +892,8 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
     upper_top_nodes = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.max(upper.X[:, 2]))))
     upper_top_z_dofs = lower_dofs + 3 * upper_top_nodes + 2
     lower_top_nodes = np.flatnonzero(np.isclose(lower.X[:, 2], float(np.max(lower.X[:, 2]))))
+    lower_top_nodal_area = _top_surface_nodal_area(lower)
+    lower_top_adjacency = _top_surface_node_adjacency(lower)
     upper_bottom_nodes = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.min(upper.X[:, 2]))))
     history: list[Row] = []
     timing: list[Row] = []
@@ -791,7 +913,12 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
         all_q = contact_cache.points(lower_x)
         active_cache = _filtered_cache(
             contact_cache,
-            _footprint_mask(all_q, upper_x, tolerance=cfg.spacing, bottom_node_ids=upper_bottom_nodes),
+            _footprint_mask(
+                all_q,
+                upper_x,
+                tolerance=cfg.contact_footprint_tolerance,
+                bottom_node_ids=upper_bottom_nodes,
+            ),
         )
         q_points = active_cache.points(lower_x)
         field_t0 = time.perf_counter()
@@ -843,6 +970,12 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
             response.gaps,
             pressure_stiffness=cfg.pressure_stiffness,
             n_slave_nodes=lower.X.shape[0],
+            nodal_area_denominator=lower_top_nodal_area,
+        )
+        nodal_pressure = _smooth_nodal_scalar(
+            nodal_pressure,
+            lower_top_adjacency,
+            passes=cfg.pressure_smoothing_passes,
         )
         nodal_pressure_on_top = nodal_pressure[lower_top_nodes] if lower_top_nodes.size else nodal_pressure
         positive_nodal_pressure = nodal_pressure_on_top[nodal_pressure_on_top > 0.0]
@@ -910,7 +1043,12 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
             all_q_next = contact_cache_next.points(lower_guess_x)
             active_cache_next = _filtered_cache(
                 contact_cache_next,
-                _footprint_mask(all_q_next, upper_guess_x, tolerance=cfg.spacing, bottom_node_ids=upper_bottom_nodes),
+                _footprint_mask(
+                    all_q_next,
+                    upper_guess_x,
+                    tolerance=cfg.contact_footprint_tolerance,
+                    bottom_node_ids=upper_bottom_nodes,
+                ),
             )
             q_next = active_cache_next.points(lower_guess_x)
             if q_next.size == 0:
@@ -1340,6 +1478,21 @@ def _metric(source: list[Row], reference: list[Row], key: str) -> Row:
     }
 
 
+def _add_reaction_pressure(rows: list[Row], cfg: FlexibleCubeConfig) -> list[Row]:
+    """Add reaction-based nominal contact pressure for solver-to-solver curves."""
+
+    area = float(4.5 * 4.5)
+    if area <= 0.0:
+        return rows
+    out: list[Row] = []
+    for row in rows:
+        item = dict(row)
+        reaction = item.get("upper_reaction_force", "")
+        item["nominal_contact_pressure"] = "" if reaction == "" else float(reaction) / area
+        out.append(item)
+    return out
+
+
 def _plot_curves(
     out_dir: Path,
     abaqus_rows: list[Row],
@@ -1352,8 +1505,8 @@ def _plot_curves(
     keys = [
         ("top_mean_z_displacement", "lower top mean z displacement"),
         ("surface_gap_mean_z", "mean surface gap"),
-        ("max_contact_pressure", "maximum contact pressure"),
-        ("p95_contact_pressure", "95th percentile contact pressure"),
+        ("upper_reaction_force", "upper-surface reaction force"),
+        ("nominal_contact_pressure", "nominal reaction pressure"),
         ("max_displacement_norm", "max displacement norm"),
         ("p95_von_mises", "95th percentile von Mises"),
         ("p95_strain_norm", "95th percentile strain norm"),
@@ -1387,22 +1540,42 @@ def _plot_curves(
 
 def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str | None, skip_abaqus: bool = False) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    timing_path = out_dir / "flexible_cube_sdf_abaqus_timing.csv"
+    previous_timing: list[Row] = []
+    if skip_abaqus and timing_path.exists():
+        with timing_path.open(newline="", encoding="utf-8") as handle:
+            previous_timing = [dict(row) for row in csv.DictReader(handle)]
     manifest, abaqus_metrics_csv, abaqus_timing = run_abaqus(cfg, out_dir, abaqus_command=abaqus_command, skip_abaqus=skip_abaqus)
-    abaqus_rows = load_abaqus_history(abaqus_metrics_csv)
+    if skip_abaqus and not abaqus_timing.get("analysis_wall_seconds", ""):
+        previous_abaqus = next(
+            (
+                row
+                for row in previous_timing
+                if str(row.get("solver", "")).startswith("abaqus")
+                and (row.get("analysis_wall_seconds", "") or row.get("reported_wall_seconds", ""))
+            ),
+            None,
+        )
+        if previous_abaqus is not None:
+            abaqus_timing = previous_abaqus
+    abaqus_rows = _add_reaction_pressure(load_abaqus_history(abaqus_metrics_csv), cfg)
     sfc_rows, sfc_timing_rows, sfc_wall, sfc_manifest = run_sfc(cfg, vtk_dir=out_dir / "sfc_vtk")
+    sfc_rows = _add_reaction_pressure(sfc_rows, cfg)
+    include_tangential = abs(float(cfg.tangential_force)) > 0.0 or abs(float(cfg.tangential_displacement)) > 0.0
+    metric_keys = [
+        "top_mean_z_displacement",
+        "surface_gap_mean_z",
+        "upper_reaction_force",
+        "nominal_contact_pressure",
+        "max_displacement_norm",
+        "p95_von_mises",
+        "p95_strain_norm",
+    ]
+    if include_tangential:
+        metric_keys[1:1] = ["upper_top_mean_x_displacement", "upper_bottom_mean_x_displacement"]
     metrics = [
         _metric(sfc_rows, abaqus_rows, key)
-        for key in (
-            "top_mean_z_displacement",
-            "upper_top_mean_x_displacement",
-            "upper_bottom_mean_x_displacement",
-            "surface_gap_mean_z",
-            "max_contact_pressure",
-            "p95_contact_pressure",
-            "max_displacement_norm",
-            "p95_von_mises",
-            "p95_strain_norm",
-        )
+        for key in metric_keys
     ]
     timing = [
         abaqus_timing,
@@ -1416,9 +1589,8 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
     ]
     _write_csv(out_dir / "flexible_cube_sdf_abaqus_history.csv", abaqus_rows + sfc_rows)
     _write_csv(out_dir / "flexible_cube_sdf_abaqus_metrics.csv", metrics)
-    _write_csv(out_dir / "flexible_cube_sdf_abaqus_timing.csv", timing)
+    _write_csv(timing_path, timing)
     _write_csv(out_dir / "flexible_cube_sdf_field_timing.csv", sfc_timing_rows)
-    include_tangential = abs(float(cfg.tangential_force)) > 0.0 or abs(float(cfg.tangential_displacement)) > 0.0
     plot = _plot_curves(out_dir, abaqus_rows, sfc_rows, metrics, include_tangential=include_tangential)
     if include_tangential:
         start_time = (
@@ -1497,6 +1669,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-gap", type=float, default=0.01)
     parser.add_argument("--spacing", type=float, default=None)
     parser.add_argument("--band-radius", type=float, default=None)
+    parser.add_argument("--contact-footprint-tolerance", type=float, default=0.0)
+    parser.add_argument("--pressure-smoothing-passes", type=int, default=1)
     parser.add_argument("--output-stride", type=int, default=1)
     parser.add_argument("--quadrature-order", type=int, default=None)
     parser.add_argument("--tangential-force", type=float, default=0.0)
@@ -1534,6 +1708,8 @@ def main() -> None:
         initial_gap=float(args.initial_gap),
         spacing=0.30 if args.spacing is None else float(args.spacing),
         band_radius=0.90 if args.band_radius is None else float(args.band_radius),
+        contact_footprint_tolerance=float(args.contact_footprint_tolerance),
+        pressure_smoothing_passes=int(args.pressure_smoothing_passes),
         quadrature_order=(2 if args.quadrature_order is None else int(args.quadrature_order)),
         output_stride=max(1, int(args.output_stride)),
     )

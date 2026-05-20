@@ -13,7 +13,11 @@ if str(ROOT) not in sys.path:
 from validation.run_flexible_cube_sdf_abaqus_comparison import (  # noqa: E402
     FlexibleCubeConfig,
     _contact_lower_top_element_ids,
+    _footprint_mask,
     _nodal_smoothed_pressure,
+    _smooth_nodal_scalar,
+    _top_surface_node_adjacency,
+    _top_surface_nodal_area,
     _top_quads_for_element_ids,
     _upper_bottom_triangles,
     build_abaqus_input_text,
@@ -39,6 +43,7 @@ def test_flexible_cube_deck_uses_two_c3d8_flexible_bodies() -> None:
     assert "CSTRESS, CDISP" in text
     assert "*Step, name=FLEXIBLE_CUBE_IMPLICIT, nlgeom=NO" in text
     assert "*Dynamic, ALPHA=-5.000000000000e-02, HAFTOL=1.0e-4" in text
+    assert "*Amplitude, name=CLOSURE_AMP, time=TOTAL TIME, smooth=0." in text
     assert "UPPER_TOP_ASM, 1, 2, 0." in text
     assert "*Cload, amplitude=TANGENTIAL_AMP" not in text
     assert "S, E, LE" in text
@@ -138,3 +143,53 @@ def test_nodal_smoothed_pressure_projects_quadrature_pressure_by_area() -> None:
 
     assert nodal_area.tolist() == pytest.approx([3.0, 5.0])
     assert pressure.tolist() == pytest.approx([(1.0 * 1.5 + 3.0 * 1.5) / 3.0, (1.0 * 0.5 + 3.0 * 4.5) / 5.0])
+
+
+def test_nodal_smoothed_pressure_can_use_full_surface_area_denominator() -> None:
+    cache = SurfaceQuadratureCache(
+        node_ids=np.asarray([[0, 1]], dtype=np.int64),
+        weights=np.asarray([[0.5, 0.5]], dtype=float),
+        area_weights=np.asarray([2.0], dtype=float),
+    )
+    pressure, nodal_area = _nodal_smoothed_pressure(
+        cache,
+        np.asarray([-0.2], dtype=float),
+        pressure_stiffness=10.0,
+        n_slave_nodes=2,
+        nodal_area_denominator=np.asarray([4.0, 2.0], dtype=float),
+    )
+
+    assert nodal_area.tolist() == pytest.approx([4.0, 2.0])
+    assert pressure.tolist() == pytest.approx([0.5, 1.0])
+
+
+def test_top_surface_nodal_area_matches_box_top_area() -> None:
+    cfg = FlexibleCubeConfig(lower_nx=4, lower_ny=2, lower_nz=1, upper_nx=2, upper_ny=2, upper_nz=1)
+    lower, _upper = make_geometry(cfg)
+    area = _top_surface_nodal_area(lower)
+
+    assert float(np.sum(area)) == pytest.approx(float(lower.size[0] * lower.size[1]))
+
+
+def test_top_surface_pressure_smoothing_preserves_uniform_field() -> None:
+    cfg = FlexibleCubeConfig(lower_nx=4, lower_ny=2, lower_nz=1, upper_nx=2, upper_ny=2, upper_nz=1)
+    lower, _upper = make_geometry(cfg)
+    adjacency = _top_surface_node_adjacency(lower)
+    values = np.zeros(lower.X.shape[0], dtype=float)
+    top = np.flatnonzero(np.isclose(lower.X[:, 2], float(np.max(lower.X[:, 2]))))
+    values[top] = 7.0
+
+    smoothed = _smooth_nodal_scalar(values, adjacency, passes=2)
+
+    assert smoothed[top].tolist() == pytest.approx([7.0] * top.size)
+
+
+def test_footprint_mask_default_does_not_expand_by_sdf_spacing() -> None:
+    points = np.asarray([[-0.1, 0.0, 0.0], [0.5, 0.5, 0.0], [1.1, 0.5, 0.0]], dtype=float)
+    upper = np.asarray([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], dtype=float)
+
+    mask = _footprint_mask(points, upper, tolerance=0.0)
+    padded = _footprint_mask(points, upper, tolerance=0.2)
+
+    assert mask.tolist() == [False, True, False]
+    assert padded.tolist() == [True, True, True]
