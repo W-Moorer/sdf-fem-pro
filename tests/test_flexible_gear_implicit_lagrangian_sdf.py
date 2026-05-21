@@ -16,6 +16,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     solve_sfc_cropped_pair,
     solve_sfc_cropped_pair_hard_contact,
 )
+from validation.run_flexible_gear_full_lagrangian_sdf_comparison import build_full_active_pair
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
@@ -31,6 +32,21 @@ def test_cropped_gear_pair_is_small_and_has_supports() -> None:
     assert pair.gear2.contact_faces.shape[0] == 4
     assert pair.gear1.support_nodes.size >= 4
     assert pair.gear2.support_nodes.size >= 4
+    assert pair.initial_patch_gap >= 0.0
+
+
+def test_full_active_gear_pair_keeps_complete_volume_mesh() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_full_active_pair(model, active_faces_per_body=4)
+
+    assert pair.gear1.nodes.shape == model.gear1.nodes.shape
+    assert pair.gear2.nodes.shape == model.gear2.nodes.shape
+    assert pair.gear1.elements.shape == model.gear1.elements.shape
+    assert pair.gear2.elements.shape == model.gear2.elements.shape
+    assert pair.gear1.contact_faces.shape[0] == 4
+    assert pair.gear2.contact_faces.shape[0] == 4
+    assert pair.gear1.support_nodes.size == len(set(model.gear1_hub_labels))
+    assert pair.gear2.support_nodes.size == len(set(model.gear2_hub_labels))
     assert pair.initial_patch_gap >= 0.0
 
 

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 import numpy as np
+from scipy.sparse import bmat, csr_matrix, diags, issparse
+from scipy.sparse.linalg import spsolve
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +320,132 @@ def solve_linear_hard_contact_with_dirichlet(
     )
 
 
+def solve_linear_hard_contact_with_dirichlet_sparse(
+    stiffness,
+    external_force: np.ndarray,
+    gap_offset: np.ndarray,
+    gap_jacobian: np.ndarray,
+    *,
+    fixed_dofs: np.ndarray,
+    fixed_values: np.ndarray | None = None,
+    equilibrium_jacobian_scale: float = 1.0,
+    normal_compliance: np.ndarray | float | None = None,
+    initial_active: np.ndarray | None = None,
+    tolerance: float = 1.0e-10,
+    max_iterations: int = 20,
+) -> HardContactSolution:
+    """Sparse counterpart of :func:`solve_linear_hard_contact_with_dirichlet`.
+
+    This keeps the global FEM tangent sparse and forms only the small active
+    contact KKT border.  It is intended for full-size validation models where
+    the dense active-set helper would exhaust memory.  The algebra and sign
+    convention are identical to the dense implementation.
+    """
+
+    K = stiffness.tocsr() if issparse(stiffness) else csr_matrix(np.asarray(stiffness, dtype=float))
+    f = np.asarray(external_force, dtype=float).reshape(-1)
+    g0 = np.asarray(gap_offset, dtype=float).reshape(-1)
+    J = np.asarray(gap_jacobian, dtype=float)
+    if K.shape[0] != K.shape[1]:
+        raise ValueError("stiffness must be square")
+    if f.shape != (K.shape[0],):
+        raise ValueError("external_force length must match stiffness")
+    if J.ndim != 2 or J.shape[1] != K.shape[0]:
+        raise ValueError("gap_jacobian must have shape (n_constraints, n_dofs)")
+    if g0.shape != (J.shape[0],):
+        raise ValueError("gap_offset length must match number of constraints")
+    compliance = _as_constraint_compliance(normal_compliance, J.shape[0])
+    scale = float(equilibrium_jacobian_scale)
+    if scale <= 0.0:
+        raise ValueError("equilibrium_jacobian_scale must be positive")
+    fixed = np.asarray(fixed_dofs, dtype=np.int64).reshape(-1)
+    if np.any(fixed < 0) or (fixed.size and int(fixed.max()) >= K.shape[0]):
+        raise ValueError("fixed_dofs reference a dof outside stiffness")
+    if np.unique(fixed).shape[0] != fixed.shape[0]:
+        raise ValueError("fixed_dofs must not contain duplicates")
+    values = np.zeros(fixed.shape[0], dtype=float) if fixed_values is None else np.asarray(fixed_values, dtype=float).reshape(-1)
+    if values.shape != fixed.shape:
+        raise ValueError("fixed_values must match fixed_dofs")
+
+    full_u = np.zeros(K.shape[0], dtype=float)
+    full_u[fixed] = values
+    free_mask = np.ones(K.shape[0], dtype=bool)
+    free_mask[fixed] = False
+    free = np.flatnonzero(free_mask)
+    if free.size == 0:
+        gaps = g0 + J @ full_u
+        active = gaps < -float(tolerance)
+        return HardContactSolution(
+            displacement=full_u,
+            multipliers=np.zeros(J.shape[0], dtype=float),
+            gaps=gaps,
+            active=active,
+            iterations=0,
+            converged=not bool(np.any(active)),
+        )
+
+    Kff = K[free][:, free].tocsc()
+    f_eff = np.asarray(f[free] - (K[free][:, fixed] @ values if fixed.size else 0.0), dtype=float).reshape(-1)
+    Jf_dense = J[:, free]
+    Jc_values = J[:, fixed] @ values if fixed.size else 0.0
+    g_eff = np.asarray(g0 + Jc_values, dtype=float).reshape(-1)
+
+    if initial_active is None:
+        unconstrained = _sparse_solve_vector(Kff, f_eff)
+        active = g_eff + Jf_dense @ unconstrained < -float(tolerance)
+    else:
+        active = np.asarray(initial_active, dtype=bool).reshape(-1)
+        if active.shape != g_eff.shape:
+            raise ValueError("initial_active must match constraints")
+
+    u_free = np.zeros(free.size, dtype=float)
+    lam = np.zeros(J.shape[0], dtype=float)
+    converged = False
+    iterations = 0
+    for iterations in range(1, max(1, int(max_iterations)) + 1):
+        active_ids = np.flatnonzero(active)
+        if active_ids.size:
+            Ja_dense = Jf_dense[active_ids]
+            Ja = csr_matrix(Ja_dense)
+            Ca = diags(compliance[active_ids], offsets=0, shape=(active_ids.size, active_ids.size), format="csc")
+            matrix = bmat(
+                [
+                    [Kff, (-scale * Ja.T).tocsc()],
+                    [Ja.tocsc(), Ca],
+                ],
+                format="csc",
+            )
+            rhs = np.concatenate((f_eff, -g_eff[active_ids]))
+            sol = _sparse_solve_vector(matrix, rhs)
+            u_free = sol[: free.size]
+            lam = np.zeros(J.shape[0], dtype=float)
+            lam[active_ids] = sol[free.size :]
+        else:
+            u_free = _sparse_solve_vector(Kff, f_eff)
+            lam = np.zeros(J.shape[0], dtype=float)
+        gaps_free = g_eff + Jf_dense @ u_free
+        effective_gaps = gaps_free + compliance * lam
+        next_active = active.copy()
+        next_active[effective_gaps < -float(tolerance)] = True
+        next_active[lam < -float(tolerance)] = False
+        if np.array_equal(next_active, active) and np.all(effective_gaps >= -float(tolerance)) and np.all(lam >= -float(tolerance)):
+            converged = True
+            break
+        active = next_active
+
+    full_u[free] = u_free
+    gaps = g0 + J @ full_u
+    lam[np.abs(lam) <= float(tolerance)] = 0.0
+    return HardContactSolution(
+        displacement=full_u,
+        multipliers=lam.copy(),
+        gaps=gaps,
+        active=active.copy(),
+        iterations=int(iterations),
+        converged=bool(converged and np.all(gaps + compliance * lam >= -float(tolerance))),
+    )
+
+
 def solve_linear_hard_contact_from_samples_with_dirichlet(
     stiffness: np.ndarray,
     external_force: np.ndarray,
@@ -394,6 +522,11 @@ def _dense_matrix(value: Any) -> np.ndarray:
     if hasattr(value, "toarray"):
         return np.asarray(value.toarray(), dtype=float)
     return np.asarray(value, dtype=float)
+
+
+def _sparse_solve_vector(matrix, rhs: np.ndarray) -> np.ndarray:
+    solution = spsolve(matrix, np.asarray(rhs, dtype=float).reshape(-1))
+    return np.asarray(solution, dtype=float).reshape(-1)
 
 
 def _as_constraint_compliance(value: np.ndarray | float | None, n_constraints: int) -> np.ndarray:

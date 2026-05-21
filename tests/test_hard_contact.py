@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.sparse import csr_matrix
 
 from sfc.contact.hard_contact import (
     hard_contact_gap_jacobian_from_samples,
@@ -10,6 +11,7 @@ from sfc.contact.hard_contact import (
     solve_linear_hard_contact_from_samples,
     solve_linear_hard_contact_from_samples_with_dirichlet,
     solve_linear_hard_contact_with_dirichlet,
+    solve_linear_hard_contact_with_dirichlet_sparse,
 )
 from sfc.fem.calculix_aligned import ContactSample
 
@@ -116,6 +118,40 @@ def test_linear_hard_contact_with_dirichlet_eliminates_prescribed_dofs() -> None
     assert solution.displacement == pytest.approx([0.1, 0.2])
     assert solution.gaps == pytest.approx([0.0])
     assert solution.multipliers == pytest.approx([3.0])
+
+
+def test_sparse_hard_contact_with_dirichlet_matches_dense_solution() -> None:
+    stiffness = np.diag([10.0, 20.0, 15.0, 12.0])
+    force = np.asarray([-2.0, 0.4, 0.0, 0.0], dtype=float)
+    gap_offset = np.asarray([0.1, 0.2], dtype=float)
+    gap_jacobian = np.asarray([[1.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, -1.0]], dtype=float)
+    fixed = np.asarray([2, 3], dtype=np.int64)
+    values = np.asarray([0.2, 0.0], dtype=float)
+
+    dense = solve_linear_hard_contact_with_dirichlet(
+        stiffness,
+        force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed,
+        fixed_values=values,
+        normal_compliance=np.asarray([0.0, 0.03], dtype=float),
+    )
+    sparse = solve_linear_hard_contact_with_dirichlet_sparse(
+        csr_matrix(stiffness),
+        force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed,
+        fixed_values=values,
+        normal_compliance=np.asarray([0.0, 0.03], dtype=float),
+    )
+
+    assert sparse.converged == dense.converged
+    assert sparse.displacement == pytest.approx(dense.displacement)
+    assert sparse.gaps == pytest.approx(dense.gaps)
+    assert sparse.multipliers == pytest.approx(dense.multipliers)
+    assert sparse.active.tolist() == dense.active.tolist()
 
 
 def test_hard_contact_from_samples_with_dirichlet_includes_master_motion() -> None:

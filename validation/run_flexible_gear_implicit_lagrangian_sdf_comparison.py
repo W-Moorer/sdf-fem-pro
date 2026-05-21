@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 from sfc.contact.hard_contact import (  # noqa: E402
     hard_contact_gap_jacobian_from_samples,
     solve_linear_hard_contact_with_dirichlet,
+    solve_linear_hard_contact_with_dirichlet_sparse,
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import MechanicsModel, stvk_internal_response  # noqa: E402
@@ -646,6 +647,7 @@ def solve_sfc_cropped_pair_hard_contact(
     hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
     automatic_increment: bool = True,
     cutback_factor: float = 0.5,
+    linear_solver: str = "dense",
 ) -> tuple[list[Row], Row]:
     """Solve the cropped gear pair with implicit Newmark + HARD contact KKT.
 
@@ -662,6 +664,9 @@ def solve_sfc_cropped_pair_hard_contact(
         raise ValueError(
             "hard_enforcement must be 'exact', 'pressure_compliance', 'element_pressure_smoothing', or 'abaqus_standard_penalty'"
         )
+    solver_kind = str(linear_solver).lower()
+    if solver_kind not in {"dense", "sparse", "auto"}:
+        raise ValueError("linear_solver must be 'dense', 'sparse', or 'auto'")
     effective_pressure_stiffness = _effective_hard_pressure_stiffness(
         pair=pair,
         young=young,
@@ -745,7 +750,12 @@ def solve_sfc_cropped_pair_hard_contact(
                 - float(hht_alpha) * previous_rhs_balance,
                 dtype=float,
             )
-            solution = solve_linear_hard_contact_with_dirichlet(
+            solve_hard_contact = (
+                solve_linear_hard_contact_with_dirichlet_sparse
+                if solver_kind == "sparse" or (solver_kind == "auto" and model.n_dofs > 12000)
+                else solve_linear_hard_contact_with_dirichlet
+            )
+            solution = solve_hard_contact(
                 effective_stiffness,
                 effective_force,
                 gap_offset,
@@ -931,6 +941,7 @@ def solve_sfc_cropped_pair_hard_contact(
         "contact_mode": "hard",
         "hard_enforcement": enforcement,
         "constraint_averaging": str(constraint_averaging),
+        "linear_solver": solver_kind,
         "effective_hard_pressure_stiffness": float(effective_pressure_stiffness),
         "pressure_smoothing_factor": float(pressure_smoothing_factor),
         "contact_patch_min_edge_length": _contact_patch_min_edge_length(pair),
@@ -1522,6 +1533,7 @@ def write_summary(
         f"- contact mode: {summary.get('contact_mode', 'penalty')}",
         f"- hard enforcement: {summary.get('hard_enforcement', '')}",
         f"- constraint averaging: {summary.get('constraint_averaging', '')}",
+        f"- linear solver: {summary.get('linear_solver', 'dense')}",
         f"- effective hard pressure stiffness: {float(summary.get('effective_hard_pressure_stiffness', 0.0)):.6e}",
         f"- pressure smoothing factor: {float(summary.get('pressure_smoothing_factor', 0.0)):.6e}",
         f"- HHT alpha/beta/gamma: {float(summary.get('hht_alpha', 0.0)):.6e} / {float(summary.get('hht_beta', 0.0)):.6e} / {float(summary.get('hht_gamma', 0.0)):.6e}",
@@ -1604,6 +1616,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cutback-factor", type=float, default=0.5)
     parser.add_argument("--constraint-averaging", choices=("none", "slave_face", "surface_patch"), default="slave_face")
     parser.add_argument("--hard-max-iterations", type=int, default=6)
+    parser.add_argument("--linear-solver", choices=("dense", "sparse", "auto"), default="dense")
     parser.add_argument("--run-abaqus", action="store_true", help="Run the generated Abaqus native-contact deck and compare curves.")
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--quick", action="store_true", help="Use the default small cropped patch settings.")
@@ -1634,6 +1647,7 @@ def main(argv: list[str] | None = None) -> int:
             hht_alpha=float(args.hht_alpha),
             automatic_increment=not bool(args.no_automatic_increment),
             cutback_factor=float(args.cutback_factor),
+            linear_solver=str(args.linear_solver),
         )
     else:
         history, summary = solve_sfc_cropped_pair(
