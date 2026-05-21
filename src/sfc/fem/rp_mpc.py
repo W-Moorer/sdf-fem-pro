@@ -128,6 +128,42 @@ class RigidHubMPC:
         order = np.argsort(dofs.ravel(), kind="stable")
         return dofs.ravel()[order].astype(np.int64), values.ravel()[order].astype(float)
 
+    def generalized_force_from_nodal_forces(
+        self,
+        nodal_forces: np.ndarray | Sequence[Sequence[float]],
+        *,
+        current_nodes: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Return the six RP generalized forces by BEAM-MPC virtual work.
+
+        For the small-rotation BEAM kinematics ``u_i = u_RP + theta x r_i``,
+        virtual work gives
+
+        ``Q = [sum_i f_i, sum_i r_i x f_i]``.
+
+        ``nodal_forces`` may contain either one force per hub node or a full
+        ``(n_nodes, 3)`` array.  ``current_nodes`` can be supplied when a
+        finite-deformation diagnostic wants moments about current levers; the
+        translational RP force is independent of that choice.
+        """
+
+        forces = np.asarray(nodal_forces, dtype=float)
+        if forces.ndim != 2 or forces.shape[1] != 3:
+            raise ValueError("nodal_forces must have shape (n, 3)")
+        if forces.shape[0] == self.reference_nodes.shape[0]:
+            local_forces = forces[self.node_ids]
+        elif forces.shape[0] == self.node_ids.size:
+            local_forces = forces
+        else:
+            raise ValueError("nodal_forces must be full-size or match the hub node count")
+        lever_nodes = self.reference_nodes if current_nodes is None else np.asarray(current_nodes, dtype=float)
+        if lever_nodes.shape != self.reference_nodes.shape:
+            raise ValueError("current_nodes must match reference_nodes")
+        lever = lever_nodes[self.node_ids] - self.reference_point[None, :]
+        force = np.sum(local_forces, axis=0) if local_forces.size else np.zeros(3, dtype=float)
+        moment = np.sum(np.cross(lever, local_forces), axis=0) if local_forces.size else np.zeros(3, dtype=float)
+        return np.concatenate((force, moment)).astype(float, copy=False)
+
 
 @dataclass(frozen=True, slots=True)
 class FiniteRotationRigidHubMPC:

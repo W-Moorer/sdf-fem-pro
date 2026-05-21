@@ -561,14 +561,17 @@ def _equivalent_hub_reaction(
     nodes_reference: np.ndarray,
     reference_point: np.ndarray,
     drive_direction: np.ndarray,
+    current_nodes: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Project constrained nodal residuals to the equivalent hub/RP reaction."""
 
-    ids = np.asarray(node_ids, dtype=np.int64).reshape(-1)
-    nodal = np.asarray(residual, dtype=float).reshape((-1, 3))[ids]
-    force = np.sum(nodal, axis=0) if nodal.size else np.zeros(3, dtype=float)
-    lever = np.asarray(nodes_reference, dtype=float)[ids] - np.asarray(reference_point, dtype=float)
-    moment = np.sum(np.cross(lever, nodal), axis=0) if nodal.size else np.zeros(3, dtype=float)
+    hub = RigidHubMPC(np.asarray(node_ids, dtype=np.int64), np.asarray(nodes_reference, dtype=float), np.asarray(reference_point, dtype=float))
+    generalized = hub.generalized_force_from_nodal_forces(
+        np.asarray(residual, dtype=float).reshape((-1, 3)),
+        current_nodes=current_nodes,
+    )
+    force = generalized[:3]
+    moment = generalized[3:]
     drive = np.asarray(drive_direction, dtype=float)
     drive_norm = float(np.linalg.norm(drive))
     if drive_norm > 0.0:
@@ -757,33 +760,38 @@ def solve_sfc_cropped_pair_hard_contact(
         previous_rhs_balance = -internal.force.reshape(-1)
         if final_gap_jacobian.size and multipliers.size:
             previous_rhs_balance += final_gap_jacobian.T @ multipliers
+        n1_dofs = 3 * pair.gear1.nodes.shape[0]
         hub1_reaction = _equivalent_hub_reaction(
-            dynamic_balance,
+            dynamic_balance[:n1_dofs],
             node_ids=pair.gear1.support_nodes,
             nodes_reference=pair.gear1.nodes,
             reference_point=pair.gear1.rp,
             drive_direction=pair.drive_direction,
+            current_nodes=state_x[: pair.gear1.nodes.shape[0]],
         )
         hub2_reaction = _equivalent_hub_reaction(
-            dynamic_balance[3 * pair.gear1.nodes.shape[0] :],
+            dynamic_balance[n1_dofs:],
             node_ids=pair.gear2.support_nodes,
             nodes_reference=pair.gear2.nodes,
             reference_point=pair.gear2.rp,
             drive_direction=pair.drive_direction,
+            current_nodes=state_x[pair.gear1.nodes.shape[0] :],
         )
         hub1_static_reaction = _equivalent_hub_reaction(
-            static_balance,
+            static_balance[:n1_dofs],
             node_ids=pair.gear1.support_nodes,
             nodes_reference=pair.gear1.nodes,
             reference_point=pair.gear1.rp,
             drive_direction=pair.drive_direction,
+            current_nodes=state_x[: pair.gear1.nodes.shape[0]],
         )
         hub2_static_reaction = _equivalent_hub_reaction(
-            static_balance[3 * pair.gear1.nodes.shape[0] :],
+            static_balance[n1_dofs:],
             node_ids=pair.gear2.support_nodes,
             nodes_reference=pair.gear2.nodes,
             reference_point=pair.gear2.rp,
             drive_direction=pair.drive_direction,
+            current_nodes=state_x[pair.gear1.nodes.shape[0] :],
         )
         disp = state_x - model.X
         strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
@@ -1051,6 +1059,35 @@ def norm3(data):
     return math.sqrt(float(data[0]) ** 2 + float(data[1]) ** 2 + float(data[2]) ** 2)
 
 
+def parse_int_set(text):
+    if not text:
+        return set()
+    return set(int(part) for part in text.split(",") if part)
+
+
+def parse_vec3(text):
+    values = [float(part) for part in text.split(",")]
+    if len(values) != 3:
+        raise RuntimeError("expected three comma-separated coordinates")
+    return values
+
+
+def dot3(a, b):
+    return float(a[0]) * float(b[0]) + float(a[1]) * float(b[1]) + float(a[2]) * float(b[2])
+
+
+def cross3(a, b):
+    return [
+        float(a[1]) * float(b[2]) - float(a[2]) * float(b[1]),
+        float(a[2]) * float(b[0]) - float(a[0]) * float(b[2]),
+        float(a[0]) * float(b[1]) - float(a[1]) * float(b[0]),
+    ]
+
+
+def add3(a, b):
+    return [float(a[0]) + float(b[0]), float(a[1]) + float(b[1]), float(a[2]) + float(b[2])]
+
+
 def tensor_norm(data):
     values = [float(v) for v in data]
     if len(values) < 6:
@@ -1093,7 +1130,15 @@ out_path = sys.argv[2]
 drive = [float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])]
 young = float(sys.argv[6])
 poisson = float(sys.argv[7])
+g1_hub_labels = parse_int_set(sys.argv[8])
+g2_hub_labels = parse_int_set(sys.argv[9])
+g1_rp = parse_vec3(sys.argv[10])
+g2_rp = parse_vec3(sys.argv[11])
 try:
+    assembly = odb.rootAssembly
+    instance_coords = {}
+    for name, inst in assembly.instances.items():
+        instance_coords[name.upper()] = dict((int(node.label), [float(v) for v in node.coordinates[:3]]) for node in inst.nodes)
     step = odb.steps[list(odb.steps.keys())[0]]
     with open(out_path, "w", newline="") as handle:
         fieldnames = [
@@ -1113,6 +1158,10 @@ try:
             "rp_force_norm",
             "rp2_force_drive",
             "rp2_force_norm",
+            "hub_virtual_force_drive",
+            "hub_virtual_force_norm",
+            "hub2_virtual_force_drive",
+            "hub2_virtual_force_norm",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -1127,6 +1176,10 @@ try:
             rp_force_norm = 0.0
             rp2_force_drive = 0.0
             rp2_force_norm = 0.0
+            hub_force = [0.0, 0.0, 0.0]
+            hub_moment = [0.0, 0.0, 0.0]
+            hub2_force = [0.0, 0.0, 0.0]
+            hub2_moment = [0.0, 0.0, 0.0]
             if "U" in frame.fieldOutputs:
                 for value in frame.fieldOutputs["U"].values:
                     u_norm.append(norm3(value.data))
@@ -1147,6 +1200,11 @@ try:
             equivalent_strain = [equivalent_elastic_strain_from_mises(value, young, poisson) for value in vm]
             if "RF" in frame.fieldOutputs:
                 for value in frame.fieldOutputs["RF"].values:
+                    inst_name = ""
+                    try:
+                        inst_name = value.instance.name.upper()
+                    except Exception:
+                        inst_name = ""
                     if int(value.nodeLabel) == 1000001:
                         data = [float(v) for v in value.data[:3]]
                         rp_force_drive += data[0] * drive[0] + data[1] * drive[1] + data[2] * drive[2]
@@ -1155,6 +1213,18 @@ try:
                         data = [float(v) for v in value.data[:3]]
                         rp2_force_drive += data[0] * drive[0] + data[1] * drive[1] + data[2] * drive[2]
                         rp2_force_norm = norm3(data)
+                    if inst_name == "GEAR1-1" and int(value.nodeLabel) in g1_hub_labels:
+                        data = [float(v) for v in value.data[:3]]
+                        coords = instance_coords.get(inst_name, {}).get(int(value.nodeLabel), g1_rp)
+                        lever = [coords[0] - g1_rp[0], coords[1] - g1_rp[1], coords[2] - g1_rp[2]]
+                        hub_force = add3(hub_force, data)
+                        hub_moment = add3(hub_moment, cross3(lever, data))
+                    if inst_name == "GEAR2-1" and int(value.nodeLabel) in g2_hub_labels:
+                        data = [float(v) for v in value.data[:3]]
+                        coords = instance_coords.get(inst_name, {}).get(int(value.nodeLabel), g2_rp)
+                        lever = [coords[0] - g2_rp[0], coords[1] - g2_rp[1], coords[2] - g2_rp[2]]
+                        hub2_force = add3(hub2_force, data)
+                        hub2_moment = add3(hub2_moment, cross3(lever, data))
             for name, output in frame.fieldOutputs.items():
                 upper = name.upper()
                 if "COPEN" in upper:
@@ -1178,6 +1248,10 @@ try:
                 "rp_force_norm": rp_force_norm,
                 "rp2_force_drive": rp2_force_drive,
                 "rp2_force_norm": rp2_force_norm,
+                "hub_virtual_force_drive": dot3(hub_force, drive),
+                "hub_virtual_force_norm": norm3(hub_force),
+                "hub2_virtual_force_drive": dot3(hub2_force, drive),
+                "hub2_virtual_force_norm": norm3(hub2_force),
             })
 finally:
     odb.close()
@@ -1224,6 +1298,10 @@ def run_abaqus_alignment(
             f"{pair.drive_direction[2]:.16e}",
             f"{float(young):.16e}",
             f"{float(poisson):.16e}",
+            ",".join(str(int(v) + 1) for v in pair.gear1.support_nodes),
+            ",".join(str(int(v) + 1) for v in pair.gear2.support_nodes),
+            ",".join(f"{float(v):.16e}" for v in pair.gear1.rp),
+            ",".join(f"{float(v):.16e}" for v in pair.gear2.rp),
         ],
         cwd=run_dir,
         log_path=out_dir / "abaqus_export_stdout.log",
@@ -1278,6 +1356,20 @@ def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -
     t_abaqus = _as_float_column(abaqus_rows, "time")
     force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
     opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    abaqus_force_key = (
+        "hub_virtual_force_norm"
+        if abaqus_rows
+        and "hub_virtual_force_norm" in abaqus_rows[0]
+        and np.any(np.abs(_as_float_column(abaqus_rows, "hub_virtual_force_norm")) > 0.0)
+        else "rp_force_norm"
+    )
+    abaqus_opposing_force_key = (
+        "hub2_virtual_force_norm"
+        if abaqus_rows
+        and "hub2_virtual_force_norm" in abaqus_rows[0]
+        and np.any(np.abs(_as_float_column(abaqus_rows, "hub2_virtual_force_norm")) > 0.0)
+        else "rp2_force_norm"
+    )
     strain_key, abaqus_strain_key, _strain_title = _preferred_strain_metric(sfc_rows, abaqus_rows)
     metrics = [
         ("max_displacement_norm", "max_displacement_norm"),
@@ -1285,8 +1377,8 @@ def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -
         ("max_von_mises", "max_von_mises"),
         (strain_key, abaqus_strain_key),
         ("max_strain_norm", "max_strain_norm"),
-        (force_key, "rp_force_norm"),
-        (opposing_force_key, "rp2_force_norm"),
+        (force_key, abaqus_force_key),
+        (opposing_force_key, abaqus_opposing_force_key),
     ]
     if t_abaqus.size == 0:
         raise RuntimeError(f"Abaqus metrics file has no frames: {abaqus_history}")
@@ -1325,12 +1417,19 @@ def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: l
     t_abq = _as_float_column(abaqus_rows, "time")
     force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
     opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    abaqus_opposing_force_key = (
+        "hub2_virtual_force_norm"
+        if abaqus_rows
+        and "hub2_virtual_force_norm" in abaqus_rows[0]
+        and np.any(np.abs(_as_float_column(abaqus_rows, "hub2_virtual_force_norm")) > 0.0)
+        else "rp2_force_norm"
+    )
     strain_key, abaqus_strain_key, strain_title = _preferred_strain_metric(sfc_rows, abaqus_rows)
     panels = [
         ("max_displacement_norm", "max_displacement_norm", "max displacement norm"),
         ("p95_von_mises", "p95_von_mises", "p95 von Mises stress"),
         (strain_key, abaqus_strain_key, strain_title),
-        (opposing_force_key, "rp2_force_norm", "fixed RP reaction norm"),
+        (opposing_force_key, abaqus_opposing_force_key, "fixed RP reaction norm"),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
     for ax, (sfc_key, abq_key, title) in zip(axes.ravel(), panels, strict=True):

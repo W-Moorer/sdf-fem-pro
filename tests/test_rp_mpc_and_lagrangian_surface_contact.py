@@ -150,6 +150,20 @@ def test_rigid_hub_reduced_assembly_projects_mass_and_forces_to_rp_dofs() -> Non
     assert reduced_force[5] == pytest.approx(1.0 * 2.0 + 2.0 * 3.0)
 
 
+def test_rigid_hub_generalized_force_matches_virtual_work_projection() -> None:
+    nodes = np.asarray([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]], dtype=float)
+    hub = RigidHubMPC(np.asarray([0, 1], dtype=np.int64), nodes, np.zeros(3))
+    full_force = np.asarray([[0.0, 2.0, 0.0], [-3.0, 0.0, 1.0], [9.0, 9.0, 9.0]], dtype=float)
+    generalized = hub.generalized_force_from_nodal_forces(full_force)
+
+    assert generalized[:3] == pytest.approx([-3.0, 2.0, 1.0])
+    assert generalized[3:] == pytest.approx([2.0, 0.0, 8.0])
+    virtual_rp = np.asarray([0.2, -0.1, 0.3, 0.0, 0.0, 0.4], dtype=float)
+    virtual_nodes = hub.nodal_displacements(translation=virtual_rp[:3], rotation=virtual_rp[3:])
+
+    assert float(generalized @ virtual_rp) == pytest.approx(float(np.sum(full_force[hub.node_ids] * virtual_nodes)))
+
+
 def test_merge_dirichlet_conditions_rejects_conflicts() -> None:
     dofs, values = merge_dirichlet_conditions(
         (np.asarray([0, 2]), np.asarray([1.0, 3.0])),
