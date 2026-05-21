@@ -665,8 +665,8 @@ def solve_sfc_cropped_pair_hard_contact(
             "hard_enforcement must be 'exact', 'pressure_compliance', 'element_pressure_smoothing', or 'abaqus_standard_penalty'"
         )
     solver_kind = str(linear_solver).lower()
-    if solver_kind not in {"dense", "sparse", "auto"}:
-        raise ValueError("linear_solver must be 'dense', 'sparse', or 'auto'")
+    if solver_kind not in {"dense", "sparse", "iterative", "auto"}:
+        raise ValueError("linear_solver must be 'dense', 'sparse', 'iterative', or 'auto'")
     effective_pressure_stiffness = _effective_hard_pressure_stiffness(
         pair=pair,
         young=young,
@@ -763,24 +763,40 @@ def solve_sfc_cropped_pair_hard_contact(
                 dtype=float,
             )
             timing_effective_system += time.perf_counter() - t_section
-            solve_hard_contact = (
-                solve_linear_hard_contact_with_dirichlet_sparse
-                if solver_kind == "sparse" or (solver_kind == "auto" and model.n_dofs > 12000)
-                else solve_linear_hard_contact_with_dirichlet
-            )
+            use_sparse_hard_contact = solver_kind in {"sparse", "iterative"} or (solver_kind == "auto" and model.n_dofs > 12000)
+            solve_hard_contact = solve_linear_hard_contact_with_dirichlet_sparse if use_sparse_hard_contact else solve_linear_hard_contact_with_dirichlet
+            sparse_solver_mode = "primal_cg" if solver_kind == "iterative" else "direct"
             t_section = time.perf_counter()
-            solution = solve_hard_contact(
-                effective_stiffness,
-                effective_force,
-                gap_offset,
-                gap_jacobian,
-                fixed_dofs=fixed,
-                fixed_values=values,
-                equilibrium_jacobian_scale=equilibrium_scale,
-                normal_compliance=compliance,
-                tolerance=float(tolerance),
-                max_iterations=30,
-            )
+            if use_sparse_hard_contact:
+                solution = solve_hard_contact(
+                    effective_stiffness,
+                    effective_force,
+                    gap_offset,
+                    gap_jacobian,
+                    fixed_dofs=fixed,
+                    fixed_values=values,
+                    equilibrium_jacobian_scale=equilibrium_scale,
+                    normal_compliance=compliance,
+                    tolerance=float(tolerance),
+                    max_iterations=30,
+                    linear_solver=sparse_solver_mode,
+                    iterative_tolerance=1.0e-10,
+                    iterative_max_iterations=600,
+                    iterative_fallback_to_direct=True,
+                )
+            else:
+                solution = solve_hard_contact(
+                    effective_stiffness,
+                    effective_force,
+                    gap_offset,
+                    gap_jacobian,
+                    fixed_dofs=fixed,
+                    fixed_values=values,
+                    equilibrium_jacobian_scale=equilibrium_scale,
+                    normal_compliance=compliance,
+                    tolerance=float(tolerance),
+                    max_iterations=30,
+                )
             timing_hard_contact_solve += time.perf_counter() - t_section
             correction_norm = float(np.linalg.norm(solution.displacement - u_guess))
             displacement_scale = max(1.0, float(np.linalg.norm(solution.displacement)))

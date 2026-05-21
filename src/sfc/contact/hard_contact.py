@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
-from scipy.sparse.linalg import splu, spsolve
+from scipy.sparse.linalg import LinearOperator, cg, splu, spsolve
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,10 @@ class HardContactSolution:
     active: np.ndarray
     iterations: int
     converged: bool
+
+
+class _IterativeHardContactSolveFailed(RuntimeError):
+    """Internal signal used to fall back to the direct Schur path."""
 
 
 def solve_linear_hard_contact_active_set(
@@ -333,6 +337,10 @@ def solve_linear_hard_contact_with_dirichlet_sparse(
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
     max_iterations: int = 20,
+    linear_solver: str = "direct",
+    iterative_tolerance: float | None = None,
+    iterative_max_iterations: int | None = None,
+    iterative_fallback_to_direct: bool = True,
 ) -> HardContactSolution:
     """Sparse counterpart of :func:`solve_linear_hard_contact_with_dirichlet`.
 
@@ -384,12 +392,44 @@ def solve_linear_hard_contact_with_dirichlet_sparse(
             converged=not bool(np.any(active)),
         )
 
-    Kff = K[free][:, free].tocsc()
     f_eff = np.asarray(f[free] - (K[free][:, fixed] @ values if fixed.size else 0.0), dtype=float).reshape(-1)
     Jf_dense = J[:, free]
     Jc_values = J[:, fixed] @ values if fixed.size else 0.0
     g_eff = np.asarray(g0 + Jc_values, dtype=float).reshape(-1)
+    solver_mode = str(linear_solver).lower()
+    if solver_mode not in {"direct", "primal_cg", "cg", "auto"}:
+        raise ValueError("linear_solver must be 'direct', 'primal_cg', 'cg', or 'auto'")
+    if solver_mode in {"primal_cg", "cg", "auto"} and J.shape[0] and np.all(compliance > 0.0):
+        Kff_csr = K[free][:, free].tocsr()
+        try:
+            reduced = _solve_regularized_hard_contact_primal_cg(
+                Kff_csr,
+                f_eff,
+                g_eff,
+                Jf_dense,
+                compliance,
+                scale=scale,
+                initial_active=initial_active,
+                tolerance=float(tolerance),
+                max_iterations=max_iterations,
+                iterative_tolerance=iterative_tolerance,
+                iterative_max_iterations=iterative_max_iterations,
+            )
+            full_u[free] = reduced.displacement
+            gaps = g0 + J @ full_u
+            return HardContactSolution(
+                displacement=full_u,
+                multipliers=reduced.multipliers.copy(),
+                gaps=gaps,
+                active=reduced.active.copy(),
+                iterations=int(reduced.iterations),
+                converged=bool(reduced.converged and np.all(gaps + compliance * reduced.multipliers >= -float(tolerance))),
+            )
+        except _IterativeHardContactSolveFailed:
+            if not iterative_fallback_to_direct:
+                raise
 
+    Kff = K[free][:, free].tocsc()
     lu = splu(Kff)
     unconstrained = np.asarray(lu.solve(f_eff), dtype=float).reshape(-1)
     if initial_active is None:
@@ -480,6 +520,134 @@ def solve_linear_hard_contact_from_samples_with_dirichlet(
         tolerance=tolerance,
         max_iterations=max_iterations,
     )
+
+
+def _solve_regularized_hard_contact_primal_cg(
+    Kff: csr_matrix,
+    f_eff: np.ndarray,
+    g_eff: np.ndarray,
+    Jf_dense: np.ndarray,
+    compliance: np.ndarray,
+    *,
+    scale: float,
+    initial_active: np.ndarray | None,
+    tolerance: float,
+    max_iterations: int,
+    iterative_tolerance: float | None,
+    iterative_max_iterations: int | None,
+) -> HardContactSolution:
+    """Solve the compliant active set through a primal SPD CG system.
+
+    For positive normal compliance, eliminating the multipliers from
+    ``K u - s J^T lambda = f`` and ``g0 + J u + C lambda = 0`` gives the
+    equivalent primal system
+    ``(K + s J_a^T C_a^-1 J_a) u = f - s J_a^T C_a^-1 g_a``.
+    This avoids a sparse LU factorization of ``K`` while preserving the same
+    active-set equations.  Callers fall back to the direct Schur path if the
+    iterative residual does not meet the requested tolerance.
+    """
+
+    f = np.asarray(f_eff, dtype=float).reshape(-1)
+    g0 = np.asarray(g_eff, dtype=float).reshape(-1)
+    J = np.asarray(Jf_dense, dtype=float)
+    compliance_arr = np.asarray(compliance, dtype=float).reshape(-1)
+    if np.any(compliance_arr <= 0.0):
+        raise _IterativeHardContactSolveFailed("primal CG requires positive compliance")
+    cg_rtol = 1.0e-10 if iterative_tolerance is None else float(iterative_tolerance)
+    cg_atol = max(float(tolerance) * 1.0e-2, 1.0e-12)
+    maxiter = int(iterative_max_iterations) if iterative_max_iterations is not None else max(200, min(2000, Kff.shape[0] // 10))
+    unconstrained = _cg_checked(
+        Kff,
+        f,
+        rtol=cg_rtol,
+        atol=cg_atol,
+        maxiter=maxiter,
+        x0=None,
+        diagonal_preconditioner=np.asarray(Kff.diagonal(), dtype=float),
+    )
+    if initial_active is None:
+        active = g0 + J @ unconstrained < -float(tolerance)
+    else:
+        active = np.asarray(initial_active, dtype=bool).reshape(-1)
+        if active.shape != g0.shape:
+            raise ValueError("initial_active must match constraints")
+    u = unconstrained.copy()
+    lam = np.zeros(J.shape[0], dtype=float)
+    converged = False
+    iterations = 0
+    for iterations in range(1, max(1, int(max_iterations)) + 1):
+        active_ids = np.flatnonzero(active)
+        if active_ids.size:
+            Ja = J[active_ids]
+            inv_c = 1.0 / compliance_arr[active_ids]
+
+            def matvec(value: np.ndarray) -> np.ndarray:
+                v = np.asarray(value, dtype=float)
+                return np.asarray(Kff @ v, dtype=float) + float(scale) * np.asarray(Ja.T @ (inv_c * (Ja @ v)), dtype=float)
+
+            rhs = f - float(scale) * np.asarray(Ja.T @ (inv_c * g0[active_ids]), dtype=float)
+            diag = np.asarray(Kff.diagonal(), dtype=float) + float(scale) * np.sum((Ja * Ja) * inv_c[:, None], axis=0)
+            u = _cg_checked(
+                LinearOperator(Kff.shape, matvec=matvec, dtype=float),
+                rhs,
+                rtol=cg_rtol,
+                atol=cg_atol,
+                maxiter=maxiter,
+                x0=u,
+                diagonal_preconditioner=diag,
+            )
+            lam = np.zeros(J.shape[0], dtype=float)
+            lam[active_ids] = -inv_c * (g0[active_ids] + Ja @ u)
+        else:
+            u = unconstrained.copy()
+            lam = np.zeros(J.shape[0], dtype=float)
+        gaps = g0 + J @ u
+        effective_gaps = gaps + compliance_arr * lam
+        next_active = active.copy()
+        next_active[effective_gaps < -float(tolerance)] = True
+        next_active[lam < -float(tolerance)] = False
+        if np.array_equal(next_active, active) and np.all(effective_gaps >= -float(tolerance)) and np.all(lam >= -float(tolerance)):
+            converged = True
+            break
+        active = next_active
+    lam[np.abs(lam) <= float(tolerance)] = 0.0
+    return HardContactSolution(
+        displacement=u,
+        multipliers=lam,
+        gaps=g0 + J @ u,
+        active=active,
+        iterations=int(iterations),
+        converged=bool(converged),
+    )
+
+
+def _cg_checked(
+    operator,
+    rhs: np.ndarray,
+    *,
+    rtol: float,
+    atol: float,
+    maxiter: int,
+    x0: np.ndarray | None,
+    diagonal_preconditioner: np.ndarray | None = None,
+) -> np.ndarray:
+    """Run CG and require the achieved algebraic residual to satisfy tolerance."""
+
+    b = np.asarray(rhs, dtype=float).reshape(-1)
+    M = None
+    if diagonal_preconditioner is not None:
+        diag = np.asarray(diagonal_preconditioner, dtype=float).reshape(-1)
+        safe_diag = np.where(np.abs(diag) > 1.0e-30, diag, 1.0)
+        M = LinearOperator((b.size, b.size), matvec=lambda value: np.asarray(value, dtype=float) / safe_diag, dtype=float)
+    solution, info = cg(operator, b, x0=x0, rtol=float(rtol), atol=float(atol), maxiter=int(maxiter), M=M)
+    if info != 0:
+        raise _IterativeHardContactSolveFailed(f"CG did not converge, info={info}")
+    residual = np.asarray(operator @ solution, dtype=float) - b
+    residual_norm = float(np.linalg.norm(residual))
+    allowed = float(atol) + float(rtol) * max(1.0, float(np.linalg.norm(b)))
+    if residual_norm > max(10.0 * allowed, 1.0e-9):
+        raise _IterativeHardContactSolveFailed(f"CG residual {residual_norm:.6e} exceeds {allowed:.6e}")
+    return np.asarray(solution, dtype=float).reshape(-1)
 
 
 def hard_contact_pressure_compliance_from_samples(

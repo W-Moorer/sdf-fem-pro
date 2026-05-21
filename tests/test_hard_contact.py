@@ -194,6 +194,54 @@ def test_sparse_hard_contact_schur_path_handles_multiple_active_constraints() ->
     assert sparse.multipliers == pytest.approx(dense.multipliers)
 
 
+def test_sparse_hard_contact_primal_cg_matches_direct_regularized_solution() -> None:
+    stiffness = np.asarray(
+        [
+            [7.0, 0.3, 0.0, -0.2],
+            [0.3, 6.0, 0.2, 0.0],
+            [0.0, 0.2, 5.0, 0.1],
+            [-0.2, 0.0, 0.1, 4.0],
+        ],
+        dtype=float,
+    )
+    force = np.asarray([-2.0, -1.0, 0.2, 0.0], dtype=float)
+    gap_offset = np.asarray([0.1, 0.05], dtype=float)
+    gap_jacobian = np.asarray([[1.0, 0.0, -0.5, 0.0], [0.0, 1.0, 0.0, -1.0]], dtype=float)
+    fixed = np.asarray([3], dtype=np.int64)
+    values = np.asarray([0.02], dtype=float)
+    compliance = np.asarray([0.04, 0.03], dtype=float)
+
+    direct = solve_linear_hard_contact_with_dirichlet_sparse(
+        csr_matrix(stiffness),
+        force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed,
+        fixed_values=values,
+        normal_compliance=compliance,
+        linear_solver="direct",
+    )
+    iterative = solve_linear_hard_contact_with_dirichlet_sparse(
+        csr_matrix(stiffness),
+        force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed,
+        fixed_values=values,
+        normal_compliance=compliance,
+        linear_solver="primal_cg",
+        iterative_tolerance=1.0e-12,
+        iterative_max_iterations=100,
+        iterative_fallback_to_direct=False,
+    )
+
+    assert iterative.converged == direct.converged
+    assert iterative.active.tolist() == direct.active.tolist()
+    assert iterative.displacement == pytest.approx(direct.displacement, abs=1.0e-10)
+    assert iterative.gaps == pytest.approx(direct.gaps, abs=1.0e-10)
+    assert iterative.multipliers == pytest.approx(direct.multipliers, abs=1.0e-10)
+
+
 def test_hard_contact_from_samples_with_dirichlet_includes_master_motion() -> None:
     sample = ContactSample(
         node_ids=np.asarray([0], dtype=np.int64),
