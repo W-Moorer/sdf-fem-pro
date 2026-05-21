@@ -95,14 +95,14 @@ def build_feature_rows(source: Path = DEFAULT_SOURCE) -> list[Row]:
             "feature": "velocity_angular_boundary",
             "abaqus_usage": f"gear1 omega_z={model.gear1_angular_velocity_z:g}",
             "sfc_status": "partial",
-            "evidence": "finite-rotation kinematics can prescribe angular motion; prescribed RP angular velocity has an Abaqus-aligned small-case validation",
+            "evidence": "finite-rotation kinematics can prescribe angular motion; prescribed RP angular velocity and dual-body reduced RP dynamics have Abaqus-aligned small-case validation",
             "gap": "not yet wired as a full finite-rotation time-integrated RP constraint for all gear nodes in the full flexible gear solve",
         },
         {
             "feature": "moment_cload_on_rp",
             "abaqus_usage": f"gear2 torque_z={model.gear2_torque_z:g}",
             "sfc_status": "partial",
-            "evidence": "value is parsed; reduced RP torque dynamics has an Abaqus-aligned small-case validation",
+            "evidence": "value is parsed; reduced RP torque dynamics and dual-body reduced RP dynamics have Abaqus-aligned small-case validation",
             "gap": "full flexible gear torque residual coupling is not yet assembled in the global nonlinear solve",
         },
         {
