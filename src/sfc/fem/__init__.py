@@ -65,7 +65,14 @@ from .hex8 import (
 from .integrator import newmark_beta_step
 from .implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
 from .material import isotropic_linear_elasticity_matrix
-from .rp_mpc import RigidHubMPC, merge_dirichlet_conditions
+from .rp_mpc import (
+    FiniteRotationRigidHubMPC,
+    RigidHubMPC,
+    constant_torque_rotation_history,
+    merge_dirichlet_conditions,
+    reduced_hub_rotational_inertia,
+    rotation_matrix_from_vector,
+)
 from .tet4 import (
     tet4_consistent_mass,
     tet4_lumped_mass,
@@ -129,9 +136,13 @@ __all__ = [
     "initial_state_dirichlet",
     "newmark_beta_step",
     "project_fixed_dofs",
+    "FiniteRotationRigidHubMPC",
     "RigidHubMPC",
+    "constant_torque_rotation_history",
     "register_element_backend",
     "merge_dirichlet_conditions",
+    "reduced_hub_rotational_inertia",
+    "rotation_matrix_from_vector",
     "isotropic_linear_elasticity_matrix",
     "static_force_state",
     "static_residual_and_tangent",

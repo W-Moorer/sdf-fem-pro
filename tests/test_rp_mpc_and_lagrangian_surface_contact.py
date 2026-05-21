@@ -6,7 +6,16 @@ import pytest
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry
 from sfc.fem.calculix_aligned import MechanicsModel, assemble_contact_response
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
-from sfc.fem.rp_mpc import FiniteRotationRigidHubMPC, RigidHubMPC, merge_dirichlet_conditions, rotation_matrix_from_vector
+from scipy.sparse import diags
+
+from sfc.fem.rp_mpc import (
+    FiniteRotationRigidHubMPC,
+    RigidHubMPC,
+    constant_torque_rotation_history,
+    merge_dirichlet_conditions,
+    reduced_hub_rotational_inertia,
+    rotation_matrix_from_vector,
+)
 from sfc.sdf.material_sdf import MaterialSDF
 
 
@@ -50,6 +59,43 @@ def test_rotation_matrix_from_vector_is_orthonormal() -> None:
 
     assert R.T @ R == pytest.approx(np.eye(3), abs=1.0e-14)
     assert np.linalg.det(R) == pytest.approx(1.0)
+
+
+def test_reduced_hub_rotational_inertia_matches_point_mass_formula() -> None:
+    nodes = np.asarray([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=float)
+    masses = np.repeat(np.asarray([2.0, 3.0], dtype=float), 3)
+    inertia = reduced_hub_rotational_inertia(np.asarray([0, 1]), nodes, np.zeros(3), diags(masses))
+
+    assert inertia[2, 2] == pytest.approx(2.0 * 1.0**2 + 3.0 * 2.0**2)
+    assert inertia[0, 0] == pytest.approx(3.0 * 2.0**2)
+    assert inertia[1, 1] == pytest.approx(2.0 * 1.0**2)
+
+
+def test_constant_torque_rotation_history_integrates_free_rp_dof() -> None:
+    times, rotations, velocities = constant_torque_rotation_history(
+        np.diag([2.0, 3.0, 4.0]),
+        (0.0, 0.0, 8.0),
+        duration=0.1,
+        dt=0.05,
+    )
+
+    assert times == pytest.approx([0.0, 0.05, 0.1])
+    assert rotations[:, 2] == pytest.approx([0.0, 0.0025, 0.01])
+    assert velocities[:, 2] == pytest.approx([0.0, 0.1, 0.2])
+
+
+def test_constant_torque_rotation_history_respects_active_axes() -> None:
+    inertia = np.asarray([[2.0, 0.0, 0.5], [0.0, 3.0, 0.0], [0.5, 0.0, 4.0]], dtype=float)
+    _times, rotations, velocities = constant_torque_rotation_history(
+        inertia,
+        (0.0, 0.0, 8.0),
+        duration=0.1,
+        dt=0.1,
+        active_axes=(2,),
+    )
+
+    assert rotations[-1] == pytest.approx([0.0, 0.0, 0.01])
+    assert velocities[-1] == pytest.approx([0.0, 0.0, 0.2])
 
 
 def test_merge_dirichlet_conditions_rejects_conflicts() -> None:

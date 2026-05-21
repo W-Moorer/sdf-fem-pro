@@ -21,7 +21,9 @@ def test_gear_inp_feature_audit_marks_hard_contact_and_torque_gap() -> None:
     by_feature = {str(row["feature"]): row for row in rows}
 
     assert by_feature["c3d4_tet4_volume_elements"]["sfc_status"] == "supported"
-    assert "missing" in str(by_feature["surface_to_surface_hard_contact"]["sfc_status"])
-    assert by_feature["moment_cload_on_rp"]["sfc_status"] == "missing"
+    assert by_feature["surface_to_surface_hard_contact"]["sfc_status"] == "partial"
+    assert "hard normal active-set" in str(by_feature["surface_to_surface_hard_contact"]["evidence"])
+    assert by_feature["moment_cload_on_rp"]["sfc_status"] == "partial"
+    assert "torque dynamics" in str(by_feature["moment_cload_on_rp"]["evidence"])
     assert "38884 nodes" in str(by_feature["two_flexible_gear_parts"]["abaqus_usage"])
     assert "176486 C3D4" in str(by_feature["two_flexible_gear_parts"]["abaqus_usage"])

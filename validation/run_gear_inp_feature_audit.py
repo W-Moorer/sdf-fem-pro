@@ -88,8 +88,8 @@ def build_feature_rows(source: Path = DEFAULT_SOURCE) -> list[Row]:
             "feature": "beam_mpc_hub_to_reference_point",
             "abaqus_usage": f"2 BEAM MPC constraints, hub nodes {len(model.gear1_hub_labels)} + {len(model.gear2_hub_labels)}",
             "sfc_status": "partial",
-            "evidence": "small-rotation RigidHubMPC and finite-rotation kinematic helper exist",
-            "gap": "reduced RP rotational DOF dynamics and torque coupling are not complete",
+            "evidence": "small-rotation RigidHubMPC, finite-rotation kinematics, and reduced rotational inertia helpers exist",
+            "gap": "not yet wired into the full flexible gear global solve",
         },
         {
             "feature": "velocity_angular_boundary",
@@ -101,16 +101,16 @@ def build_feature_rows(source: Path = DEFAULT_SOURCE) -> list[Row]:
         {
             "feature": "moment_cload_on_rp",
             "abaqus_usage": f"gear2 torque_z={model.gear2_torque_z:g}",
-            "sfc_status": "missing",
-            "evidence": "value is parsed",
-            "gap": "requires reduced RP rotational DOF and angular inertia/residual assembly",
+            "sfc_status": "partial",
+            "evidence": "value is parsed; reduced RP torque dynamics has an Abaqus-aligned small-case validation",
+            "gap": "full flexible gear torque residual coupling is not yet assembled in the global nonlinear solve",
         },
         {
             "feature": "surface_to_surface_hard_contact",
             "abaqus_usage": "frictionless HARD pressure-overclosure, SURFACE TO SURFACE contact pair",
-            "sfc_status": "missing_exact_partial_penalty",
-            "evidence": "SFC has Lagrangian-SDF penalty surface contact",
-            "gap": "Abaqus-style hard normal active-set contact is not implemented",
+            "sfc_status": "partial",
+            "evidence": "SFC has Lagrangian-SDF penalty surface contact and a hard normal active-set layer aligned to an Abaqus node-to-surface small case",
+            "gap": "surface-to-surface hard contact must still be wired into the full Lagrangian-SDF gear solve",
         },
         {
             "feature": "nlgeom_implicit_dynamic_step",

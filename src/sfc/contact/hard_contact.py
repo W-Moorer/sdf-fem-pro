@@ -1,0 +1,212 @@
+"""Small frictionless hard-normal contact active-set solvers.
+
+The routines here implement the algebraic hard-contact layer needed before the
+full Lagrangian-SDF surface contact path can support Abaqus-style
+``pressure-overclosure=HARD`` semantics.  They are intentionally geometry
+agnostic: callers provide a linear stiffness matrix, external force vector,
+gap offsets, and gap Jacobian rows.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+import numpy as np
+
+
+@dataclass(frozen=True, slots=True)
+class HardContactSolution:
+    """Result from a frictionless hard-normal active-set solve."""
+
+    displacement: np.ndarray
+    multipliers: np.ndarray
+    gaps: np.ndarray
+    active: np.ndarray
+    iterations: int
+    converged: bool
+
+
+def solve_linear_hard_contact_active_set(
+    stiffness: np.ndarray,
+    external_force: np.ndarray,
+    gap_offset: np.ndarray,
+    gap_jacobian: np.ndarray,
+    *,
+    initial_active: np.ndarray | None = None,
+    tolerance: float = 1.0e-10,
+    max_iterations: int = 20,
+) -> HardContactSolution:
+    """Solve a linear frictionless hard-contact complementarity problem.
+
+    The gap is ``g = gap_offset + J u`` and must satisfy ``g >= 0``.  The
+    contact multiplier is non-negative and contributes ``J.T lambda`` to the
+    resisting force.  The active set is solved from
+
+    ``K u - J_active.T lambda = f``,
+    ``J_active u = -gap_offset_active``.
+    """
+
+    K = np.asarray(stiffness, dtype=float)
+    f = np.asarray(external_force, dtype=float).reshape(-1)
+    g0 = np.asarray(gap_offset, dtype=float).reshape(-1)
+    J = np.asarray(gap_jacobian, dtype=float)
+    if K.ndim != 2 or K.shape[0] != K.shape[1]:
+        raise ValueError("stiffness must be square")
+    if f.shape != (K.shape[0],):
+        raise ValueError("external_force length must match stiffness")
+    if J.ndim != 2 or J.shape[1] != K.shape[0]:
+        raise ValueError("gap_jacobian must have shape (n_constraints, n_dofs)")
+    if g0.shape != (J.shape[0],):
+        raise ValueError("gap_offset length must match number of constraints")
+    if float(tolerance) < 0.0:
+        raise ValueError("tolerance must be non-negative")
+    if initial_active is None:
+        try:
+            unconstrained = np.linalg.solve(K, f)
+        except np.linalg.LinAlgError:
+            unconstrained, *_ = np.linalg.lstsq(K, f, rcond=None)
+        active = g0 + J @ unconstrained < -float(tolerance)
+    else:
+        active = np.asarray(initial_active, dtype=bool).reshape(-1)
+        if active.shape != g0.shape:
+            raise ValueError("initial_active must match constraints")
+    u = np.zeros(K.shape[0], dtype=float)
+    lam = np.zeros(J.shape[0], dtype=float)
+    converged = False
+    iterations = 0
+    for iterations in range(1, max(1, int(max_iterations)) + 1):
+        active_ids = np.flatnonzero(active)
+        if active_ids.size:
+            Ja = J[active_ids]
+            matrix = np.block(
+                [
+                    [K, -Ja.T],
+                    [Ja, np.zeros((active_ids.size, active_ids.size), dtype=float)],
+                ]
+            )
+            rhs = np.concatenate((f, -g0[active_ids]))
+            try:
+                sol = np.linalg.solve(matrix, rhs)
+            except np.linalg.LinAlgError:
+                sol, *_ = np.linalg.lstsq(matrix, rhs, rcond=None)
+            u = sol[: K.shape[0]]
+            lam = np.zeros(J.shape[0], dtype=float)
+            lam[active_ids] = sol[K.shape[0] :]
+        else:
+            try:
+                u = np.linalg.solve(K, f)
+            except np.linalg.LinAlgError:
+                u, *_ = np.linalg.lstsq(K, f, rcond=None)
+            lam = np.zeros(J.shape[0], dtype=float)
+        gaps = g0 + J @ u
+        next_active = active.copy()
+        next_active[gaps < -float(tolerance)] = True
+        next_active[lam < -float(tolerance)] = False
+        if np.array_equal(next_active, active) and np.all(gaps >= -float(tolerance)) and np.all(lam >= -float(tolerance)):
+            converged = True
+            break
+        active = next_active
+    gaps = g0 + J @ u
+    lam[np.abs(lam) <= float(tolerance)] = 0.0
+    return HardContactSolution(
+        displacement=u,
+        multipliers=lam,
+        gaps=gaps,
+        active=active,
+        iterations=int(iterations),
+        converged=bool(converged),
+    )
+
+
+def hard_contact_gap_jacobian_from_samples(
+    samples: Iterable[Any],
+    *,
+    n_total_dofs: int,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build dense hard-contact gap offsets and Jacobian rows from samples.
+
+    Each sample must expose the same attributes as
+    :class:`sfc.fem.calculix_aligned.ContactSample`: ``gap``, ``normal``,
+    ``node_ids``, ``shape_weights``, and optional ``master_node_ids`` /
+    ``master_shape_weights``.  The row convention is
+
+    ``g = g0 + J u``,
+
+    with positive slave-side normal motion increasing the gap and master-side
+    motion along the same normal decreasing it.
+    """
+
+    n_dofs = int(n_total_dofs)
+    if n_dofs <= 0:
+        raise ValueError("n_total_dofs must be positive")
+    g0: list[float] = []
+    rows: list[np.ndarray] = []
+    for sample in samples:
+        normal = np.asarray(sample.normal, dtype=float).reshape(-1)
+        if normal.shape != (3,):
+            raise ValueError("sample normal must have shape (3,)")
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm <= 0.0:
+            raise ValueError("sample normal must be nonzero")
+        normal = normal / normal_norm
+        row = np.zeros(n_dofs, dtype=float)
+        slave_nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        slave_weights = np.asarray(sample.shape_weights, dtype=float).reshape(-1)
+        if slave_nodes.shape != slave_weights.shape:
+            raise ValueError("sample slave nodes and weights must have matching lengths")
+        _scatter_gap_row(row, slave_nodes, slave_weights, normal, int(slave_dof_offset), sign=1.0)
+        master_nodes = getattr(sample, "master_node_ids", None)
+        master_weights = getattr(sample, "master_shape_weights", None)
+        if master_nodes is not None and master_weights is not None:
+            master_ids = np.asarray(master_nodes, dtype=np.int64).reshape(-1)
+            master_w = np.asarray(master_weights, dtype=float).reshape(-1)
+            if master_ids.shape != master_w.shape:
+                raise ValueError("sample master nodes and weights must have matching lengths")
+            _scatter_gap_row(row, master_ids, master_w, normal, int(master_dof_offset), sign=-1.0)
+        rows.append(row)
+        g0.append(float(sample.gap))
+    if not rows:
+        return np.empty((0,), dtype=float), np.empty((0, n_dofs), dtype=float)
+    return np.asarray(g0, dtype=float), np.vstack(rows)
+
+
+def solve_linear_hard_contact_from_samples(
+    stiffness: np.ndarray,
+    external_force: np.ndarray,
+    samples: Iterable[Any],
+    *,
+    n_total_dofs: int,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+    initial_active: np.ndarray | None = None,
+    tolerance: float = 1.0e-10,
+    max_iterations: int = 20,
+) -> HardContactSolution:
+    """Solve linear hard contact using contact-sample gap/Jacobian data."""
+
+    gap_offset, gap_jacobian = hard_contact_gap_jacobian_from_samples(
+        samples,
+        n_total_dofs=int(n_total_dofs),
+        slave_dof_offset=int(slave_dof_offset),
+        master_dof_offset=int(master_dof_offset),
+    )
+    return solve_linear_hard_contact_active_set(
+        stiffness,
+        external_force,
+        gap_offset,
+        gap_jacobian,
+        initial_active=initial_active,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+    )
+
+
+def _scatter_gap_row(row: np.ndarray, nodes: np.ndarray, weights: np.ndarray, normal: np.ndarray, offset: int, *, sign: float) -> None:
+    for node, weight in zip(nodes, weights, strict=True):
+        base = int(offset) + 3 * int(node)
+        if base < 0 or base + 2 >= row.shape[0]:
+            raise ValueError("sample node references a dof outside n_total_dofs")
+        row[base : base + 3] += float(sign) * float(weight) * normal

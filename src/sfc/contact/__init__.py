@@ -21,6 +21,12 @@ from .field_contact import (
     triangle_surface_quadrature_cache,
     triangle_surface_quadrature_samples,
 )
+from .hard_contact import (
+    HardContactSolution,
+    hard_contact_gap_jacobian_from_samples,
+    solve_linear_hard_contact_active_set,
+    solve_linear_hard_contact_from_samples,
+)
 from .jacobian import (
     assemble_contact_jacobian,
     contact_jacobian_entries,
@@ -56,6 +62,7 @@ __all__ = [
     "FieldContactConstraint",
     "FieldContactMatrixFreeStiffness",
     "FieldSurfaceContactResponse",
+    "HardContactSolution",
     "LagrangianOracleConstraint",
     "LagrangianOracleContactResponse",
     "LagrangianPatchPairQueryResult",
@@ -78,6 +85,7 @@ __all__ = [
     "field_contact_jacobian_entries",
     "field_contact_jacobian_row",
     "field_penalty_contact_response",
+    "hard_contact_gap_jacobian_from_samples",
     "lagrangian_oracle_constraint_from_sample",
     "lagrangian_oracle_jacobian_row",
     "lagrangian_oracle_penalty_response",
@@ -87,6 +95,8 @@ __all__ = [
     "penalty_contact_response",
     "quadrilateral_master_surface_penalty_response",
     "quadrilateral_surface_quadrature_cache",
+    "solve_linear_hard_contact_active_set",
+    "solve_linear_hard_contact_from_samples",
     "surface_to_surface_field_penalty_response",
     "surface_to_surface_field_penalty_response_vectorized",
     "triangle_aabbs",
