@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sfc.contact.hard_contact import hard_contact_gap_jacobian_from_samples, solve_linear_hard_contact_with_dirichlet  # noqa: E402
-from sfc.contact.lagrangian_surface_contact import LagrangianSDFQuadrilateralSurfaceContactGeometry  # noqa: E402
+from sfc.contact.lagrangian_surface_contact import LagrangianSDFQ4MasterSurfaceContactGeometry, LagrangianSDFQuadrilateralSurfaceContactGeometry  # noqa: E402
 from sfc.fem import DeformableBody  # noqa: E402
 from sfc.fem.assembler import assemble_stiffness_matrix  # noqa: E402
 from sfc.mesh import VolumeMesh  # noqa: E402
@@ -56,6 +56,7 @@ class FlexibleBlockHardContactCase:
     poisson_ratio: float = 0.30
     density: float = 1.0
     quadrature_order: int = 2
+    master_payload_mode: str = "q4"
 
 
 def _write_csv(path: Path, rows: list[Row]) -> None:
@@ -312,24 +313,40 @@ def _fixed_dofs(case: FlexibleBlockHardContactCase, *, upper_offset: int) -> tup
 
 def _sfc_contact_samples(case: FlexibleBlockHardContactCase, lower: np.ndarray, upper: np.ndarray) -> tuple[list[Any], np.ndarray, np.ndarray]:
     lower_top_quad = np.asarray([[4, 5, 6, 7]], dtype=np.int64)
-    upper_bottom_faces = np.asarray([[0, 2, 1], [0, 3, 2]], dtype=np.int64)
-    material = MaterialSDF.from_triangle_surface(upper, upper_bottom_faces, band_radius=max(case.initial_gap, case.closure))
-    contact = LagrangianSDFQuadrilateralSurfaceContactGeometry(
-        lower_top_quad,
-        material,
-        upper,
-        pressure_stiffness=1.0,
-        master_node_offset=lower.shape[0],
-        quadrature_order=int(case.quadrature_order),
-        search_radius=max(case.initial_gap, case.closure) + case.height,
-    )
+    mode = str(case.master_payload_mode).lower()
+    search_radius = max(case.initial_gap, case.closure) + case.height
+    if mode == "q4":
+        upper_bottom_quads = np.asarray([[0, 3, 2, 1]], dtype=np.int64)
+        contact = LagrangianSDFQ4MasterSurfaceContactGeometry(
+            lower_top_quad,
+            upper_bottom_quads,
+            upper,
+            pressure_stiffness=1.0,
+            master_node_offset=lower.shape[0],
+            quadrature_order=int(case.quadrature_order),
+            search_radius=search_radius,
+        )
+    elif mode == "triangulated":
+        upper_bottom_faces = np.asarray([[0, 2, 1], [0, 3, 2]], dtype=np.int64)
+        material = MaterialSDF.from_triangle_surface(upper, upper_bottom_faces, band_radius=max(case.initial_gap, case.closure))
+        contact = LagrangianSDFQuadrilateralSurfaceContactGeometry(
+            lower_top_quad,
+            material,
+            upper,
+            pressure_stiffness=1.0,
+            master_node_offset=lower.shape[0],
+            quadrature_order=int(case.quadrature_order),
+            search_radius=search_radius,
+        )
+    else:
+        raise ValueError("master_payload_mode must be 'q4' or 'triangulated'")
     x_reference = np.vstack((lower, upper))
     samples = list(contact.samples(x_reference))
     g0, J = hard_contact_gap_jacobian_from_samples(samples, n_total_dofs=3 * x_reference.shape[0])
     return samples, g0, J
 
 
-def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path) -> tuple[Path, Row]:
+def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_path: Path | None = None) -> tuple[Path, Row]:
     lower, upper, elements = make_geometry(case)
     lower_body = DeformableBody(
         mesh=VolumeMesh(lower, elements, element_type="C3D8"),
@@ -367,6 +384,7 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path) -> tuple[Path, R
     upper_top_z_dofs = lower_dofs + 3 * upper_top + 2
     lower_bottom_z_dofs = 3 * lower_bottom + 2
     row = {
+        "master_payload_mode": str(case.master_payload_mode),
         "upper_top_u3_mean": float(np.mean(upper_u[upper_top, 2])),
         "upper_bottom_u3_mean": float(np.mean(upper_u[[0, 1, 2, 3], 2])),
         "lower_top_u3_mean": float(np.mean(lower_u[[4, 5, 6, 7], 2])),
@@ -383,7 +401,85 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path) -> tuple[Path, R
         "quadrature_samples": int(len(samples)),
     }
     _write_csv(out_path, [row])
+    if diagnostics_path is not None:
+        _write_contact_diagnostics(diagnostics_path, samples, solution, J)
     return out_path, {"solver": "sfc_lagrangian_sdf_surface_hard", "analysis_wall_seconds": wall}
+
+
+def _format_array(values: np.ndarray) -> str:
+    arr = np.asarray(values).reshape(-1)
+    return ";".join(f"{float(v):.12e}" for v in arr)
+
+
+def _format_int_array(values: np.ndarray) -> str:
+    arr = np.asarray(values, dtype=np.int64).reshape(-1)
+    return ";".join(str(int(v)) for v in arr)
+
+
+def _write_contact_diagnostics(path: Path, samples: list[Any], solution: Any, gap_jacobian: np.ndarray) -> None:
+    rows: list[Row] = []
+    for idx, sample in enumerate(samples):
+        row = np.asarray(gap_jacobian[int(idx)], dtype=float)
+        multiplier = float(solution.multipliers[int(idx)])
+        contact_force_row = -multiplier * row
+        slave_nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        master_nodes = np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1)
+        slave_z = sum(float(contact_force_row[3 * int(node) + 2]) for node in slave_nodes)
+        master_z = sum(float(contact_force_row[3 * int(node) + 2]) for node in master_nodes)
+        rows.append(
+            {
+                "sample_id": int(idx),
+                "active": int(bool(solution.active[int(idx)])),
+                "initial_gap": float(sample.gap),
+                "solved_gap": float(solution.gaps[int(idx)]),
+                "multiplier": multiplier,
+                "area": float(sample.area),
+                "pressure_like_multiplier_over_area": multiplier / max(float(sample.area), 1.0e-30),
+                "normal_x": float(sample.normal[0]),
+                "normal_y": float(sample.normal[1]),
+                "normal_z": float(sample.normal[2]),
+                "slave_node_ids": _format_int_array(slave_nodes),
+                "slave_weights": _format_array(np.asarray(sample.shape_weights, dtype=float)),
+                "master_node_ids": _format_int_array(master_nodes),
+                "master_weights": _format_array(np.asarray(sample.master_shape_weights, dtype=float)),
+                "slave_force_z_from_row": float(slave_z),
+                "master_force_z_from_row": float(master_z),
+            }
+        )
+    _write_csv(path, rows)
+
+
+def run_sfc_convergence_diagnostics(case: FlexibleBlockHardContactCase, abaqus_path: Path, out_dir: Path) -> list[Row]:
+    abaqus = _read_first(abaqus_path)
+    rows: list[Row] = []
+    for mode in ("triangulated", "q4"):
+        for order in (1, 2, 3):
+            candidate = replace(case, master_payload_mode=mode, quadrature_order=order)
+            result_path, runtime = run_sfc(candidate, out_dir / f"sfc_{mode}_q{order}.csv")
+            row = _read_first(result_path)
+            rf_a = float(abaqus["upper_top_rf3_sum"])
+            rf_s = float(row["upper_top_rf3_sum"])
+            gap_a = float(abaqus["mean_gap"])
+            gap_s = float(row["mean_gap"])
+            rows.append(
+                {
+                    "master_payload_mode": mode,
+                    "quadrature_order": int(order),
+                    "constraints": int(row["constraints"]),
+                    "active_constraints": int(row["active_constraints"]),
+                    "upper_top_rf3_abaqus": rf_a,
+                    "upper_top_rf3_sfc": rf_s,
+                    "upper_top_rf3_rel_error": abs(rf_s - rf_a) / max(abs(rf_a), 1.0e-12),
+                    "mean_gap_abaqus": gap_a,
+                    "mean_gap_sfc": gap_s,
+                    "mean_gap_abs_error": abs(gap_s - gap_a),
+                    "sample_min_gap": float(row["sample_min_gap"]),
+                    "sample_max_gap": float(row["sample_max_gap"]),
+                    "sfc_wall_seconds": float(runtime["analysis_wall_seconds"]),
+                }
+            )
+    _write_csv(out_dir / "sfc_master_payload_convergence.csv", rows)
+    return rows
 
 
 def _read_first(path: Path) -> Row:
@@ -429,7 +525,7 @@ def write_summary(path: Path, rows: list[Row], abaqus_runtime: Row, sfc_runtime:
         "# Lagrangian-SDF Surface-to-Surface HARD Contact Alignment",
         "",
         "Two flexible C3D8 blocks are pressed together in the normal direction.",
-        "Abaqus uses frictionless `SURFACE TO SURFACE` with `pressure-overclosure=HARD`; SFC uses internal C3D8 stiffness and Lagrangian-SDF Q4 slave quadrature hard contact.",
+        "Abaqus uses frictionless `SURFACE TO SURFACE` with `pressure-overclosure=HARD`; SFC uses internal C3D8 stiffness, Q4 slave quadrature, and Q4 master closest-feature payload hard contact.",
         "",
         f"- Abaqus analysis wall time: {float(abaqus_runtime.get('analysis_wall_seconds', 0.0)):.6f} s",
         f"- SFC analysis wall time: {float(sfc_runtime.get('analysis_wall_seconds', 0.0)):.6e} s",
@@ -437,6 +533,7 @@ def write_summary(path: Path, rows: list[Row], abaqus_runtime: Row, sfc_runtime:
         f"- lower top U3 relative error: {100.0 * float(by_metric['lower_top_u3_mean']['rel_error']):.6f}%",
         f"- upper top RF3 relative error: {100.0 * float(by_metric['upper_top_rf3_sum']['rel_error']):.6f}%",
         f"- mean hard-contact gap abs. error: {float(by_metric['mean_gap']['abs_error']):.6e}",
+        "- Diagnostic outputs: `sfc_contact_quadrature_diagnostics.csv` and `sfc_master_payload_convergence.csv`.",
         "",
         "This validates the HARD normal-contact algebra and flexible-body boundary semantics before applying the same layer to gear-tooth contact.",
     ]
@@ -448,13 +545,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--master-payload-mode", choices=("q4", "triangulated"), default="q4")
     args = parser.parse_args(argv)
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    case = build_case()
+    case = replace(build_case(), master_payload_mode=str(args.master_payload_mode))
     abaqus_path, abaqus_runtime = run_abaqus(case, out_dir, abaqus_command=args.abaqus_command, timeout=int(args.timeout))
-    sfc_path, sfc_runtime = run_sfc(case, out_dir / "sfc_lagrangian_sdf_hard_contact.csv")
+    sfc_path, sfc_runtime = run_sfc(
+        case,
+        out_dir / "sfc_lagrangian_sdf_hard_contact.csv",
+        diagnostics_path=out_dir / "sfc_contact_quadrature_diagnostics.csv",
+    )
     rows = compare(abaqus_path, sfc_path, out_dir / "abaqus_vs_sfc_lagrangian_sdf_hard_contact_errors.csv")
+    run_sfc_convergence_diagnostics(case, abaqus_path, out_dir)
     _write_csv(out_dir / "solver_runtime.csv", [abaqus_runtime, sfc_runtime])
     summary = out_dir / "lagrangian_sdf_hard_contact_summary.md"
     write_summary(summary, rows, abaqus_runtime, sfc_runtime)

@@ -29,7 +29,8 @@ def test_lagrangian_sdf_hard_contact_deck_uses_surface_to_surface_hard(tmp_path)
 def test_sfc_lagrangian_sdf_hard_contact_enforces_q4_sample_gaps(tmp_path) -> None:
     case = build_case()
 
-    path, runtime = run_sfc(case, tmp_path / "sfc.csv")
+    diagnostics = tmp_path / "diagnostics.csv"
+    path, runtime = run_sfc(case, tmp_path / "sfc.csv", diagnostics_path=diagnostics)
 
     with path.open(newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
@@ -41,3 +42,8 @@ def test_sfc_lagrangian_sdf_hard_contact_enforces_q4_sample_gaps(tmp_path) -> No
     assert float(row["sample_min_gap"]) == pytest.approx(0.0, abs=1.0e-8)
     assert float(row["sample_max_gap"]) == pytest.approx(0.0, abs=1.0e-8)
     assert float(row["upper_top_u3_mean"]) == pytest.approx(-case.closure)
+    with diagnostics.open(newline="", encoding="utf-8") as handle:
+        diagnostic_rows = list(csv.DictReader(handle))
+    assert len(diagnostic_rows) == case.quadrature_order**2
+    assert diagnostic_rows[0]["master_weights"]
+    assert float(diagnostic_rows[0]["solved_gap"]) == pytest.approx(0.0, abs=1.0e-8)

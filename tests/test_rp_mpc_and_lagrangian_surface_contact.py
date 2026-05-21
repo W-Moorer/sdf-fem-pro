@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sfc.contact.lagrangian_surface_contact import LagrangianSDFQuadrilateralSurfaceContactGeometry, LagrangianSDFSurfaceContactGeometry
+from sfc.contact.lagrangian_surface_contact import (
+    LagrangianQ4ClosestFeatureOracle,
+    LagrangianSDFQ4MasterSurfaceContactGeometry,
+    LagrangianSDFQuadrilateralSurfaceContactGeometry,
+    LagrangianSDFSurfaceContactGeometry,
+)
 from sfc.fem.calculix_aligned import MechanicsModel, assemble_contact_response
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
 from scipy.sparse import diags
@@ -255,3 +260,65 @@ def test_lagrangian_sdf_quadrilateral_surface_contact_uses_q4_weights() -> None:
     assert all(sample.shape_weights.sum() == pytest.approx(1.0) for sample in samples)
     assert all(sample.gap == pytest.approx(-0.05) for sample in samples)
     assert all(sample.master_node_ids is not None for sample in samples)
+
+
+def test_lagrangian_q4_master_oracle_returns_q4_payload() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    oracle = LagrangianQ4ClosestFeatureOracle(
+        master_nodes,
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        master_nodes,
+    )
+
+    payload = oracle.query(np.asarray([0.5, 0.5, -0.05], dtype=float))
+
+    assert payload.gap == pytest.approx(0.05)
+    assert payload.normal == pytest.approx([0.0, 0.0, -1.0])
+    assert payload.master_node_ids == pytest.approx([0, 1, 2, 3])
+    assert payload.master_weights == pytest.approx([0.25, 0.25, 0.25, 0.25])
+
+
+def test_lagrangian_sdf_q4_master_surface_contact_avoids_triangle_payload_split() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+            [1.0, 1.0, -0.05],
+            [1.0, 0.0, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([slave_nodes, master_nodes])
+    contact = LagrangianSDFQ4MasterSurfaceContactGeometry(
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=4,
+        quadrature_order=1,
+    )
+
+    samples = list(contact.samples(x_current))
+
+    assert len(samples) == 1
+    assert samples[0].gap == pytest.approx(0.05)
+    assert samples[0].normal == pytest.approx([0.0, 0.0, -1.0])
+    assert samples[0].master_node_ids == pytest.approx([4, 5, 6, 7])
+    assert samples[0].master_shape_weights == pytest.approx([0.25, 0.25, 0.25, 0.25])
