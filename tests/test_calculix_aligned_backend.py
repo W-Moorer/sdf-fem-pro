@@ -125,6 +125,9 @@ def test_hht_parameters_match_calculix_alpha_convention() -> None:
 
     assert beta == pytest.approx(0.25 * 1.05**2)
     assert gamma == pytest.approx(0.55)
+    beta_md, gamma_md = hht_newmark_parameters(-0.41421)
+    assert beta_md == pytest.approx(0.25 * 1.41421**2)
+    assert gamma_md == pytest.approx(0.91421)
 
 
 def test_calculix_dynamic_predictor_matches_prediction_state_update() -> None:

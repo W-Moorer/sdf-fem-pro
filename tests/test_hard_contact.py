@@ -165,6 +165,30 @@ def test_regularized_hard_contact_allows_pressure_compliance_overclosure() -> No
     assert solution.gaps[0] + 0.05 * solution.multipliers[0] == pytest.approx(0.0)
 
 
+def test_hard_contact_equilibrium_jacobian_scale_weights_multiplier_force() -> None:
+    gap_offset = np.asarray([-1.0], dtype=float)
+    gap_jacobian = np.asarray([[1.0]], dtype=float)
+
+    unscaled = solve_linear_hard_contact_active_set(
+        np.eye(1, dtype=float),
+        np.asarray([0.0], dtype=float),
+        gap_offset,
+        gap_jacobian,
+    )
+    scaled = solve_linear_hard_contact_active_set(
+        np.eye(1, dtype=float),
+        np.asarray([0.0], dtype=float),
+        gap_offset,
+        gap_jacobian,
+        equilibrium_jacobian_scale=0.5,
+    )
+
+    assert unscaled.displacement == pytest.approx([1.0])
+    assert unscaled.multipliers == pytest.approx([1.0])
+    assert scaled.displacement == pytest.approx([1.0])
+    assert 0.5 * scaled.multipliers[0] == pytest.approx(1.0)
+
+
 def test_pressure_compliance_from_samples_uses_area_and_pressure_stiffness() -> None:
     samples = [
         ContactSample(

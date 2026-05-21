@@ -79,6 +79,7 @@ def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> Non
     assert "G2_RP, 1, 6" in text
     assert "G1_RP, 4, 5" in text
     assert "*Boundary, amplitude=RAMP" in text
+    assert "*Dynamic, application=MODERATE DISSIPATION" in text
     assert "G1_RP, 6, 6, 4.000000000000e-03" in text
     assert "S, E, LE" in text
     assert "CPRESS" not in text
@@ -100,11 +101,14 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
         target_overclosure=1.0e-5,
         rotation_rate_z=0.0,
         max_iterations=4,
+        automatic_increment=False,
     )
 
     assert len(history) == 1
     assert summary["status"] == "completed"
     assert summary["contact_mode"] == "hard"
+    assert summary["hard_enforcement"] == "abaqus_standard_penalty"
+    assert float(summary["hht_alpha"]) < 0.0
     assert summary["nodes"] > 0
     assert summary["elements"] > 0
     assert int(history[-1]["hard_contact_samples"]) > 0
@@ -134,6 +138,7 @@ def test_cropped_gear_hard_contact_supports_surface_patch_constraint_averaging()
         rotation_rate_z=0.0,
         max_iterations=4,
         constraint_averaging="surface_patch",
+        automatic_increment=False,
     )
 
     assert len(history) == 1
@@ -159,12 +164,38 @@ def test_cropped_gear_hard_contact_supports_element_pressure_smoothing() -> None
         max_iterations=4,
         hard_enforcement="element_pressure_smoothing",
         pressure_smoothing_factor=4.0,
+        automatic_increment=False,
     )
 
     assert len(history) == 1
     assert summary["hard_enforcement"] == "element_pressure_smoothing"
     assert float(summary["effective_hard_pressure_stiffness"]) > 5.0e9
     assert float(summary["contact_patch_min_edge_length"]) > 0.0
+
+
+def test_cropped_gear_hard_contact_supports_abaqus_standard_penalty() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+
+    history, summary = solve_sfc_cropped_pair_hard_contact(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=1.0e-3,
+        dt=1.0e-3,
+        target_overclosure=1.0e-5,
+        rotation_rate_z=0.0,
+        max_iterations=4,
+        hard_enforcement="abaqus_standard_penalty",
+        automatic_increment=False,
+    )
+
+    assert len(history) == 1
+    assert summary["hard_enforcement"] == "abaqus_standard_penalty"
+    assert float(summary["effective_hard_pressure_stiffness"]) > 5.0e9
+    assert int(summary["accepted_increment_count"]) == 1
 
 
 def test_cropped_gear_abaqus_deck_can_use_hard_contact(tmp_path) -> None:

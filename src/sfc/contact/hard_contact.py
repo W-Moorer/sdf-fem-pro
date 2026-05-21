@@ -33,6 +33,7 @@ def solve_linear_hard_contact_active_set(
     gap_offset: np.ndarray,
     gap_jacobian: np.ndarray,
     *,
+    equilibrium_jacobian_scale: float = 1.0,
     normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
@@ -44,12 +45,16 @@ def solve_linear_hard_contact_active_set(
     contact multiplier is non-negative and contributes ``J.T lambda`` to the
     resisting force.  With zero compliance, the active set is solved from
 
-    ``K u - J_active.T lambda = f``,
+    ``K u - s J_active.T lambda = f``,
     ``J_active u = -gap_offset_active``.
 
     A nonzero ``normal_compliance`` solves the regularized hard-enforcement
     system ``g + C lambda = 0`` on active constraints.  This models solver
     contact-enforcement compliance without changing the geometric gap query.
+    The optional scale ``s`` is used by HHT-style equilibrium, where current
+    contact forces enter the residual with the same ``1 + alpha`` weight as the
+    rest of the current static force balance while the geometric constraint
+    equation remains unscaled.
     """
 
     K = _dense_matrix(stiffness)
@@ -66,6 +71,9 @@ def solve_linear_hard_contact_active_set(
         raise ValueError("gap_offset length must match number of constraints")
     if float(tolerance) < 0.0:
         raise ValueError("tolerance must be non-negative")
+    scale = float(equilibrium_jacobian_scale)
+    if scale <= 0.0:
+        raise ValueError("equilibrium_jacobian_scale must be positive")
     compliance = _as_constraint_compliance(normal_compliance, J.shape[0])
     if initial_active is None:
         try:
@@ -88,7 +96,7 @@ def solve_linear_hard_contact_active_set(
             Ca = np.diag(compliance[active_ids])
             matrix = np.block(
                 [
-                    [K, -Ja.T],
+                    [K, -scale * Ja.T],
                     [Ja, Ca],
                 ]
             )
@@ -189,6 +197,7 @@ def solve_linear_hard_contact_from_samples(
     n_total_dofs: int,
     slave_dof_offset: int = 0,
     master_dof_offset: int = 0,
+    equilibrium_jacobian_scale: float = 1.0,
     normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
@@ -207,6 +216,7 @@ def solve_linear_hard_contact_from_samples(
         external_force,
         gap_offset,
         gap_jacobian,
+        equilibrium_jacobian_scale=equilibrium_jacobian_scale,
         normal_compliance=normal_compliance,
         initial_active=initial_active,
         tolerance=tolerance,
@@ -222,6 +232,7 @@ def solve_linear_hard_contact_with_dirichlet(
     *,
     fixed_dofs: np.ndarray,
     fixed_values: np.ndarray | None = None,
+    equilibrium_jacobian_scale: float = 1.0,
     normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
@@ -247,6 +258,9 @@ def solve_linear_hard_contact_with_dirichlet(
     if g0.shape != (J.shape[0],):
         raise ValueError("gap_offset length must match number of constraints")
     compliance = _as_constraint_compliance(normal_compliance, J.shape[0])
+    scale = float(equilibrium_jacobian_scale)
+    if scale <= 0.0:
+        raise ValueError("equilibrium_jacobian_scale must be positive")
     fixed = np.asarray(fixed_dofs, dtype=np.int64).reshape(-1)
     if np.any(fixed < 0) or (fixed.size and int(fixed.max()) >= K.shape[0]):
         raise ValueError("fixed_dofs reference a dof outside stiffness")
@@ -286,6 +300,7 @@ def solve_linear_hard_contact_with_dirichlet(
         f_eff,
         g_eff,
         Jf,
+        equilibrium_jacobian_scale=scale,
         normal_compliance=compliance,
         initial_active=initial_active,
         tolerance=tolerance,
@@ -313,6 +328,7 @@ def solve_linear_hard_contact_from_samples_with_dirichlet(
     fixed_values: np.ndarray | None = None,
     slave_dof_offset: int = 0,
     master_dof_offset: int = 0,
+    equilibrium_jacobian_scale: float = 1.0,
     normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
@@ -333,6 +349,7 @@ def solve_linear_hard_contact_from_samples_with_dirichlet(
         gap_jacobian,
         fixed_dofs=fixed_dofs,
         fixed_values=fixed_values,
+        equilibrium_jacobian_scale=equilibrium_jacobian_scale,
         normal_compliance=normal_compliance,
         initial_active=initial_active,
         tolerance=tolerance,

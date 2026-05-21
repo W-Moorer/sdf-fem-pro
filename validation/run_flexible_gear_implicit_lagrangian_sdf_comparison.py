@@ -39,7 +39,11 @@ from sfc.contact.hard_contact import (  # noqa: E402
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import MechanicsModel, stvk_internal_response  # noqa: E402
-from sfc.fem.calculix_aligned import calculix_dynamic_predictor, hht_newmark_parameters  # noqa: E402
+from sfc.fem.calculix_aligned import (  # noqa: E402
+    ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+    calculix_dynamic_predictor,
+    hht_newmark_parameters,
+)
 from sfc.fem.constraints import project_fixed_dofs  # noqa: E402
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet  # noqa: E402
 from sfc.fem.rp_mpc import RigidHubMPC, merge_dirichlet_conditions  # noqa: E402
@@ -495,16 +499,58 @@ def _contact_patch_min_edge_length(pair: CroppedGearPair) -> float:
     return float(min(values))
 
 
+def _contact_patch_representative_length(pair: CroppedGearPair) -> float:
+    """Return an Abaqus-style representative contact facet length.
+
+    The hard-contact penalty fallback should scale with the underlying element
+    stiffness instead of a case-fitted factor.  A robust representative length
+    is the area-weighted mean edge length over the two contact patches; it is
+    insensitive to isolated short sliver edges but still follows mesh
+    refinement.
+    """
+
+    weighted_lengths: list[float] = []
+    weights: list[float] = []
+    for nodes, faces in ((pair.gear1.nodes, pair.gear1.contact_faces), (pair.gear2.nodes, pair.gear2.contact_faces)):
+        for face in np.asarray(faces, dtype=np.int64):
+            tri = np.asarray(nodes, dtype=float)[face]
+            area = 0.5 * float(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+            if area <= 0.0:
+                continue
+            edges = [
+                float(np.linalg.norm(tri[0] - tri[1])),
+                float(np.linalg.norm(tri[1] - tri[2])),
+                float(np.linalg.norm(tri[2] - tri[0])),
+            ]
+            positive = [value for value in edges if value > 0.0]
+            if not positive:
+                continue
+            weighted_lengths.append(float(np.mean(positive)))
+            weights.append(area)
+    if not weighted_lengths:
+        raise ValueError("contact patch has no positive representative length")
+    return float(np.average(np.asarray(weighted_lengths, dtype=float), weights=np.asarray(weights, dtype=float)))
+
+
 def _effective_hard_pressure_stiffness(
     *,
     pair: CroppedGearPair,
     young: float,
+    poisson: float,
     pressure_stiffness: float,
     hard_enforcement: str,
     pressure_smoothing_factor: float,
 ) -> float:
-    if str(hard_enforcement).lower() == "element_pressure_smoothing":
+    mode = str(hard_enforcement).lower()
+    if mode == "element_pressure_smoothing":
         return float(pressure_smoothing_factor) * float(young) / _contact_patch_min_edge_length(pair)
+    if mode == "abaqus_standard_penalty":
+        # Abaqus/Standard's finite-sliding hard contact uses a penalty fallback
+        # tied to representative underlying element stiffness.  We use the
+        # same dimensional law, k_p = 10 E / h_rep, with h_rep computed from
+        # the current contact facet set rather than from a fitted parameter.
+        _ = float(poisson)  # kept in the signature for future material variants
+        return 10.0 * float(young) / _contact_patch_representative_length(pair)
     return float(pressure_stiffness)
 
 
@@ -553,9 +599,12 @@ def solve_sfc_cropped_pair_hard_contact(
     rotation_rate_z: float,
     max_iterations: int = 6,
     tolerance: float = 1.0e-9,
-    hard_enforcement: str = "exact",
+    hard_enforcement: str = "abaqus_standard_penalty",
     constraint_averaging: str = "slave_face",
     pressure_smoothing_factor: float = 4.0,
+    hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+    automatic_increment: bool = True,
+    cutback_factor: float = 0.5,
 ) -> tuple[list[Row], Row]:
     """Solve the cropped gear pair with implicit Newmark + HARD contact KKT.
 
@@ -568,11 +617,14 @@ def solve_sfc_cropped_pair_hard_contact(
     """
 
     enforcement = str(hard_enforcement).lower()
-    if enforcement not in {"exact", "pressure_compliance", "element_pressure_smoothing"}:
-        raise ValueError("hard_enforcement must be 'exact', 'pressure_compliance', or 'element_pressure_smoothing'")
+    if enforcement not in {"exact", "pressure_compliance", "element_pressure_smoothing", "abaqus_standard_penalty"}:
+        raise ValueError(
+            "hard_enforcement must be 'exact', 'pressure_compliance', 'element_pressure_smoothing', or 'abaqus_standard_penalty'"
+        )
     effective_pressure_stiffness = _effective_hard_pressure_stiffness(
         pair=pair,
         young=young,
+        poisson=poisson,
         pressure_stiffness=pressure_stiffness,
         hard_enforcement=enforcement,
         pressure_smoothing_factor=pressure_smoothing_factor,
@@ -590,29 +642,43 @@ def solve_sfc_cropped_pair_hard_contact(
     state_x = model.X + u0.reshape((-1, 3))
     velocity = np.zeros_like(model.X)
     acceleration = np.zeros_like(model.X)
+    previous_rhs_balance = np.zeros(model.n_dofs, dtype=float)
     rows: list[Row] = []
-    steps = max(1, int(round(float(duration) / float(dt))))
-    beta, gamma = hht_newmark_parameters(0.0)
-    c0 = 1.0 / (beta * float(dt) * float(dt))
+    beta, gamma = hht_newmark_parameters(float(hht_alpha))
+    max_dt = float(dt)
+    min_dt = min(max_dt * 1.0e-4, 1.0e-8)
+    if max_dt <= 0.0:
+        raise ValueError("dt must be positive")
+    if not (0.0 < float(cutback_factor) < 1.0):
+        raise ValueError("cutback_factor must lie in (0, 1)")
     start = time.perf_counter()
     last_iterations = 0
     last_converged = True
-    for step in range(1, steps + 1):
-        t = step * float(dt)
-        ramp = t / max(float(duration), float(dt))
+    cutback_count = 0
+    increment_count = 0
+    t = 0.0
+    h_trial = max_dt
+    while t < float(duration) - 1.0e-15:
+        h = min(float(h_trial), float(duration) - t)
+        t_candidate = t + h
+        ramp = t_candidate / max(float(duration), float(dt))
         closure = ramp * (pair.initial_patch_gap + float(target_overclosure))
-        rotation = float(rotation_rate_z) * t
+        rotation = float(rotation_rate_z) * t_candidate
         fixed, values = _fixed_conditions_for_pair(pair, closure=closure, rotation_z=rotation)
         u_n = (state_x - model.X).reshape(-1)
         v_n = velocity.reshape(-1)
         a_n = acceleration.reshape(-1)
-        u_pred, v_pred, _accold_after_prediction = calculix_dynamic_predictor(u_n, v_n, a_n, dt=float(dt), beta=beta, gamma=gamma)
+        c0 = 1.0 / (beta * h * h)
+        equilibrium_scale = 1.0 + float(hht_alpha)
+        u_pred, v_pred, _accold_after_prediction = calculix_dynamic_predictor(u_n, v_n, a_n, dt=h, beta=beta, gamma=gamma)
         u_guess = project_fixed_dofs(u_pred.copy(), fixed, values)
         solution = None
         final_samples: list[Any] = []
         final_gap_jacobian = np.empty((0, model.n_dofs), dtype=float)
         converged = False
         iteration_count = 0
+        previous_active: np.ndarray | None = None
+        active_stable_count = 0
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             x_guess = model.X + u_guess.reshape((-1, 3))
             internal = stvk_internal_response(model, x_guess, assemble_tangent=True)
@@ -630,8 +696,14 @@ def solve_sfc_cropped_pair_hard_contact(
                 else 1.0 / (float(effective_pressure_stiffness) * np.maximum(constraint_areas, 1.0e-30))
             )
             tangent = internal.tangent.tocsr()
-            effective_stiffness = (tangent + model.mass_matrix * c0).tocsr()
-            effective_force = np.asarray(model.mass_matrix @ (c0 * u_pred) - internal.force.reshape(-1) + tangent @ u_guess, dtype=float)
+            effective_stiffness = (model.mass_matrix * c0 + tangent * equilibrium_scale).tocsr()
+            effective_force = np.asarray(
+                model.mass_matrix @ (c0 * u_pred)
+                - equilibrium_scale * internal.force.reshape(-1)
+                + equilibrium_scale * (tangent @ u_guess)
+                - float(hht_alpha) * previous_rhs_balance,
+                dtype=float,
+            )
             solution = solve_linear_hard_contact_with_dirichlet(
                 effective_stiffness,
                 effective_force,
@@ -639,6 +711,7 @@ def solve_sfc_cropped_pair_hard_contact(
                 gap_jacobian,
                 fixed_dofs=fixed,
                 fixed_values=values,
+                equilibrium_jacobian_scale=equilibrium_scale,
                 normal_compliance=compliance,
                 tolerance=float(tolerance),
                 max_iterations=30,
@@ -647,14 +720,26 @@ def solve_sfc_cropped_pair_hard_contact(
             displacement_scale = max(1.0, float(np.linalg.norm(solution.displacement)))
             u_guess = solution.displacement.copy()
             iteration_count = iteration
-            if correction_norm <= float(tolerance) * displacement_scale and bool(solution.converged):
+            active_now = np.asarray(solution.active, dtype=bool)
+            if previous_active is not None and np.array_equal(active_now, previous_active):
+                active_stable_count += 1
+            else:
+                active_stable_count = 0
+            previous_active = active_now.copy()
+            strict_correction = correction_norm <= float(tolerance) * displacement_scale
+            abaqus_style_contact_accept = bool(solution.converged) and active_stable_count >= 1 and correction_norm <= 1.0e-4 * displacement_scale
+            if bool(solution.converged) and (strict_correction or abaqus_style_contact_accept):
                 converged = True
                 break
         if solution is None:
             raise RuntimeError("hard contact solve did not run")
+        if (not converged) and bool(automatic_increment) and h > min_dt * (1.0 + 1.0e-12):
+            h_trial = max(min_dt, h * float(cutback_factor))
+            cutback_count += 1
+            continue
         u_new = solution.displacement
         a_new = c0 * (u_new - u_pred)
-        v_new = v_pred + gamma * float(dt) * a_new
+        v_new = v_pred + gamma * h * a_new
         state_x = model.X + u_new.reshape((-1, 3))
         velocity = v_new.reshape((-1, 3))
         acceleration = a_new.reshape((-1, 3))
@@ -662,13 +747,16 @@ def solve_sfc_cropped_pair_hard_contact(
         raw_gaps = np.asarray([float(sample.gap) for sample in contact.samples(state_x)], dtype=float)
         active = np.asarray(solution.active, dtype=bool)
         multipliers = np.asarray(solution.multipliers, dtype=float)
-        active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
+        active_force = float(equilibrium_scale * np.sum(multipliers[active])) if multipliers.size else 0.0
         dynamic_balance = np.asarray(model.mass_matrix @ a_new + internal.force.reshape(-1), dtype=float)
         if final_gap_jacobian.size and multipliers.size:
-            dynamic_balance -= final_gap_jacobian.T @ multipliers
+            dynamic_balance -= equilibrium_scale * (final_gap_jacobian.T @ multipliers)
         static_balance = np.asarray(internal.force.reshape(-1), dtype=float)
         if final_gap_jacobian.size and multipliers.size:
             static_balance -= final_gap_jacobian.T @ multipliers
+        previous_rhs_balance = -internal.force.reshape(-1)
+        if final_gap_jacobian.size and multipliers.size:
+            previous_rhs_balance += final_gap_jacobian.T @ multipliers
         hub1_reaction = _equivalent_hub_reaction(
             dynamic_balance,
             node_ids=pair.gear1.support_nodes,
@@ -706,7 +794,8 @@ def solve_sfc_cropped_pair_hard_contact(
             poisson=poisson,
         )
         row = {
-            "time": t,
+            "time": t_candidate,
+            "dt": h,
             "closure": closure,
             "rotation_z": rotation,
             "active_contact_samples": int(np.count_nonzero(active)),
@@ -729,8 +818,12 @@ def solve_sfc_cropped_pair_hard_contact(
             "newton_iterations": int(iteration_count),
             "hard_active_set_converged": int(bool(solution.converged)),
             "hard_outer_converged": int(bool(converged)),
+            "automatic_increment_cutbacks": int(cutback_count),
             "hard_contact_samples": int(len(final_samples)),
             "hard_constraints": int(solution.gaps.shape[0]),
+            "hht_alpha": float(hht_alpha),
+            "hht_beta": float(beta),
+            "hht_gamma": float(gamma),
         }
         row.update({f"rp1_{key}": value for key, value in hub1_reaction.items()})
         row.update({f"rp2_{key}": value for key, value in hub2_reaction.items()})
@@ -744,6 +837,9 @@ def solve_sfc_cropped_pair_hard_contact(
         rows.append(row)
         last_iterations = iteration_count
         last_converged = bool(converged)
+        increment_count += 1
+        t = t_candidate
+        h_trial = max_dt if (not automatic_increment) else min(max_dt, max(h, min_dt) * (1.25 if converged and iteration_count <= 3 else 1.0))
     wall = time.perf_counter() - start
     summary = {
         "sfc_wall_seconds": wall,
@@ -762,6 +858,12 @@ def solve_sfc_cropped_pair_hard_contact(
         "final_opposing_rp_force_norm": float(rows[-1].get("opposing_rp_force_norm", 0.0)) if rows else 0.0,
         "final_hard_outer_iterations": int(last_iterations),
         "final_hard_outer_converged": int(last_converged),
+        "accepted_increment_count": int(increment_count),
+        "automatic_increment": str(bool(automatic_increment)).lower(),
+        "cutback_count": int(cutback_count),
+        "hht_alpha": float(hht_alpha),
+        "hht_beta": float(beta),
+        "hht_gamma": float(gamma),
         "contact_mode": "hard",
         "hard_enforcement": enforcement,
         "constraint_averaging": str(constraint_averaging),
@@ -859,7 +961,7 @@ def _write_abaqus_alignment_deck(
             "*Amplitude, name=RAMP",
             f"0., 0., {duration:.12e}, 1.",
             "*Step, name=alignment, nlgeom=YES, inc=2000",
-            "*Dynamic",
+            "*Dynamic, application=MODERATE DISSIPATION",
             f"{dt:.12e}, {duration:.12e}, {min(float(dt) * 1.0e-4, 1.0e-8):.12e}, {dt:.12e}",
             "*Boundary",
             "G2_RP, 1, 6",
@@ -1267,6 +1369,9 @@ def write_summary(
         f"- constraint averaging: {summary.get('constraint_averaging', '')}",
         f"- effective hard pressure stiffness: {float(summary.get('effective_hard_pressure_stiffness', 0.0)):.6e}",
         f"- pressure smoothing factor: {float(summary.get('pressure_smoothing_factor', 0.0)):.6e}",
+        f"- HHT alpha/beta/gamma: {float(summary.get('hht_alpha', 0.0)):.6e} / {float(summary.get('hht_beta', 0.0)):.6e} / {float(summary.get('hht_gamma', 0.0)):.6e}",
+        f"- automatic increment: {summary.get('automatic_increment', '')}",
+        f"- cutback count: {int(summary.get('cutback_count', 0))}",
         f"- SFC wall time: {summary['sfc_wall_seconds']:.6f} s",
         f"- nodes/elements: {summary['nodes']} / {summary['elements']}",
         f"- contact faces: {summary['gear1_contact_faces']} / {summary['gear2_contact_faces']}",
@@ -1332,8 +1437,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rotation-rate-z", type=float, default=2.0)
     parser.add_argument("--pressure-stiffness", type=float, default=DEFAULT_PRESSURE_STIFFNESS)
     parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="penalty")
-    parser.add_argument("--hard-enforcement", choices=("exact", "pressure_compliance", "element_pressure_smoothing"), default="exact")
+    parser.add_argument(
+        "--hard-enforcement",
+        choices=("exact", "pressure_compliance", "element_pressure_smoothing", "abaqus_standard_penalty"),
+        default="abaqus_standard_penalty",
+    )
     parser.add_argument("--pressure-smoothing-factor", type=float, default=4.0)
+    parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
+    parser.add_argument("--no-automatic-increment", action="store_true")
+    parser.add_argument("--cutback-factor", type=float, default=0.5)
     parser.add_argument("--constraint-averaging", choices=("none", "slave_face", "surface_patch"), default="slave_face")
     parser.add_argument("--hard-max-iterations", type=int, default=6)
     parser.add_argument("--run-abaqus", action="store_true", help="Run the generated Abaqus native-contact deck and compare curves.")
@@ -1363,6 +1475,9 @@ def main(argv: list[str] | None = None) -> int:
             hard_enforcement=str(args.hard_enforcement),
             constraint_averaging=str(args.constraint_averaging),
             pressure_smoothing_factor=float(args.pressure_smoothing_factor),
+            hht_alpha=float(args.hht_alpha),
+            automatic_increment=not bool(args.no_automatic_increment),
+            cutback_factor=float(args.cutback_factor),
         )
     else:
         history, summary = solve_sfc_cropped_pair(

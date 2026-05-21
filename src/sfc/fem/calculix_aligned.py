@@ -35,6 +35,8 @@ TRIANGLE_QUADRATURE_BARYCENTRIC = np.asarray(
     dtype=float,
 )
 TRIANGLE_QUADRATURE_WEIGHTS = np.full(3, 1.0 / 3.0, dtype=float)
+ABAQUS_STANDARD_TRANSIENT_FIDELITY_ALPHA = -0.05
+ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA = -0.41421
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,11 +282,11 @@ class StepDiagnostics:
 
 
 def hht_newmark_parameters(alpha: float) -> tuple[float, float]:
-    """Return HHT/Newmark ``beta`` and ``gamma`` for CalculiX alpha syntax."""
+    """Return HHT/Newmark ``beta`` and ``gamma`` for Abaqus/CalculiX alpha syntax."""
 
     alpha_value = float(alpha)
-    if not (-1.0 / 3.0 <= alpha_value <= 0.0):
-        raise ValueError("HHT alpha must lie in [-1/3, 0]")
+    if not (-0.5 <= alpha_value <= 0.0):
+        raise ValueError("HHT alpha must lie in [-0.5, 0]")
     return 0.25 * (1.0 - alpha_value) ** 2, 0.5 - alpha_value
 
 
