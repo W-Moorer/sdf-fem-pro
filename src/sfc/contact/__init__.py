@@ -39,6 +39,7 @@ from .lagrangian_sdf_oracle import (
     lagrangian_oracle_penalty_response_batch,
     lagrangian_patch_pair_query,
 )
+from .lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry
 from .narrow_phase import (
     ContactConstraint,
     SurfaceSample,
@@ -60,6 +61,7 @@ __all__ = [
     "LagrangianPatchPairQueryResult",
     "LagrangianPullbackQueryResult",
     "LagrangianSDFContactOracle",
+    "LagrangianSDFSurfaceContactGeometry",
     "LagrangianSDFQueryResult",
     "SurfaceQuadratureCache",
     "PenaltyContactBackend",

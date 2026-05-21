@@ -63,7 +63,9 @@ from .hex8 import (
     hex8_volume,
 )
 from .integrator import newmark_beta_step
+from .implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
 from .material import isotropic_linear_elasticity_matrix
+from .rp_mpc import RigidHubMPC, merge_dirichlet_conditions
 from .tet4 import (
     tet4_consistent_mass,
     tet4_lumped_mass,
@@ -110,6 +112,7 @@ __all__ = [
     "get_element_backend",
     "hht_newmark_parameters",
     "hht_step",
+    "hht_step_dirichlet",
     "hex8_reference_data",
     "C3D8_NATURAL_NODE_COORDS",
     "HEX8_CENTER_NATURAL_GRADIENTS",
@@ -123,9 +126,12 @@ __all__ = [
     "hex8_strain_displacement_matrix",
     "hex8_volume",
     "initial_state",
+    "initial_state_dirichlet",
     "newmark_beta_step",
     "project_fixed_dofs",
+    "RigidHubMPC",
     "register_element_backend",
+    "merge_dirichlet_conditions",
     "isotropic_linear_elasticity_matrix",
     "static_force_state",
     "static_residual_and_tangent",
