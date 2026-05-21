@@ -10,6 +10,7 @@ from sfc.fem.calculix_aligned import (
     MechanicsModel,
     PlaneContactGeometry,
     _nodal_gravity_loads,
+    _stvk_internal_response_quadrature_loop,
     _restore_contact_state,
     _snapshot_contact_state,
     assemble_calculix_c3d4_mass,
@@ -227,6 +228,29 @@ def test_stvk_tangent_matches_directional_finite_difference() -> None:
     assert response.tangent @ direction.reshape(-1) == pytest.approx(finite_difference, rel=1.0e-5, abs=1.0e-6)
     assert np.linalg.norm(response.material_tangent.data) > 0.0
     assert np.linalg.norm(response.geometric_tangent.data) > 0.0
+
+
+def test_vectorized_tet4_stvk_response_matches_reference_loop() -> None:
+    model = _block_model()
+    x = model.X.copy()
+    x[:, 0] += 0.03 * model.X[:, 1]
+    x[:, 1] += 0.02 * model.X[:, 2]
+    x[:, 2] += 0.01 * model.X[:, 0]
+
+    fast = stvk_internal_response(model, x, assemble_tangent=True)
+    reference = _stvk_internal_response_quadrature_loop(model, x, assemble_tangent=True)
+
+    assert fast.force == pytest.approx(reference.force)
+    assert fast.strain == pytest.approx(reference.strain)
+    assert fast.stress == pytest.approx(reference.stress)
+    assert fast.von_mises == pytest.approx(reference.von_mises)
+    assert fast.strain_energy == pytest.approx(reference.strain_energy)
+    assert (fast.material_tangent - reference.material_tangent).toarray() == pytest.approx(
+        np.zeros((model.n_dofs, model.n_dofs))
+    )
+    assert (fast.geometric_tangent - reference.geometric_tangent).toarray() == pytest.approx(
+        np.zeros((model.n_dofs, model.n_dofs))
+    )
 
 
 def test_plane_contact_response_uses_area_weighted_pressure_overclosure() -> None:

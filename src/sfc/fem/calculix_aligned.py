@@ -518,6 +518,16 @@ def assemble_hex8_mass(X: np.ndarray, elements: np.ndarray, density: float, *, k
 def stvk_internal_response(model: MechanicsModel, x_current: np.ndarray, *, assemble_tangent: bool = True) -> InternalResponse:
     """Return total-Lagrangian StVK internal force and tangent."""
 
+    if model.quadrature_shape_grads is None and model.quadrature_weights is None and model.element_type == "c3d4":
+        return _stvk_internal_response_tet4_vectorized(model, x_current, assemble_tangent=assemble_tangent)
+    return _stvk_internal_response_quadrature_loop(model, x_current, assemble_tangent=assemble_tangent)
+
+
+def _stvk_internal_response_quadrature_loop(
+    model: MechanicsModel, x_current: np.ndarray, *, assemble_tangent: bool = True
+) -> InternalResponse:
+    """Reference quadrature loop used by multi-point elements."""
+
     x = np.asarray(x_current, dtype=float)
     lam, mu = _lame_parameters(model.E, model.nu)
     identity = np.eye(3)
@@ -582,6 +592,106 @@ def stvk_internal_response(model: MechanicsModel, x_current: np.ndarray, *, asse
     material = coo_matrix((mat_data, (mat_rows, mat_cols)), shape=(model.n_dofs, model.n_dofs)).tocsr()
     geometric = coo_matrix((geo_data, (geo_rows, geo_cols)), shape=(model.n_dofs, model.n_dofs)).tocsr()
     return InternalResponse(force, strains, stresses, vm, float(energy), material, geometric)
+
+
+def _stvk_internal_response_tet4_vectorized(
+    model: MechanicsModel, x_current: np.ndarray, *, assemble_tangent: bool = True
+) -> InternalResponse:
+    """Vectorized one-point C3D4 StVK response with the same formulas as the reference loop."""
+
+    x = np.asarray(x_current, dtype=float)
+    lam, mu = _lame_parameters(model.E, model.nu)
+    identity = np.eye(3, dtype=float)
+    force = np.zeros_like(x)
+    n_elements = int(model.elements.shape[0])
+    strains = np.zeros((n_elements, 3, 3), dtype=float)
+    stresses = np.zeros((n_elements, 3, 3), dtype=float)
+    vm = np.zeros(n_elements, dtype=float)
+    energy = 0.0
+    mat_rows: list[np.ndarray] = []
+    mat_cols: list[np.ndarray] = []
+    mat_data: list[np.ndarray] = []
+    geo_rows: list[np.ndarray] = []
+    geo_cols: list[np.ndarray] = []
+    geo_data: list[np.ndarray] = []
+    chunk_size = 8192
+    for start in range(0, n_elements, chunk_size):
+        end = min(n_elements, start + chunk_size)
+        elements = model.elements[start:end]
+        xe = x[elements]
+        grad = model.shape_grads[start:end]
+        volume = model.volumes[start:end]
+        F = np.einsum("eai,eaj->eij", xe, grad, optimize=True)
+        green = 0.5 * (np.einsum("eki,ekj->eij", F, F, optimize=True) - identity)
+        trace_green = np.trace(green, axis1=1, axis2=2)
+        second_piola = lam * trace_green[:, None, None] * identity + 2.0 * mu * green
+        first_piola = np.einsum("eik,ekj->eij", F, second_piola, optimize=True)
+        element_force = volume[:, None, None] * np.einsum("eij,eaj->eai", first_piola, grad, optimize=True)
+        np.add.at(force, elements, element_force)
+        det_f = np.maximum(np.linalg.det(F), 1.0e-12)
+        cauchy = np.einsum("eik,ejk->eij", first_piola, F, optimize=True) / det_f[:, None, None]
+        strains[start:end] = green
+        stresses[start:end] = cauchy
+        vm[start:end] = _von_mises_batch(cauchy)
+        energy += 0.5 * float(np.sum(volume * np.einsum("eij,eij->e", green, second_piola, optimize=True)))
+        if not assemble_tangent:
+            continue
+        F_grad = np.einsum("eij,eaj->eai", F, grad, optimize=True)
+        grad_dot = np.einsum("eak,ebk->eab", grad, grad, optimize=True)
+        fft = np.einsum("eik,ejk->eij", F, F, optimize=True)
+        material = volume[:, None, None, None, None] * (
+            lam * F_grad[:, :, None, :, None] * F_grad[:, None, :, None, :]
+            + mu * F_grad[:, None, :, :, None] * F_grad[:, :, None, None, :]
+            + mu * grad_dot[:, :, :, None, None] * fft[:, None, None, :, :]
+        )
+        geo_scalar = volume[:, None, None] * np.einsum("ebi,eij,eaj->eab", grad, second_piola, grad, optimize=True)
+        geometric = geo_scalar[:, :, :, None, None] * identity[None, None, None, :, :]
+        rows, cols = _tet4_tangent_row_col_blocks(elements, material.shape)
+        mat_rows.append(rows)
+        mat_cols.append(cols)
+        mat_data.append(np.ravel(material))
+        geo_rows.append(rows)
+        geo_cols.append(cols)
+        geo_data.append(np.ravel(geometric))
+    if assemble_tangent and mat_data:
+        material_tangent = coo_matrix(
+            (np.concatenate(mat_data), (np.concatenate(mat_rows), np.concatenate(mat_cols))),
+            shape=(model.n_dofs, model.n_dofs),
+        ).tocsr()
+        geometric_tangent = coo_matrix(
+            (np.concatenate(geo_data), (np.concatenate(geo_rows), np.concatenate(geo_cols))),
+            shape=(model.n_dofs, model.n_dofs),
+        ).tocsr()
+    else:
+        material_tangent = csr_matrix((model.n_dofs, model.n_dofs), dtype=float)
+        geometric_tangent = csr_matrix((model.n_dofs, model.n_dofs), dtype=float)
+    return InternalResponse(force, strains, stresses, vm, float(energy), material_tangent, geometric_tangent)
+
+
+def _tet4_tangent_row_col_blocks(elements: np.ndarray, block_shape: tuple[int, int, int, int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Return flattened row/column indices for vectorized C3D4 tangent blocks."""
+
+    row_nodes = np.asarray(elements, dtype=np.int64)[:, :, None, None, None]
+    col_nodes = np.asarray(elements, dtype=np.int64)[:, None, :, None, None]
+    i = np.arange(3, dtype=np.int64)[None, None, None, :, None]
+    j = np.arange(3, dtype=np.int64)[None, None, None, None, :]
+    rows = np.broadcast_to(3 * row_nodes + i, block_shape).ravel()
+    cols = np.broadcast_to(3 * col_nodes + j, block_shape).ravel()
+    return rows, cols
+
+
+def _von_mises_batch(stress: np.ndarray) -> np.ndarray:
+    """Return von Mises stress for a batch of symmetric 3x3 tensors."""
+
+    s = np.asarray(stress, dtype=float)
+    sx = s[:, 0, 0]
+    sy = s[:, 1, 1]
+    sz = s[:, 2, 2]
+    txy = s[:, 0, 1]
+    tyz = s[:, 1, 2]
+    txz = s[:, 0, 2]
+    value = 0.5 * ((sx - sy) ** 2 + (sy - sz) ** 2 + (sz - sx) ** 2) + 3.0 * (txy**2 + tyz**2 + txz**2)
+    return np.sqrt(np.maximum(value, 0.0))
 
 
 def assemble_contact_response(samples: Iterable[ContactSample], n_nodes: int) -> ContactResponse:

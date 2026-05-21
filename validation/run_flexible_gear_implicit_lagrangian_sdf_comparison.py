@@ -698,6 +698,13 @@ def solve_sfc_cropped_pair_hard_contact(
     if not (0.0 < float(cutback_factor) < 1.0):
         raise ValueError("cutback_factor must lie in (0, 1)")
     start = time.perf_counter()
+    timing_internal_tangent = 0.0
+    timing_contact_linearization = 0.0
+    timing_effective_system = 0.0
+    timing_hard_contact_solve = 0.0
+    timing_accepted_internal = 0.0
+    timing_accepted_contact = 0.0
+    timing_reaction_diagnostics = 0.0
     last_iterations = 0
     last_converged = True
     cutback_count = 0
@@ -727,7 +734,10 @@ def solve_sfc_cropped_pair_hard_contact(
         active_stable_count = 0
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             x_guess = model.X + u_guess.reshape((-1, 3))
+            t_section = time.perf_counter()
             internal = stvk_internal_response(model, x_guess, assemble_tangent=True)
+            timing_internal_tangent += time.perf_counter() - t_section
+            t_section = time.perf_counter()
             final_samples, gap_offset, gap_jacobian, constraint_areas = _hard_contact_linearized_gap_jacobian(
                 contact,
                 x_guess,
@@ -735,12 +745,14 @@ def solve_sfc_cropped_pair_hard_contact(
                 n_total_dofs=model.n_dofs,
                 constraint_averaging=constraint_averaging,
             )
+            timing_contact_linearization += time.perf_counter() - t_section
             final_gap_jacobian = gap_jacobian
             compliance = (
                 None
                 if enforcement == "exact"
                 else 1.0 / (float(effective_pressure_stiffness) * np.maximum(constraint_areas, 1.0e-30))
             )
+            t_section = time.perf_counter()
             tangent = internal.tangent.tocsr()
             effective_stiffness = (model.mass_matrix * c0 + tangent * equilibrium_scale).tocsr()
             effective_force = np.asarray(
@@ -750,11 +762,13 @@ def solve_sfc_cropped_pair_hard_contact(
                 - float(hht_alpha) * previous_rhs_balance,
                 dtype=float,
             )
+            timing_effective_system += time.perf_counter() - t_section
             solve_hard_contact = (
                 solve_linear_hard_contact_with_dirichlet_sparse
                 if solver_kind == "sparse" or (solver_kind == "auto" and model.n_dofs > 12000)
                 else solve_linear_hard_contact_with_dirichlet
             )
+            t_section = time.perf_counter()
             solution = solve_hard_contact(
                 effective_stiffness,
                 effective_force,
@@ -767,6 +781,7 @@ def solve_sfc_cropped_pair_hard_contact(
                 tolerance=float(tolerance),
                 max_iterations=30,
             )
+            timing_hard_contact_solve += time.perf_counter() - t_section
             correction_norm = float(np.linalg.norm(solution.displacement - u_guess))
             displacement_scale = max(1.0, float(np.linalg.norm(solution.displacement)))
             u_guess = solution.displacement.copy()
@@ -795,8 +810,12 @@ def solve_sfc_cropped_pair_hard_contact(
         state_x = model.X + u_new.reshape((-1, 3))
         velocity = v_new.reshape((-1, 3))
         acceleration = a_new.reshape((-1, 3))
+        t_section = time.perf_counter()
         internal = stvk_internal_response(model, state_x, assemble_tangent=False)
+        timing_accepted_internal += time.perf_counter() - t_section
+        t_section = time.perf_counter()
         raw_gaps = np.asarray([float(sample.gap) for sample in contact.samples(state_x)], dtype=float)
+        timing_accepted_contact += time.perf_counter() - t_section
         active = np.asarray(solution.active, dtype=bool)
         multipliers = np.asarray(solution.multipliers, dtype=float)
         active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
@@ -811,6 +830,7 @@ def solve_sfc_cropped_pair_hard_contact(
             mass_acceleration - equilibrium_scale * current_rhs_balance + float(hht_alpha) * previous_rhs_before_step,
             dtype=float,
         )
+        t_section = time.perf_counter()
         n1_dofs = 3 * pair.gear1.nodes.shape[0]
         hub1_hht_reaction, hub2_hht_reaction = _equivalent_pair_reactions(
             hht_balance,
@@ -842,6 +862,7 @@ def solve_sfc_cropped_pair_hard_contact(
             state_x=state_x,
             n1_dofs=n1_dofs,
         )
+        timing_reaction_diagnostics += time.perf_counter() - t_section
         previous_rhs_balance = current_rhs_balance
         disp = state_x - model.X
         strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
@@ -945,6 +966,13 @@ def solve_sfc_cropped_pair_hard_contact(
         "effective_hard_pressure_stiffness": float(effective_pressure_stiffness),
         "pressure_smoothing_factor": float(pressure_smoothing_factor),
         "contact_patch_min_edge_length": _contact_patch_min_edge_length(pair),
+        "timing_internal_tangent_seconds": float(timing_internal_tangent),
+        "timing_contact_linearization_seconds": float(timing_contact_linearization),
+        "timing_effective_system_seconds": float(timing_effective_system),
+        "timing_hard_contact_solve_seconds": float(timing_hard_contact_solve),
+        "timing_accepted_internal_seconds": float(timing_accepted_internal),
+        "timing_accepted_contact_seconds": float(timing_accepted_contact),
+        "timing_reaction_diagnostics_seconds": float(timing_reaction_diagnostics),
         "status": "completed",
     }
     return rows, summary
@@ -1541,6 +1569,11 @@ def write_summary(
         f"- automatic increment: {summary.get('automatic_increment', '')}",
         f"- cutback count: {int(summary.get('cutback_count', 0))}",
         f"- SFC wall time: {summary['sfc_wall_seconds']:.6f} s",
+        f"- timing internal+tangent: {float(summary.get('timing_internal_tangent_seconds', 0.0)):.6f} s",
+        f"- timing effective system: {float(summary.get('timing_effective_system_seconds', 0.0)):.6f} s",
+        f"- timing hard-contact solve: {float(summary.get('timing_hard_contact_solve_seconds', 0.0)):.6f} s",
+        f"- timing contact linearization: {float(summary.get('timing_contact_linearization_seconds', 0.0)):.6f} s",
+        f"- timing accepted-state diagnostics: {float(summary.get('timing_accepted_internal_seconds', 0.0)) + float(summary.get('timing_accepted_contact_seconds', 0.0)) + float(summary.get('timing_reaction_diagnostics_seconds', 0.0)):.6f} s",
         f"- nodes/elements: {summary['nodes']} / {summary['elements']}",
         f"- contact faces: {summary['gear1_contact_faces']} / {summary['gear2_contact_faces']}",
         f"- support nodes: {summary['gear1_support_nodes']} / {summary['gear2_support_nodes']}",

@@ -129,6 +129,10 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert summary["elements"] > 0
     assert int(history[-1]["hard_contact_samples"]) > 0
     assert int(history[-1]["hard_active_set_converged"]) == 1
+    assert "timing_internal_tangent_seconds" in summary
+    assert float(summary["timing_internal_tangent_seconds"]) >= 0.0
+    assert "timing_hard_contact_solve_seconds" in summary
+    assert float(summary["timing_hard_contact_solve_seconds"]) >= 0.0
     assert "rp_force_norm" in history[-1]
     assert float(history[-1]["rp_force_norm"]) >= 0.0
     assert "opposing_rp_force_norm" in history[-1]
