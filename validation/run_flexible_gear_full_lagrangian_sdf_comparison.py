@@ -35,6 +35,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _write_abaqus_alignment_deck,
     _write_csv,
     run_abaqus_alignment,
+    compare_histories,
+    plot_alignment_curves,
     solve_sfc_cropped_pair_hard_contact,
 )
 
@@ -142,6 +144,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
                 "",
                 f"- Abaqus analysis wall time: {float(abaqus_row.get('abaqus_analysis_wall_seconds', 0.0)):.6f} s",
                 f"- Abaqus export wall time: {float(abaqus_row.get('abaqus_export_wall_seconds', 0.0)):.6f} s",
+                f"- alignment errors CSV: `{Path(str(summary.get('alignment_errors', ''))).name}`",
+                f"- alignment figure: `{Path(str(summary.get('alignment_figure', ''))).name}`",
             ]
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -201,8 +205,10 @@ def run_full_gear(
         contact_mode="hard",
     )
     abaqus_row: Row | None = None
+    error_rows: list[Row] | None = None
+    figure_path: Path | None = None
     if run_abaqus:
-        abaqus_metrics = run_abaqus_alignment(
+        abaqus_metrics, abaqus_row = run_abaqus_alignment(
             deck_path,
             out_dir,
             pair=pair,
@@ -210,8 +216,13 @@ def run_full_gear(
             poisson=model.poisson,
             abaqus_command=abaqus_command,
         )
-        abaqus_row = dict(abaqus_metrics)
         summary.update(abaqus_row)
+        _write_csv(out_dir / "abaqus_runtime.csv", [abaqus_row])
+        error_rows = compare_histories(history_path, abaqus_metrics, out_dir / "sfc_vs_abaqus_alignment_errors.csv")
+        figure_path = out_dir / "sfc_vs_abaqus_alignment_curves.png"
+        plot_alignment_curves(history_path, abaqus_metrics, error_rows, figure_path)
+        summary["alignment_errors"] = str(out_dir / "sfc_vs_abaqus_alignment_errors.csv")
+        summary["alignment_figure"] = str(figure_path)
     write_full_summary(out_dir / "full_gear_lagrangian_sdf_summary.md", summary, history_path, abaqus_row=abaqus_row)
     _write_csv(out_dir / "full_gear_lagrangian_sdf_summary.csv", [summary])
     return history, summary
