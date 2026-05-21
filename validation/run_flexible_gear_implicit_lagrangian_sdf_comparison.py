@@ -1565,14 +1565,42 @@ def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: l
         (strain_key, abaqus_strain_key, strain_title),
         (opposing_force_key, abaqus_opposing_force_key, f"fixed {force_title}"),
     ]
+
+    def with_initial_zero(time_values: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if time_values.size == 1 and float(time_values[0]) > 0.0:
+            return np.concatenate(([0.0], time_values)), np.concatenate(([0.0], values))
+        return time_values, values
+
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
     for ax, (sfc_key, abq_key, title) in zip(axes.ravel(), panels, strict=True):
         sfc_y = _as_float_column(sfc_rows, sfc_key)
         abq_y = _as_float_column(abaqus_rows, abq_key)
+        t_sfc_plot, sfc_y_plot = with_initial_zero(t_sfc, sfc_y)
+        t_abq_plot, abq_y_plot = with_initial_zero(t_abq, abq_y)
         rel_key = f"{sfc_key}_rel_error"
         final_error = float(error_rows[-1].get(rel_key, 0.0)) if error_rows else 0.0
-        ax.plot(t_abq, abq_y, color="#1f77b4", linewidth=1.8, label="Abaqus/Standard")
-        ax.plot(t_sfc, sfc_y, color="#ff7f0e", linewidth=1.8, linestyle="--", label=f"SFC ({final_error * 100:.2f}% final err.)")
+        ax.plot(
+            t_abq_plot,
+            abq_y_plot,
+            color="#1f77b4",
+            linewidth=1.8,
+            marker="o",
+            markersize=3.6,
+            label="Abaqus/Standard",
+            zorder=2,
+        )
+        ax.plot(
+            t_sfc_plot,
+            sfc_y_plot,
+            color="#d95f02",
+            linewidth=1.8,
+            linestyle="--",
+            marker="s",
+            markersize=3.8,
+            markerfacecolor="white",
+            label=f"SFC ({final_error * 100:.2f}% final err.)",
+            zorder=3,
+        )
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("time (s)", fontsize=9)
         ax.grid(True, linewidth=0.4, alpha=0.35)
