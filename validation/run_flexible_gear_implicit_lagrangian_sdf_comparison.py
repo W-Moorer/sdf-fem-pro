@@ -589,6 +589,44 @@ def _equivalent_hub_reaction(
     }
 
 
+def _body_vector_slice(vector: np.ndarray, *, n1_dofs: int, body: int) -> np.ndarray:
+    values = np.asarray(vector, dtype=float).reshape(-1)
+    if body == 1:
+        return values[:n1_dofs]
+    if body == 2:
+        return values[n1_dofs:]
+    raise ValueError("body must be 1 or 2")
+
+
+def _equivalent_pair_reactions(
+    residual: np.ndarray,
+    *,
+    pair: CroppedGearPair,
+    state_x: np.ndarray,
+    n1_dofs: int,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Return gear1/gear2 RP generalized reactions for one residual vector."""
+
+    return (
+        _equivalent_hub_reaction(
+            _body_vector_slice(residual, n1_dofs=n1_dofs, body=1),
+            node_ids=pair.gear1.support_nodes,
+            nodes_reference=pair.gear1.nodes,
+            reference_point=pair.gear1.rp,
+            drive_direction=pair.drive_direction,
+            current_nodes=state_x[: pair.gear1.nodes.shape[0]],
+        ),
+        _equivalent_hub_reaction(
+            _body_vector_slice(residual, n1_dofs=n1_dofs, body=2),
+            node_ids=pair.gear2.support_nodes,
+            nodes_reference=pair.gear2.nodes,
+            reference_point=pair.gear2.rp,
+            drive_direction=pair.drive_direction,
+            current_nodes=state_x[pair.gear1.nodes.shape[0] :],
+        ),
+    )
+
+
 def solve_sfc_cropped_pair_hard_contact(
     pair: CroppedGearPair,
     *,
@@ -740,6 +778,7 @@ def solve_sfc_cropped_pair_hard_contact(
             h_trial = max(min_dt, h * float(cutback_factor))
             cutback_count += 1
             continue
+        previous_rhs_before_step = previous_rhs_balance.copy()
         u_new = solution.displacement
         a_new = c0 * (u_new - u_pred)
         v_new = v_pred + gamma * h * a_new
@@ -750,49 +789,50 @@ def solve_sfc_cropped_pair_hard_contact(
         raw_gaps = np.asarray([float(sample.gap) for sample in contact.samples(state_x)], dtype=float)
         active = np.asarray(solution.active, dtype=bool)
         multipliers = np.asarray(solution.multipliers, dtype=float)
-        active_force = float(equilibrium_scale * np.sum(multipliers[active])) if multipliers.size else 0.0
-        dynamic_balance = np.asarray(model.mass_matrix @ a_new + internal.force.reshape(-1), dtype=float)
+        active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
+        mass_acceleration = np.asarray(model.mass_matrix @ a_new, dtype=float)
+        contact_balance = np.zeros(model.n_dofs, dtype=float)
         if final_gap_jacobian.size and multipliers.size:
-            dynamic_balance -= equilibrium_scale * (final_gap_jacobian.T @ multipliers)
-        static_balance = np.asarray(internal.force.reshape(-1), dtype=float)
-        if final_gap_jacobian.size and multipliers.size:
-            static_balance -= final_gap_jacobian.T @ multipliers
-        previous_rhs_balance = -internal.force.reshape(-1)
-        if final_gap_jacobian.size and multipliers.size:
-            previous_rhs_balance += final_gap_jacobian.T @ multipliers
+            contact_balance = np.asarray(final_gap_jacobian.T @ multipliers, dtype=float)
+        static_balance = np.asarray(internal.force.reshape(-1) - contact_balance, dtype=float)
+        current_rhs_balance = -static_balance
+        dynamic_balance = np.asarray(mass_acceleration + static_balance, dtype=float)
+        hht_balance = np.asarray(
+            mass_acceleration - equilibrium_scale * current_rhs_balance + float(hht_alpha) * previous_rhs_before_step,
+            dtype=float,
+        )
         n1_dofs = 3 * pair.gear1.nodes.shape[0]
-        hub1_reaction = _equivalent_hub_reaction(
-            dynamic_balance[:n1_dofs],
-            node_ids=pair.gear1.support_nodes,
-            nodes_reference=pair.gear1.nodes,
-            reference_point=pair.gear1.rp,
-            drive_direction=pair.drive_direction,
-            current_nodes=state_x[: pair.gear1.nodes.shape[0]],
+        hub1_hht_reaction, hub2_hht_reaction = _equivalent_pair_reactions(
+            hht_balance,
+            pair=pair,
+            state_x=state_x,
+            n1_dofs=n1_dofs,
         )
-        hub2_reaction = _equivalent_hub_reaction(
-            dynamic_balance[n1_dofs:],
-            node_ids=pair.gear2.support_nodes,
-            nodes_reference=pair.gear2.nodes,
-            reference_point=pair.gear2.rp,
-            drive_direction=pair.drive_direction,
-            current_nodes=state_x[pair.gear1.nodes.shape[0] :],
+        hub1_dynamic_reaction, hub2_dynamic_reaction = _equivalent_pair_reactions(
+            dynamic_balance,
+            pair=pair,
+            state_x=state_x,
+            n1_dofs=n1_dofs,
         )
-        hub1_static_reaction = _equivalent_hub_reaction(
-            static_balance[:n1_dofs],
-            node_ids=pair.gear1.support_nodes,
-            nodes_reference=pair.gear1.nodes,
-            reference_point=pair.gear1.rp,
-            drive_direction=pair.drive_direction,
-            current_nodes=state_x[: pair.gear1.nodes.shape[0]],
+        hub1_static_reaction, hub2_static_reaction = _equivalent_pair_reactions(
+            static_balance,
+            pair=pair,
+            state_x=state_x,
+            n1_dofs=n1_dofs,
         )
-        hub2_static_reaction = _equivalent_hub_reaction(
-            static_balance[n1_dofs:],
-            node_ids=pair.gear2.support_nodes,
-            nodes_reference=pair.gear2.nodes,
-            reference_point=pair.gear2.rp,
-            drive_direction=pair.drive_direction,
-            current_nodes=state_x[pair.gear1.nodes.shape[0] :],
+        hub1_inertia_reaction, hub2_inertia_reaction = _equivalent_pair_reactions(
+            mass_acceleration,
+            pair=pair,
+            state_x=state_x,
+            n1_dofs=n1_dofs,
         )
+        hub1_contact_reaction, hub2_contact_reaction = _equivalent_pair_reactions(
+            contact_balance,
+            pair=pair,
+            state_x=state_x,
+            n1_dofs=n1_dofs,
+        )
+        previous_rhs_balance = current_rhs_balance
         disp = state_x - model.X
         strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
         elastic_strain_norm = _elastic_strain_norm_from_stress(internal.stress, young=young, poisson=poisson)
@@ -833,15 +873,30 @@ def solve_sfc_cropped_pair_hard_contact(
             "hht_beta": float(beta),
             "hht_gamma": float(gamma),
         }
-        row.update({f"rp1_{key}": value for key, value in hub1_reaction.items()})
-        row.update({f"rp2_{key}": value for key, value in hub2_reaction.items()})
+        row.update({f"rp1_{key}": value for key, value in hub1_hht_reaction.items()})
+        row.update({f"rp2_{key}": value for key, value in hub2_hht_reaction.items()})
+        row.update({f"rp1_hht_{key}": value for key, value in hub1_hht_reaction.items()})
+        row.update({f"rp2_hht_{key}": value for key, value in hub2_hht_reaction.items()})
+        row.update({f"rp1_dynamic_{key}": value for key, value in hub1_dynamic_reaction.items()})
+        row.update({f"rp2_dynamic_{key}": value for key, value in hub2_dynamic_reaction.items()})
         row.update({f"rp1_static_{key}": value for key, value in hub1_static_reaction.items()})
         row.update({f"rp2_static_{key}": value for key, value in hub2_static_reaction.items()})
-        row["rp_force_drive"] = float(hub1_reaction["rp_force_drive"])
-        row["rp_force_norm"] = float(hub1_reaction["rp_force_norm"])
-        row["opposing_rp_force_norm"] = float(hub2_reaction["rp_force_norm"])
+        row.update({f"rp1_inertia_{key}": value for key, value in hub1_inertia_reaction.items()})
+        row.update({f"rp2_inertia_{key}": value for key, value in hub2_inertia_reaction.items()})
+        row.update({f"rp1_contact_{key}": value for key, value in hub1_contact_reaction.items()})
+        row.update({f"rp2_contact_{key}": value for key, value in hub2_contact_reaction.items()})
+        row["rp_reaction_definition"] = "static_physical_constraint_residual"
+        row["rp_force_drive"] = float(hub1_static_reaction["rp_force_drive"])
+        row["rp_force_norm"] = float(hub1_static_reaction["rp_force_norm"])
+        row["opposing_rp_force_norm"] = float(hub2_static_reaction["rp_force_norm"])
         row["rp_static_force_norm"] = float(hub1_static_reaction["rp_force_norm"])
         row["opposing_rp_static_force_norm"] = float(hub2_static_reaction["rp_force_norm"])
+        row["rp_dynamic_force_norm"] = float(hub1_dynamic_reaction["rp_force_norm"])
+        row["opposing_rp_dynamic_force_norm"] = float(hub2_dynamic_reaction["rp_force_norm"])
+        row["rp_inertia_force_norm"] = float(hub1_inertia_reaction["rp_force_norm"])
+        row["opposing_rp_inertia_force_norm"] = float(hub2_inertia_reaction["rp_force_norm"])
+        row["rp_contact_force_norm"] = float(hub1_contact_reaction["rp_force_norm"])
+        row["opposing_rp_contact_force_norm"] = float(hub2_contact_reaction["rp_force_norm"])
         rows.append(row)
         last_iterations = iteration_count
         last_converged = bool(converged)
@@ -872,6 +927,7 @@ def solve_sfc_cropped_pair_hard_contact(
         "hht_alpha": float(hht_alpha),
         "hht_beta": float(beta),
         "hht_gamma": float(gamma),
+        "rp_reaction_definition": "static_physical_constraint_residual",
         "contact_mode": "hard",
         "hard_enforcement": enforcement,
         "constraint_averaging": str(constraint_averaging),
@@ -1469,6 +1525,7 @@ def write_summary(
         f"- effective hard pressure stiffness: {float(summary.get('effective_hard_pressure_stiffness', 0.0)):.6e}",
         f"- pressure smoothing factor: {float(summary.get('pressure_smoothing_factor', 0.0)):.6e}",
         f"- HHT alpha/beta/gamma: {float(summary.get('hht_alpha', 0.0)):.6e} / {float(summary.get('hht_beta', 0.0)):.6e} / {float(summary.get('hht_gamma', 0.0)):.6e}",
+        f"- RP reaction definition: {summary.get('rp_reaction_definition', 'static_physical_constraint_residual')}",
         f"- automatic increment: {summary.get('automatic_increment', '')}",
         f"- cutback count: {int(summary.get('cutback_count', 0))}",
         f"- SFC wall time: {summary['sfc_wall_seconds']:.6f} s",

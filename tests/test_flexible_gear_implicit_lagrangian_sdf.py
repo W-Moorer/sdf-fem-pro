@@ -117,6 +117,11 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert float(history[-1]["rp_force_norm"]) >= 0.0
     assert "opposing_rp_force_norm" in history[-1]
     assert float(history[-1]["opposing_rp_force_norm"]) >= 0.0
+    assert history[-1]["rp_reaction_definition"] == "static_physical_constraint_residual"
+    assert "rp1_hht_rp_force_norm" in history[-1]
+    assert "rp1_dynamic_rp_force_norm" in history[-1]
+    assert "rp1_inertia_rp_force_norm" in history[-1]
+    assert "rp1_contact_rp_force_norm" in history[-1]
     assert "contact_multiplier_sum" in history[-1]
     assert "p95_equivalent_elastic_strain" in history[-1]
     assert float(history[-1]["p95_equivalent_elastic_strain"]) >= 0.0
