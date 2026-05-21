@@ -154,6 +154,46 @@ def test_sparse_hard_contact_with_dirichlet_matches_dense_solution() -> None:
     assert sparse.active.tolist() == dense.active.tolist()
 
 
+def test_sparse_hard_contact_schur_path_handles_multiple_active_constraints() -> None:
+    stiffness = np.diag([10.0, 12.0, 14.0, 16.0, 18.0])
+    force = np.asarray([-2.0, -1.0, 0.2, 0.0, 0.0], dtype=float)
+    gap_offset = np.asarray([0.1, 0.05, 0.3], dtype=float)
+    gap_jacobian = np.asarray(
+        [
+            [1.0, 0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.5, 0.0, -1.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    fixed = np.asarray([3, 4], dtype=np.int64)
+    values = np.asarray([0.15, 0.1], dtype=float)
+
+    dense = solve_linear_hard_contact_with_dirichlet(
+        stiffness,
+        force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed,
+        fixed_values=values,
+        normal_compliance=np.asarray([0.0, 0.02, 0.0], dtype=float),
+    )
+    sparse = solve_linear_hard_contact_with_dirichlet_sparse(
+        csr_matrix(stiffness),
+        force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed,
+        fixed_values=values,
+        normal_compliance=np.asarray([0.0, 0.02, 0.0], dtype=float),
+    )
+
+    assert sparse.converged == dense.converged
+    assert sparse.displacement == pytest.approx(dense.displacement)
+    assert sparse.gaps == pytest.approx(dense.gaps)
+    assert sparse.multipliers == pytest.approx(dense.multipliers)
+
+
 def test_hard_contact_from_samples_with_dirichlet_includes_master_motion() -> None:
     sample = ContactSample(
         node_ids=np.asarray([0], dtype=np.int64),

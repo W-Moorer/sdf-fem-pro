@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 import numpy as np
-from scipy.sparse import bmat, csr_matrix, diags, issparse
-from scipy.sparse.linalg import spsolve
+from scipy.sparse import csr_matrix, issparse
+from scipy.sparse.linalg import splu, spsolve
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,15 +390,16 @@ def solve_linear_hard_contact_with_dirichlet_sparse(
     Jc_values = J[:, fixed] @ values if fixed.size else 0.0
     g_eff = np.asarray(g0 + Jc_values, dtype=float).reshape(-1)
 
+    lu = splu(Kff)
+    unconstrained = np.asarray(lu.solve(f_eff), dtype=float).reshape(-1)
     if initial_active is None:
-        unconstrained = _sparse_solve_vector(Kff, f_eff)
         active = g_eff + Jf_dense @ unconstrained < -float(tolerance)
     else:
         active = np.asarray(initial_active, dtype=bool).reshape(-1)
         if active.shape != g_eff.shape:
             raise ValueError("initial_active must match constraints")
 
-    u_free = np.zeros(free.size, dtype=float)
+    u_free = unconstrained.copy()
     lam = np.zeros(J.shape[0], dtype=float)
     converged = False
     iterations = 0
@@ -406,22 +407,18 @@ def solve_linear_hard_contact_with_dirichlet_sparse(
         active_ids = np.flatnonzero(active)
         if active_ids.size:
             Ja_dense = Jf_dense[active_ids]
-            Ja = csr_matrix(Ja_dense)
-            Ca = diags(compliance[active_ids], offsets=0, shape=(active_ids.size, active_ids.size), format="csc")
-            matrix = bmat(
-                [
-                    [Kff, (-scale * Ja.T).tocsc()],
-                    [Ja.tocsc(), Ca],
-                ],
-                format="csc",
-            )
-            rhs = np.concatenate((f_eff, -g_eff[active_ids]))
-            sol = _sparse_solve_vector(matrix, rhs)
-            u_free = sol[: free.size]
+            influence = np.asarray(lu.solve(Ja_dense.T), dtype=float)
+            schur = float(scale) * (Ja_dense @ influence) + np.diag(compliance[active_ids])
+            rhs = -g_eff[active_ids] - Ja_dense @ unconstrained
+            try:
+                lam_active = np.linalg.solve(schur, rhs)
+            except np.linalg.LinAlgError:
+                lam_active, *_ = np.linalg.lstsq(schur, rhs, rcond=None)
+            u_free = unconstrained + float(scale) * (influence @ lam_active)
             lam = np.zeros(J.shape[0], dtype=float)
-            lam[active_ids] = sol[free.size :]
+            lam[active_ids] = lam_active
         else:
-            u_free = _sparse_solve_vector(Kff, f_eff)
+            u_free = unconstrained.copy()
             lam = np.zeros(J.shape[0], dtype=float)
         gaps_free = g_eff + Jf_dense @ u_free
         effective_gaps = gaps_free + compliance * lam
