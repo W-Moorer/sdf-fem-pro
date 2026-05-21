@@ -47,7 +47,7 @@ def solve_linear_hard_contact_active_set(
     ``J_active u = -gap_offset_active``.
     """
 
-    K = np.asarray(stiffness, dtype=float)
+    K = _dense_matrix(stiffness)
     f = np.asarray(external_force, dtype=float).reshape(-1)
     g0 = np.asarray(gap_offset, dtype=float).reshape(-1)
     J = np.asarray(gap_jacobian, dtype=float)
@@ -204,9 +204,136 @@ def solve_linear_hard_contact_from_samples(
     )
 
 
+def solve_linear_hard_contact_with_dirichlet(
+    stiffness: np.ndarray,
+    external_force: np.ndarray,
+    gap_offset: np.ndarray,
+    gap_jacobian: np.ndarray,
+    *,
+    fixed_dofs: np.ndarray,
+    fixed_values: np.ndarray | None = None,
+    initial_active: np.ndarray | None = None,
+    tolerance: float = 1.0e-10,
+    max_iterations: int = 20,
+) -> HardContactSolution:
+    """Solve linear hard contact with prescribed displacement constraints.
+
+    Dirichlet values are eliminated before the active-set solve.  The returned
+    displacement vector is expanded back to the full DOF space, while contact
+    multipliers and gaps remain associated with the original constraint rows.
+    """
+
+    K = _dense_matrix(stiffness)
+    f = np.asarray(external_force, dtype=float).reshape(-1)
+    g0 = np.asarray(gap_offset, dtype=float).reshape(-1)
+    J = np.asarray(gap_jacobian, dtype=float)
+    if K.ndim != 2 or K.shape[0] != K.shape[1]:
+        raise ValueError("stiffness must be square")
+    if f.shape != (K.shape[0],):
+        raise ValueError("external_force length must match stiffness")
+    if J.ndim != 2 or J.shape[1] != K.shape[0]:
+        raise ValueError("gap_jacobian must have shape (n_constraints, n_dofs)")
+    if g0.shape != (J.shape[0],):
+        raise ValueError("gap_offset length must match number of constraints")
+    fixed = np.asarray(fixed_dofs, dtype=np.int64).reshape(-1)
+    if np.any(fixed < 0) or (fixed.size and int(fixed.max()) >= K.shape[0]):
+        raise ValueError("fixed_dofs reference a dof outside stiffness")
+    if np.unique(fixed).shape[0] != fixed.shape[0]:
+        raise ValueError("fixed_dofs must not contain duplicates")
+    if fixed_values is None:
+        values = np.zeros(fixed.shape[0], dtype=float)
+    else:
+        values = np.asarray(fixed_values, dtype=float).reshape(-1)
+        if values.shape != fixed.shape:
+            raise ValueError("fixed_values must match fixed_dofs")
+
+    full_u = np.zeros(K.shape[0], dtype=float)
+    full_u[fixed] = values
+    free_mask = np.ones(K.shape[0], dtype=bool)
+    free_mask[fixed] = False
+    free = np.flatnonzero(free_mask)
+    if free.size == 0:
+        gaps = g0 + J @ full_u
+        active = gaps < -float(tolerance)
+        return HardContactSolution(
+            displacement=full_u,
+            multipliers=np.zeros(J.shape[0], dtype=float),
+            gaps=gaps,
+            active=active,
+            iterations=0,
+            converged=not bool(np.any(active)),
+        )
+
+    Kff = K[np.ix_(free, free)]
+    Kfc = K[np.ix_(free, fixed)] if fixed.size else np.empty((free.size, 0), dtype=float)
+    f_eff = f[free] - (Kfc @ values if fixed.size else 0.0)
+    Jf = J[:, free]
+    g_eff = g0 + (J[:, fixed] @ values if fixed.size else 0.0)
+    reduced = solve_linear_hard_contact_active_set(
+        Kff,
+        f_eff,
+        g_eff,
+        Jf,
+        initial_active=initial_active,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+    )
+    full_u[free] = reduced.displacement
+    gaps = g0 + J @ full_u
+    return HardContactSolution(
+        displacement=full_u,
+        multipliers=reduced.multipliers.copy(),
+        gaps=gaps,
+        active=reduced.active.copy(),
+        iterations=int(reduced.iterations),
+        converged=bool(reduced.converged and np.all(gaps >= -float(tolerance))),
+    )
+
+
+def solve_linear_hard_contact_from_samples_with_dirichlet(
+    stiffness: np.ndarray,
+    external_force: np.ndarray,
+    samples: Iterable[Any],
+    *,
+    n_total_dofs: int,
+    fixed_dofs: np.ndarray,
+    fixed_values: np.ndarray | None = None,
+    slave_dof_offset: int = 0,
+    master_dof_offset: int = 0,
+    initial_active: np.ndarray | None = None,
+    tolerance: float = 1.0e-10,
+    max_iterations: int = 20,
+) -> HardContactSolution:
+    """Solve sample-based hard contact with prescribed DOFs."""
+
+    gap_offset, gap_jacobian = hard_contact_gap_jacobian_from_samples(
+        samples,
+        n_total_dofs=int(n_total_dofs),
+        slave_dof_offset=int(slave_dof_offset),
+        master_dof_offset=int(master_dof_offset),
+    )
+    return solve_linear_hard_contact_with_dirichlet(
+        stiffness,
+        external_force,
+        gap_offset,
+        gap_jacobian,
+        fixed_dofs=fixed_dofs,
+        fixed_values=fixed_values,
+        initial_active=initial_active,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+    )
+
+
 def _scatter_gap_row(row: np.ndarray, nodes: np.ndarray, weights: np.ndarray, normal: np.ndarray, offset: int, *, sign: float) -> None:
     for node, weight in zip(nodes, weights, strict=True):
         base = int(offset) + 3 * int(node)
         if base < 0 or base + 2 >= row.shape[0]:
             raise ValueError("sample node references a dof outside n_total_dofs")
         row[base : base + 3] += float(sign) * float(weight) * normal
+
+
+def _dense_matrix(value: Any) -> np.ndarray:
+    if hasattr(value, "toarray"):
+        return np.asarray(value.toarray(), dtype=float)
+    return np.asarray(value, dtype=float)

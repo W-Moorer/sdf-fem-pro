@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry
+from sfc.contact.lagrangian_surface_contact import LagrangianSDFQuadrilateralSurfaceContactGeometry, LagrangianSDFSurfaceContactGeometry
 from sfc.fem.calculix_aligned import MechanicsModel, assemble_contact_response
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
 from scipy.sparse import diags
@@ -215,3 +215,43 @@ def test_lagrangian_sdf_surface_contact_provides_master_payload_tangent() -> Non
     assert np.sum(response.force[:3, 2]) > 0.0
     assert np.sum(response.force[3:, 2]) < 0.0
     assert response.tangent.nnz > 0
+
+
+def test_lagrangian_sdf_quadrilateral_surface_contact_uses_q4_weights() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.05],
+            [1.0, 0.0, -0.05],
+            [1.0, 1.0, -0.05],
+            [0.0, 1.0, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([slave_nodes, master_nodes])
+    material = MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int64))
+    contact = LagrangianSDFQuadrilateralSurfaceContactGeometry(
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=4,
+        quadrature_order=2,
+    )
+
+    samples = list(contact.samples(x_current))
+
+    assert len(samples) == 4
+    assert sum(sample.area for sample in samples) == pytest.approx(1.0)
+    assert all(sample.node_ids.shape == (4,) for sample in samples)
+    assert all(sample.shape_weights.sum() == pytest.approx(1.0) for sample in samples)
+    assert all(sample.gap == pytest.approx(-0.05) for sample in samples)
+    assert all(sample.master_node_ids is not None for sample in samples)

@@ -101,8 +101,112 @@ class LagrangianSDFSurfaceContactGeometry:
                 )
 
 
+@dataclass(slots=True)
+class LagrangianSDFQuadrilateralSurfaceContactGeometry:
+    """Quadrilateral slave-surface quadrature against a Lagrangian-SDF master.
+
+    This is the C3D8/H8 surface-to-surface counterpart of
+    :class:`LagrangianSDFSurfaceContactGeometry`.  Slave points are evaluated
+    with tensor-product Gauss quadrature on Q4 faces; each point queries the
+    master Lagrangian SDF oracle for gap, normal, and closest-feature payload.
+    """
+
+    slave_quads: np.ndarray
+    master_material: MaterialSDF
+    master_reference_nodes: np.ndarray
+    pressure_stiffness: float
+    slave_node_offset: int = 0
+    master_node_offset: int = 0
+    quadrature_order: int = 2
+    search_radius: float | None = None
+    patch_cell_size: float | None = None
+    _oracle: LagrangianSDFContactOracle = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        quads = np.asarray(self.slave_quads, dtype=np.int64)
+        if quads.ndim != 2 or quads.shape[1] != 4:
+            raise ValueError("slave_quads must have shape (n_faces, 4)")
+        if np.any(quads < 0):
+            raise ValueError("slave_quads cannot contain negative node ids")
+        master_nodes = np.asarray(self.master_reference_nodes, dtype=float)
+        if master_nodes.ndim != 2 or master_nodes.shape[1] != 3:
+            raise ValueError("master_reference_nodes must have shape (n_nodes, 3)")
+        if float(self.pressure_stiffness) <= 0.0:
+            raise ValueError("pressure_stiffness must be positive")
+        if int(self.quadrature_order) not in {1, 2, 3}:
+            raise ValueError("quadrature_order must be 1, 2, or 3")
+        self.slave_quads = quads
+        self.master_reference_nodes = master_nodes
+        self._oracle = LagrangianSDFContactOracle(
+            self.master_material,
+            master_nodes.copy(),
+            search_radius=self.search_radius,
+            patch_cell_size=self.patch_cell_size,
+        )
+
+    def samples(self, x_current: np.ndarray):
+        X = np.asarray(x_current, dtype=float)
+        if X.ndim != 2 or X.shape[1] != 3:
+            raise ValueError("x_current must have shape (n_nodes, 3)")
+        master_start = int(self.master_node_offset)
+        master_stop = master_start + self.master_reference_nodes.shape[0]
+        if master_stop > X.shape[0]:
+            raise ValueError("master_node_offset places master nodes outside x_current")
+        master_x = X[master_start:master_stop]
+        self._oracle.refit(master_x)
+        points, weights = np.polynomial.legendre.leggauss(int(self.quadrature_order))
+        for face_id, quad in enumerate(self.slave_quads):
+            global_quad = quad + int(self.slave_node_offset)
+            qx = X[global_quad]
+            for a, xi in enumerate(points):
+                for b, eta in enumerate(points):
+                    shape = _q4_shape_functions(float(xi), float(eta))
+                    dshape = _q4_shape_derivatives(float(xi), float(eta))
+                    tangent_xi = dshape[:, 0] @ qx
+                    tangent_eta = dshape[:, 1] @ qx
+                    jac = float(np.linalg.norm(np.cross(tangent_xi, tangent_eta)))
+                    if jac <= 0.0:
+                        continue
+                    point = shape @ qx
+                    query = self._oracle.query(point, cache_key=(int(face_id), int(a), int(b)))
+                    yield ContactSample(
+                        node_ids=global_quad.copy(),
+                        shape_weights=shape.copy(),
+                        gap=float(query.gap),
+                        normal=query.normal.copy(),
+                        area=float(jac * float(weights[a]) * float(weights[b])),
+                        stiffness=float(self.pressure_stiffness),
+                        master_node_ids=query.master_node_ids.astype(np.int64) + master_start,
+                        master_shape_weights=query.master_weights.copy(),
+                    )
+
+
 def _triangle_area(tri: np.ndarray) -> float:
     T = np.asarray(tri, dtype=float)
     if T.shape != (3, 3):
         raise ValueError("tri must have shape (3, 3)")
     return 0.5 * float(np.linalg.norm(np.cross(T[1] - T[0], T[2] - T[0])))
+
+
+def _q4_shape_functions(xi: float, eta: float) -> np.ndarray:
+    return 0.25 * np.asarray(
+        [
+            (1.0 - xi) * (1.0 - eta),
+            (1.0 + xi) * (1.0 - eta),
+            (1.0 + xi) * (1.0 + eta),
+            (1.0 - xi) * (1.0 + eta),
+        ],
+        dtype=float,
+    )
+
+
+def _q4_shape_derivatives(xi: float, eta: float) -> np.ndarray:
+    return 0.25 * np.asarray(
+        [
+            [-(1.0 - eta), -(1.0 - xi)],
+            [1.0 - eta, -(1.0 + xi)],
+            [1.0 + eta, 1.0 + xi],
+            [-(1.0 + eta), 1.0 - xi],
+        ],
+        dtype=float,
+    )
