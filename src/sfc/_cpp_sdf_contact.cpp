@@ -26,6 +26,149 @@ struct Projection {
     double nz;
 };
 
+struct Q4Projection {
+    double dist2;
+    double qx;
+    double qy;
+    double qz;
+    double w0;
+    double w1;
+    double w2;
+    double w3;
+    double nx;
+    double ny;
+    double nz;
+};
+
+void q4_shape(
+    double xi,
+    double eta,
+    double* shape,
+    double* dxi,
+    double* deta
+) {
+    shape[0] = 0.25 * (1.0 - xi) * (1.0 - eta);
+    shape[1] = 0.25 * (1.0 + xi) * (1.0 - eta);
+    shape[2] = 0.25 * (1.0 + xi) * (1.0 + eta);
+    shape[3] = 0.25 * (1.0 - xi) * (1.0 + eta);
+
+    dxi[0] = -0.25 * (1.0 - eta);
+    dxi[1] = 0.25 * (1.0 - eta);
+    dxi[2] = 0.25 * (1.0 + eta);
+    dxi[3] = -0.25 * (1.0 + eta);
+
+    deta[0] = -0.25 * (1.0 - xi);
+    deta[1] = -0.25 * (1.0 + xi);
+    deta[2] = 0.25 * (1.0 + xi);
+    deta[3] = 0.25 * (1.0 - xi);
+}
+
+Q4Projection project_point_q4(
+    double px,
+    double py,
+    double pz,
+    const double* x0,
+    const double* x1,
+    const double* x2,
+    const double* x3,
+    double normal_sign
+) {
+    double xi = 0.0;
+    double eta = 0.0;
+    double shape[4];
+    double dxi[4];
+    double deta[4];
+    const double* verts[4] = {x0, x1, x2, x3};
+    for (int iter = 0; iter < 10; ++iter) {
+        q4_shape(xi, eta, shape, dxi, deta);
+        double q[3] = {0.0, 0.0, 0.0};
+        double txi[3] = {0.0, 0.0, 0.0};
+        double teta[3] = {0.0, 0.0, 0.0};
+        for (int a = 0; a < 4; ++a) {
+            q[0] += shape[a] * verts[a][0];
+            q[1] += shape[a] * verts[a][1];
+            q[2] += shape[a] * verts[a][2];
+            txi[0] += dxi[a] * verts[a][0];
+            txi[1] += dxi[a] * verts[a][1];
+            txi[2] += dxi[a] * verts[a][2];
+            teta[0] += deta[a] * verts[a][0];
+            teta[1] += deta[a] * verts[a][1];
+            teta[2] += deta[a] * verts[a][2];
+        }
+        const double rx = q[0] - px;
+        const double ry = q[1] - py;
+        const double rz = q[2] - pz;
+        const double grad0 = rx * txi[0] + ry * txi[1] + rz * txi[2];
+        const double grad1 = rx * teta[0] + ry * teta[1] + rz * teta[2];
+        const double h00 = txi[0] * txi[0] + txi[1] * txi[1] + txi[2] * txi[2];
+        const double h01 = txi[0] * teta[0] + txi[1] * teta[1] + txi[2] * teta[2];
+        const double h11 = teta[0] * teta[0] + teta[1] * teta[1] + teta[2] * teta[2];
+        const double det = h00 * h11 - h01 * h01;
+        if (std::abs(det) <= 1.0e-18) {
+            break;
+        }
+        const double rhs0 = -grad0;
+        const double rhs1 = -grad1;
+        const double step0 = (rhs0 * h11 - h01 * rhs1) / det;
+        const double step1 = (h00 * rhs1 - h01 * rhs0) / det;
+        const double next_xi = std::max(-1.0, std::min(1.0, xi + step0));
+        const double next_eta = std::max(-1.0, std::min(1.0, eta + step1));
+        const double delta0 = next_xi - xi;
+        const double delta1 = next_eta - eta;
+        xi = next_xi;
+        eta = next_eta;
+        if (std::sqrt(delta0 * delta0 + delta1 * delta1) <= 1.0e-12) {
+            break;
+        }
+    }
+
+    q4_shape(xi, eta, shape, dxi, deta);
+    double q[3] = {0.0, 0.0, 0.0};
+    double txi[3] = {0.0, 0.0, 0.0};
+    double teta[3] = {0.0, 0.0, 0.0};
+    for (int a = 0; a < 4; ++a) {
+        q[0] += shape[a] * verts[a][0];
+        q[1] += shape[a] * verts[a][1];
+        q[2] += shape[a] * verts[a][2];
+        txi[0] += dxi[a] * verts[a][0];
+        txi[1] += dxi[a] * verts[a][1];
+        txi[2] += dxi[a] * verts[a][2];
+        teta[0] += deta[a] * verts[a][0];
+        teta[1] += deta[a] * verts[a][1];
+        teta[2] += deta[a] * verts[a][2];
+    }
+    double nx = txi[1] * teta[2] - txi[2] * teta[1];
+    double ny = txi[2] * teta[0] - txi[0] * teta[2];
+    double nz = txi[0] * teta[1] - txi[1] * teta[0];
+    const double nn = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (nn > 0.0) {
+        const double sign = normal_sign < 0.0 ? -1.0 : 1.0;
+        nx = sign * nx / nn;
+        ny = sign * ny / nn;
+        nz = sign * nz / nn;
+    } else {
+        nx = 0.0;
+        ny = 0.0;
+        nz = 0.0;
+    }
+    const double dx = px - q[0];
+    const double dy = py - q[1];
+    const double dz = pz - q[2];
+    Q4Projection out;
+    out.dist2 = dx * dx + dy * dy + dz * dz;
+    out.qx = q[0];
+    out.qy = q[1];
+    out.qz = q[2];
+    out.w0 = shape[0];
+    out.w1 = shape[1];
+    out.w2 = shape[2];
+    out.w3 = shape[3];
+    out.nx = nx;
+    out.ny = ny;
+    out.nz = nz;
+    return out;
+}
+
 Projection project_point_triangle(
     double px,
     double py,
@@ -608,6 +751,143 @@ py::array_t<double> contact_stiffness_matvec(
     return out;
 }
 
+py::tuple quadrilateral_master_penalty_response(
+    py::array_t<double, py::array::c_style | py::array::forcecast> points,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> sample_node_ids,
+    py::array_t<double, py::array::c_style | py::array::forcecast> sample_weights,
+    py::array_t<double, py::array::c_style | py::array::forcecast> area_weights,
+    py::array_t<double, py::array::c_style | py::array::forcecast> master_x_current,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> master_quads,
+    double pressure_stiffness,
+    std::int64_t n_total_dofs,
+    std::int64_t slave_dof_offset,
+    std::int64_t master_dof_offset,
+    double master_normal_sign
+) {
+    const auto P = points.unchecked<2>();
+    const auto snodes = sample_node_ids.unchecked<2>();
+    const auto sweights = sample_weights.unchecked<2>();
+    const auto aweights = area_weights.unchecked<1>();
+    const auto X = master_x_current.unchecked<2>();
+    const auto quads = master_quads.unchecked<2>();
+    const py::ssize_t n_samples = P.shape(0);
+    const py::ssize_t n_quads = quads.shape(0);
+    if (P.shape(1) != 3) {
+        throw std::runtime_error("points must have shape (n, 3)");
+    }
+    if (snodes.shape(0) != n_samples || sweights.shape(0) != n_samples || aweights.shape(0) != n_samples) {
+        throw std::runtime_error("sample arrays must have the same number of rows as points");
+    }
+    if (X.shape(1) != 3) {
+        throw std::runtime_error("master_x_current must have shape (n, 3)");
+    }
+    if (quads.shape(1) != 4) {
+        throw std::runtime_error("master_quads must have shape (n, 4)");
+    }
+    if (n_quads <= 0) {
+        throw std::runtime_error("master_quads must contain at least one face");
+    }
+
+    py::array_t<double> force({static_cast<py::ssize_t>(n_total_dofs)});
+    py::array_t<double> gaps({n_samples});
+    py::array_t<double> normals({n_samples, py::ssize_t(3)});
+    py::array_t<std::int64_t> master_node_ids({n_samples, py::ssize_t(4)});
+    py::array_t<double> master_weights({n_samples, py::ssize_t(4)});
+    auto f = force.mutable_unchecked<1>();
+    auto g = gaps.mutable_unchecked<1>();
+    auto nrm = normals.mutable_unchecked<2>();
+    auto mnodes = master_node_ids.mutable_unchecked<2>();
+    auto mweights = master_weights.mutable_unchecked<2>();
+    for (py::ssize_t i = 0; i < n_total_dofs; ++i) {
+        f(i) = 0.0;
+    }
+
+    for (py::ssize_t sample = 0; sample < n_samples; ++sample) {
+        const double px = P(sample, 0);
+        const double py = P(sample, 1);
+        const double pz = P(sample, 2);
+        double best_dist2 = std::numeric_limits<double>::infinity();
+        std::int64_t best_quad = -1;
+        Q4Projection best{};
+
+        for (py::ssize_t jq = 0; jq < n_quads; ++jq) {
+            const std::int64_t i0 = quads(jq, 0);
+            const std::int64_t i1 = quads(jq, 1);
+            const std::int64_t i2 = quads(jq, 2);
+            const std::int64_t i3 = quads(jq, 3);
+            if (
+                i0 < 0 || i0 >= X.shape(0) ||
+                i1 < 0 || i1 >= X.shape(0) ||
+                i2 < 0 || i2 >= X.shape(0) ||
+                i3 < 0 || i3 >= X.shape(0)
+            ) {
+                throw std::runtime_error("master_quads reference nodes outside master_x_current");
+            }
+            const double v0[3] = {X(i0, 0), X(i0, 1), X(i0, 2)};
+            const double v1[3] = {X(i1, 0), X(i1, 1), X(i1, 2)};
+            const double v2[3] = {X(i2, 0), X(i2, 1), X(i2, 2)};
+            const double v3[3] = {X(i3, 0), X(i3, 1), X(i3, 2)};
+            const Q4Projection proj = project_point_q4(
+                px, py, pz,
+                v0, v1, v2, v3,
+                master_normal_sign
+            );
+            if (proj.nx == 0.0 && proj.ny == 0.0 && proj.nz == 0.0) {
+                continue;
+            }
+            if (proj.dist2 < best_dist2) {
+                best_dist2 = proj.dist2;
+                best_quad = static_cast<std::int64_t>(jq);
+                best = proj;
+            }
+        }
+        if (best_quad < 0) {
+            throw std::runtime_error("no valid master quadrilateral projection was found");
+        }
+
+        const double gap =
+            (px - best.qx) * best.nx +
+            (py - best.qy) * best.ny +
+            (pz - best.qz) * best.nz;
+        g(sample) = gap;
+        nrm(sample, 0) = best.nx;
+        nrm(sample, 1) = best.ny;
+        nrm(sample, 2) = best.nz;
+        mnodes(sample, 0) = quads(best_quad, 0);
+        mnodes(sample, 1) = quads(best_quad, 1);
+        mnodes(sample, 2) = quads(best_quad, 2);
+        mnodes(sample, 3) = quads(best_quad, 3);
+        mweights(sample, 0) = best.w0;
+        mweights(sample, 1) = best.w1;
+        mweights(sample, 2) = best.w2;
+        mweights(sample, 3) = best.w3;
+
+        const double penetration = -gap;
+        if (penetration <= 0.0) {
+            continue;
+        }
+        const double lambda = pressure_stiffness * aweights(sample) * penetration;
+        for (py::ssize_t local_node = 0; local_node < snodes.shape(1); ++local_node) {
+            const std::int64_t node = snodes(sample, local_node);
+            const double sw = sweights(sample, local_node);
+            const std::int64_t base = slave_dof_offset + 3 * node;
+            f(base) += lambda * sw * best.nx;
+            f(base + 1) += lambda * sw * best.ny;
+            f(base + 2) += lambda * sw * best.nz;
+        }
+        for (int face_node = 0; face_node < 4; ++face_node) {
+            const std::int64_t node = mnodes(sample, face_node);
+            const double mw = mweights(sample, face_node);
+            const std::int64_t base = master_dof_offset + 3 * node;
+            const double coeff = -lambda * mw;
+            f(base) += coeff * best.nx;
+            f(base + 1) += coeff * best.ny;
+            f(base + 2) += coeff * best.nz;
+        }
+    }
+    return py::make_tuple(force, gaps, normals, master_node_ids, master_weights);
+}
+
 py::tuple solve_contact_tangent_pcg(
     py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> effective_indptr,
     py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> effective_indices,
@@ -1186,5 +1466,6 @@ PYBIND11_MODULE(_sfc_cpp, m) {
     m.def("closest_points_padded_aabb", &closest_points_padded_aabb);
     m.def("surface_penalty_response", &surface_penalty_response);
     m.def("contact_stiffness_matvec", &contact_stiffness_matvec);
+    m.def("quadrilateral_master_penalty_response", &quadrilateral_master_penalty_response);
     m.def("solve_contact_tangent_pcg", &solve_contact_tangent_pcg);
 }

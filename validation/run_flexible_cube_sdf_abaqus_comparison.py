@@ -123,6 +123,11 @@ class FlexibleCubeConfig:
     pressure_smoothing_passes: int = 1
     output_stride: int = 1
     master_surface_mode: str = "quadrilateral_oracle"
+    use_cpp_contact_tangent_solver: bool = False
+    contact_tangent_cg_rtol: float = 1.0e-10
+    contact_tangent_cg_atol: float = 1.0e-12
+    contact_tangent_cg_maxiter: int = 200
+    cpp_contact_tangent_preconditioner: str = "block-sgs"
 
 
 def make_geometry(cfg: FlexibleCubeConfig) -> tuple[BoxMesh, BoxMesh]:
@@ -919,6 +924,8 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
     master_surface_mode = str(cfg.master_surface_mode).lower()
     if master_surface_mode not in {"quadrilateral_oracle", "triangulated_field"}:
         raise ValueError("master_surface_mode must be 'quadrilateral_oracle' or 'triangulated_field'")
+    if bool(cfg.use_cpp_contact_tangent_solver) and master_surface_mode != "quadrilateral_oracle":
+        raise ValueError("C++ contact tangent solver is currently wired to quadrilateral_oracle master mode")
     beta, gamma = _hht_parameters(float(cfg.hht_alpha))
     alpha = float(cfg.hht_alpha)
     dt = float(cfg.dt)
@@ -931,6 +938,7 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
     v[dofs0] = v0
     a[dofs0] = a0
     free = _free_dofs(total_dofs, dofs0)
+    effective_free = (M * c0 + K * (1.0 + alpha))[free[:, None], free].tocsr() if free.size else None
     upper_top_nodes = np.flatnonzero(np.isclose(upper.X[:, 2], float(np.max(upper.X[:, 2]))))
     upper_top_z_dofs = lower_dofs + 3 * upper_top_nodes + 2
     lower_top_nodes = np.flatnonzero(np.isclose(lower.X[:, 2], float(np.max(lower.X[:, 2]))))
@@ -1125,7 +1133,8 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
                     slave_dof_offset=0,
                     master_dof_offset=lower_dofs,
                     master_normal_sign=-1.0,
-                    assemble_stiffness=True,
+                    assemble_stiffness=not bool(cfg.use_cpp_contact_tangent_solver),
+                    matrix_free_stiffness=bool(cfg.use_cpp_contact_tangent_solver),
                 )
             else:
                 sdf_next = sdf_workspace.build(upper_guess_x, upper_bottom_faces, q_next)
@@ -1161,8 +1170,62 @@ def run_sfc(cfg: FlexibleCubeConfig, *, vtk_dir: Path | None = None) -> tuple[li
             force_scale = max(1.0, float(np.linalg.norm(f_contact)))
             active_stable = previous_active_count is not None and int(response_next.active_count) == int(previous_active_count)
             if free.size:
-                tangent = (M * c0 + (K + response_next.stiffness) * (1.0 + alpha)).tocsc()
-                correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
+                if bool(cfg.use_cpp_contact_tangent_solver):
+                    if response_next.stiffness_operator is None or effective_free is None:
+                        raise RuntimeError("C++ Q4 contact tangent solver was requested but no matrix-free operator is available")
+                    try:
+                        from sfc.contact._cpp_field_contact import solve_contact_tangent_pcg
+                    except Exception as exc:
+                        raise RuntimeError("C++ Q4 contact tangent solver is not available") from exc
+                    op = response_next.stiffness_operator
+                    solution, info, _iterations, _pcg_residual = solve_contact_tangent_pcg(
+                        effective_free.indptr,
+                        effective_free.indices,
+                        effective_free.data,
+                        -residual[free],
+                        free,
+                        np.asarray(op.scale, dtype=float) * (1.0 + alpha),
+                        op.slave_node_ids,
+                        op.slave_weights,
+                        op.gradients,
+                        op.face_node_ids,
+                        op.grid_weights,
+                        op.barycentric,
+                        op.normals,
+                        total_dofs,
+                        op.slave_dof_offset,
+                        op.master_dof_offset,
+                        cfg.contact_tangent_cg_rtol,
+                        cfg.contact_tangent_cg_atol,
+                        cfg.contact_tangent_cg_maxiter,
+                        preconditioner=cfg.cpp_contact_tangent_preconditioner,
+                    )
+                    if info == 0:
+                        correction[free] = np.asarray(solution, dtype=float)
+                    else:
+                        response_next = quadrilateral_master_surface_penalty_response(
+                            lower_guess_x,
+                            upper_guess_x,
+                            upper_bottom_quads,
+                            pressure_stiffness=cfg.pressure_stiffness,
+                            n_total_dofs=total_dofs,
+                            quadrature_cache=active_cache_next,
+                            slave_dof_offset=0,
+                            master_dof_offset=lower_dofs,
+                            master_normal_sign=-1.0,
+                            assemble_stiffness=True,
+                        )
+                        f_contact = response_next.force
+                        residual = (
+                            M @ a_guess
+                            + (1.0 + alpha) * (K @ u_guess - f_contact - current_external_force)
+                            + alpha * previous_rhs_balance
+                        )
+                        tangent = (M * c0 + (K + response_next.stiffness) * (1.0 + alpha)).tocsc()
+                        correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
+                else:
+                    tangent = (M * c0 + (K + response_next.stiffness) * (1.0 + alpha)).tocsc()
+                    correction[free] = np.asarray(spsolve(tangent[free[:, None], free], -residual[free]), dtype=float)
             u_guess[free] += correction[free]
             u_guess[next_dofs] = next_u_bc
             correction_norm = float(np.linalg.norm(correction[free])) if free.size else 0.0
@@ -1708,6 +1771,7 @@ def run_workflow(out_dir: Path, *, cfg: FlexibleCubeConfig, abaqus_command: str 
         f"- Contact stiffness: `{cfg.pressure_stiffness}`",
         f"- Mass matrix: `{cfg.mass_kind}`",
         "- Contact: frictionless linear pressure-overclosure, two flexible bodies",
+        f"- C++ Q4 matrix-free contact tangent: `{bool(cfg.use_cpp_contact_tangent_solver)}`",
         f"- Plot: `{plot}`",
         "",
         "## Metrics",
@@ -1759,6 +1823,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tangential-displacement", type=float, default=0.0)
     parser.add_argument("--tangential-motion-start-time", type=float, default=None)
     parser.add_argument("--tangential-motion-ramp-time", type=float, default=None)
+    parser.add_argument("--cpp-contact-tangent-solver", action="store_true")
+    parser.add_argument("--contact-tangent-cg-rtol", type=float, default=1.0e-10)
+    parser.add_argument("--contact-tangent-cg-atol", type=float, default=1.0e-12)
+    parser.add_argument("--contact-tangent-cg-maxiter", type=int, default=200)
+    parser.add_argument("--cpp-contact-tangent-preconditioner", choices=("sgs", "block-sgs"), default="block-sgs")
     return parser.parse_args()
 
 
@@ -1793,6 +1862,11 @@ def main() -> None:
         quadrature_order=(2 if args.quadrature_order is None else int(args.quadrature_order)),
         output_stride=max(1, int(args.output_stride)),
         master_surface_mode=str(args.master_surface_mode),
+        use_cpp_contact_tangent_solver=bool(args.cpp_contact_tangent_solver),
+        contact_tangent_cg_rtol=float(args.contact_tangent_cg_rtol),
+        contact_tangent_cg_atol=float(args.contact_tangent_cg_atol),
+        contact_tangent_cg_maxiter=int(args.contact_tangent_cg_maxiter),
+        cpp_contact_tangent_preconditioner=str(args.cpp_contact_tangent_preconditioner),
     )
     outputs = run_workflow(args.out_dir, cfg=cfg, abaqus_command=args.abaqus_command, skip_abaqus=bool(args.skip_abaqus))
     print("Two-flexible-body SDF comparison complete.")

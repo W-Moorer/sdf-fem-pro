@@ -599,6 +599,7 @@ def quadrilateral_master_surface_penalty_response(
     master_dof_offset: int = 0,
     master_normal_sign: float = 1.0,
     assemble_stiffness: bool = False,
+    matrix_free_stiffness: bool = False,
 ) -> FieldSurfaceContactResponse:
     """Assemble surface contact against four-node master faces.
 
@@ -626,35 +627,63 @@ def quadrilateral_master_surface_penalty_response(
         raise ValueError("master_quads reference nodes outside master_x_current")
 
     points = quadrature_cache.points(slave_x)
-    gaps, normals, master_node_ids, master_weights = _closest_points_on_master_quads(
-        points,
-        master_x,
-        quads,
-        normal_sign=float(master_normal_sign),
-    )
+    force_from_cpp: np.ndarray | None = None
+    try:
+        from ._cpp_field_contact import (
+            is_available as _cpp_available,
+            quadrilateral_master_penalty_response as _cpp_q4_response,
+        )
+    except Exception:
+        cpp = False
+    else:
+        cpp = bool(_cpp_available())
+    if cpp:
+        force_from_cpp, gaps, normals, master_node_ids, master_weights = _cpp_q4_response(
+            points,
+            quadrature_cache.node_ids,
+            quadrature_cache.weights,
+            quadrature_cache.area_weights,
+            master_x,
+            quads,
+            k,
+            int(n_total_dofs),
+            int(slave_dof_offset),
+            int(master_dof_offset),
+            float(master_normal_sign),
+        )
+    else:
+        gaps, normals, master_node_ids, master_weights = _closest_points_on_master_quads(
+            points,
+            master_x,
+            quads,
+            normal_sign=float(master_normal_sign),
+        )
     penetration = np.maximum(-gaps, 0.0)
     lambdas = k * quadrature_cache.area_weights * penetration
     active = lambdas > 0.0
 
     n_dofs = int(n_total_dofs)
-    force = np.zeros(n_dofs, dtype=float)
-    if bool(np.any(active)):
-        _accumulate_slave_force(
-            force,
-            quadrature_cache.node_ids[active],
-            quadrature_cache.weights[active],
-            normals[active],
-            lambdas[active],
-            int(slave_dof_offset),
-        )
-        _accumulate_slave_force(
-            force,
-            master_node_ids[active],
-            master_weights[active],
-            normals[active],
-            -lambdas[active],
-            int(master_dof_offset),
-        )
+    if force_from_cpp is None:
+        force = np.zeros(n_dofs, dtype=float)
+        if bool(np.any(active)):
+            _accumulate_slave_force(
+                force,
+                quadrature_cache.node_ids[active],
+                quadrature_cache.weights[active],
+                normals[active],
+                lambdas[active],
+                int(slave_dof_offset),
+            )
+            _accumulate_slave_force(
+                force,
+                master_node_ids[active],
+                master_weights[active],
+                normals[active],
+                -lambdas[active],
+                int(master_dof_offset),
+            )
+    else:
+        force = np.asarray(force_from_cpp, dtype=float)
 
     stiffness = (
         _assemble_quad_master_contact_stiffness(
@@ -671,6 +700,21 @@ def quadrilateral_master_surface_penalty_response(
         if bool(assemble_stiffness)
         else csr_matrix((n_dofs, n_dofs), dtype=float)
     )
+    stiffness_operator = (
+        _make_quad_master_matrix_free_stiffness(
+            cache=quadrature_cache,
+            active=active,
+            master_node_ids=master_node_ids,
+            master_weights=master_weights,
+            normals=normals,
+            pressure_stiffness=k,
+            n_total_dofs=n_dofs,
+            slave_dof_offset=int(slave_dof_offset),
+            master_dof_offset=int(master_dof_offset),
+        )
+        if bool(matrix_free_stiffness)
+        else None
+    )
 
     return FieldSurfaceContactResponse(
         force=force,
@@ -678,6 +722,7 @@ def quadrilateral_master_surface_penalty_response(
         constraints=(),
         quadrature_weights=quadrature_cache.area_weights.copy(),
         gaps=gaps.copy(),
+        stiffness_operator=stiffness_operator,
     )
 
 
@@ -1065,6 +1110,49 @@ def _assemble_quad_master_contact_stiffness(
     vals = np.concatenate((slave_vals.reshape(-1), master_vals.reshape(-1)))
     J = coo_matrix((vals, (rows, cols)), shape=(sample_count, int(n_total_dofs))).tocsr()
     return (J.T @ diags(np.asarray(scale, dtype=float), format="csr") @ J).tocsr()
+
+
+def _make_quad_master_matrix_free_stiffness(
+    *,
+    cache: SurfaceQuadratureCache,
+    active: np.ndarray,
+    master_node_ids: np.ndarray,
+    master_weights: np.ndarray,
+    normals: np.ndarray,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+) -> FieldContactMatrixFreeStiffness:
+    active_mask = np.asarray(active, dtype=bool)
+    slave_width = int(cache.node_ids.shape[1]) if cache.node_ids.ndim == 2 else 0
+    if not bool(np.any(active_mask)):
+        return FieldContactMatrixFreeStiffness(
+            n_total_dofs=int(n_total_dofs),
+            scale=np.empty(0, dtype=float),
+            slave_node_ids=np.empty((0, slave_width), dtype=np.int64),
+            slave_weights=np.empty((0, slave_width), dtype=float),
+            gradients=np.empty((0, 3), dtype=float),
+            face_node_ids=np.empty((0, 1, 4), dtype=np.int64),
+            grid_weights=np.empty((0, 1), dtype=float),
+            barycentric=np.empty((0, 1, 4), dtype=float),
+            normals=np.empty((0, 1, 3), dtype=float),
+            slave_dof_offset=int(slave_dof_offset),
+            master_dof_offset=int(master_dof_offset),
+        )
+    return FieldContactMatrixFreeStiffness(
+        n_total_dofs=int(n_total_dofs),
+        scale=float(pressure_stiffness) * np.asarray(cache.area_weights[active_mask], dtype=float).copy(),
+        slave_node_ids=np.asarray(cache.node_ids[active_mask], dtype=np.int64).copy(),
+        slave_weights=np.asarray(cache.weights[active_mask], dtype=float).copy(),
+        gradients=np.asarray(normals[active_mask], dtype=float).copy(),
+        face_node_ids=np.asarray(master_node_ids[active_mask], dtype=np.int64)[:, None, :].copy(),
+        grid_weights=np.ones((int(np.count_nonzero(active_mask)), 1), dtype=float),
+        barycentric=np.asarray(master_weights[active_mask], dtype=float)[:, None, :].copy(),
+        normals=np.asarray(normals[active_mask], dtype=float)[:, None, :].copy(),
+        slave_dof_offset=int(slave_dof_offset),
+        master_dof_offset=int(master_dof_offset),
+    )
 
 
 def _make_batch_contact_matrix_free_stiffness(

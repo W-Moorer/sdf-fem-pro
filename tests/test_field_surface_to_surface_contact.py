@@ -156,6 +156,78 @@ def test_quadrilateral_master_surface_response_uses_q4_master_weights() -> None:
     assert float(np.sum(response.force[12:].reshape((-1, 3))[:, 2])) == pytest.approx(1.0)
     assert response.stiffness.shape == (24, 24)
 
+    matrix_free = quadrilateral_master_surface_penalty_response(
+        slave_x,
+        master_x,
+        master_quads,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        master_normal_sign=-1.0,
+        matrix_free_stiffness=True,
+    )
+    assert matrix_free.stiffness_operator is not None
+    probe = np.linspace(-0.4, 0.2, 24)
+    np.testing.assert_allclose(matrix_free.force, response.force, atol=1.0e-14)
+    np.testing.assert_allclose(matrix_free.stiffness_operator.matvec(probe), response.stiffness @ probe, atol=1.0e-14)
+
+
+def test_cpp_quadrilateral_master_response_matches_reference_when_built() -> None:
+    if not cpp_field_contact_available():
+        pytest.skip("C++ field-contact backend is not built")
+    slave_x = np.asarray(
+        [
+            [0.0, 0.0, 0.1],
+            [1.0, 0.0, 0.1],
+            [1.0, 1.0, 0.1],
+            [0.0, 1.0, 0.1],
+        ],
+        dtype=float,
+    )
+    slave_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    cache = quadrilateral_surface_quadrature_cache(slave_quads, slave_x, order=2)
+    master_x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    master_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    from sfc.contact._cpp_field_contact import quadrilateral_master_penalty_response
+
+    force, gaps, normals, master_node_ids, master_weights = quadrilateral_master_penalty_response(
+        cache.points(slave_x),
+        cache.node_ids,
+        cache.weights,
+        cache.area_weights,
+        master_x,
+        master_quads,
+        10.0,
+        24,
+        0,
+        12,
+        -1.0,
+    )
+    reference = quadrilateral_master_surface_penalty_response(
+        slave_x,
+        master_x,
+        master_quads,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        master_normal_sign=-1.0,
+    )
+    np.testing.assert_allclose(force, reference.force, atol=1.0e-14)
+    np.testing.assert_allclose(gaps, reference.gaps, atol=1.0e-14)
+    np.testing.assert_allclose(normals, np.tile([0.0, 0.0, -1.0], (4, 1)), atol=1.0e-14)
+    np.testing.assert_array_equal(master_node_ids, np.repeat(master_quads, 4, axis=0))
+    np.testing.assert_allclose(np.sum(master_weights, axis=1), 1.0, atol=1.0e-14)
+
 
 def test_surface_to_surface_response_area_integrates_constant_plane_gap() -> None:
     x = np.asarray([[0.0, 0.0, -0.1], [1.0, 0.0, -0.1], [0.0, 1.0, -0.1]], dtype=float)
@@ -467,3 +539,83 @@ def test_cpp_contact_tangent_pcg_solver_matches_dense_reference_when_built() -> 
         assert info == 0
         assert residual < 1.0e-10
         np.testing.assert_allclose(solution, reference, atol=1.0e-10)
+
+
+def test_cpp_q4_contact_tangent_pcg_solver_matches_dense_reference_when_built() -> None:
+    if not cpp_field_contact_available():
+        pytest.skip("C++ field-contact backend is not built")
+    slave_x = np.asarray(
+        [
+            [0.0, 0.0, 0.1],
+            [1.0, 0.0, 0.1],
+            [1.0, 1.0, 0.1],
+            [0.0, 1.0, 0.1],
+        ],
+        dtype=float,
+    )
+    slave_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    cache = quadrilateral_surface_quadrature_cache(slave_quads, slave_x, order=2)
+    master_x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    master_quads = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    explicit = quadrilateral_master_surface_penalty_response(
+        slave_x,
+        master_x,
+        master_quads,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        master_normal_sign=-1.0,
+        assemble_stiffness=True,
+    )
+    matrix_free = quadrilateral_master_surface_penalty_response(
+        slave_x,
+        master_x,
+        master_quads,
+        pressure_stiffness=10.0,
+        n_total_dofs=24,
+        quadrature_cache=cache,
+        master_dof_offset=12,
+        master_normal_sign=-1.0,
+        matrix_free_stiffness=True,
+    )
+    assert matrix_free.stiffness_operator is not None
+    from sfc.contact._cpp_field_contact import solve_contact_tangent_pcg
+
+    effective = (3.0 * eye(24, format="csr")).tocsr()
+    rhs = np.cos(np.arange(24, dtype=float))
+    op = matrix_free.stiffness_operator
+    reference = np.linalg.solve((effective + explicit.stiffness).toarray(), rhs)
+    solution, info, _iterations, residual = solve_contact_tangent_pcg(
+        effective.indptr,
+        effective.indices,
+        effective.data,
+        rhs,
+        np.arange(24, dtype=np.int64),
+        op.scale,
+        op.slave_node_ids,
+        op.slave_weights,
+        op.gradients,
+        op.face_node_ids,
+        op.grid_weights,
+        op.barycentric,
+        op.normals,
+        24,
+        op.slave_dof_offset,
+        op.master_dof_offset,
+        1.0e-12,
+        1.0e-14,
+        200,
+        preconditioner="block-sgs",
+    )
+    assert info == 0
+    assert residual < 1.0e-10
+    np.testing.assert_allclose(solution, reference, atol=1.0e-10)

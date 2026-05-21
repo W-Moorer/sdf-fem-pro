@@ -97,6 +97,44 @@ def contact_stiffness_matvec(
     )
 
 
+def quadrilateral_master_penalty_response(
+    points: np.ndarray,
+    sample_node_ids: np.ndarray,
+    sample_weights: np.ndarray,
+    area_weights: np.ndarray,
+    master_x_current: np.ndarray,
+    master_quads: np.ndarray,
+    pressure_stiffness: float,
+    n_total_dofs: int,
+    slave_dof_offset: int,
+    master_dof_offset: int,
+    master_normal_sign: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate Q4 master surface penalty response with the optional C++ backend."""
+
+    _require_backend()
+    force, gaps, normals, master_node_ids, master_weights = _BACKEND.quadrilateral_master_penalty_response(
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(sample_node_ids, dtype=np.int64),
+        np.ascontiguousarray(sample_weights, dtype=np.float64),
+        np.ascontiguousarray(area_weights, dtype=np.float64),
+        np.ascontiguousarray(master_x_current, dtype=np.float64),
+        np.ascontiguousarray(master_quads, dtype=np.int64),
+        float(pressure_stiffness),
+        int(n_total_dofs),
+        int(slave_dof_offset),
+        int(master_dof_offset),
+        float(master_normal_sign),
+    )
+    return (
+        np.asarray(force, dtype=float),
+        np.asarray(gaps, dtype=float),
+        np.asarray(normals, dtype=float),
+        np.asarray(master_node_ids, dtype=np.int64),
+        np.asarray(master_weights, dtype=float),
+    )
+
+
 def solve_contact_tangent_pcg(
     effective_indptr: np.ndarray,
     effective_indices: np.ndarray,
