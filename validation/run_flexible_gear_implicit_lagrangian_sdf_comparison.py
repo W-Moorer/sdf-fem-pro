@@ -91,6 +91,33 @@ def _write_csv(path: Path, rows: list[Row], fieldnames: list[str] | None = None)
         writer.writerows(rows)
 
 
+def _elastic_strain_norm_from_stress(stress: np.ndarray, *, young: float, poisson: float) -> np.ndarray:
+    """Return small elastic strain norms recovered from Cauchy stress.
+
+    Abaqus `LE` is the strain output used by the external reference deck.  The
+    SFC material model stores Green strain for mechanics, so for validation
+    diagnostics we recover the corresponding linear-elastic strain from the
+    Cauchy stress before comparing to Abaqus `LE`.
+    """
+
+    values = np.asarray(stress, dtype=float)
+    if values.size == 0:
+        return np.empty(0, dtype=float)
+    identity = np.eye(3)
+    out = np.empty(values.shape[0], dtype=float)
+    for idx, sigma in enumerate(values):
+        trace = float(np.trace(sigma))
+        eps = ((1.0 + float(poisson)) / float(young)) * sigma - (float(poisson) / float(young)) * trace * identity
+        out[idx] = float(np.linalg.norm(eps))
+    return out
+
+
+def _equivalent_elastic_strain_from_mises(von_mises_values: np.ndarray, *, young: float, poisson: float) -> np.ndarray:
+    vm = np.asarray(von_mises_values, dtype=float).reshape(-1)
+    shear = float(young) / (2.0 * (1.0 + float(poisson)))
+    return vm / max(3.0 * shear, 1.0e-30)
+
+
 def _face_centroids(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return np.mean(nodes[np.asarray(faces, dtype=np.int64)], axis=1)
 
@@ -293,6 +320,8 @@ def solve_sfc_cropped_pair(
         internal = diagnostics.internal
         disp = state.x - model.X
         strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
+        elastic_strain_norm = _elastic_strain_norm_from_stress(internal.stress, young=young, poisson=poisson)
+        equivalent_elastic_strain = _equivalent_elastic_strain_from_mises(internal.von_mises, young=young, poisson=poisson)
         rows.append(
             {
                 "time": t,
@@ -306,6 +335,10 @@ def solve_sfc_cropped_pair(
                 "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
                 "p95_strain_norm": float(np.percentile(strain_norm, 95.0)) if strain_norm.size else 0.0,
                 "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+                "p95_elastic_strain_norm": float(np.percentile(elastic_strain_norm, 95.0)) if elastic_strain_norm.size else 0.0,
+                "max_elastic_strain_norm": float(np.max(elastic_strain_norm)) if elastic_strain_norm.size else 0.0,
+                "p95_equivalent_elastic_strain": float(np.percentile(equivalent_elastic_strain, 95.0)) if equivalent_elastic_strain.size else 0.0,
+                "max_equivalent_elastic_strain": float(np.max(equivalent_elastic_strain)) if equivalent_elastic_strain.size else 0.0,
                 "strain_energy": internal.strain_energy,
                 "newton_iterations": diagnostics.newton_iterations,
             }
@@ -633,6 +666,9 @@ def solve_sfc_cropped_pair_hard_contact(
         dynamic_balance = np.asarray(model.mass_matrix @ a_new + internal.force.reshape(-1), dtype=float)
         if final_gap_jacobian.size and multipliers.size:
             dynamic_balance -= final_gap_jacobian.T @ multipliers
+        static_balance = np.asarray(internal.force.reshape(-1), dtype=float)
+        if final_gap_jacobian.size and multipliers.size:
+            static_balance -= final_gap_jacobian.T @ multipliers
         hub1_reaction = _equivalent_hub_reaction(
             dynamic_balance,
             node_ids=pair.gear1.support_nodes,
@@ -647,8 +683,28 @@ def solve_sfc_cropped_pair_hard_contact(
             reference_point=pair.gear2.rp,
             drive_direction=pair.drive_direction,
         )
+        hub1_static_reaction = _equivalent_hub_reaction(
+            static_balance,
+            node_ids=pair.gear1.support_nodes,
+            nodes_reference=pair.gear1.nodes,
+            reference_point=pair.gear1.rp,
+            drive_direction=pair.drive_direction,
+        )
+        hub2_static_reaction = _equivalent_hub_reaction(
+            static_balance[3 * pair.gear1.nodes.shape[0] :],
+            node_ids=pair.gear2.support_nodes,
+            nodes_reference=pair.gear2.nodes,
+            reference_point=pair.gear2.rp,
+            drive_direction=pair.drive_direction,
+        )
         disp = state_x - model.X
         strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
+        elastic_strain_norm = _elastic_strain_norm_from_stress(internal.stress, young=young, poisson=poisson)
+        equivalent_elastic_strain = _equivalent_elastic_strain_from_mises(
+            internal.von_mises,
+            young=young,
+            poisson=poisson,
+        )
         row = {
             "time": t,
             "closure": closure,
@@ -663,6 +719,12 @@ def solve_sfc_cropped_pair_hard_contact(
             "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
             "p95_strain_norm": float(np.percentile(strain_norm, 95.0)) if strain_norm.size else 0.0,
             "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+            "p95_elastic_strain_norm": float(np.percentile(elastic_strain_norm, 95.0)) if elastic_strain_norm.size else 0.0,
+            "max_elastic_strain_norm": float(np.max(elastic_strain_norm)) if elastic_strain_norm.size else 0.0,
+            "p95_equivalent_elastic_strain": float(np.percentile(equivalent_elastic_strain, 95.0))
+            if equivalent_elastic_strain.size
+            else 0.0,
+            "max_equivalent_elastic_strain": float(np.max(equivalent_elastic_strain)) if equivalent_elastic_strain.size else 0.0,
             "strain_energy": internal.strain_energy,
             "newton_iterations": int(iteration_count),
             "hard_active_set_converged": int(bool(solution.converged)),
@@ -672,9 +734,13 @@ def solve_sfc_cropped_pair_hard_contact(
         }
         row.update({f"rp1_{key}": value for key, value in hub1_reaction.items()})
         row.update({f"rp2_{key}": value for key, value in hub2_reaction.items()})
+        row.update({f"rp1_static_{key}": value for key, value in hub1_static_reaction.items()})
+        row.update({f"rp2_static_{key}": value for key, value in hub2_static_reaction.items()})
         row["rp_force_drive"] = float(hub1_reaction["rp_force_drive"])
         row["rp_force_norm"] = float(hub1_reaction["rp_force_norm"])
         row["opposing_rp_force_norm"] = float(hub2_reaction["rp_force_norm"])
+        row["rp_static_force_norm"] = float(hub1_static_reaction["rp_force_norm"])
+        row["opposing_rp_static_force_norm"] = float(hub2_static_reaction["rp_force_norm"])
         rows.append(row)
         last_iterations = iteration_count
         last_converged = bool(converged)
@@ -807,7 +873,7 @@ def _write_abaqus_alignment_deck(
             "*Node Output",
             "U, RF",
             "*Element Output",
-            "S, LE",
+            "S, E, LE",
             "*End Step",
         ]
     )
@@ -915,9 +981,16 @@ def append_scalar_field(values, target):
             target.append(float(data[0]))
 
 
+def equivalent_elastic_strain_from_mises(mises, young, poisson):
+    shear = float(young) / (2.0 * (1.0 + float(poisson)))
+    return float(mises) / max(3.0 * shear, 1.0e-30)
+
+
 odb = openOdb(path=sys.argv[1], readOnly=True)
 out_path = sys.argv[2]
 drive = [float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])]
+young = float(sys.argv[6])
+poisson = float(sys.argv[7])
 try:
     step = odb.steps[list(odb.steps.keys())[0]]
     with open(out_path, "w", newline="") as handle:
@@ -928,6 +1001,10 @@ try:
             "max_von_mises",
             "p95_strain_norm",
             "max_strain_norm",
+            "p95_log_strain_norm",
+            "max_log_strain_norm",
+            "p95_equivalent_elastic_strain",
+            "max_equivalent_elastic_strain",
             "min_copen",
             "max_cpressure",
             "rp_force_drive",
@@ -941,6 +1018,7 @@ try:
             u_norm = []
             vm = []
             strain = []
+            log_strain = []
             copen = []
             cpressure = []
             rp_force_drive = 0.0
@@ -956,9 +1034,15 @@ try:
                         vm.append(float(value.mises))
                     except Exception:
                         vm.append(von_mises(value.data))
+            if "E" in frame.fieldOutputs:
+                for value in frame.fieldOutputs["E"].values:
+                    strain.append(tensor_norm(value.data))
             if "LE" in frame.fieldOutputs:
                 for value in frame.fieldOutputs["LE"].values:
-                    strain.append(tensor_norm(value.data))
+                    log_strain.append(tensor_norm(value.data))
+            if not strain:
+                strain = list(log_strain)
+            equivalent_strain = [equivalent_elastic_strain_from_mises(value, young, poisson) for value in vm]
             if "RF" in frame.fieldOutputs:
                 for value in frame.fieldOutputs["RF"].values:
                     if int(value.nodeLabel) == 1000001:
@@ -982,6 +1066,10 @@ try:
                 "max_von_mises": max(vm) if vm else 0.0,
                 "p95_strain_norm": percentile(strain, 95.0),
                 "max_strain_norm": max(strain) if strain else 0.0,
+                "p95_log_strain_norm": percentile(log_strain, 95.0),
+                "max_log_strain_norm": max(log_strain) if log_strain else 0.0,
+                "p95_equivalent_elastic_strain": percentile(equivalent_strain, 95.0),
+                "max_equivalent_elastic_strain": max(equivalent_strain) if equivalent_strain else 0.0,
                 "min_copen": min(copen) if copen else 0.0,
                 "max_cpressure": max(cpressure) if cpressure else 0.0,
                 "rp_force_drive": rp_force_drive,
@@ -994,7 +1082,15 @@ finally:
 '''
 
 
-def run_abaqus_alignment(deck_path: Path, out_dir: Path, pair: CroppedGearPair, *, abaqus_command: str | None) -> tuple[Path, Row]:
+def run_abaqus_alignment(
+    deck_path: Path,
+    out_dir: Path,
+    pair: CroppedGearPair,
+    *,
+    abaqus_command: str | None,
+    young: float,
+    poisson: float,
+) -> tuple[Path, Row]:
     run_dir = out_dir / "abaqus_run"
     run_dir.mkdir(parents=True, exist_ok=True)
     job_name = "cropped_gear_alignment"
@@ -1024,6 +1120,8 @@ def run_abaqus_alignment(deck_path: Path, out_dir: Path, pair: CroppedGearPair, 
             f"{pair.drive_direction[0]:.16e}",
             f"{pair.drive_direction[1]:.16e}",
             f"{pair.drive_direction[2]:.16e}",
+            f"{float(young):.16e}",
+            f"{float(poisson):.16e}",
         ],
         cwd=run_dir,
         log_path=out_dir / "abaqus_export_stdout.log",
@@ -1051,6 +1149,26 @@ def _relative_error(a: float, b: float) -> float:
     return abs(float(a) - float(b)) / max(abs(float(b)), 1.0e-12)
 
 
+def _metric_available(rows: list[Row], key: str) -> bool:
+    return bool(rows) and key in rows[0]
+
+
+def _preferred_strain_metric(sfc_rows: list[Row], abaqus_rows: list[Row]) -> tuple[str, str, str]:
+    """Return the primary strain scalar used for Abaqus/SFC alignment.
+
+    We keep raw tensor strain norms in the CSV, but the paper-facing scalar is
+    the equivalent elastic strain recovered from von Mises stress.  This avoids
+    mixing SFC Green strain diagnostics with Abaqus element output conventions.
+    """
+
+    if _metric_available(sfc_rows, "p95_equivalent_elastic_strain") and _metric_available(
+        abaqus_rows,
+        "p95_equivalent_elastic_strain",
+    ):
+        return "p95_equivalent_elastic_strain", "p95_equivalent_elastic_strain", "p95 equivalent elastic strain"
+    return "p95_strain_norm", "p95_strain_norm", "p95 strain norm"
+
+
 def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -> list[Row]:
     sfc_rows = _read_csv_rows(sfc_history)
     abaqus_rows = _read_csv_rows(abaqus_history)
@@ -1058,11 +1176,12 @@ def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -
     t_abaqus = _as_float_column(abaqus_rows, "time")
     force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
     opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    strain_key, abaqus_strain_key, _strain_title = _preferred_strain_metric(sfc_rows, abaqus_rows)
     metrics = [
         ("max_displacement_norm", "max_displacement_norm"),
         ("p95_von_mises", "p95_von_mises"),
         ("max_von_mises", "max_von_mises"),
-        ("p95_strain_norm", "p95_strain_norm"),
+        (strain_key, abaqus_strain_key),
         ("max_strain_norm", "max_strain_norm"),
         (force_key, "rp_force_norm"),
         (opposing_force_key, "rp2_force_norm"),
@@ -1104,10 +1223,11 @@ def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: l
     t_abq = _as_float_column(abaqus_rows, "time")
     force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
     opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    strain_key, abaqus_strain_key, strain_title = _preferred_strain_metric(sfc_rows, abaqus_rows)
     panels = [
         ("max_displacement_norm", "max_displacement_norm", "max displacement norm"),
         ("p95_von_mises", "p95_von_mises", "p95 von Mises stress"),
-        ("p95_strain_norm", "p95_strain_norm", "p95 strain norm"),
+        (strain_key, abaqus_strain_key, strain_title),
         (opposing_force_key, "rp2_force_norm", "fixed RP reaction norm"),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
@@ -1176,6 +1296,12 @@ def write_summary(
         )
     if error_rows:
         final = error_rows[-1]
+        strain_error_key = (
+            "p95_equivalent_elastic_strain_rel_error"
+            if "p95_equivalent_elastic_strain_rel_error" in final
+            else "p95_strain_norm_rel_error"
+        )
+        strain_label = "p95 equivalent elastic strain" if strain_error_key.startswith("p95_equivalent") else "p95 strain norm"
         text.extend(
             [
                 "",
@@ -1183,7 +1309,7 @@ def write_summary(
                 "",
                 f"- max displacement norm rel. error: {100.0 * float(final.get('max_displacement_norm_rel_error', 0.0)):.3f}%",
                 f"- p95 von Mises rel. error: {100.0 * float(final.get('p95_von_mises_rel_error', 0.0)):.3f}%",
-                f"- p95 strain norm rel. error: {100.0 * float(final.get('p95_strain_norm_rel_error', 0.0)):.3f}%",
+                f"- {strain_label} rel. error: {100.0 * float(final.get(strain_error_key, 0.0)):.3f}%",
                 f"- RP/contact reaction rel. error: {100.0 * float(final.get('rp_force_norm_rel_error', final.get('normal_force_rel_error', 0.0))):.3f}%",
                 f"- fixed-RP reaction rel. error: {100.0 * float(final.get('opposing_rp_force_norm_rel_error', 0.0)):.3f}%",
             ]
@@ -1273,7 +1399,14 @@ def main(argv: list[str] | None = None) -> int:
     error_rows: list[Row] | None = None
     figure_path: Path | None = None
     if args.run_abaqus:
-        abaqus_metrics, abaqus_row = run_abaqus_alignment(deck_path, out_dir, pair, abaqus_command=args.abaqus_command)
+        abaqus_metrics, abaqus_row = run_abaqus_alignment(
+            deck_path,
+            out_dir,
+            pair,
+            abaqus_command=args.abaqus_command,
+            young=model.young,
+            poisson=model.poisson,
+        )
         _write_csv(out_dir / "abaqus_runtime.csv", [abaqus_row])
         error_rows = compare_histories(history_path, abaqus_metrics, out_dir / "sfc_vs_abaqus_alignment_errors.csv")
         figure_path = out_dir / "sfc_vs_abaqus_alignment_curves.png"

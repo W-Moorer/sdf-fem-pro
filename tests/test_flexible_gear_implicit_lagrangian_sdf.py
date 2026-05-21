@@ -80,6 +80,7 @@ def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> Non
     assert "G1_RP, 4, 5" in text
     assert "*Boundary, amplitude=RAMP" in text
     assert "G1_RP, 6, 6, 4.000000000000e-03" in text
+    assert "S, E, LE" in text
     assert "CPRESS" not in text
     assert "COPEN" not in text
 
@@ -113,6 +114,8 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert "opposing_rp_force_norm" in history[-1]
     assert float(history[-1]["opposing_rp_force_norm"]) >= 0.0
     assert "contact_multiplier_sum" in history[-1]
+    assert "p95_equivalent_elastic_strain" in history[-1]
+    assert float(history[-1]["p95_equivalent_elastic_strain"]) >= 0.0
 
 
 def test_cropped_gear_hard_contact_supports_surface_patch_constraint_averaging() -> None:
