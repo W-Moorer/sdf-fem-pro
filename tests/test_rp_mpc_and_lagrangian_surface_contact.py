@@ -11,6 +11,7 @@ from scipy.sparse import diags
 from sfc.fem.rp_mpc import (
     FiniteRotationRigidHubMPC,
     RigidHubMPC,
+    build_rigid_hub_reduced_assembly,
     constant_angular_velocity_rotation_history,
     constant_torque_rotation_history,
     merge_dirichlet_conditions,
@@ -110,6 +111,38 @@ def test_constant_angular_velocity_rotation_history_prescribes_rp_motion() -> No
     assert times == pytest.approx([0.0, 0.1, 0.2])
     assert rotations[:, 2] == pytest.approx([0.5, 0.8, 1.1])
     assert velocities[:, 2] == pytest.approx([3.0, 3.0, 3.0])
+
+
+def test_rigid_hub_reduced_assembly_expands_hub_and_free_nodes() -> None:
+    nodes = np.asarray([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.3, 0.4, 0.5]], dtype=float)
+    hub = RigidHubMPC(np.asarray([0, 1], dtype=np.int64), nodes, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(nodes, [hub])
+    q = np.zeros(assembly.n_reduced_dofs, dtype=float)
+    q[:3] = [0.1, 0.2, 0.3]
+    q[assembly.hub_slice(0)] = [0.01, -0.02, 0.03, 0.0, 0.0, 0.1]
+
+    expanded = assembly.expand_displacements(q)
+    expected_hub = hub.nodal_displacements(translation=(0.01, -0.02, 0.03), rotation=(0.0, 0.0, 0.1))
+
+    assert assembly.free_node_ids == pytest.approx([2])
+    assert expanded[0:2] == pytest.approx(expected_hub)
+    assert expanded[2] == pytest.approx([0.1, 0.2, 0.3])
+
+
+def test_rigid_hub_reduced_assembly_projects_mass_and_forces_to_rp_dofs() -> None:
+    nodes = np.asarray([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=float)
+    masses = np.repeat(np.asarray([2.0, 3.0], dtype=float), 3)
+    hub = RigidHubMPC(np.asarray([0, 1], dtype=np.int64), nodes, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(nodes, [hub], include_free_nodes=False)
+    reduced_mass = assembly.reduce_matrix(diags(masses)).toarray()
+    inertia = reduced_hub_rotational_inertia(np.asarray([0, 1]), nodes, np.zeros(3), diags(masses))
+    nodal_force = np.asarray([[0.0, 2.0, 0.0], [-3.0, 0.0, 0.0]], dtype=float)
+    reduced_force = assembly.reduce_vector(nodal_force)
+
+    assert reduced_mass[:3, :3] == pytest.approx(5.0 * np.eye(3))
+    assert reduced_mass[3:, 3:] == pytest.approx(inertia)
+    assert reduced_force[:3] == pytest.approx([-3.0, 2.0, 0.0])
+    assert reduced_force[5] == pytest.approx(1.0 * 2.0 + 2.0 * 3.0)
 
 
 def test_merge_dirichlet_conditions_rejects_conflicts() -> None:

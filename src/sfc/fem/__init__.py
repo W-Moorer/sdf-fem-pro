@@ -67,7 +67,9 @@ from .implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
 from .material import isotropic_linear_elasticity_matrix
 from .rp_mpc import (
     FiniteRotationRigidHubMPC,
+    RigidHubReducedAssembly,
     RigidHubMPC,
+    build_rigid_hub_reduced_assembly,
     constant_angular_velocity_rotation_history,
     constant_torque_rotation_history,
     merge_dirichlet_conditions,
@@ -138,7 +140,9 @@ __all__ = [
     "newmark_beta_step",
     "project_fixed_dofs",
     "FiniteRotationRigidHubMPC",
+    "RigidHubReducedAssembly",
     "RigidHubMPC",
+    "build_rigid_hub_reduced_assembly",
     "constant_angular_velocity_rotation_history",
     "constant_torque_rotation_history",
     "register_element_backend",

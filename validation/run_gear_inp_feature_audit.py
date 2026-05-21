@@ -88,7 +88,7 @@ def build_feature_rows(source: Path = DEFAULT_SOURCE) -> list[Row]:
             "feature": "beam_mpc_hub_to_reference_point",
             "abaqus_usage": f"2 BEAM MPC constraints, hub nodes {len(model.gear1_hub_labels)} + {len(model.gear2_hub_labels)}",
             "sfc_status": "partial",
-            "evidence": "small-rotation RigidHubMPC, finite-rotation kinematics, and reduced rotational inertia helpers exist",
+            "evidence": "small-rotation RigidHubMPC, finite-rotation kinematics, reduced rotational inertia, and reduced global RP-MPC assembly have Abaqus-aligned small-case validation",
             "gap": "not yet wired into the full flexible gear global solve",
         },
         {

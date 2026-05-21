@@ -23,6 +23,7 @@ def test_gear_inp_feature_audit_marks_hard_contact_and_torque_gap() -> None:
     assert by_feature["c3d4_tet4_volume_elements"]["sfc_status"] == "supported"
     assert by_feature["surface_to_surface_hard_contact"]["sfc_status"] == "partial"
     assert "hard normal active-set" in str(by_feature["surface_to_surface_hard_contact"]["evidence"])
+    assert "reduced global RP-MPC assembly" in str(by_feature["beam_mpc_hub_to_reference_point"]["evidence"])
     assert by_feature["moment_cload_on_rp"]["sfc_status"] == "partial"
     assert "torque dynamics" in str(by_feature["moment_cload_on_rp"]["evidence"])
     assert by_feature["velocity_angular_boundary"]["sfc_status"] == "partial"

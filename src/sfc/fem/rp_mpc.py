@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
-from scipy.sparse import issparse
+from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 
 _AXIS_TO_COMPONENT = {"x": 0, "y": 1, "z": 2, 0: 0, 1: 1, 2: 2}
@@ -223,6 +223,151 @@ class FiniteRotationRigidHubMPC:
         return dofs.ravel()[order].astype(np.int64), values.ravel()[order].astype(float)
 
 
+@dataclass(frozen=True, slots=True)
+class RigidHubReducedAssembly:
+    """Sparse reduced-DOF assembly map for Abaqus-style BEAM hub MPCs.
+
+    The transformation ``u_full = T q_reduced`` keeps ordinary translational
+    DOFs for non-hub nodes and replaces each rigid hub by six RP DOFs:
+
+    ``u_i = u_rp + theta x (X_i - X_rp)``.
+
+    It is linearized about the reference configuration, matching the
+    small-rotation BEAM-MPC form used for global matrix projection.  Large
+    rotations can still be advanced incrementally by rebuilding or updating the
+    tangent frame at a higher level.
+    """
+
+    reference_nodes: np.ndarray
+    hubs: tuple[RigidHubMPC, ...]
+    free_node_ids: np.ndarray
+    hub_column_offsets: np.ndarray
+    transformation: csr_matrix
+
+    @property
+    def n_full_dofs(self) -> int:
+        """Number of full translational nodal DOFs."""
+
+        return int(self.transformation.shape[0])
+
+    @property
+    def n_reduced_dofs(self) -> int:
+        """Number of reduced DOFs."""
+
+        return int(self.transformation.shape[1])
+
+    def hub_slice(self, hub_index: int = 0) -> slice:
+        """Return the six reduced columns for one hub RP."""
+
+        index = int(hub_index)
+        if index < 0 or index >= len(self.hubs):
+            raise IndexError("hub_index out of range")
+        start = int(self.hub_column_offsets[index])
+        return slice(start, start + 6)
+
+    def expand_vector(self, reduced_vector: np.ndarray | Sequence[float]) -> np.ndarray:
+        """Expand a reduced vector to full flattened nodal DOFs."""
+
+        q = np.asarray(reduced_vector, dtype=float).reshape(-1)
+        if q.shape != (self.n_reduced_dofs,):
+            raise ValueError("reduced_vector length must match n_reduced_dofs")
+        return np.asarray(self.transformation @ q, dtype=float).reshape(-1)
+
+    def expand_displacements(self, reduced_vector: np.ndarray | Sequence[float]) -> np.ndarray:
+        """Expand a reduced displacement vector to ``(n_nodes, 3)``."""
+
+        return self.expand_vector(reduced_vector).reshape((-1, 3))
+
+    def current_positions(self, reduced_vector: np.ndarray | Sequence[float]) -> np.ndarray:
+        """Return current nodal positions induced by a reduced displacement."""
+
+        return self.reference_nodes + self.expand_displacements(reduced_vector)
+
+    def reduce_vector(self, full_vector: np.ndarray | Sequence[float]) -> np.ndarray:
+        """Project a full vector into reduced coordinates via ``T.T f``."""
+
+        f = np.asarray(full_vector, dtype=float)
+        if f.shape == self.reference_nodes.shape:
+            f = f.reshape(-1)
+        else:
+            f = f.reshape(-1)
+        if f.shape != (self.n_full_dofs,):
+            raise ValueError("full_vector length must match n_full_dofs")
+        return np.asarray(self.transformation.T @ f, dtype=float).reshape(-1)
+
+    def reduce_matrix(self, full_matrix) -> csr_matrix:
+        """Project a full matrix into reduced coordinates via ``T.T A T``."""
+
+        if getattr(full_matrix, "shape", None) != (self.n_full_dofs, self.n_full_dofs):
+            raise ValueError("full_matrix must have shape (n_full_dofs, n_full_dofs)")
+        A = full_matrix.tocsr() if issparse(full_matrix) else csr_matrix(np.asarray(full_matrix, dtype=float))
+        return (self.transformation.T @ A @ self.transformation).tocsr()
+
+
+def build_rigid_hub_reduced_assembly(
+    reference_nodes: np.ndarray,
+    hubs: Sequence[RigidHubMPC],
+    *,
+    include_free_nodes: bool = True,
+) -> RigidHubReducedAssembly:
+    """Build a sparse global reduced assembly for one or more rigid hubs."""
+
+    nodes = np.asarray(reference_nodes, dtype=float)
+    if nodes.ndim != 2 or nodes.shape[1] != 3:
+        raise ValueError("reference_nodes must have shape (n_nodes, 3)")
+    hub_tuple = tuple(hubs)
+    if not hub_tuple:
+        raise ValueError("at least one hub is required")
+    occupied: dict[int, int] = {}
+    normalized_hubs: list[RigidHubMPC] = []
+    for hub_index, hub in enumerate(hub_tuple):
+        normalized = RigidHubMPC(hub.node_ids, nodes, hub.reference_point)
+        for node in normalized.node_ids:
+            key = int(node)
+            if key in occupied:
+                raise ValueError(f"node {key} belongs to multiple rigid hubs")
+            occupied[key] = hub_index
+        normalized_hubs.append(normalized)
+    all_nodes = np.arange(nodes.shape[0], dtype=np.int64)
+    if include_free_nodes:
+        free_nodes = np.asarray([node for node in all_nodes if int(node) not in occupied], dtype=np.int64)
+    else:
+        free_nodes = np.empty(0, dtype=np.int64)
+    n_full = 3 * nodes.shape[0]
+    free_cols = 3 * free_nodes.size
+    hub_offsets = free_cols + 6 * np.arange(len(normalized_hubs), dtype=np.int64)
+    n_reduced = free_cols + 6 * len(normalized_hubs)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for free_index, node in enumerate(free_nodes):
+        for axis in range(3):
+            rows.append(3 * int(node) + axis)
+            cols.append(3 * free_index + axis)
+            data.append(1.0)
+    for hub_index, hub in enumerate(normalized_hubs):
+        col0 = int(hub_offsets[hub_index])
+        for node in hub.node_ids:
+            lever = nodes[int(node)] - hub.reference_point
+            block = _small_rotation_hub_block(lever)
+            for axis in range(3):
+                full_row = 3 * int(node) + axis
+                for local_col in range(6):
+                    value = float(block[axis, local_col])
+                    if value != 0.0:
+                        rows.append(full_row)
+                        cols.append(col0 + local_col)
+                        data.append(value)
+    T = coo_matrix((data, (rows, cols)), shape=(n_full, n_reduced), dtype=float).tocsr()
+    return RigidHubReducedAssembly(
+        reference_nodes=nodes,
+        hubs=tuple(normalized_hubs),
+        free_node_ids=free_nodes,
+        hub_column_offsets=hub_offsets,
+        transformation=T,
+    )
+
+
 def reduced_hub_rotational_inertia(
     node_ids: np.ndarray,
     reference_nodes: np.ndarray,
@@ -361,6 +506,20 @@ def merge_dirichlet_conditions(*conditions: tuple[np.ndarray, np.ndarray]) -> tu
     dofs = np.asarray(sorted(merged), dtype=np.int64)
     values = np.asarray([merged[int(dof)] for dof in dofs], dtype=float)
     return dofs, values
+
+
+def _small_rotation_hub_block(lever: np.ndarray) -> np.ndarray:
+    r = np.asarray(lever, dtype=float).reshape(-1)
+    if r.shape != (3,):
+        raise ValueError("lever must have shape (3,)")
+    return np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0, r[2], -r[1]],
+            [0.0, 1.0, 0.0, -r[2], 0.0, r[0]],
+            [0.0, 0.0, 1.0, r[1], -r[0], 0.0],
+        ],
+        dtype=float,
+    )
 
 
 def _normalize_components(components: str | Sequence[str | int]) -> np.ndarray:
