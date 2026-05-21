@@ -25,5 +25,7 @@ def test_gear_inp_feature_audit_marks_hard_contact_and_torque_gap() -> None:
     assert "hard normal active-set" in str(by_feature["surface_to_surface_hard_contact"]["evidence"])
     assert by_feature["moment_cload_on_rp"]["sfc_status"] == "partial"
     assert "torque dynamics" in str(by_feature["moment_cload_on_rp"]["evidence"])
+    assert by_feature["velocity_angular_boundary"]["sfc_status"] == "partial"
+    assert "angular velocity" in str(by_feature["velocity_angular_boundary"]["evidence"])
     assert "38884 nodes" in str(by_feature["two_flexible_gear_parts"]["abaqus_usage"])
     assert "176486 C3D4" in str(by_feature["two_flexible_gear_parts"]["abaqus_usage"])

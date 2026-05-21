@@ -68,6 +68,7 @@ from .material import isotropic_linear_elasticity_matrix
 from .rp_mpc import (
     FiniteRotationRigidHubMPC,
     RigidHubMPC,
+    constant_angular_velocity_rotation_history,
     constant_torque_rotation_history,
     merge_dirichlet_conditions,
     reduced_hub_rotational_inertia,
@@ -138,6 +139,7 @@ __all__ = [
     "project_fixed_dofs",
     "FiniteRotationRigidHubMPC",
     "RigidHubMPC",
+    "constant_angular_velocity_rotation_history",
     "constant_torque_rotation_history",
     "register_element_backend",
     "merge_dirichlet_conditions",

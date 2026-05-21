@@ -11,6 +11,7 @@ from scipy.sparse import diags
 from sfc.fem.rp_mpc import (
     FiniteRotationRigidHubMPC,
     RigidHubMPC,
+    constant_angular_velocity_rotation_history,
     constant_torque_rotation_history,
     merge_dirichlet_conditions,
     reduced_hub_rotational_inertia,
@@ -96,6 +97,19 @@ def test_constant_torque_rotation_history_respects_active_axes() -> None:
 
     assert rotations[-1] == pytest.approx([0.0, 0.0, 0.01])
     assert velocities[-1] == pytest.approx([0.0, 0.0, 0.2])
+
+
+def test_constant_angular_velocity_rotation_history_prescribes_rp_motion() -> None:
+    times, rotations, velocities = constant_angular_velocity_rotation_history(
+        (0.0, 0.0, 3.0),
+        duration=0.2,
+        dt=0.1,
+        initial_rotation=(0.0, 0.0, 0.5),
+    )
+
+    assert times == pytest.approx([0.0, 0.1, 0.2])
+    assert rotations[:, 2] == pytest.approx([0.5, 0.8, 1.1])
+    assert velocities[:, 2] == pytest.approx([3.0, 3.0, 3.0])
 
 
 def test_merge_dirichlet_conditions_rejects_conflicts() -> None:

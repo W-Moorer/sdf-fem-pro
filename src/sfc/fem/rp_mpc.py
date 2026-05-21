@@ -317,6 +317,30 @@ def constant_torque_rotation_history(
     return times, rotations, angular_velocities
 
 
+def constant_angular_velocity_rotation_history(
+    angular_velocity: np.ndarray | Sequence[float],
+    *,
+    duration: float,
+    dt: float,
+    initial_rotation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the RP rotation history for prescribed constant angular velocity."""
+
+    omega = np.asarray(angular_velocity, dtype=float).reshape(-1)
+    theta0 = np.asarray(initial_rotation, dtype=float).reshape(-1)
+    if omega.shape != (3,) or theta0.shape != (3,):
+        raise ValueError("angular_velocity and initial_rotation must have shape (3,)")
+    if float(duration) < 0.0 or float(dt) <= 0.0:
+        raise ValueError("duration must be non-negative and dt must be positive")
+    steps = int(round(float(duration) / float(dt)))
+    if not np.isclose(steps * float(dt), float(duration), rtol=1.0e-10, atol=1.0e-14):
+        raise ValueError("duration must be an integer multiple of dt")
+    times = np.linspace(0.0, float(duration), steps + 1)
+    rotations = theta0[None, :] + times[:, None] * omega[None, :]
+    angular_velocities = np.repeat(omega[None, :], steps + 1, axis=0)
+    return times, rotations, angular_velocities
+
+
 def merge_dirichlet_conditions(*conditions: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
     """Merge multiple ``(dofs, values)`` pairs, rejecting conflicts."""
 
