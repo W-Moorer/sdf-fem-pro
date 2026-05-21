@@ -6,7 +6,7 @@ import pytest
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry
 from sfc.fem.calculix_aligned import MechanicsModel, assemble_contact_response
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
-from sfc.fem.rp_mpc import RigidHubMPC, merge_dirichlet_conditions
+from sfc.fem.rp_mpc import FiniteRotationRigidHubMPC, RigidHubMPC, merge_dirichlet_conditions, rotation_matrix_from_vector
 from sfc.sdf.material_sdf import MaterialSDF
 
 
@@ -23,6 +23,33 @@ def test_rigid_hub_mpc_matches_z_axis_cross_product() -> None:
 
     assert disp[0] == pytest.approx([0.0, 0.1, 0.0])
     assert disp[1] == pytest.approx([-0.2, 0.0, 0.0])
+
+
+def test_finite_rotation_hub_mpc_rotates_reference_lever_exactly() -> None:
+    nodes = np.asarray([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+    hub = FiniteRotationRigidHubMPC(np.asarray([0, 1], dtype=np.int64), nodes, np.zeros(3))
+
+    current = hub.current_positions(rotation=(0.0, 0.0, 0.5 * np.pi))
+
+    assert current[0] == pytest.approx([0.0, 1.0, 0.0], abs=1.0e-14)
+    assert current[1] == pytest.approx([-2.0, 0.0, 0.0], abs=1.0e-14)
+
+
+def test_finite_rotation_matches_small_rotation_to_first_order() -> None:
+    nodes = np.asarray([[1.0, -0.2, 0.0], [0.0, 2.0, 0.3]], dtype=float)
+    ids = np.asarray([0, 1], dtype=np.int64)
+    theta = np.asarray([2.0e-7, -3.0e-7, 5.0e-7], dtype=float)
+    small = RigidHubMPC(ids, nodes, np.zeros(3)).nodal_displacements(rotation=theta)
+    finite = FiniteRotationRigidHubMPC(ids, nodes, np.zeros(3)).nodal_displacements(rotation=theta)
+
+    assert finite == pytest.approx(small, abs=1.0e-12)
+
+
+def test_rotation_matrix_from_vector_is_orthonormal() -> None:
+    R = rotation_matrix_from_vector((0.2, -0.1, 0.3))
+
+    assert R.T @ R == pytest.approx(np.eye(3), abs=1.0e-14)
+    assert np.linalg.det(R) == pytest.approx(1.0)
 
 
 def test_merge_dirichlet_conditions_rejects_conflicts() -> None:

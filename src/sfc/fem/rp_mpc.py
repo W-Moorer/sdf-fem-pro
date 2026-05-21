@@ -18,6 +18,33 @@ import numpy as np
 _AXIS_TO_COMPONENT = {"x": 0, "y": 1, "z": 2, 0: 0, 1: 1, 2: 2}
 
 
+def rotation_matrix_from_vector(rotation: np.ndarray | Sequence[float]) -> np.ndarray:
+    """Return the finite-rotation matrix for an axis-angle vector.
+
+    ``rotation`` is interpreted as the rotation vector whose direction is the
+    rotation axis and whose norm is the angle in radians.  The implementation
+    uses Rodrigues' formula and is independent of Abaqus; it is the finite
+    counterpart to the small-rotation hub helper below.
+    """
+
+    theta = np.asarray(rotation, dtype=float).reshape(-1)
+    if theta.shape != (3,):
+        raise ValueError("rotation must have shape (3,)")
+    angle = float(np.linalg.norm(theta))
+    if angle <= 0.0:
+        return np.eye(3, dtype=float)
+    axis = theta / angle
+    cross = np.asarray(
+        [
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ],
+        dtype=float,
+    )
+    return np.eye(3, dtype=float) + np.sin(angle) * cross + (1.0 - np.cos(angle)) * (cross @ cross)
+
+
 @dataclass(frozen=True, slots=True)
 class RigidHubMPC:
     """Rigid hub motion tied to a reference point.
@@ -92,6 +119,100 @@ class RigidHubMPC:
         components: str | Sequence[str | int] = "xyz",
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return global DOF indices and prescribed values for this hub."""
+
+        comp = _normalize_components(components)
+        disp = self.nodal_displacements(translation=translation, rotation=rotation)
+        dofs = self.node_ids[:, None] * 3 + comp[None, :]
+        values = disp[:, comp]
+        order = np.argsort(dofs.ravel(), kind="stable")
+        return dofs.ravel()[order].astype(np.int64), values.ravel()[order].astype(float)
+
+
+@dataclass(frozen=True, slots=True)
+class FiniteRotationRigidHubMPC:
+    """Finite-rotation rigid hub motion tied to a reference point.
+
+    The current hub-node position is
+
+    ``x_i = X_rp + u_rp + R(theta) (X_i - X_rp)``.
+
+    This helper is the kinematic foundation needed for full gear-like hub/RP
+    motion.  It returns ordinary nodal displacement values so existing
+    eliminated-Dirichlet solvers can use it immediately; a reduced RP-DOF
+    dynamics layer can later reuse the same transformation.
+    """
+
+    node_ids: np.ndarray
+    reference_nodes: np.ndarray
+    reference_point: np.ndarray
+
+    def __post_init__(self) -> None:
+        node_ids = np.asarray(self.node_ids, dtype=np.int64).ravel()
+        if node_ids.size == 0:
+            raise ValueError("node_ids must not be empty")
+        if np.any(node_ids < 0):
+            raise ValueError("node_ids cannot contain negative entries")
+        nodes = np.asarray(self.reference_nodes, dtype=float)
+        if nodes.ndim != 2 or nodes.shape[1] != 3:
+            raise ValueError("reference_nodes must have shape (n_nodes, 3)")
+        if int(node_ids.max()) >= nodes.shape[0]:
+            raise ValueError("node_ids reference a node outside reference_nodes")
+        rp = np.asarray(self.reference_point, dtype=float).reshape(-1)
+        if rp.shape != (3,):
+            raise ValueError("reference_point must have shape (3,)")
+        object.__setattr__(self, "node_ids", np.unique(node_ids))
+        object.__setattr__(self, "reference_nodes", nodes)
+        object.__setattr__(self, "reference_point", rp)
+
+    def current_positions(
+        self,
+        *,
+        translation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+        rotation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+    ) -> np.ndarray:
+        """Return finite-rotation current positions for the hub nodes."""
+
+        u_rp = np.asarray(translation, dtype=float).reshape(-1)
+        if u_rp.shape != (3,):
+            raise ValueError("translation must have shape (3,)")
+        R = rotation_matrix_from_vector(rotation)
+        lever = self.reference_nodes[self.node_ids] - self.reference_point[None, :]
+        return self.reference_point[None, :] + u_rp[None, :] + lever @ R.T
+
+    def nodal_displacements(
+        self,
+        *,
+        translation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+        rotation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+    ) -> np.ndarray:
+        """Return finite-rotation prescribed displacements for hub nodes."""
+
+        return self.current_positions(translation=translation, rotation=rotation) - self.reference_nodes[self.node_ids]
+
+    def nodal_velocities(
+        self,
+        *,
+        translation_rate: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+        angular_velocity: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+        rotation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+    ) -> np.ndarray:
+        """Return hub-node velocities for the current finite orientation."""
+
+        v_rp = np.asarray(translation_rate, dtype=float).reshape(-1)
+        omega = np.asarray(angular_velocity, dtype=float).reshape(-1)
+        if v_rp.shape != (3,) or omega.shape != (3,):
+            raise ValueError("translation_rate and angular_velocity must have shape (3,)")
+        current_lever = self.current_positions(translation=(0.0, 0.0, 0.0), rotation=rotation) - self.reference_point[None, :]
+        return v_rp[None, :] + np.cross(omega[None, :], current_lever)
+
+    def dirichlet_dofs_and_values(
+        self,
+        *,
+        translation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+        rotation: np.ndarray | Sequence[float] = (0.0, 0.0, 0.0),
+        components: str | Sequence[str | int] = "xyz",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return global DOF indices and finite-rotation prescribed values."""
 
         comp = _normalize_components(components)
         disp = self.nodal_displacements(translation=translation, rotation=rotation)
