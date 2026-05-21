@@ -76,6 +76,35 @@ def test_cropped_gear_sfc_lagrangian_sdf_path_runs_one_implicit_step() -> None:
     assert history[-1]["newton_iterations"] >= 1
 
 
+def test_cropped_gear_modified_newton_penalty_path_runs_one_implicit_step() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+
+    history, summary = solve_sfc_cropped_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=1.0e-3,
+        dt=1.0e-3,
+        target_overclosure=1.0e-5,
+        rotation_rate_z=0.0,
+        penalty_solver="modified_newton",
+        material_linearization="reference_linear",
+    )
+
+    assert len(history) == 1
+    assert summary["status"] == "completed"
+    assert summary["contact_mode"] == "penalty"
+    assert summary["penalty_solver"] == "modified_newton"
+    assert summary["material_linearization"] == "reference_linear"
+    assert int(summary["penalty_fallback_count"]) >= 0
+    assert float(summary["timing_base_tangent_seconds"]) >= 0.0
+    assert history[-1]["penalty_solver"] in {"modified_newton", "full_newton_fallback"}
+    assert history[-1]["newton_iterations"] >= 1
+
+
 def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)

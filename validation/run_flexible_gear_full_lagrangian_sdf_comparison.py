@@ -168,12 +168,18 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- active patch radius factor: {float(summary.get('active_patch_radius_factor', 1.0)):.3f}",
         f"- support nodes: {summary['gear1_support_nodes']} / {summary['gear2_support_nodes']}",
         f"- linear solver: {summary.get('linear_solver', 'sparse')}",
+        f"- contact mode: {summary.get('contact_mode', '')}",
+        f"- penalty solver: {summary.get('penalty_solver', '')}",
+        f"- material linearization: {summary.get('material_linearization', '')}",
         f"- RP reaction definition: {summary.get('rp_reaction_definition', '')}",
         f"- SFC wall time: {float(summary['sfc_wall_seconds']):.6f} s",
         f"- timing internal+tangent: {float(summary.get('timing_internal_tangent_seconds', 0.0)):.6f} s",
         f"- timing effective system: {float(summary.get('timing_effective_system_seconds', 0.0)):.6f} s",
         f"- timing hard-contact solve: {float(summary.get('timing_hard_contact_solve_seconds', 0.0)):.6f} s",
         f"- timing contact linearization: {float(summary.get('timing_contact_linearization_seconds', 0.0)):.6f} s",
+        f"- timing penalty base tangent: {float(summary.get('timing_base_tangent_seconds', 0.0)):.6f} s",
+        f"- timing penalty residual: {float(summary.get('timing_penalty_residual_seconds', 0.0)):.6f} s",
+        f"- timing penalty low-rank solve: {float(summary.get('timing_penalty_low_rank_seconds', 0.0)):.6f} s",
         f"- final max displacement norm: {float(summary.get('final_max_displacement_norm', 0.0)):.6e}",
         f"- final p95 von Mises: {float(summary.get('final_p95_von_mises', 0.0)):.6e}",
         f"- final p95 equivalent elastic strain: {float(summary.get('final_p95_equivalent_elastic_strain', 0.0)):.6e}",
@@ -251,6 +257,8 @@ def run_full_gear(
             target_overclosure=target_overclosure,
             rotation_rate_z=rotation_rate_z,
             hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+            penalty_solver="modified_newton",
+            material_linearization="reference_linear",
         )
     if history:
         summary["final_max_displacement_norm"] = float(history[-1].get("max_displacement_norm", 0.0))

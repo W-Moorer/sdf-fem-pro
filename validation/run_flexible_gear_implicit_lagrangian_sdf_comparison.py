@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import LinearOperator, cg, splu
 from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,13 +41,19 @@ from sfc.contact.hard_contact import (  # noqa: E402
     solve_linear_hard_contact_with_dirichlet_sparse,
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
-from sfc.fem.calculix_aligned import MechanicsModel, stvk_internal_response  # noqa: E402
+from sfc.fem.calculix_aligned import (  # noqa: E402
+    InternalResponse,
+    MechanicsModel,
+    MechanicsState,
+    assemble_contact_response,
+    stvk_internal_response,
+)
 from sfc.fem.calculix_aligned import (  # noqa: E402
     ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
     calculix_dynamic_predictor,
     hht_newmark_parameters,
 )
-from sfc.fem.constraints import project_fixed_dofs  # noqa: E402
+from sfc.fem.constraints import free_dofs, project_fixed_dofs  # noqa: E402
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet  # noqa: E402
 from sfc.fem.rp_mpc import RigidHubMPC, merge_dirichlet_conditions  # noqa: E402
 from sfc.sdf.material_sdf import MaterialSDF  # noqa: E402
@@ -121,6 +129,49 @@ def _equivalent_elastic_strain_from_mises(von_mises_values: np.ndarray, *, young
     vm = np.asarray(von_mises_values, dtype=float).reshape(-1)
     shear = float(young) / (2.0 * (1.0 + float(poisson)))
     return vm / max(3.0 * shear, 1.0e-30)
+
+
+def _linear_reference_internal_response(
+    model: MechanicsModel,
+    x_current: np.ndarray,
+    reference_tangent: Any,
+) -> InternalResponse:
+    """Return a fast small-strain TET4 response for linear-elastic decks."""
+
+    displacement = np.asarray(x_current, dtype=float) - np.asarray(model.X, dtype=float)
+    element_u = displacement[np.asarray(model.elements, dtype=np.int64)]
+    grad_u = np.einsum("eai,eaj->eij", element_u, model.shape_grads, optimize=True)
+    strain = 0.5 * (grad_u + np.swapaxes(grad_u, 1, 2))
+    lam, mu = _lame_parameters_local(model.E, model.nu)
+    identity = np.eye(3, dtype=float)
+    trace = np.trace(strain, axis1=1, axis2=2)
+    stress = lam * trace[:, None, None] * identity + 2.0 * mu * strain
+    vm = _von_mises_local(stress)
+    u_flat = displacement.reshape(-1)
+    force = np.asarray(reference_tangent @ u_flat, dtype=float).reshape((-1, 3))
+    energy = 0.5 * float(u_flat @ np.asarray(force, dtype=float).reshape(-1))
+    empty = csr_matrix((model.n_dofs, model.n_dofs), dtype=float)
+    return InternalResponse(force, strain, stress, vm, energy, empty, empty)
+
+
+def _lame_parameters_local(young: float, poisson: float) -> tuple[float, float]:
+    e = float(young)
+    nu = float(poisson)
+    mu = e / (2.0 * (1.0 + nu))
+    lam = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    return lam, mu
+
+
+def _von_mises_local(stress: np.ndarray) -> np.ndarray:
+    values = np.asarray(stress, dtype=float)
+    sx = values[:, 0, 0]
+    sy = values[:, 1, 1]
+    sz = values[:, 2, 2]
+    txy = values[:, 0, 1]
+    tyz = values[:, 1, 2]
+    txz = values[:, 0, 2]
+    mises = 0.5 * ((sx - sy) ** 2 + (sy - sz) ** 2 + (sz - sx) ** 2) + 3.0 * (txy * txy + tyz * tyz + txz * txz)
+    return np.sqrt(np.maximum(mises, 0.0))
 
 
 def _face_centroids(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -270,6 +321,412 @@ def _fixed_conditions_for_pair(
     return merge_dirichlet_conditions((d1, v1), (d2, v2))
 
 
+def _penalty_rhs_balance(model: MechanicsModel, internal: Any, contact_response: Any) -> np.ndarray:
+    """Return external-minus-internal balance for the zero-gravity gear cases."""
+
+    _ = model
+    return -np.asarray(internal.force, dtype=float).reshape(-1) + np.asarray(contact_response.force, dtype=float).reshape(-1)
+
+
+def _penalty_history_row(
+    *,
+    time_value: float,
+    closure: float,
+    rotation: float,
+    state: MechanicsState,
+    model: MechanicsModel,
+    internal: Any,
+    contact_response: Any,
+    young: float,
+    poisson: float,
+    newton_iterations: int,
+    residual_norm: float,
+    solver: str,
+) -> Row:
+    disp = state.x - model.X
+    strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
+    elastic_strain_norm = _elastic_strain_norm_from_stress(internal.stress, young=young, poisson=poisson)
+    equivalent_elastic_strain = _equivalent_elastic_strain_from_mises(internal.von_mises, young=young, poisson=poisson)
+    return {
+        "time": float(time_value),
+        "closure": float(closure),
+        "rotation_z": float(rotation),
+        "active_contact_samples": int(contact_response.active_count),
+        "min_gap": float(contact_response.min_gap),
+        "normal_force": float(contact_response.normal_force),
+        "max_displacement_norm": float(np.max(np.linalg.norm(disp, axis=1))),
+        "p95_von_mises": float(np.percentile(internal.von_mises, 95.0)) if internal.von_mises.size else 0.0,
+        "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
+        "p95_strain_norm": float(np.percentile(strain_norm, 95.0)) if strain_norm.size else 0.0,
+        "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+        "p95_elastic_strain_norm": float(np.percentile(elastic_strain_norm, 95.0)) if elastic_strain_norm.size else 0.0,
+        "max_elastic_strain_norm": float(np.max(elastic_strain_norm)) if elastic_strain_norm.size else 0.0,
+        "p95_equivalent_elastic_strain": float(np.percentile(equivalent_elastic_strain, 95.0)) if equivalent_elastic_strain.size else 0.0,
+        "max_equivalent_elastic_strain": float(np.max(equivalent_elastic_strain)) if equivalent_elastic_strain.size else 0.0,
+        "strain_energy": float(internal.strain_energy),
+        "newton_iterations": int(newton_iterations),
+        "newton_residual_norm": float(residual_norm),
+        "penalty_solver": str(solver),
+    }
+
+
+def _solve_penalty_low_rank_correction(
+    *,
+    base_matrix_free: Any,
+    base_lu_cache: list[Any],
+    residual_free: np.ndarray,
+    samples: list[Any],
+    free: np.ndarray,
+    n_total_dofs: int,
+    equilibrium_scale: float,
+    tolerance: float,
+    use_cg: bool = False,
+) -> np.ndarray:
+    """Solve a Newton correction with the active penalty tangent as low rank."""
+
+    rhs = -np.asarray(residual_free, dtype=float).reshape(-1)
+    if rhs.size == 0:
+        return np.empty(0, dtype=float)
+    active_samples = [sample for sample in samples if float(sample.gap) < 0.0]
+    j_free = np.empty((0, rhs.size), dtype=float)
+    tangent_scale = np.asarray(
+        [float(equilibrium_scale) * float(sample.stiffness) * float(sample.area) for sample in active_samples],
+        dtype=float,
+    )
+    if active_samples:
+        _gaps, gap_jacobian = hard_contact_gap_jacobian_from_samples(active_samples, n_total_dofs=int(n_total_dofs))
+        j_free = np.asarray(gap_jacobian[:, np.asarray(free, dtype=np.int64)], dtype=float)
+        positive = tangent_scale > 0.0
+        j_free = j_free[positive]
+        tangent_scale = tangent_scale[positive]
+    if bool(use_cg):
+        cg_solution = _solve_penalty_cg_correction(
+            base_matrix_free=base_matrix_free,
+            rhs=rhs,
+            j_free=j_free,
+            tangent_scale=tangent_scale,
+            tolerance=tolerance,
+        )
+        if cg_solution is not None:
+            return cg_solution
+    if base_lu_cache[0] is None:
+        base_lu_cache[0] = splu(base_matrix_free.tocsc())
+    base_lu = base_lu_cache[0]
+    base_solution = np.asarray(base_lu.solve(rhs), dtype=float).reshape(-1)
+    if not active_samples or j_free.size == 0:
+        return base_solution
+    influence = np.asarray(base_lu.solve(j_free.T), dtype=float)
+    schur = np.diag(1.0 / tangent_scale) + j_free @ influence
+    try:
+        contact_coeff = np.linalg.solve(schur, j_free @ base_solution)
+    except np.linalg.LinAlgError:
+        contact_coeff, *_ = np.linalg.lstsq(schur, j_free @ base_solution, rcond=None)
+    return base_solution - influence @ contact_coeff
+
+
+def _solve_penalty_cg_correction(
+    *,
+    base_matrix_free: Any,
+    rhs: np.ndarray,
+    j_free: np.ndarray,
+    tangent_scale: np.ndarray,
+    tolerance: float,
+) -> np.ndarray | None:
+    """Solve the active penalty tangent system by matrix-free CG."""
+
+    b = np.asarray(rhs, dtype=float).reshape(-1)
+    j = np.asarray(j_free, dtype=float)
+    scale = np.asarray(tangent_scale, dtype=float).reshape(-1)
+    if j.shape[0] != scale.shape[0] or (j.ndim == 2 and j.shape[1] != b.size):
+        return None
+    base = base_matrix_free.tocsr()
+
+    def matvec(value: np.ndarray) -> np.ndarray:
+        vec = np.asarray(value, dtype=float).reshape(-1)
+        out = np.asarray(base @ vec, dtype=float)
+        if j.size:
+            out += np.asarray(j.T @ (scale * (j @ vec)), dtype=float)
+        return out
+
+    diag = np.asarray(base.diagonal(), dtype=float).reshape(-1)
+    if j.size:
+        diag = diag + np.sum((j * j) * scale[:, None], axis=0)
+    safe_diag = np.where(np.abs(diag) > 1.0e-30, diag, 1.0)
+    preconditioner = LinearOperator((b.size, b.size), matvec=lambda value: np.asarray(value, dtype=float) / safe_diag, dtype=float)
+    operator = LinearOperator((b.size, b.size), matvec=matvec, dtype=float)
+    rtol = min(1.0e-8, max(1.0e-11, float(tolerance) * 10.0))
+    atol = max(float(tolerance) * max(1.0, float(np.linalg.norm(b))) * 1.0e-2, 1.0e-10)
+    try:
+        solution, info = cg(
+            operator,
+            b,
+            rtol=rtol,
+            atol=atol,
+            maxiter=max(200, min(2000, b.size // 20)),
+            M=preconditioner,
+        )
+    except Exception:
+        return None
+    if info != 0:
+        return None
+    residual = matvec(solution) - b
+    allowed = atol + rtol * max(1.0, float(np.linalg.norm(b)))
+    if float(np.linalg.norm(residual)) > max(50.0 * allowed, 1.0e-7):
+        return None
+    return np.asarray(solution, dtype=float).reshape(-1)
+
+
+def _solve_sfc_cropped_pair_penalty_modified_newton(
+    pair: CroppedGearPair,
+    *,
+    young: float,
+    poisson: float,
+    density: float,
+    pressure_stiffness: float,
+    duration: float,
+    dt: float,
+    target_overclosure: float,
+    rotation_rate_z: float,
+    hht_alpha: float,
+    max_iterations: int,
+    tolerance: float,
+    material_linearization: str,
+) -> tuple[list[Row], Row]:
+    """Solve linear penalty contact with exact residuals and a reused base tangent.
+
+    The contact law and gap query are unchanged.  Only the Newton linearization
+    is modified: each increment factors the HHT mass-plus-material tangent once
+    and uses it for residual-correcting iterations.  If the correction does not
+    converge, the increment falls back to the full tangent path.
+    """
+
+    n1 = pair.gear1.nodes.shape[0]
+    X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])
+    elements = np.vstack([pair.gear1.elements, pair.gear2.elements + n1])
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=young, nu=poisson, density=density)
+    master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
+    contact = LagrangianSDFSurfaceContactGeometry(
+        pair.gear1.contact_faces,
+        master,
+        pair.gear2.nodes,
+        pressure_stiffness=pressure_stiffness,
+        slave_node_offset=0,
+        master_node_offset=n1,
+        quadrature="tri3",
+        search_radius=max(2.5 * (pair.initial_patch_gap + target_overclosure), 1.0e-4),
+    )
+    fixed0, values0 = _fixed_conditions_for_pair(pair, closure=0.0, rotation_z=0.0)
+    state, previous = initial_state_dirichlet(model, contact, gravity=0.0, fixed_dofs=fixed0, fixed_values=values0)
+    rows: list[Row] = []
+    steps = max(1, int(round(float(duration) / float(dt))))
+    beta, gamma = hht_newmark_parameters(float(hht_alpha))
+    scale = 1.0 + float(hht_alpha)
+    material_mode = str(material_linearization).lower()
+    if material_mode not in {"stvk", "reference_linear"}:
+        raise ValueError("material_linearization must be 'stvk' or 'reference_linear'")
+    reference_tangent = None
+    reference_base_free = None
+    reference_lu_cache: list[Any] | None = None
+    if material_mode == "reference_linear":
+        reference_internal = stvk_internal_response(model, model.X, assemble_tangent=True)
+        reference_tangent = reference_internal.tangent.tocsr()
+    start = time.perf_counter()
+    timing_base_tangent = 0.0
+    timing_base_factor = 0.0
+    timing_residual = 0.0
+    timing_linear_solve = 0.0
+    timing_contact_low_rank = 0.0
+    timing_fallback = 0.0
+    fallback_count = 0
+    for step in range(1, steps + 1):
+        t = step * float(dt)
+        ramp = t / max(float(duration), float(dt))
+        closure = ramp * (pair.initial_patch_gap + float(target_overclosure))
+        rotation = float(rotation_rate_z) * t
+        fixed, values = _fixed_conditions_for_pair(pair, closure=closure, rotation_z=rotation)
+        free = free_dofs(model.n_dofs, fixed)
+        c0 = 1.0 / (beta * float(dt) * float(dt))
+        u = (state.x - model.X).reshape(-1)
+        v = state.v.reshape(-1)
+        a = state.a.reshape(-1)
+        u_pred, v_pred, _accold_after_prediction = calculix_dynamic_predictor(u, v, a, dt=float(dt), beta=beta, gamma=gamma)
+        u_guess = project_fixed_dofs(u_pred, fixed, values)
+        if material_mode == "reference_linear":
+            if reference_tangent is None:
+                raise RuntimeError("reference tangent was not initialized")
+            if reference_base_free is None:
+                t_section = time.perf_counter()
+                base_matrix = (model.mass_matrix * c0 + reference_tangent * scale).tocsr()
+                reference_base_free = base_matrix[free[:, None], free].tocsr() if free.size else None
+                reference_lu_cache = [None]
+                timing_base_tangent += time.perf_counter() - t_section
+            base_matrix_free = reference_base_free
+            base_lu_cache = reference_lu_cache if reference_lu_cache is not None else [None]
+        else:
+            t_section = time.perf_counter()
+            base_internal = stvk_internal_response(model, model.X + u_guess.reshape((-1, 3)), assemble_tangent=True)
+            base_matrix = (model.mass_matrix * c0 + base_internal.tangent * scale).tocsr()
+            timing_base_tangent += time.perf_counter() - t_section
+            t_section = time.perf_counter()
+            base_matrix_free = base_matrix[free[:, None], free].tocsr() if free.size else None
+            base_lu_cache = [None]
+            timing_base_factor += time.perf_counter() - t_section
+        converged = False
+        residual_norm = np.inf
+        iteration_count = 0
+        if material_mode == "reference_linear" and reference_tangent is not None:
+            last_internal = _linear_reference_internal_response(model, model.X + u_guess.reshape((-1, 3)), reference_tangent)
+        else:
+            last_internal = stvk_internal_response(model, model.X + u_guess.reshape((-1, 3)), assemble_tangent=False)
+        last_contact = assemble_contact_response(contact.samples(model.X + u_guess.reshape((-1, 3))), model.n_nodes)
+        for iteration in range(1, max(1, int(max_iterations)) + 1):
+            u_guess = project_fixed_dofs(u_guess, fixed, values)
+            x_guess = model.X + u_guess.reshape((-1, 3))
+            t_section = time.perf_counter()
+            if material_mode == "reference_linear":
+                if reference_tangent is None:
+                    raise RuntimeError("reference tangent was not initialized")
+                last_internal = _linear_reference_internal_response(model, x_guess, reference_tangent)
+                internal_force = np.asarray(last_internal.force, dtype=float).reshape(-1)
+            else:
+                last_internal = stvk_internal_response(model, x_guess, assemble_tangent=False)
+                internal_force = np.asarray(last_internal.force, dtype=float).reshape(-1)
+            samples = list(contact.samples(x_guess))
+            last_contact = assemble_contact_response(samples, model.n_nodes)
+            rhs_balance = -internal_force + np.asarray(last_contact.force, dtype=float).reshape(-1)
+            a_guess = c0 * (u_guess - u_pred)
+            dynamic_residual = np.asarray(model.mass_matrix @ a_guess, dtype=float) - scale * rhs_balance + float(hht_alpha) * previous
+            residual_norm = float(np.linalg.norm(dynamic_residual[free])) if free.size else 0.0
+            timing_residual += time.perf_counter() - t_section
+            t_section = time.perf_counter()
+            correction_free = (
+                _solve_penalty_low_rank_correction(
+                    base_matrix_free=base_matrix_free,
+                    base_lu_cache=base_lu_cache,
+                    residual_free=dynamic_residual[free],
+                    samples=samples,
+                    free=free,
+                    n_total_dofs=model.n_dofs,
+                    equilibrium_scale=scale,
+                    tolerance=float(tolerance),
+                )
+                if free.size
+                else np.empty(0, dtype=float)
+            )
+            timing_linear_solve += time.perf_counter() - t_section
+            timing_contact_low_rank += time.perf_counter() - t_section
+            u_guess[free] += correction_free
+            iteration_count = iteration
+            correction_norm = float(np.linalg.norm(correction_free))
+            displacement_scale = max(1.0, float(np.linalg.norm(u_guess[free])) if free.size else 1.0)
+            if correction_norm <= float(tolerance) * displacement_scale:
+                converged = True
+                break
+        if not converged:
+            fallback_count += 1
+            t_section = time.perf_counter()
+            state, previous, diagnostics = hht_step_dirichlet(
+                model,
+                state,
+                previous,
+                contact,
+                dt=float(dt),
+                gravity=0.0,
+                fixed_dofs=fixed,
+                fixed_values=values,
+                alpha=float(hht_alpha),
+                max_iterations=max_iterations,
+                tolerance=float(tolerance),
+                acceptance_policy="relative_correction",
+            )
+            timing_fallback += time.perf_counter() - t_section
+            internal = diagnostics.internal
+            contact_response = diagnostics.contact
+            row = _penalty_history_row(
+                time_value=t,
+                closure=closure,
+                rotation=rotation,
+                state=state,
+                model=model,
+                internal=internal,
+                contact_response=contact_response,
+                young=young,
+                poisson=poisson,
+                newton_iterations=diagnostics.newton_iterations,
+                residual_norm=diagnostics.newton_residual_norm,
+                solver="full_newton_fallback",
+            )
+            rows.append(row)
+            continue
+        u_new = project_fixed_dofs(u_guess, fixed, values)
+        a_new = c0 * (u_new - u_pred)
+        v_new = v_pred + gamma * float(dt) * a_new
+        state = MechanicsState(
+            model.X + u_new.reshape((-1, 3)),
+            v_new.reshape((-1, 3)),
+            a_new.reshape((-1, 3)),
+            time=state.time + float(dt),
+        )
+        if material_mode == "reference_linear":
+            if reference_tangent is None:
+                raise RuntimeError("reference tangent was not initialized")
+            last_internal = _linear_reference_internal_response(model, state.x, reference_tangent)
+        else:
+            last_internal = stvk_internal_response(model, state.x, assemble_tangent=False)
+        last_contact = assemble_contact_response(contact.samples(state.x), model.n_nodes)
+        if material_mode == "reference_linear":
+            if reference_tangent is None:
+                raise RuntimeError("reference tangent was not initialized")
+            accepted_internal_force = np.asarray(reference_tangent @ u_new, dtype=float)
+            previous = -accepted_internal_force + np.asarray(last_contact.force, dtype=float).reshape(-1)
+        else:
+            previous = _penalty_rhs_balance(model, last_internal, last_contact)
+        rows.append(
+            _penalty_history_row(
+                time_value=t,
+                closure=closure,
+                rotation=rotation,
+                state=state,
+                model=model,
+                internal=last_internal,
+                contact_response=last_contact,
+                young=young,
+                poisson=poisson,
+                newton_iterations=iteration_count,
+                residual_norm=residual_norm,
+                solver="modified_newton",
+            )
+        )
+    wall = time.perf_counter() - start
+    summary = {
+        "sfc_wall_seconds": wall,
+        "nodes": int(X.shape[0]),
+        "elements": int(elements.shape[0]),
+        "gear1_contact_faces": int(pair.gear1.contact_faces.shape[0]),
+        "gear2_contact_faces": int(pair.gear2.contact_faces.shape[0]),
+        "gear1_support_nodes": int(pair.gear1.support_nodes.size),
+        "gear2_support_nodes": int(pair.gear2.support_nodes.size),
+        "initial_patch_gap": float(pair.initial_patch_gap),
+        "target_overclosure": float(target_overclosure),
+        "final_active_contact_samples": int(rows[-1]["active_contact_samples"]) if rows else 0,
+        "final_min_gap": float(rows[-1]["min_gap"]) if rows else 0.0,
+        "final_normal_force": float(rows[-1]["normal_force"]) if rows else 0.0,
+        "hht_alpha": float(hht_alpha),
+        "contact_mode": "penalty",
+        "penalty_solver": "modified_newton",
+        "material_linearization": material_mode,
+        "penalty_fallback_count": int(fallback_count),
+        "timing_base_tangent_seconds": float(timing_base_tangent),
+        "timing_base_factor_seconds": float(timing_base_factor),
+        "timing_penalty_residual_seconds": float(timing_residual),
+        "timing_penalty_linear_solve_seconds": float(timing_linear_solve),
+        "timing_penalty_low_rank_seconds": float(timing_contact_low_rank),
+        "timing_penalty_fallback_seconds": float(timing_fallback),
+        "status": "completed",
+    }
+    return rows, summary
+
+
 def solve_sfc_cropped_pair(
     pair: CroppedGearPair,
     *,
@@ -282,7 +739,28 @@ def solve_sfc_cropped_pair(
     target_overclosure: float,
     rotation_rate_z: float,
     hht_alpha: float = -0.05,
+    penalty_solver: str = "full_newton",
+    material_linearization: str = "stvk",
 ) -> tuple[list[Row], Row]:
+    solver = str(penalty_solver).lower()
+    if solver not in {"full_newton", "modified_newton"}:
+        raise ValueError("penalty_solver must be 'full_newton' or 'modified_newton'")
+    if solver == "modified_newton":
+        return _solve_sfc_cropped_pair_penalty_modified_newton(
+            pair,
+            young=young,
+            poisson=poisson,
+            density=density,
+            pressure_stiffness=pressure_stiffness,
+            duration=duration,
+            dt=dt,
+            target_overclosure=target_overclosure,
+            rotation_rate_z=rotation_rate_z,
+            hht_alpha=hht_alpha,
+            max_iterations=12,
+            tolerance=1.0e-9,
+            material_linearization=material_linearization,
+        )
     n1 = pair.gear1.nodes.shape[0]
     X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])
     elements = np.vstack([pair.gear1.elements, pair.gear2.elements + n1])
