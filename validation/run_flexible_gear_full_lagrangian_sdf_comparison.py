@@ -37,6 +37,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     run_abaqus_alignment,
     compare_histories,
     plot_alignment_curves,
+    solve_sfc_cropped_pair,
     solve_sfc_cropped_pair_hard_contact,
 )
 
@@ -207,6 +208,7 @@ def run_full_gear(
     rotation_rate_z: float,
     pressure_stiffness: float,
     hard_max_iterations: int,
+    contact_mode: str,
     run_abaqus: bool,
     abaqus_command: str | None = None,
 ) -> tuple[list[Row], Row]:
@@ -217,22 +219,39 @@ def run_full_gear(
         active_faces_per_body=active_faces_per_body,
         active_patch_radius_factor=active_patch_radius_factor,
     )
-    history, summary = solve_sfc_cropped_pair_hard_contact(
-        pair,
-        young=model.young,
-        poisson=model.poisson,
-        density=model.density,
-        pressure_stiffness=pressure_stiffness,
-        duration=duration,
-        dt=dt,
-        target_overclosure=target_overclosure,
-        rotation_rate_z=rotation_rate_z,
-        max_iterations=hard_max_iterations,
-        hard_enforcement="abaqus_standard_penalty",
-        constraint_averaging="slave_face",
-        hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
-        linear_solver="sparse",
-    )
+    mode = str(contact_mode).lower()
+    if mode not in {"penalty", "hard"}:
+        raise ValueError("contact_mode must be 'penalty' or 'hard'")
+    if mode == "hard":
+        history, summary = solve_sfc_cropped_pair_hard_contact(
+            pair,
+            young=model.young,
+            poisson=model.poisson,
+            density=model.density,
+            pressure_stiffness=pressure_stiffness,
+            duration=duration,
+            dt=dt,
+            target_overclosure=target_overclosure,
+            rotation_rate_z=rotation_rate_z,
+            max_iterations=hard_max_iterations,
+            hard_enforcement="abaqus_standard_penalty",
+            constraint_averaging="slave_face",
+            hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+            linear_solver="sparse",
+        )
+    else:
+        history, summary = solve_sfc_cropped_pair(
+            pair,
+            young=model.young,
+            poisson=model.poisson,
+            density=model.density,
+            pressure_stiffness=pressure_stiffness,
+            duration=duration,
+            dt=dt,
+            target_overclosure=target_overclosure,
+            rotation_rate_z=rotation_rate_z,
+            hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+        )
     if history:
         summary["final_max_displacement_norm"] = float(history[-1].get("max_displacement_norm", 0.0))
         summary["final_p95_von_mises"] = float(history[-1].get("p95_von_mises", 0.0))
@@ -252,7 +271,7 @@ def run_full_gear(
         dt=dt,
         target_overclosure=target_overclosure,
         rotation_rate_z=rotation_rate_z,
-        contact_mode="hard",
+        contact_mode=mode,
     )
     abaqus_row: Row | None = None
     error_rows: list[Row] | None = None
@@ -289,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overclosure", type=float, default=1.0e-5)
     parser.add_argument("--rotation-rate-z", type=float, default=0.0)
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
+    parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="hard")
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
     parser.add_argument("--abaqus-command", type=str, default=None)
@@ -304,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         rotation_rate_z=float(args.rotation_rate_z),
         pressure_stiffness=float(args.pressure_stiffness),
         hard_max_iterations=int(args.hard_max_iterations),
+        contact_mode=str(args.contact_mode),
         run_abaqus=bool(args.run_abaqus),
         abaqus_command=args.abaqus_command,
     )

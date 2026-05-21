@@ -281,6 +281,7 @@ def solve_sfc_cropped_pair(
     dt: float,
     target_overclosure: float,
     rotation_rate_z: float,
+    hht_alpha: float = -0.05,
 ) -> tuple[list[Row], Row]:
     n1 = pair.gear1.nodes.shape[0]
     X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])
@@ -317,7 +318,7 @@ def solve_sfc_cropped_pair(
             gravity=0.0,
             fixed_dofs=fixed,
             fixed_values=values,
-            alpha=-0.05,
+            alpha=float(hht_alpha),
             max_iterations=10,
             tolerance=1.0e-9,
             acceptance_policy="relative_correction",
@@ -362,6 +363,8 @@ def solve_sfc_cropped_pair(
         "final_active_contact_samples": int(rows[-1]["active_contact_samples"]) if rows else 0,
         "final_min_gap": float(rows[-1]["min_gap"]) if rows else 0.0,
         "final_normal_force": float(rows[-1]["normal_force"]) if rows else 0.0,
+        "hht_alpha": float(hht_alpha),
+        "contact_mode": "penalty",
         "status": "completed",
     }
     return rows, summary
