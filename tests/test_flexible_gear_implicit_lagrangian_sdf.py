@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, parse_gear_input
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
+    _write_abaqus_alignment_deck,
     build_cropped_pair,
     solve_sfc_cropped_pair,
 )
@@ -53,3 +54,30 @@ def test_cropped_gear_sfc_lagrangian_sdf_path_runs_one_implicit_step() -> None:
     assert summary["nodes"] > 0
     assert summary["elements"] > 0
     assert history[-1]["newton_iterations"] >= 1
+
+
+def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+    path = tmp_path / "cropped_gear_alignment.inp"
+
+    _write_abaqus_alignment_deck(
+        path,
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=2.0e-3,
+        dt=1.0e-3,
+        target_overclosure=3.0e-4,
+        rotation_rate_z=2.0,
+    )
+
+    text = path.read_text(encoding="ascii")
+    assert "G2_RP, 1, 6" in text
+    assert "G1_RP, 4, 5" in text
+    assert "*Boundary, amplitude=RAMP" in text
+    assert "G1_RP, 6, 6, 4.000000000000e-03" in text
+    assert "CPRESS" not in text
+    assert "COPEN" not in text

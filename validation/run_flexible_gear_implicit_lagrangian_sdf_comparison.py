@@ -14,6 +14,9 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -283,6 +286,7 @@ def solve_sfc_cropped_pair(
         )
         internal = diagnostics.internal
         disp = state.x - model.X
+        strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
         rows.append(
             {
                 "time": t,
@@ -294,6 +298,8 @@ def solve_sfc_cropped_pair(
                 "max_displacement_norm": float(np.max(np.linalg.norm(disp, axis=1))),
                 "p95_von_mises": float(np.percentile(internal.von_mises, 95.0)) if internal.von_mises.size else 0.0,
                 "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
+                "p95_strain_norm": float(np.percentile(strain_norm, 95.0)) if strain_norm.size else 0.0,
+                "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
                 "strain_energy": internal.strain_energy,
                 "newton_iterations": diagnostics.newton_iterations,
             }
@@ -317,7 +323,19 @@ def solve_sfc_cropped_pair(
     return rows, summary
 
 
-def _write_abaqus_alignment_deck(path: Path, pair: CroppedGearPair, *, young: float, poisson: float, density: float, pressure_stiffness: float, duration: float, dt: float) -> None:
+def _write_abaqus_alignment_deck(
+    path: Path,
+    pair: CroppedGearPair,
+    *,
+    young: float,
+    poisson: float,
+    density: float,
+    pressure_stiffness: float,
+    duration: float,
+    dt: float,
+    target_overclosure: float,
+    rotation_rate_z: float,
+) -> None:
     """Write a compact Abaqus deck with matching cropped meshes and RP MPCs."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,6 +367,9 @@ def _write_abaqus_alignment_deck(path: Path, pair: CroppedGearPair, *, young: fl
     _append_surface(lines, "G1_SURFACE", "GEAR1-1", pair.gear1.surface_entries)
     _append_surface(lines, "G2_SURFACE", "GEAR2-1", pair.gear2.surface_entries)
     lines.extend(["*MPC", "BEAM, G1_HUB, G1_RP", "*MPC", "BEAM, G2_HUB, G2_RP", "*End Assembly"])
+    closure = float(pair.initial_patch_gap) + float(target_overclosure)
+    final_translation = closure * pair.drive_direction
+    final_rotation_z = float(rotation_rate_z) * float(duration)
     lines.extend(
         [
             "*Material, name=STEEL",
@@ -368,16 +389,20 @@ def _write_abaqus_alignment_deck(path: Path, pair: CroppedGearPair, *, young: fl
             f"0., 0., {duration:.12e}, 1.",
             "*Step, name=alignment, nlgeom=YES, inc=2000",
             "*Dynamic",
-            f"{dt:.12e}, {duration:.12e}, {dt:.12e}, {dt:.12e}",
+            f"{dt:.12e}, {duration:.12e}, {min(float(dt) * 1.0e-4, 1.0e-8):.12e}, {dt:.12e}",
             "*Boundary",
             "G2_RP, 1, 6",
+            "G1_RP, 4, 5",
+            "*Boundary, amplitude=RAMP",
+            f"G1_RP, 1, 1, {final_translation[0]:.12e}",
+            f"G1_RP, 2, 2, {final_translation[1]:.12e}",
+            f"G1_RP, 3, 3, {final_translation[2]:.12e}",
+            f"G1_RP, 6, 6, {final_rotation_z:.12e}",
             "*Output, field, frequency=1",
             "*Node Output",
-            "U",
+            "U, RF",
             "*Element Output",
             "S, LE",
-            "*Contact Output",
-            "CPRESS, COPEN",
             "*End Step",
         ]
     )
@@ -405,7 +430,292 @@ def _append_surface(lines: list[str], name: str, instance: str, entries: tuple[t
         lines.append(f"{name}_{side}, {side}")
 
 
-def write_summary(path: Path, summary: Row, history_path: Path, deck_path: Path) -> None:
+def _resolve_abaqus_command(command: str | None) -> str:
+    if command:
+        return command
+    for candidate in ("abaqus", "abq2024"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise RuntimeError("Abaqus command not found; pass --abaqus-command")
+
+
+def _run_command(command: list[str], *, cwd: Path, log_path: Path) -> float:
+    start = time.perf_counter()
+    result = subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    elapsed = time.perf_counter() - start
+    log_path.write_text(result.stdout, encoding="utf-8", errors="ignore")
+    print(result.stdout)
+    failed_text = result.stdout.lower()
+    if result.returncode != 0 or "exited with errors" in failed_text or "fatal errors" in failed_text:
+        raise RuntimeError(f"command failed with exit code {result.returncode}: {' '.join(command)}")
+    return elapsed
+
+
+def _abaqus_wallclock_seconds(sta_path: Path) -> float | None:
+    if not sta_path.exists():
+        return None
+    text = sta_path.read_text(encoding="utf-8", errors="ignore")
+    matches = re.findall(r"WALLCLOCK TIME[^\d]*([0-9.]+)", text, flags=re.IGNORECASE)
+    if matches:
+        return float(matches[-1])
+    matches = re.findall(r"TOTAL JOB TIME[^\d]*([0-9.]+)", text, flags=re.IGNORECASE)
+    return float(matches[-1]) if matches else None
+
+
+def _abaqus_metrics_export_script() -> str:
+    return r'''
+from __future__ import print_function
+
+import csv
+import math
+import sys
+
+from odbAccess import openOdb
+
+
+def norm3(data):
+    return math.sqrt(float(data[0]) ** 2 + float(data[1]) ** 2 + float(data[2]) ** 2)
+
+
+def tensor_norm(data):
+    values = [float(v) for v in data]
+    if len(values) < 6:
+        return 0.0
+    return math.sqrt(values[0] ** 2 + values[1] ** 2 + values[2] ** 2 + 2.0 * (values[3] ** 2 + values[4] ** 2 + values[5] ** 2))
+
+
+def von_mises(data):
+    values = [float(v) for v in data]
+    if len(values) < 6:
+        return 0.0
+    s11, s22, s33, s12, s13, s23 = values[:6]
+    return math.sqrt(0.5 * ((s11 - s22) ** 2 + (s22 - s33) ** 2 + (s33 - s11) ** 2) + 3.0 * (s12 * s12 + s13 * s13 + s23 * s23))
+
+
+def percentile(values, pct):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = int(round((len(ordered) - 1) * pct / 100.0))
+    return float(ordered[index])
+
+
+def append_scalar_field(values, target):
+    for value in values:
+        data = value.data
+        try:
+            target.append(float(data))
+        except Exception:
+            target.append(float(data[0]))
+
+
+odb = openOdb(path=sys.argv[1], readOnly=True)
+out_path = sys.argv[2]
+drive = [float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])]
+try:
+    step = odb.steps[list(odb.steps.keys())[0]]
+    with open(out_path, "w", newline="") as handle:
+        fieldnames = [
+            "time",
+            "max_displacement_norm",
+            "p95_von_mises",
+            "max_von_mises",
+            "p95_strain_norm",
+            "max_strain_norm",
+            "min_copen",
+            "max_cpressure",
+            "rp_force_drive",
+            "rp_force_norm",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for frame in step.frames:
+            u_norm = []
+            vm = []
+            strain = []
+            copen = []
+            cpressure = []
+            rp_force_drive = 0.0
+            rp_force_norm = 0.0
+            if "U" in frame.fieldOutputs:
+                for value in frame.fieldOutputs["U"].values:
+                    u_norm.append(norm3(value.data))
+            if "S" in frame.fieldOutputs:
+                for value in frame.fieldOutputs["S"].values:
+                    try:
+                        vm.append(float(value.mises))
+                    except Exception:
+                        vm.append(von_mises(value.data))
+            if "LE" in frame.fieldOutputs:
+                for value in frame.fieldOutputs["LE"].values:
+                    strain.append(tensor_norm(value.data))
+            if "RF" in frame.fieldOutputs:
+                for value in frame.fieldOutputs["RF"].values:
+                    if int(value.nodeLabel) == 1000001:
+                        data = [float(v) for v in value.data[:3]]
+                        rp_force_drive += data[0] * drive[0] + data[1] * drive[1] + data[2] * drive[2]
+                        rp_force_norm = norm3(data)
+            for name, output in frame.fieldOutputs.items():
+                upper = name.upper()
+                if "COPEN" in upper:
+                    append_scalar_field(output.values, copen)
+                if "CPRESS" in upper:
+                    append_scalar_field(output.values, cpressure)
+            writer.writerow({
+                "time": float(frame.frameValue),
+                "max_displacement_norm": max(u_norm) if u_norm else 0.0,
+                "p95_von_mises": percentile(vm, 95.0),
+                "max_von_mises": max(vm) if vm else 0.0,
+                "p95_strain_norm": percentile(strain, 95.0),
+                "max_strain_norm": max(strain) if strain else 0.0,
+                "min_copen": min(copen) if copen else 0.0,
+                "max_cpressure": max(cpressure) if cpressure else 0.0,
+                "rp_force_drive": rp_force_drive,
+                "rp_force_norm": rp_force_norm,
+            })
+finally:
+    odb.close()
+'''
+
+
+def run_abaqus_alignment(deck_path: Path, out_dir: Path, pair: CroppedGearPair, *, abaqus_command: str | None) -> tuple[Path, Row]:
+    run_dir = out_dir / "abaqus_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job_name = "cropped_gear_alignment"
+    inp_path = run_dir / f"{job_name}.inp"
+    for old in run_dir.glob(f"{job_name}.*"):
+        old.unlink()
+    inp_path.write_text(deck_path.read_text(encoding="ascii"), encoding="ascii")
+    command = _resolve_abaqus_command(abaqus_command)
+    analysis_wall = _run_command(
+        [command, f"job={job_name}", f"input={inp_path.name}", "interactive"],
+        cwd=run_dir,
+        log_path=out_dir / "abaqus_analysis_stdout.log",
+    )
+    odb = run_dir / f"{job_name}.odb"
+    if not odb.exists():
+        raise FileNotFoundError(odb)
+    export_script = run_dir / "export_cropped_gear_metrics.py"
+    export_script.write_text(_abaqus_metrics_export_script(), encoding="ascii")
+    metrics = out_dir / "abaqus_cropped_gear_metrics.csv"
+    export_wall = _run_command(
+        [
+            command,
+            "python",
+            str(export_script.resolve()),
+            str(odb.resolve()),
+            str(metrics.resolve()),
+            f"{pair.drive_direction[0]:.16e}",
+            f"{pair.drive_direction[1]:.16e}",
+            f"{pair.drive_direction[2]:.16e}",
+        ],
+        cwd=run_dir,
+        log_path=out_dir / "abaqus_export_stdout.log",
+    )
+    row: Row = {
+        "abaqus_analysis_wall_seconds": analysis_wall,
+        "abaqus_export_wall_seconds": export_wall,
+        "abaqus_reported_wall_seconds": _abaqus_wallclock_seconds(run_dir / f"{job_name}.sta") or 0.0,
+        "abaqus_metrics": str(metrics),
+        "status": "completed",
+    }
+    return metrics, row
+
+
+def _read_csv_rows(path: Path) -> list[Row]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def _as_float_column(rows: list[Row], key: str) -> np.ndarray:
+    return np.asarray([float(row.get(key, 0.0) or 0.0) for row in rows], dtype=float)
+
+
+def _relative_error(a: float, b: float) -> float:
+    return abs(float(a) - float(b)) / max(abs(float(b)), 1.0e-12)
+
+
+def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -> list[Row]:
+    sfc_rows = _read_csv_rows(sfc_history)
+    abaqus_rows = _read_csv_rows(abaqus_history)
+    t_sfc = _as_float_column(sfc_rows, "time")
+    t_abaqus = _as_float_column(abaqus_rows, "time")
+    metrics = [
+        ("max_displacement_norm", "max_displacement_norm"),
+        ("p95_von_mises", "p95_von_mises"),
+        ("max_von_mises", "max_von_mises"),
+        ("p95_strain_norm", "p95_strain_norm"),
+        ("max_strain_norm", "max_strain_norm"),
+        ("normal_force", "rp_force_drive"),
+    ]
+    if t_abaqus.size == 0:
+        raise RuntimeError(f"Abaqus metrics file has no frames: {abaqus_history}")
+    rows: list[Row] = []
+    for i, t in enumerate(t_sfc):
+        row: Row = {"time": float(t)}
+        for sfc_key, abaqus_key in metrics:
+            sfc_value = float(sfc_rows[i].get(sfc_key, 0.0) or 0.0)
+            abaqus_values = _as_float_column(abaqus_rows, abaqus_key)
+            abaqus_value = float(np.interp(t, t_abaqus, abaqus_values))
+            row[f"sfc_{sfc_key}"] = sfc_value
+            row[f"abaqus_{abaqus_key}"] = abaqus_value
+            row[f"{sfc_key}_abs_error"] = abs(sfc_value - abaqus_value)
+            row[f"{sfc_key}_rel_error"] = _relative_error(sfc_value, abaqus_value)
+        rows.append(row)
+    _write_csv(out_path, rows)
+    return rows
+
+
+def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: list[Row], out_path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update(
+        {
+            "font.family": "Times New Roman",
+            "mathtext.fontset": "stix",
+            "axes.unicode_minus": False,
+        }
+    )
+    sfc_rows = _read_csv_rows(sfc_history)
+    abaqus_rows = _read_csv_rows(abaqus_history)
+    t_sfc = _as_float_column(sfc_rows, "time")
+    t_abq = _as_float_column(abaqus_rows, "time")
+    panels = [
+        ("max_displacement_norm", "max_displacement_norm", "max displacement norm"),
+        ("p95_von_mises", "p95_von_mises", "p95 von Mises stress"),
+        ("p95_strain_norm", "p95_strain_norm", "p95 strain norm"),
+        ("normal_force", "rp_force_drive", "normal/contact force"),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
+    for ax, (sfc_key, abq_key, title) in zip(axes.ravel(), panels, strict=True):
+        sfc_y = _as_float_column(sfc_rows, sfc_key)
+        abq_y = _as_float_column(abaqus_rows, abq_key)
+        rel_key = f"{sfc_key}_rel_error"
+        final_error = float(error_rows[-1].get(rel_key, 0.0)) if error_rows else 0.0
+        ax.plot(t_abq, abq_y, color="#1f77b4", linewidth=1.8, label="Abaqus/Standard")
+        ax.plot(t_sfc, sfc_y, color="#ff7f0e", linewidth=1.8, linestyle="--", label=f"SFC ({final_error * 100:.2f}% final err.)")
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("time (s)", fontsize=9)
+        ax.grid(True, linewidth=0.4, alpha=0.35)
+        ax.legend(loc="best", fontsize=8, frameon=False)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+
+
+def write_summary(
+    path: Path,
+    summary: Row,
+    history_path: Path,
+    deck_path: Path,
+    *,
+    abaqus_row: Row | None = None,
+    error_rows: list[Row] | None = None,
+    figure_path: Path | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = [
         "# Cropped Gear Lagrangian-SDF Implicit Alignment",
@@ -423,9 +733,34 @@ def write_summary(path: Path, summary: Row, history_path: Path, deck_path: Path)
         f"- final normal force: {summary['final_normal_force']:.6e}",
         f"- history CSV: `{history_path.name}`",
         f"- optional Abaqus alignment deck: `{deck_path.name}`",
-        "",
-        "Abaqus is not used by the SFC solve path. The deck is emitted only for external native-contact comparison.",
     ]
+    if abaqus_row is not None:
+        text.extend(
+            [
+                "",
+                "## Abaqus Native-Contact Alignment",
+                "",
+                f"- Abaqus analysis wall time: {float(abaqus_row.get('abaqus_analysis_wall_seconds', 0.0)):.6f} s",
+                f"- Abaqus reported wall time: {float(abaqus_row.get('abaqus_reported_wall_seconds', 0.0)):.6f} s",
+                f"- Abaqus export wall time: {float(abaqus_row.get('abaqus_export_wall_seconds', 0.0)):.6f} s",
+            ]
+        )
+    if error_rows:
+        final = error_rows[-1]
+        text.extend(
+            [
+                "",
+                "## Final-Time Alignment Errors",
+                "",
+                f"- max displacement norm rel. error: {100.0 * float(final.get('max_displacement_norm_rel_error', 0.0)):.3f}%",
+                f"- p95 von Mises rel. error: {100.0 * float(final.get('p95_von_mises_rel_error', 0.0)):.3f}%",
+                f"- p95 strain norm rel. error: {100.0 * float(final.get('p95_strain_norm_rel_error', 0.0)):.3f}%",
+                f"- contact force rel. error: {100.0 * float(final.get('normal_force_rel_error', 0.0)):.3f}%",
+            ]
+        )
+    if figure_path is not None:
+        text.extend(["", f"- alignment figure: `{figure_path.name}`"])
+    text.extend(["", "Abaqus is not used by the SFC solve path. The deck is emitted only for external native-contact comparison."])
     path.write_text("\n".join(text) + "\n", encoding="utf-8")
 
 
@@ -440,6 +775,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overclosure", type=float, default=3.0e-4)
     parser.add_argument("--rotation-rate-z", type=float, default=2.0)
     parser.add_argument("--pressure-stiffness", type=float, default=DEFAULT_PRESSURE_STIFFNESS)
+    parser.add_argument("--run-abaqus", action="store_true", help="Run the generated Abaqus native-contact deck and compare curves.")
+    parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--quick", action="store_true", help="Use the default small cropped patch settings.")
     args = parser.parse_args(argv)
 
@@ -476,8 +813,19 @@ def main(argv: list[str] | None = None) -> int:
         pressure_stiffness=float(args.pressure_stiffness),
         duration=float(args.duration),
         dt=float(args.dt),
+        target_overclosure=float(args.overclosure),
+        rotation_rate_z=float(args.rotation_rate_z),
     )
-    write_summary(report_path, summary, history_path, deck_path)
+    abaqus_row: Row | None = None
+    error_rows: list[Row] | None = None
+    figure_path: Path | None = None
+    if args.run_abaqus:
+        abaqus_metrics, abaqus_row = run_abaqus_alignment(deck_path, out_dir, pair, abaqus_command=args.abaqus_command)
+        _write_csv(out_dir / "abaqus_runtime.csv", [abaqus_row])
+        error_rows = compare_histories(history_path, abaqus_metrics, out_dir / "sfc_vs_abaqus_alignment_errors.csv")
+        figure_path = out_dir / "sfc_vs_abaqus_alignment_curves.png"
+        plot_alignment_curves(history_path, abaqus_metrics, error_rows, figure_path)
+    write_summary(report_path, summary, history_path, deck_path, abaqus_row=abaqus_row, error_rows=error_rows, figure_path=figure_path)
     print(report_path.read_text(encoding="utf-8"))
     return 0
 
