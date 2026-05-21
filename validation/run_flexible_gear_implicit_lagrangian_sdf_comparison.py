@@ -33,8 +33,14 @@ if str(SRC) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from sfc.contact.hard_contact import (  # noqa: E402
+    hard_contact_gap_jacobian_from_samples,
+    solve_linear_hard_contact_with_dirichlet,
+)
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import MechanicsModel, stvk_internal_response  # noqa: E402
+from sfc.fem.calculix_aligned import calculix_dynamic_predictor, hht_newmark_parameters  # noqa: E402
+from sfc.fem.constraints import project_fixed_dofs  # noqa: E402
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet  # noqa: E402
 from sfc.fem.rp_mpc import RigidHubMPC, merge_dirichlet_conditions  # noqa: E402
 from sfc.sdf.material_sdf import MaterialSDF  # noqa: E402
@@ -323,6 +329,232 @@ def solve_sfc_cropped_pair(
     return rows, summary
 
 
+def _cropped_pair_model_and_contact(
+    pair: CroppedGearPair,
+    *,
+    young: float,
+    poisson: float,
+    density: float,
+    pressure_stiffness: float,
+    target_overclosure: float,
+) -> tuple[MechanicsModel, LagrangianSDFSurfaceContactGeometry]:
+    n1 = pair.gear1.nodes.shape[0]
+    X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])
+    elements = np.vstack([pair.gear1.elements, pair.gear2.elements + n1])
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=young, nu=poisson, density=density)
+    master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
+    contact = LagrangianSDFSurfaceContactGeometry(
+        pair.gear1.contact_faces,
+        master,
+        pair.gear2.nodes,
+        pressure_stiffness=pressure_stiffness,
+        slave_node_offset=0,
+        master_node_offset=n1,
+        quadrature="tri3",
+        search_radius=max(2.5 * (pair.initial_patch_gap + target_overclosure), 1.0e-4),
+    )
+    return model, contact
+
+
+def _hard_contact_linearized_gap_jacobian(
+    contact: LagrangianSDFSurfaceContactGeometry,
+    x_linearization: np.ndarray,
+    u_linearization: np.ndarray,
+    *,
+    n_total_dofs: int,
+    constraint_averaging: str = "slave_face",
+) -> tuple[list[Any], np.ndarray, np.ndarray, np.ndarray]:
+    samples = list(contact.samples(x_linearization))
+    gap_at_linearization, gap_jacobian = hard_contact_gap_jacobian_from_samples(samples, n_total_dofs=int(n_total_dofs))
+    areas = np.asarray([float(sample.area) for sample in samples], dtype=float)
+    averaging = str(constraint_averaging).lower()
+    if averaging not in {"none", "slave_face"}:
+        raise ValueError("constraint_averaging must be 'none' or 'slave_face'")
+    if averaging == "slave_face" and gap_at_linearization.size >= 3 and gap_at_linearization.size % 3 == 0:
+        aggregated_gaps: list[float] = []
+        aggregated_rows: list[np.ndarray] = []
+        aggregated_areas: list[float] = []
+        for start in range(0, gap_at_linearization.size, 3):
+            stop = start + 3
+            group_area = areas[start:stop]
+            total_area = float(np.sum(group_area))
+            if total_area <= 0.0:
+                weights = np.full(3, 1.0 / 3.0, dtype=float)
+            else:
+                weights = group_area / total_area
+            aggregated_gaps.append(float(weights @ gap_at_linearization[start:stop]))
+            aggregated_rows.append(weights @ gap_jacobian[start:stop])
+            aggregated_areas.append(total_area)
+        gap_at_linearization = np.asarray(aggregated_gaps, dtype=float)
+        gap_jacobian = np.vstack(aggregated_rows)
+        areas = np.asarray(aggregated_areas, dtype=float)
+    gap_offset = gap_at_linearization - gap_jacobian @ np.asarray(u_linearization, dtype=float).reshape(-1)
+    return samples, gap_offset, gap_jacobian, areas
+
+
+def solve_sfc_cropped_pair_hard_contact(
+    pair: CroppedGearPair,
+    *,
+    young: float,
+    poisson: float,
+    density: float,
+    pressure_stiffness: float,
+    duration: float,
+    dt: float,
+    target_overclosure: float,
+    rotation_rate_z: float,
+    max_iterations: int = 6,
+    tolerance: float = 1.0e-9,
+    hard_enforcement: str = "exact",
+    constraint_averaging: str = "slave_face",
+) -> tuple[list[Row], Row]:
+    """Solve the cropped gear pair with implicit Newmark + HARD contact KKT.
+
+    This is the dynamic counterpart of the flat/tilted HARD-contact alignment
+    cases. Each step linearizes the current Lagrangian-SDF closest-feature
+    payloads around the current iterate and solves the effective Newmark system
+    together with the hard normal-contact active set. The cropped gear mesh is
+    TET4, so the payload is triangular; the Q4 payload layer remains the C3D8
+    specialization validated by the tooth-patch runner.
+    """
+
+    enforcement = str(hard_enforcement).lower()
+    if enforcement not in {"exact", "pressure_compliance"}:
+        raise ValueError("hard_enforcement must be 'exact' or 'pressure_compliance'")
+    model, contact = _cropped_pair_model_and_contact(
+        pair,
+        young=young,
+        poisson=poisson,
+        density=density,
+        pressure_stiffness=pressure_stiffness,
+        target_overclosure=target_overclosure,
+    )
+    fixed0, values0 = _fixed_conditions_for_pair(pair, closure=0.0, rotation_z=0.0)
+    u0 = project_fixed_dofs(np.zeros(model.n_dofs, dtype=float), fixed0, values0)
+    state_x = model.X + u0.reshape((-1, 3))
+    velocity = np.zeros_like(model.X)
+    acceleration = np.zeros_like(model.X)
+    rows: list[Row] = []
+    steps = max(1, int(round(float(duration) / float(dt))))
+    beta, gamma = hht_newmark_parameters(0.0)
+    c0 = 1.0 / (beta * float(dt) * float(dt))
+    start = time.perf_counter()
+    last_iterations = 0
+    last_converged = True
+    for step in range(1, steps + 1):
+        t = step * float(dt)
+        ramp = t / max(float(duration), float(dt))
+        closure = ramp * (pair.initial_patch_gap + float(target_overclosure))
+        rotation = float(rotation_rate_z) * t
+        fixed, values = _fixed_conditions_for_pair(pair, closure=closure, rotation_z=rotation)
+        u_n = (state_x - model.X).reshape(-1)
+        v_n = velocity.reshape(-1)
+        a_n = acceleration.reshape(-1)
+        u_pred, v_pred, _accold_after_prediction = calculix_dynamic_predictor(u_n, v_n, a_n, dt=float(dt), beta=beta, gamma=gamma)
+        u_guess = project_fixed_dofs(u_pred.copy(), fixed, values)
+        solution = None
+        final_samples: list[Any] = []
+        converged = False
+        iteration_count = 0
+        for iteration in range(1, max(1, int(max_iterations)) + 1):
+            x_guess = model.X + u_guess.reshape((-1, 3))
+            internal = stvk_internal_response(model, x_guess, assemble_tangent=True)
+            final_samples, gap_offset, gap_jacobian, constraint_areas = _hard_contact_linearized_gap_jacobian(
+                contact,
+                x_guess,
+                u_guess,
+                n_total_dofs=model.n_dofs,
+                constraint_averaging=constraint_averaging,
+            )
+            compliance = (
+                None
+                if enforcement == "exact"
+                else 1.0 / (float(pressure_stiffness) * np.maximum(constraint_areas, 1.0e-30))
+            )
+            tangent = internal.tangent.tocsr()
+            effective_stiffness = (tangent + model.mass_matrix * c0).tocsr()
+            effective_force = np.asarray(model.mass_matrix @ (c0 * u_pred) - internal.force.reshape(-1) + tangent @ u_guess, dtype=float)
+            solution = solve_linear_hard_contact_with_dirichlet(
+                effective_stiffness,
+                effective_force,
+                gap_offset,
+                gap_jacobian,
+                fixed_dofs=fixed,
+                fixed_values=values,
+                normal_compliance=compliance,
+                tolerance=float(tolerance),
+                max_iterations=30,
+            )
+            correction_norm = float(np.linalg.norm(solution.displacement - u_guess))
+            displacement_scale = max(1.0, float(np.linalg.norm(solution.displacement)))
+            u_guess = solution.displacement.copy()
+            iteration_count = iteration
+            if correction_norm <= float(tolerance) * displacement_scale and bool(solution.converged):
+                converged = True
+                break
+        if solution is None:
+            raise RuntimeError("hard contact solve did not run")
+        u_new = solution.displacement
+        a_new = c0 * (u_new - u_pred)
+        v_new = v_pred + gamma * float(dt) * a_new
+        state_x = model.X + u_new.reshape((-1, 3))
+        velocity = v_new.reshape((-1, 3))
+        acceleration = a_new.reshape((-1, 3))
+        internal = stvk_internal_response(model, state_x, assemble_tangent=False)
+        raw_gaps = np.asarray([float(sample.gap) for sample in contact.samples(state_x)], dtype=float)
+        active = np.asarray(solution.active, dtype=bool)
+        multipliers = np.asarray(solution.multipliers, dtype=float)
+        active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
+        disp = state_x - model.X
+        strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
+        rows.append(
+            {
+                "time": t,
+                "closure": closure,
+                "rotation_z": rotation,
+                "active_contact_samples": int(np.count_nonzero(active)),
+                "min_gap": float(np.min(raw_gaps)) if raw_gaps.size else 0.0,
+                "linearized_min_gap": float(np.min(solution.gaps)) if solution.gaps.size else 0.0,
+                "normal_force": active_force,
+                "max_displacement_norm": float(np.max(np.linalg.norm(disp, axis=1))),
+                "p95_von_mises": float(np.percentile(internal.von_mises, 95.0)) if internal.von_mises.size else 0.0,
+                "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
+                "p95_strain_norm": float(np.percentile(strain_norm, 95.0)) if strain_norm.size else 0.0,
+                "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+                "strain_energy": internal.strain_energy,
+                "newton_iterations": int(iteration_count),
+                "hard_active_set_converged": int(bool(solution.converged)),
+                "hard_outer_converged": int(bool(converged)),
+                "hard_contact_samples": int(len(final_samples)),
+                "hard_constraints": int(solution.gaps.shape[0]),
+            }
+        )
+        last_iterations = iteration_count
+        last_converged = bool(converged)
+    wall = time.perf_counter() - start
+    summary = {
+        "sfc_wall_seconds": wall,
+        "nodes": int(model.X.shape[0]),
+        "elements": int(model.elements.shape[0]),
+        "gear1_contact_faces": int(pair.gear1.contact_faces.shape[0]),
+        "gear2_contact_faces": int(pair.gear2.contact_faces.shape[0]),
+        "gear1_support_nodes": int(pair.gear1.support_nodes.size),
+        "gear2_support_nodes": int(pair.gear2.support_nodes.size),
+        "initial_patch_gap": float(pair.initial_patch_gap),
+        "target_overclosure": float(target_overclosure),
+        "final_active_contact_samples": int(rows[-1]["active_contact_samples"]) if rows else 0,
+        "final_min_gap": float(rows[-1]["min_gap"]) if rows else 0.0,
+        "final_normal_force": float(rows[-1]["normal_force"]) if rows else 0.0,
+        "final_hard_outer_iterations": int(last_iterations),
+        "final_hard_outer_converged": int(last_converged),
+        "contact_mode": "hard",
+        "hard_enforcement": enforcement,
+        "constraint_averaging": str(constraint_averaging),
+        "status": "completed",
+    }
+    return rows, summary
+
+
 def _write_abaqus_alignment_deck(
     path: Path,
     pair: CroppedGearPair,
@@ -335,10 +567,34 @@ def _write_abaqus_alignment_deck(
     dt: float,
     target_overclosure: float,
     rotation_rate_z: float,
+    contact_mode: str = "penalty",
 ) -> None:
     """Write a compact Abaqus deck with matching cropped meshes and RP MPCs."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode = str(contact_mode).lower()
+    if mode not in {"penalty", "hard"}:
+        raise ValueError("contact_mode must be 'penalty' or 'hard'")
+    if mode == "hard":
+        contact_lines = [
+            "*Surface Interaction, name=SFC_HARD",
+            "*Surface Behavior, pressure-overclosure=HARD",
+            "*Friction",
+            "0.",
+            "*Contact Pair, interaction=SFC_HARD, type=SURFACE TO SURFACE",
+            "G1_SURFACE, G2_SURFACE",
+        ]
+    else:
+        contact_lines = [
+            "*Surface Interaction, name=SFC_LINEAR",
+            "1.",
+            "*Friction",
+            "0.",
+            "*Surface Behavior, pressure-overclosure=LINEAR",
+            f"{pressure_stiffness:.12e}",
+            "*Contact Pair, interaction=SFC_LINEAR, type=SURFACE TO SURFACE",
+            "G1_SURFACE, G2_SURFACE",
+        ]
     lines: list[str] = [
         "*Heading",
         "Cropped gear RP-MPC contact alignment deck generated by SFC validation.",
@@ -377,14 +633,11 @@ def _write_abaqus_alignment_deck(
             f"{density:.12e}",
             "*Elastic",
             f"{young:.12e}, {poisson:.12e}",
-            "*Surface Interaction, name=SFC_LINEAR",
-            "1.",
-            "*Friction",
-            "0.",
-            "*Surface Behavior, pressure-overclosure=LINEAR",
-            f"{pressure_stiffness:.12e}",
-            "*Contact Pair, interaction=SFC_LINEAR, type=SURFACE TO SURFACE",
-            "G1_SURFACE, G2_SURFACE",
+        ]
+    )
+    lines.extend(contact_lines)
+    lines.extend(
+        [
             "*Amplitude, name=RAMP",
             f"0., 0., {duration:.12e}, 1.",
             "*Step, name=alignment, nlgeom=YES, inc=2000",
@@ -647,7 +900,7 @@ def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -
         ("max_von_mises", "max_von_mises"),
         ("p95_strain_norm", "p95_strain_norm"),
         ("max_strain_norm", "max_strain_norm"),
-        ("normal_force", "rp_force_drive"),
+        ("normal_force", "rp_force_norm"),
     ]
     if t_abaqus.size == 0:
         raise RuntimeError(f"Abaqus metrics file has no frames: {abaqus_history}")
@@ -688,7 +941,7 @@ def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: l
         ("max_displacement_norm", "max_displacement_norm", "max displacement norm"),
         ("p95_von_mises", "p95_von_mises", "p95 von Mises stress"),
         ("p95_strain_norm", "p95_strain_norm", "p95 strain norm"),
-        ("normal_force", "rp_force_drive", "normal/contact force"),
+        ("normal_force", "rp_force_norm", "normal/contact force"),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
     for ax, (sfc_key, abq_key, title) in zip(axes.ravel(), panels, strict=True):
@@ -722,6 +975,9 @@ def write_summary(
         "",
         "This runner uses SFC internal TET4 HHT dynamics, Abaqus-style RP/hub MPC kinematics in eliminated Dirichlet form, and Lagrangian-SDF surface contact tangent.",
         "",
+        f"- contact mode: {summary.get('contact_mode', 'penalty')}",
+        f"- hard enforcement: {summary.get('hard_enforcement', '')}",
+        f"- constraint averaging: {summary.get('constraint_averaging', '')}",
         f"- SFC wall time: {summary['sfc_wall_seconds']:.6f} s",
         f"- nodes/elements: {summary['nodes']} / {summary['elements']}",
         f"- contact faces: {summary['gear1_contact_faces']} / {summary['gear2_contact_faces']}",
@@ -731,6 +987,8 @@ def write_summary(
         f"- final active samples: {summary['final_active_contact_samples']}",
         f"- final min gap: {summary['final_min_gap']:.6e}",
         f"- final normal force: {summary['final_normal_force']:.6e}",
+        f"- final hard outer iterations: {summary.get('final_hard_outer_iterations', '')}",
+        f"- final hard outer converged: {summary.get('final_hard_outer_converged', '')}",
         f"- history CSV: `{history_path.name}`",
         f"- optional Abaqus alignment deck: `{deck_path.name}`",
     ]
@@ -775,6 +1033,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overclosure", type=float, default=3.0e-4)
     parser.add_argument("--rotation-rate-z", type=float, default=2.0)
     parser.add_argument("--pressure-stiffness", type=float, default=DEFAULT_PRESSURE_STIFFNESS)
+    parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="penalty")
+    parser.add_argument("--hard-enforcement", choices=("exact", "pressure_compliance"), default="exact")
+    parser.add_argument("--constraint-averaging", choices=("none", "slave_face"), default="slave_face")
+    parser.add_argument("--hard-max-iterations", type=int, default=6)
     parser.add_argument("--run-abaqus", action="store_true", help="Run the generated Abaqus native-contact deck and compare curves.")
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--quick", action="store_true", help="Use the default small cropped patch settings.")
@@ -787,17 +1049,33 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(source)
     model = parse_gear_input(source)
     pair = build_cropped_pair(model, faces_per_body=int(args.faces_per_body), expansion_rings=int(args.expansion_rings))
-    history, summary = solve_sfc_cropped_pair(
-        pair,
-        young=model.young,
-        poisson=model.poisson,
-        density=model.density,
-        pressure_stiffness=float(args.pressure_stiffness),
-        duration=float(args.duration),
-        dt=float(args.dt),
-        target_overclosure=float(args.overclosure),
-        rotation_rate_z=float(args.rotation_rate_z),
-    )
+    if str(args.contact_mode).lower() == "hard":
+        history, summary = solve_sfc_cropped_pair_hard_contact(
+            pair,
+            young=model.young,
+            poisson=model.poisson,
+            density=model.density,
+            pressure_stiffness=float(args.pressure_stiffness),
+            duration=float(args.duration),
+            dt=float(args.dt),
+            target_overclosure=float(args.overclosure),
+            rotation_rate_z=float(args.rotation_rate_z),
+            max_iterations=int(args.hard_max_iterations),
+            hard_enforcement=str(args.hard_enforcement),
+            constraint_averaging=str(args.constraint_averaging),
+        )
+    else:
+        history, summary = solve_sfc_cropped_pair(
+            pair,
+            young=model.young,
+            poisson=model.poisson,
+            density=model.density,
+            pressure_stiffness=float(args.pressure_stiffness),
+            duration=float(args.duration),
+            dt=float(args.dt),
+            target_overclosure=float(args.overclosure),
+            rotation_rate_z=float(args.rotation_rate_z),
+        )
     history_path = out_dir / "sfc_cropped_gear_lagrangian_sdf_history.csv"
     summary_path = out_dir / "cropped_gear_lagrangian_sdf_summary.csv"
     deck_path = out_dir / "abaqus_cropped_gear_alignment.inp"
@@ -815,6 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
         dt=float(args.dt),
         target_overclosure=float(args.overclosure),
         rotation_rate_z=float(args.rotation_rate_z),
+        contact_mode=str(args.contact_mode),
     )
     abaqus_row: Row | None = None
     error_rows: list[Row] | None = None
