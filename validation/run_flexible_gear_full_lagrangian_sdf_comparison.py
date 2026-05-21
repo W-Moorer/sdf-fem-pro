@@ -66,7 +66,32 @@ def _hub_indices(mesh: GearMesh, labels: tuple[int, ...]) -> np.ndarray:
     return np.asarray(sorted(set(ids)), dtype=np.int64)
 
 
-def _nearest_active_surface_ids(model: GearInputModel, *, active_faces_per_body: int) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+def _nearest_ids(tree: cKDTree, point: np.ndarray, *, k: int, count: int) -> np.ndarray:
+    query_count = min(max(1, int(k)), max(1, int(count)))
+    return np.asarray(tree.query(point, k=query_count)[1], dtype=np.int64).reshape(-1)
+
+
+def _radius_expanded_ids(centroids: np.ndarray, seed: np.ndarray, base_ids: np.ndarray, *, radius_factor: float) -> np.ndarray:
+    ids = np.asarray(base_ids, dtype=np.int64).reshape(-1)
+    if float(radius_factor) <= 1.0 or ids.size == 0:
+        return np.unique(ids)
+    offsets = np.linalg.norm(centroids[ids] - seed, axis=1)
+    base_radius = float(np.max(offsets)) if offsets.size else 0.0
+    if base_radius <= 0.0 and centroids.shape[0] > 1:
+        distances = np.linalg.norm(centroids - seed, axis=1)
+        positive = distances[distances > 0.0]
+        base_radius = float(np.min(positive)) if positive.size else 0.0
+    radius = max(base_radius * float(radius_factor), base_radius)
+    expanded = np.flatnonzero(np.linalg.norm(centroids - seed, axis=1) <= radius + 1.0e-12)
+    return np.unique(np.concatenate([ids, expanded.astype(np.int64)]))
+
+
+def _nearest_active_surface_ids(
+    model: GearInputModel,
+    *,
+    active_faces_per_body: int,
+    active_patch_radius_factor: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     centroids1 = _face_centroids(model.gear1.nodes, model.gear1_contact_faces)
     centroids2 = _face_centroids(model.gear2.nodes, model.gear2_contact_faces)
     tree2 = cKDTree(centroids2)
@@ -75,8 +100,17 @@ def _nearest_active_surface_ids(model: GearInputModel, *, active_faces_per_body:
     seed2 = int(ids2[seed1])
     n = max(1, int(active_faces_per_body))
     tree1 = cKDTree(centroids1)
-    ids1 = np.asarray(tree1.query(centroids1[seed1], k=min(n, centroids1.shape[0]))[1], dtype=np.int64).reshape(-1)
-    ids2_active = np.asarray(tree2.query(centroids2[seed2], k=min(n, centroids2.shape[0]))[1], dtype=np.int64).reshape(-1)
+    ids1 = _nearest_ids(tree1, centroids1[seed1], k=n, count=centroids1.shape[0])
+    ids2_active = _nearest_ids(tree2, centroids2[seed2], k=n, count=centroids2.shape[0])
+    ids1 = _radius_expanded_ids(centroids1, centroids1[seed1], ids1, radius_factor=active_patch_radius_factor)
+    ids2_active = _radius_expanded_ids(centroids2, centroids2[seed2], ids2_active, radius_factor=active_patch_radius_factor)
+    if float(active_patch_radius_factor) > 1.0:
+        opposite_count = min(4, centroids2.shape[0])
+        mapped2 = np.asarray(tree2.query(centroids1[ids1], k=opposite_count)[1], dtype=np.int64).reshape(-1)
+        ids2_active = np.unique(np.concatenate([ids2_active, mapped2]))
+        opposite_count = min(4, centroids1.shape[0])
+        mapped1 = np.asarray(tree1.query(centroids2[ids2_active], k=opposite_count)[1], dtype=np.int64).reshape(-1)
+        ids1 = np.unique(np.concatenate([ids1, mapped1]))
     c1 = np.mean(centroids1[ids1], axis=0)
     c2 = np.mean(centroids2[ids2_active], axis=0)
     drive = c2 - c1
@@ -84,10 +118,19 @@ def _nearest_active_surface_ids(model: GearInputModel, *, active_faces_per_body:
     return ids1, ids2_active, float(distances[seed1]), drive
 
 
-def build_full_active_pair(model: GearInputModel, *, active_faces_per_body: int) -> CroppedGearPair:
+def build_full_active_pair(
+    model: GearInputModel,
+    *,
+    active_faces_per_body: int,
+    active_patch_radius_factor: float = 1.0,
+) -> CroppedGearPair:
     """Return a complete two-gear volume model with active contact surfaces."""
 
-    ids1, ids2, initial_gap, drive = _nearest_active_surface_ids(model, active_faces_per_body=active_faces_per_body)
+    ids1, ids2, initial_gap, drive = _nearest_active_surface_ids(
+        model,
+        active_faces_per_body=active_faces_per_body,
+        active_patch_radius_factor=active_patch_radius_factor,
+    )
     gear1_faces = _orient_faces_toward(model.gear1.nodes, model.gear1_contact_faces[ids1], drive)
     gear2_faces = _orient_faces_toward(model.gear2.nodes, model.gear2_contact_faces[ids2], -drive)
     gear1 = CroppedGearPatch(
@@ -121,6 +164,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         "",
         f"- nodes/elements: {summary['nodes']} / {summary['elements']}",
         f"- active contact faces: {summary['gear1_contact_faces']} / {summary['gear2_contact_faces']}",
+        f"- active patch radius factor: {float(summary.get('active_patch_radius_factor', 1.0)):.3f}",
         f"- support nodes: {summary['gear1_support_nodes']} / {summary['gear2_support_nodes']}",
         f"- linear solver: {summary.get('linear_solver', 'sparse')}",
         f"- RP reaction definition: {summary.get('rp_reaction_definition', '')}",
@@ -156,6 +200,7 @@ def run_full_gear(
     source: Path,
     out_dir: Path,
     active_faces_per_body: int,
+    active_patch_radius_factor: float,
     duration: float,
     dt: float,
     target_overclosure: float,
@@ -167,7 +212,11 @@ def run_full_gear(
 ) -> tuple[list[Row], Row]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = parse_gear_input(source)
-    pair = build_full_active_pair(model, active_faces_per_body=active_faces_per_body)
+    pair = build_full_active_pair(
+        model,
+        active_faces_per_body=active_faces_per_body,
+        active_patch_radius_factor=active_patch_radius_factor,
+    )
     history, summary = solve_sfc_cropped_pair_hard_contact(
         pair,
         young=model.young,
@@ -188,6 +237,7 @@ def run_full_gear(
         summary["final_max_displacement_norm"] = float(history[-1].get("max_displacement_norm", 0.0))
         summary["final_p95_von_mises"] = float(history[-1].get("p95_von_mises", 0.0))
         summary["final_p95_equivalent_elastic_strain"] = float(history[-1].get("p95_equivalent_elastic_strain", 0.0))
+    summary["active_patch_radius_factor"] = float(active_patch_radius_factor)
     history_path = out_dir / "sfc_full_gear_lagrangian_sdf_history.csv"
     _write_csv(history_path, history)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
@@ -233,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--active-faces-per-body", type=int, default=16)
+    parser.add_argument("--active-patch-radius-factor", type=float, default=1.0)
     parser.add_argument("--duration", type=float, default=2.5e-4)
     parser.add_argument("--dt", type=float, default=2.5e-4)
     parser.add_argument("--overclosure", type=float, default=1.0e-5)
@@ -246,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         source=args.source,
         out_dir=args.out_dir,
         active_faces_per_body=int(args.active_faces_per_body),
+        active_patch_radius_factor=float(args.active_patch_radius_factor),
         duration=float(args.duration),
         dt=float(args.dt),
         target_overclosure=float(args.overclosure),

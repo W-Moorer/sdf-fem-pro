@@ -835,6 +835,10 @@ def solve_sfc_cropped_pair_hard_contact(
         active = np.asarray(solution.active, dtype=bool)
         multipliers = np.asarray(solution.multipliers, dtype=float)
         active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
+        contact_pressure = np.zeros_like(multipliers)
+        if multipliers.size and constraint_areas.size == multipliers.size:
+            contact_pressure = multipliers / np.maximum(constraint_areas, 1.0e-30)
+        max_contact_pressure = float(np.max(contact_pressure[active])) if multipliers.size and np.any(active) else 0.0
         mass_acceleration = np.asarray(model.mass_matrix @ a_new, dtype=float)
         contact_balance = np.zeros(model.n_dofs, dtype=float)
         if final_gap_jacobian.size and multipliers.size:
@@ -898,6 +902,7 @@ def solve_sfc_cropped_pair_hard_contact(
             "linearized_min_gap": float(np.min(solution.gaps)) if solution.gaps.size else 0.0,
             "normal_force": active_force,
             "contact_multiplier_sum": active_force,
+            "max_contact_pressure": max_contact_pressure,
             "max_displacement_norm": float(np.max(np.linalg.norm(disp, axis=1))),
             "p95_von_mises": float(np.percentile(internal.von_mises, 95.0)) if internal.von_mises.size else 0.0,
             "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
@@ -1460,13 +1465,26 @@ def _preferred_strain_metric(sfc_rows: list[Row], abaqus_rows: list[Row]) -> tup
     return "p95_strain_norm", "p95_strain_norm", "p95 strain norm"
 
 
+def _preferred_sfc_reaction_keys(sfc_rows: list[Row]) -> tuple[str, str, str]:
+    """Return SFC RP reaction keys aligned with Abaqus/Standard RF output."""
+
+    if sfc_rows and "rp1_hht_rp_force_norm" in sfc_rows[0] and "rp2_hht_rp_force_norm" in sfc_rows[0]:
+        if np.any(np.abs(_as_float_column(sfc_rows, "rp1_hht_rp_force_norm")) > 0.0):
+            return "rp1_hht_rp_force_norm", "rp2_hht_rp_force_norm", "HHT RP reaction norm"
+    if sfc_rows and "rp_dynamic_force_norm" in sfc_rows[0] and "opposing_rp_dynamic_force_norm" in sfc_rows[0]:
+        if np.any(np.abs(_as_float_column(sfc_rows, "rp_dynamic_force_norm")) > 0.0):
+            return "rp_dynamic_force_norm", "opposing_rp_dynamic_force_norm", "dynamic RP reaction norm"
+    force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
+    opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    return force_key, opposing_force_key, "RP/contact reaction norm"
+
+
 def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -> list[Row]:
     sfc_rows = _read_csv_rows(sfc_history)
     abaqus_rows = _read_csv_rows(abaqus_history)
     t_sfc = _as_float_column(sfc_rows, "time")
     t_abaqus = _as_float_column(abaqus_rows, "time")
-    force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
-    opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    force_key, opposing_force_key, _force_title = _preferred_sfc_reaction_keys(sfc_rows)
     abaqus_force_key = (
         "hub_virtual_force_norm"
         if abaqus_rows
@@ -1491,6 +1509,12 @@ def compare_histories(sfc_history: Path, abaqus_history: Path, out_path: Path) -
         (force_key, abaqus_force_key),
         (opposing_force_key, abaqus_opposing_force_key),
     ]
+    if (
+        _metric_available(sfc_rows, "max_contact_pressure")
+        and _metric_available(abaqus_rows, "max_cpressure")
+        and np.any(np.abs(_as_float_column(abaqus_rows, "max_cpressure")) > 0.0)
+    ):
+        metrics.append(("max_contact_pressure", "max_cpressure"))
     if t_abaqus.size == 0:
         raise RuntimeError(f"Abaqus metrics file has no frames: {abaqus_history}")
     rows: list[Row] = []
@@ -1526,8 +1550,7 @@ def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: l
     abaqus_rows = _read_csv_rows(abaqus_history)
     t_sfc = _as_float_column(sfc_rows, "time")
     t_abq = _as_float_column(abaqus_rows, "time")
-    force_key = "rp_force_norm" if sfc_rows and "rp_force_norm" in sfc_rows[0] else "normal_force"
-    opposing_force_key = "opposing_rp_force_norm" if sfc_rows and "opposing_rp_force_norm" in sfc_rows[0] else force_key
+    _force_key, opposing_force_key, force_title = _preferred_sfc_reaction_keys(sfc_rows)
     abaqus_opposing_force_key = (
         "hub2_virtual_force_norm"
         if abaqus_rows
@@ -1540,7 +1563,7 @@ def plot_alignment_curves(sfc_history: Path, abaqus_history: Path, error_rows: l
         ("max_displacement_norm", "max_displacement_norm", "max displacement norm"),
         ("p95_von_mises", "p95_von_mises", "p95 von Mises stress"),
         (strain_key, abaqus_strain_key, strain_title),
-        (opposing_force_key, abaqus_opposing_force_key, "fixed RP reaction norm"),
+        (opposing_force_key, abaqus_opposing_force_key, f"fixed {force_title}"),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), constrained_layout=True)
     for ax, (sfc_key, abq_key, title) in zip(axes.ravel(), panels, strict=True):

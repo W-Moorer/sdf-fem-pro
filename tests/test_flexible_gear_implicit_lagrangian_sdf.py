@@ -38,6 +38,7 @@ def test_cropped_gear_pair_is_small_and_has_supports() -> None:
 def test_full_active_gear_pair_keeps_complete_volume_mesh() -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_full_active_pair(model, active_faces_per_body=4)
+    expanded = build_full_active_pair(model, active_faces_per_body=4, active_patch_radius_factor=2.0)
 
     assert pair.gear1.nodes.shape == model.gear1.nodes.shape
     assert pair.gear2.nodes.shape == model.gear2.nodes.shape
@@ -48,6 +49,8 @@ def test_full_active_gear_pair_keeps_complete_volume_mesh() -> None:
     assert pair.gear1.support_nodes.size == len(set(model.gear1_hub_labels))
     assert pair.gear2.support_nodes.size == len(set(model.gear2_hub_labels))
     assert pair.initial_patch_gap >= 0.0
+    assert expanded.gear1.contact_faces.shape[0] >= pair.gear1.contact_faces.shape[0]
+    assert expanded.gear2.contact_faces.shape[0] >= pair.gear2.contact_faces.shape[0]
 
 
 def test_cropped_gear_sfc_lagrangian_sdf_path_runs_one_implicit_step() -> None:
