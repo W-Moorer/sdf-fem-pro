@@ -33,7 +33,11 @@ if str(SRC) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sfc.contact.hard_contact import hard_contact_gap_jacobian_from_samples, solve_linear_hard_contact_with_dirichlet  # noqa: E402
+from sfc.contact.hard_contact import (  # noqa: E402
+    hard_contact_gap_jacobian_from_samples,
+    hard_contact_pressure_compliance_from_samples,
+    solve_linear_hard_contact_with_dirichlet,
+)
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFQ4MasterSurfaceContactGeometry, LagrangianSDFQuadrilateralSurfaceContactGeometry  # noqa: E402
 from sfc.fem import DeformableBody  # noqa: E402
 from sfc.fem.assembler import assemble_stiffness_matrix  # noqa: E402
@@ -57,6 +61,8 @@ class FlexibleBlockHardContactCase:
     density: float = 1.0
     quadrature_order: int = 2
     master_payload_mode: str = "q4"
+    contact_enforcement: str = "pressure_compliance"
+    pressure_smoothing_stiffness_factor: float = 4.5
 
 
 def _write_csv(path: Path, rows: list[Row]) -> None:
@@ -237,6 +243,19 @@ try:
     upper_top_rf3 = sum(rf_values.get(("UPPER-1", label), [0.0, 0.0, 0.0])[2] for label in (5, 6, 7, 8))
     lower_bottom_rf3 = sum(rf_values.get(("LOWER-1", label), [0.0, 0.0, 0.0])[2] for label in (1, 2, 3, 4))
     mean_gap = initial_gap + upper_bottom_u3 - lower_top_u3
+    copen_values = []
+    cpress_values = []
+    for key in frame.fieldOutputs.keys():
+        if key.strip().startswith("COPEN"):
+            field = frame.fieldOutputs[key]
+            for idx in range(len(field.values)):
+                copen_values.append(float(field.values[idx].data))
+        if key.strip().startswith("CPRESS"):
+            field = frame.fieldOutputs[key]
+            for idx in range(len(field.values)):
+                cpress_values.append(float(field.values[idx].data))
+    copen_mean = sum(copen_values) / float(len(copen_values)) if copen_values else mean_gap
+    cpress_mean = sum(cpress_values) / float(len(cpress_values)) if cpress_values else 0.0
     with open(out_path, "w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
@@ -247,6 +266,10 @@ try:
                 "mean_gap",
                 "upper_top_rf3_sum",
                 "lower_bottom_rf3_sum",
+                "copen_mean",
+                "cpress_mean",
+                "copen_count",
+                "cpress_count",
                 "closure",
             ],
         )
@@ -259,6 +282,10 @@ try:
                 "mean_gap": mean_gap,
                 "upper_top_rf3_sum": upper_top_rf3,
                 "lower_bottom_rf3_sum": lower_bottom_rf3,
+                "copen_mean": copen_mean,
+                "cpress_mean": cpress_mean,
+                "copen_count": len(copen_values),
+                "cpress_count": len(cpress_values),
                 "closure": closure,
             }
         )
@@ -346,6 +373,19 @@ def _sfc_contact_samples(case: FlexibleBlockHardContactCase, lower: np.ndarray, 
     return samples, g0, J
 
 
+def _pressure_enforcement_stiffness(case: FlexibleBlockHardContactCase) -> float:
+    return float(case.pressure_smoothing_stiffness_factor) * float(case.young_modulus) / max(float(case.height), 1.0e-30)
+
+
+def _normal_compliance(case: FlexibleBlockHardContactCase, samples: list[Any]) -> np.ndarray | None:
+    mode = str(case.contact_enforcement).lower()
+    if mode == "exact":
+        return None
+    if mode == "pressure_compliance":
+        return hard_contact_pressure_compliance_from_samples(samples, pressure_stiffness=_pressure_enforcement_stiffness(case))
+    raise ValueError("contact_enforcement must be 'exact' or 'pressure_compliance'")
+
+
 def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_path: Path | None = None) -> tuple[Path, Row]:
     lower, upper, elements = make_geometry(case)
     lower_body = DeformableBody(
@@ -362,6 +402,7 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_p
     K = block_diag((assemble_stiffness_matrix(lower_body).tocsr(), assemble_stiffness_matrix(upper_body).tocsr()), format="csr")
     f = np.zeros(K.shape[0], dtype=float)
     samples, g0, J = _sfc_contact_samples(case, lower, upper)
+    normal_compliance = _normal_compliance(case, samples)
     fixed, values = _fixed_dofs(case, upper_offset=lower_dofs)
     start = time.perf_counter()
     solution = solve_linear_hard_contact_with_dirichlet(
@@ -371,6 +412,7 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_p
         J,
         fixed_dofs=fixed,
         fixed_values=values,
+        normal_compliance=normal_compliance,
         tolerance=1.0e-9,
         max_iterations=30,
     )
@@ -383,8 +425,14 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_p
     lower_bottom = np.asarray([0, 1, 2, 3], dtype=np.int64)
     upper_top_z_dofs = lower_dofs + 3 * upper_top + 2
     lower_bottom_z_dofs = 3 * lower_bottom + 2
+    compliance = np.zeros(solution.gaps.shape[0], dtype=float) if normal_compliance is None else np.asarray(normal_compliance, dtype=float)
+    enforcement_gaps = solution.gaps + compliance * solution.multipliers
+    active_area = float(sum(float(sample.area) for sample, active in zip(samples, solution.active, strict=True) if bool(active)))
+    active_multiplier_sum = float(np.sum(solution.multipliers[solution.active])) if solution.multipliers.size else 0.0
     row = {
         "master_payload_mode": str(case.master_payload_mode),
+        "contact_enforcement": str(case.contact_enforcement),
+        "pressure_smoothing_stiffness": _pressure_enforcement_stiffness(case) if str(case.contact_enforcement).lower() == "pressure_compliance" else "",
         "upper_top_u3_mean": float(np.mean(upper_u[upper_top, 2])),
         "upper_bottom_u3_mean": float(np.mean(upper_u[[0, 1, 2, 3], 2])),
         "lower_top_u3_mean": float(np.mean(lower_u[[4, 5, 6, 7], 2])),
@@ -392,6 +440,9 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_p
         "sample_mean_gap": float(np.mean(solution.gaps)) if solution.gaps.size else 0.0,
         "sample_min_gap": float(np.min(solution.gaps)) if solution.gaps.size else 0.0,
         "sample_max_gap": float(np.max(solution.gaps)) if solution.gaps.size else 0.0,
+        "enforcement_gap_max_abs": float(np.max(np.abs(enforcement_gaps))) if enforcement_gaps.size else 0.0,
+        "copen_mean": float(np.mean(solution.gaps)) if solution.gaps.size else 0.0,
+        "cpress_mean": active_multiplier_sum / max(active_area, 1.0e-30),
         "upper_top_rf3_sum": float(np.sum(residual[upper_top_z_dofs])),
         "lower_bottom_rf3_sum": float(np.sum(residual[lower_bottom_z_dofs])),
         "active_constraints": int(np.count_nonzero(solution.active)),
@@ -402,7 +453,7 @@ def run_sfc(case: FlexibleBlockHardContactCase, out_path: Path, *, diagnostics_p
     }
     _write_csv(out_path, [row])
     if diagnostics_path is not None:
-        _write_contact_diagnostics(diagnostics_path, samples, solution, J)
+        _write_contact_diagnostics(diagnostics_path, samples, solution, J, normal_compliance=normal_compliance)
     return out_path, {"solver": "sfc_lagrangian_sdf_surface_hard", "analysis_wall_seconds": wall}
 
 
@@ -416,11 +467,13 @@ def _format_int_array(values: np.ndarray) -> str:
     return ";".join(str(int(v)) for v in arr)
 
 
-def _write_contact_diagnostics(path: Path, samples: list[Any], solution: Any, gap_jacobian: np.ndarray) -> None:
+def _write_contact_diagnostics(path: Path, samples: list[Any], solution: Any, gap_jacobian: np.ndarray, *, normal_compliance: np.ndarray | None = None) -> None:
     rows: list[Row] = []
+    compliance = np.zeros(len(samples), dtype=float) if normal_compliance is None else np.asarray(normal_compliance, dtype=float).reshape(-1)
     for idx, sample in enumerate(samples):
         row = np.asarray(gap_jacobian[int(idx)], dtype=float)
         multiplier = float(solution.multipliers[int(idx)])
+        c = float(compliance[int(idx)])
         contact_force_row = -multiplier * row
         slave_nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
         master_nodes = np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1)
@@ -432,6 +485,8 @@ def _write_contact_diagnostics(path: Path, samples: list[Any], solution: Any, ga
                 "active": int(bool(solution.active[int(idx)])),
                 "initial_gap": float(sample.gap),
                 "solved_gap": float(solution.gaps[int(idx)]),
+                "normal_compliance": c,
+                "enforcement_gap": float(solution.gaps[int(idx)] + c * multiplier),
                 "multiplier": multiplier,
                 "area": float(sample.area),
                 "pressure_like_multiplier_over_area": multiplier / max(float(sample.area), 1.0e-30),
@@ -452,32 +507,45 @@ def _write_contact_diagnostics(path: Path, samples: list[Any], solution: Any, ga
 def run_sfc_convergence_diagnostics(case: FlexibleBlockHardContactCase, abaqus_path: Path, out_dir: Path) -> list[Row]:
     abaqus = _read_first(abaqus_path)
     rows: list[Row] = []
-    for mode in ("triangulated", "q4"):
-        for order in (1, 2, 3):
-            candidate = replace(case, master_payload_mode=mode, quadrature_order=order)
-            result_path, runtime = run_sfc(candidate, out_dir / f"sfc_{mode}_q{order}.csv")
-            row = _read_first(result_path)
-            rf_a = float(abaqus["upper_top_rf3_sum"])
-            rf_s = float(row["upper_top_rf3_sum"])
-            gap_a = float(abaqus["mean_gap"])
-            gap_s = float(row["mean_gap"])
-            rows.append(
-                {
-                    "master_payload_mode": mode,
-                    "quadrature_order": int(order),
-                    "constraints": int(row["constraints"]),
-                    "active_constraints": int(row["active_constraints"]),
-                    "upper_top_rf3_abaqus": rf_a,
-                    "upper_top_rf3_sfc": rf_s,
-                    "upper_top_rf3_rel_error": abs(rf_s - rf_a) / max(abs(rf_a), 1.0e-12),
-                    "mean_gap_abaqus": gap_a,
-                    "mean_gap_sfc": gap_s,
-                    "mean_gap_abs_error": abs(gap_s - gap_a),
-                    "sample_min_gap": float(row["sample_min_gap"]),
-                    "sample_max_gap": float(row["sample_max_gap"]),
-                    "sfc_wall_seconds": float(runtime["analysis_wall_seconds"]),
-                }
-            )
+    for enforcement in ("exact", "pressure_compliance"):
+        for mode in ("triangulated", "q4"):
+            for order in (1, 2, 3):
+                candidate = replace(case, contact_enforcement=enforcement, master_payload_mode=mode, quadrature_order=order)
+                result_path, runtime = run_sfc(candidate, out_dir / f"sfc_{enforcement}_{mode}_q{order}.csv")
+                row = _read_first(result_path)
+                rf_a = float(abaqus["upper_top_rf3_sum"])
+                rf_s = float(row["upper_top_rf3_sum"])
+                gap_a = float(abaqus["mean_gap"])
+                gap_s = float(row["mean_gap"])
+                copen_a = float(abaqus.get("copen_mean", gap_a))
+                copen_s = float(row.get("copen_mean", row["sample_mean_gap"]))
+                cpress_a = float(abaqus.get("cpress_mean", 0.0))
+                cpress_s = float(row.get("cpress_mean", 0.0))
+                rows.append(
+                    {
+                        "contact_enforcement": enforcement,
+                        "master_payload_mode": mode,
+                        "quadrature_order": int(order),
+                        "constraints": int(row["constraints"]),
+                        "active_constraints": int(row["active_constraints"]),
+                        "upper_top_rf3_abaqus": rf_a,
+                        "upper_top_rf3_sfc": rf_s,
+                        "upper_top_rf3_rel_error": abs(rf_s - rf_a) / max(abs(rf_a), 1.0e-12),
+                        "mean_gap_abaqus": gap_a,
+                        "mean_gap_sfc": gap_s,
+                        "mean_gap_abs_error": abs(gap_s - gap_a),
+                        "copen_abaqus": copen_a,
+                        "copen_sfc": copen_s,
+                        "copen_abs_error": abs(copen_s - copen_a),
+                        "cpress_abaqus": cpress_a,
+                        "cpress_sfc": cpress_s,
+                        "cpress_rel_error": abs(cpress_s - cpress_a) / max(abs(cpress_a), 1.0e-12),
+                        "enforcement_gap_max_abs": float(row.get("enforcement_gap_max_abs", 0.0)),
+                        "sample_min_gap": float(row["sample_min_gap"]),
+                        "sample_max_gap": float(row["sample_max_gap"]),
+                        "sfc_wall_seconds": float(runtime["analysis_wall_seconds"]),
+                    }
+                )
     _write_csv(out_dir / "sfc_master_payload_convergence.csv", rows)
     return rows
 
@@ -498,6 +566,8 @@ def compare(abaqus_path: Path, sfc_path: Path, out_path: Path) -> list[Row]:
         "upper_bottom_u3_mean",
         "lower_top_u3_mean",
         "mean_gap",
+        "copen_mean",
+        "cpress_mean",
         "upper_top_rf3_sum",
         "lower_bottom_rf3_sum",
     ]
@@ -532,6 +602,8 @@ def write_summary(path: Path, rows: list[Row], abaqus_runtime: Row, sfc_runtime:
         f"- upper top U3 relative error: {100.0 * float(by_metric['upper_top_u3_mean']['rel_error']):.6f}%",
         f"- lower top U3 relative error: {100.0 * float(by_metric['lower_top_u3_mean']['rel_error']):.6f}%",
         f"- upper top RF3 relative error: {100.0 * float(by_metric['upper_top_rf3_sum']['rel_error']):.6f}%",
+        f"- COPEN mean absolute error: {float(by_metric['copen_mean']['abs_error']):.6e}",
+        f"- CPRESS mean relative error: {100.0 * float(by_metric['cpress_mean']['rel_error']):.6f}%",
         f"- mean hard-contact gap abs. error: {float(by_metric['mean_gap']['abs_error']):.6e}",
         "- Diagnostic outputs: `sfc_contact_quadrature_diagnostics.csv` and `sfc_master_payload_convergence.csv`.",
         "",
@@ -546,10 +618,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--master-payload-mode", choices=("q4", "triangulated"), default="q4")
+    parser.add_argument("--contact-enforcement", choices=("exact", "pressure_compliance"), default="pressure_compliance")
+    parser.add_argument("--pressure-smoothing-stiffness-factor", type=float, default=4.5)
     args = parser.parse_args(argv)
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    case = replace(build_case(), master_payload_mode=str(args.master_payload_mode))
+    case = replace(
+        build_case(),
+        master_payload_mode=str(args.master_payload_mode),
+        contact_enforcement=str(args.contact_enforcement),
+        pressure_smoothing_stiffness_factor=float(args.pressure_smoothing_stiffness_factor),
+    )
     abaqus_path, abaqus_runtime = run_abaqus(case, out_dir, abaqus_command=args.abaqus_command, timeout=int(args.timeout))
     sfc_path, sfc_runtime = run_sfc(
         case,

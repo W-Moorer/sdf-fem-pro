@@ -38,12 +38,11 @@ def test_sfc_lagrangian_sdf_hard_contact_enforces_q4_sample_gaps(tmp_path) -> No
     assert int(row["converged"]) == 1
     assert int(row["quadrature_samples"]) == case.quadrature_order**2
     assert int(row["active_constraints"]) >= 1
-    assert float(row["sample_mean_gap"]) == pytest.approx(0.0, abs=1.0e-8)
-    assert float(row["sample_min_gap"]) == pytest.approx(0.0, abs=1.0e-8)
-    assert float(row["sample_max_gap"]) == pytest.approx(0.0, abs=1.0e-8)
+    assert float(row["enforcement_gap_max_abs"]) == pytest.approx(0.0, abs=1.0e-8)
+    assert float(row["sample_mean_gap"]) < 0.0
     assert float(row["upper_top_u3_mean"]) == pytest.approx(-case.closure)
     with diagnostics.open(newline="", encoding="utf-8") as handle:
         diagnostic_rows = list(csv.DictReader(handle))
     assert len(diagnostic_rows) == case.quadrature_order**2
     assert diagnostic_rows[0]["master_weights"]
-    assert float(diagnostic_rows[0]["solved_gap"]) == pytest.approx(0.0, abs=1.0e-8)
+    assert float(diagnostic_rows[0]["enforcement_gap"]) == pytest.approx(0.0, abs=1.0e-8)

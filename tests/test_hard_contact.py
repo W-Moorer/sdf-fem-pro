@@ -5,6 +5,7 @@ import pytest
 
 from sfc.contact.hard_contact import (
     hard_contact_gap_jacobian_from_samples,
+    hard_contact_pressure_compliance_from_samples,
     solve_linear_hard_contact_active_set,
     solve_linear_hard_contact_from_samples,
     solve_linear_hard_contact_from_samples_with_dirichlet,
@@ -146,3 +147,44 @@ def test_hard_contact_from_samples_with_dirichlet_includes_master_motion() -> No
     assert solution.displacement[5] == pytest.approx(0.2)
     assert solution.gaps == pytest.approx([0.0])
     assert solution.multipliers == pytest.approx([3.0])
+
+
+def test_regularized_hard_contact_allows_pressure_compliance_overclosure() -> None:
+    solution = solve_linear_hard_contact_active_set(
+        np.asarray([[10.0]], dtype=float),
+        np.asarray([-2.0], dtype=float),
+        np.asarray([0.1], dtype=float),
+        np.asarray([[1.0]], dtype=float),
+        normal_compliance=np.asarray([0.05], dtype=float),
+    )
+
+    assert solution.converged
+    assert solution.active.tolist() == [True]
+    assert solution.multipliers[0] > 0.0
+    assert solution.gaps[0] < 0.0
+    assert solution.gaps[0] + 0.05 * solution.multipliers[0] == pytest.approx(0.0)
+
+
+def test_pressure_compliance_from_samples_uses_area_and_pressure_stiffness() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0], dtype=np.int64),
+            shape_weights=np.asarray([1.0], dtype=float),
+            gap=-0.1,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=0.25,
+            stiffness=100.0,
+        ),
+        ContactSample(
+            node_ids=np.asarray([1], dtype=np.int64),
+            shape_weights=np.asarray([1.0], dtype=float),
+            gap=-0.1,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=0.5,
+            stiffness=100.0,
+        ),
+    ]
+
+    compliance = hard_contact_pressure_compliance_from_samples(samples, pressure_stiffness=200.0)
+
+    assert compliance == pytest.approx([1.0 / (200.0 * 0.25), 1.0 / (200.0 * 0.5)])

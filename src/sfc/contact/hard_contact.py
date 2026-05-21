@@ -33,6 +33,7 @@ def solve_linear_hard_contact_active_set(
     gap_offset: np.ndarray,
     gap_jacobian: np.ndarray,
     *,
+    normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
     max_iterations: int = 20,
@@ -41,10 +42,14 @@ def solve_linear_hard_contact_active_set(
 
     The gap is ``g = gap_offset + J u`` and must satisfy ``g >= 0``.  The
     contact multiplier is non-negative and contributes ``J.T lambda`` to the
-    resisting force.  The active set is solved from
+    resisting force.  With zero compliance, the active set is solved from
 
     ``K u - J_active.T lambda = f``,
     ``J_active u = -gap_offset_active``.
+
+    A nonzero ``normal_compliance`` solves the regularized hard-enforcement
+    system ``g + C lambda = 0`` on active constraints.  This models solver
+    contact-enforcement compliance without changing the geometric gap query.
     """
 
     K = _dense_matrix(stiffness)
@@ -61,6 +66,7 @@ def solve_linear_hard_contact_active_set(
         raise ValueError("gap_offset length must match number of constraints")
     if float(tolerance) < 0.0:
         raise ValueError("tolerance must be non-negative")
+    compliance = _as_constraint_compliance(normal_compliance, J.shape[0])
     if initial_active is None:
         try:
             unconstrained = np.linalg.solve(K, f)
@@ -79,10 +85,11 @@ def solve_linear_hard_contact_active_set(
         active_ids = np.flatnonzero(active)
         if active_ids.size:
             Ja = J[active_ids]
+            Ca = np.diag(compliance[active_ids])
             matrix = np.block(
                 [
                     [K, -Ja.T],
-                    [Ja, np.zeros((active_ids.size, active_ids.size), dtype=float)],
+                    [Ja, Ca],
                 ]
             )
             rhs = np.concatenate((f, -g0[active_ids]))
@@ -100,10 +107,11 @@ def solve_linear_hard_contact_active_set(
                 u, *_ = np.linalg.lstsq(K, f, rcond=None)
             lam = np.zeros(J.shape[0], dtype=float)
         gaps = g0 + J @ u
+        effective_gaps = gaps + compliance * lam
         next_active = active.copy()
-        next_active[gaps < -float(tolerance)] = True
+        next_active[effective_gaps < -float(tolerance)] = True
         next_active[lam < -float(tolerance)] = False
-        if np.array_equal(next_active, active) and np.all(gaps >= -float(tolerance)) and np.all(lam >= -float(tolerance)):
+        if np.array_equal(next_active, active) and np.all(effective_gaps >= -float(tolerance)) and np.all(lam >= -float(tolerance)):
             converged = True
             break
         active = next_active
@@ -181,6 +189,7 @@ def solve_linear_hard_contact_from_samples(
     n_total_dofs: int,
     slave_dof_offset: int = 0,
     master_dof_offset: int = 0,
+    normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
     max_iterations: int = 20,
@@ -198,6 +207,7 @@ def solve_linear_hard_contact_from_samples(
         external_force,
         gap_offset,
         gap_jacobian,
+        normal_compliance=normal_compliance,
         initial_active=initial_active,
         tolerance=tolerance,
         max_iterations=max_iterations,
@@ -212,6 +222,7 @@ def solve_linear_hard_contact_with_dirichlet(
     *,
     fixed_dofs: np.ndarray,
     fixed_values: np.ndarray | None = None,
+    normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
     max_iterations: int = 20,
@@ -235,6 +246,7 @@ def solve_linear_hard_contact_with_dirichlet(
         raise ValueError("gap_jacobian must have shape (n_constraints, n_dofs)")
     if g0.shape != (J.shape[0],):
         raise ValueError("gap_offset length must match number of constraints")
+    compliance = _as_constraint_compliance(normal_compliance, J.shape[0])
     fixed = np.asarray(fixed_dofs, dtype=np.int64).reshape(-1)
     if np.any(fixed < 0) or (fixed.size and int(fixed.max()) >= K.shape[0]):
         raise ValueError("fixed_dofs reference a dof outside stiffness")
@@ -274,6 +286,7 @@ def solve_linear_hard_contact_with_dirichlet(
         f_eff,
         g_eff,
         Jf,
+        normal_compliance=compliance,
         initial_active=initial_active,
         tolerance=tolerance,
         max_iterations=max_iterations,
@@ -286,7 +299,7 @@ def solve_linear_hard_contact_with_dirichlet(
         gaps=gaps,
         active=reduced.active.copy(),
         iterations=int(reduced.iterations),
-        converged=bool(reduced.converged and np.all(gaps >= -float(tolerance))),
+        converged=bool(reduced.converged and np.all(gaps + compliance * reduced.multipliers >= -float(tolerance))),
     )
 
 
@@ -300,6 +313,7 @@ def solve_linear_hard_contact_from_samples_with_dirichlet(
     fixed_values: np.ndarray | None = None,
     slave_dof_offset: int = 0,
     master_dof_offset: int = 0,
+    normal_compliance: np.ndarray | float | None = None,
     initial_active: np.ndarray | None = None,
     tolerance: float = 1.0e-10,
     max_iterations: int = 20,
@@ -319,10 +333,36 @@ def solve_linear_hard_contact_from_samples_with_dirichlet(
         gap_jacobian,
         fixed_dofs=fixed_dofs,
         fixed_values=fixed_values,
+        normal_compliance=normal_compliance,
         initial_active=initial_active,
         tolerance=tolerance,
         max_iterations=max_iterations,
     )
+
+
+def hard_contact_pressure_compliance_from_samples(
+    samples: Iterable[Any],
+    *,
+    pressure_stiffness: float | None = None,
+) -> np.ndarray:
+    """Return force-multiplier compliance from sample pressure stiffness.
+
+    ``pressure_stiffness`` has pressure-overclosure units.  Since hard-contact
+    multipliers are nodal/contact-resultant forces, each sample compliance is
+    ``1 / (pressure_stiffness * area)``.  When ``pressure_stiffness`` is not
+    supplied, each sample may provide a positive ``stiffness`` attribute.
+    """
+
+    values: list[float] = []
+    for sample in samples:
+        area = float(getattr(sample, "area", 0.0))
+        if area <= 0.0:
+            raise ValueError("sample area must be positive for pressure compliance")
+        k = float(pressure_stiffness) if pressure_stiffness is not None else float(getattr(sample, "stiffness", 0.0))
+        if k <= 0.0:
+            raise ValueError("pressure stiffness must be positive for pressure compliance")
+        values.append(1.0 / (k * area))
+    return np.asarray(values, dtype=float)
 
 
 def _scatter_gap_row(row: np.ndarray, nodes: np.ndarray, weights: np.ndarray, normal: np.ndarray, offset: int, *, sign: float) -> None:
@@ -337,3 +377,19 @@ def _dense_matrix(value: Any) -> np.ndarray:
     if hasattr(value, "toarray"):
         return np.asarray(value.toarray(), dtype=float)
     return np.asarray(value, dtype=float)
+
+
+def _as_constraint_compliance(value: np.ndarray | float | None, n_constraints: int) -> np.ndarray:
+    n = int(n_constraints)
+    if value is None:
+        return np.zeros(n, dtype=float)
+    arr = np.asarray(value, dtype=float)
+    if arr.shape == ():
+        arr = np.full(n, float(arr), dtype=float)
+    else:
+        arr = arr.reshape(-1)
+    if arr.shape != (n,):
+        raise ValueError("normal_compliance must be scalar or match number of constraints")
+    if np.any(arr < 0.0):
+        raise ValueError("normal_compliance must be non-negative")
+    return arr
