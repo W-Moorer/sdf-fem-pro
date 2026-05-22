@@ -106,3 +106,45 @@ contact sampling + C++ closest projection: 38.18 s / 121.91 s
 3. projection kernel 的 candidate pruning / active patch cache，但必须保留 exact fallback，不降低接触精度。
 4. 将 diagnostics/VTK 与 core solve timing 分离报告；完整 wall time 仍可保留作为工程端到端成本。
 
+## 更新：quadrature-point 级接触管裁剪
+
+新增的 contact sampling 路径在已有 face-level conservative tube 之后，再对每个 slave
+quadrature point 做一次保守 tube 检查：
+
+```text
+distance(point, nearest master face bounding sphere)
+<=
+search_radius + max_master_face_radius
+```
+
+若不满足该条件，该 quadrature point 不可能落入当前接触搜索管，因此不送入
+closest-feature projection kernel。该裁剪不改变进入搜索管内点的 closest-point 计算、
+gap、normal、payload 或 penalty law。
+
+10-step 复测目录：
+
+```text
+results/source_gear_penalty_10steps_qp_cull
+```
+
+相同 Abaqus manifest 下的末帧误差变为：
+
+- max displacement magnitude relative error: `1.195%`
+- node-averaged von Mises relative error: `0.0736%`
+- node-averaged equivalent elastic strain relative error: `0.0736%`
+- RP2 rotation relative error: `1.149%`
+- RP2 angular velocity relative error: `1.244%`
+
+timing 变为：
+
+- complete wall time: `96.933245 s`
+- residual/contact sampling time: `23.988831 s`
+- sparse CG linear correction time: `59.342516 s`
+- history stress/strain diagnostics time: `7.326365 s`
+- VTK cloud output time: `6.115524 s`
+- sparse CG solves: `27`
+- sparse CG iterations: `15090`
+
+该结果同时改善了接触搜索成本和 Abaqus 对齐误差，说明原 face-level tube
+对大三角 slave face 过宽，会把远离当前接触管的积分点送入 projection/contact
+响应。点级 tube 裁剪更接近有限滑移接触的局部搜索语义。

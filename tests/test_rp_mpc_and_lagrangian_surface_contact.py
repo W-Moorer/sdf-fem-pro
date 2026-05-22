@@ -336,6 +336,38 @@ def test_lagrangian_sdf_surface_contact_skips_faces_outside_conservative_tube() 
     assert list(contact.samples(x_current)) == []
 
 
+def test_lagrangian_sdf_surface_contact_compiled_culls_out_of_tube_quadrature_points() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.02],
+            [1.2, 0.0, -0.02],
+            [0.0, 1.2, -0.02],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.4, 0.0]], dtype=float)
+    x_current = np.vstack([slave_nodes, master_nodes])
+    material = MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64))
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=3,
+        quadrature="tri3",
+        search_radius=0.25,
+        compiled_batch_projection=True,
+    )
+
+    arrays = contact.sample_arrays(x_current)
+
+    if arrays is None:
+        pytest.skip("compiled projection backend is not available")
+    assert 0 < arrays["gaps"].shape[0] < 3
+    assert arrays["sample_node_ids"].shape[0] == arrays["gaps"].shape[0]
+    assert arrays["areas"].shape[0] == arrays["gaps"].shape[0]
+
+
 def test_lagrangian_sdf_quadrilateral_surface_contact_uses_q4_weights() -> None:
     slave_nodes = np.asarray(
         [

@@ -313,6 +313,23 @@ class LagrangianSDFSurfaceContactGeometry:
         sample_nodes = np.repeat(kept_faces, n_quadrature, axis=0)
         sample_weights = np.tile(barycentric, (kept_faces.shape[0], 1))
         areas = (kept_areas[:, None] * weight_scale[None, :]).reshape(-1)
+        if master_tree is not None and point_array.size:
+            point_nearest = np.asarray(master_tree.query(point_array, k=1)[0], dtype=float)
+            point_keep = point_nearest <= float(self.search_radius) + float(master_max_radius) + 1.0e-14
+            if not np.any(point_keep):
+                return {
+                    "sample_node_ids": np.empty((0, 3), dtype=np.int64),
+                    "sample_weights": np.empty((0, 3), dtype=float),
+                    "gaps": np.empty(0, dtype=float),
+                    "normals": np.empty((0, 3), dtype=float),
+                    "areas": np.empty(0, dtype=float),
+                    "master_node_ids": np.empty((0, 3), dtype=np.int64),
+                    "master_weights": np.empty((0, 3), dtype=float),
+                }
+            point_array = point_array[point_keep]
+            sample_nodes = sample_nodes[point_keep]
+            sample_weights = sample_weights[point_keep]
+            areas = areas[point_keep]
         if _cpp_closest_points_padded_aabb is not None:
             bvh = self._oracle.bvh
             gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_padded_aabb(
