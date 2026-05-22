@@ -244,3 +244,43 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 | 末帧 mean node-averaged von Mises rel. error | 9.122% |
 
 PVD 时间戳已经同步为 `0:2e-5:8e-4`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 80，可继续向 `0.05 s` 推进。
+
+## 更新：续跑到 `1.0e-3 s`
+
+SFC 已继续从同一个 checkpoint 续跑到 `1.0e-3 s`。Abaqus penalty 对照也使用同一 `gear_contact.inp`、同一 `dt=1e-5 s`、同一 `frame_stride=2` 跑到 `1.0e-3 s`。
+
+输出目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0010`
+- 独立 manifest 对比：`results/source_gear_penalty_full_stride2_match_step_0010_alignment`
+
+独立 manifest 对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_manifest_alignment.py `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0010\abaqus_vtk\abaqus_manifest.csv `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0010_alignment
+```
+
+`1.0e-3 s` 阶段结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 1.0e-3 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 51 |
+| Abaqus VTK 帧数 | 51 |
+| SFC 续跑 wall time | 73.069 s |
+| Abaqus analysis wall time | 1542.746 s |
+| 末帧 displacement magnitude rel. error | 3.927% |
+| 末帧 p95 node-averaged von Mises rel. error | 20.832% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 20.832% |
+| 末帧 max node-averaged von Mises rel. error | 23.166% |
+| 末帧 mean node-averaged von Mises rel. error | 1.065% |
+
+该时间点的整体位移和 mean stress/strain 仍与 Abaqus penalty 对照接近，但 p95/max stress/strain 误差重新升高，说明局部接触峰值在该瞬态更敏感。当前记录保留原始 p95/max/mean 三种口径，不用单一指标替代全部云图场判断。
+
+PVD 时间戳已经同步为 `0:2e-5:1.0e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 100，可继续向 `0.05 s` 推进。
