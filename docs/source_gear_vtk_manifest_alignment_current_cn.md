@@ -476,3 +476,56 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 4. 在完成上述诊断前，论文主曲线应优先展示位移/转角/角速度和完整云图，避免用单一 p95 stress 指标代表全部物理对齐。
 
 PVD 时间戳已经同步为 `0:2e-5:1.8e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 180，可继续向 `0.05 s` 推进。
+
+## 更新：续跑到 `2.0e-3 s`
+
+SFC 已继续从同一个 checkpoint 续跑到 `2.0e-3 s`。Abaqus penalty 对照也使用同一 `gear_contact.inp`、同一 `dt=1e-5 s`、同一 `frame_stride=2` 跑到 `2.0e-3 s`。两边均使用线性罚函数接触；VTK 均为隔帧保存。
+
+输出目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0020`
+- 独立 manifest 对比：`results/source_gear_penalty_full_stride2_match_step_0020_alignment`
+
+独立 manifest 对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_manifest_alignment.py `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk\abaqus_manifest.csv `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0020_alignment
+```
+
+`2.0e-3 s` 阶段结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 2.0e-3 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 101 |
+| Abaqus VTK 帧数 | 101 |
+| SFC 续跑 wall time | 136.221 s |
+| Abaqus analysis wall time | 3320.869 s |
+| Abaqus VTK export wall time | 1527.732 s |
+| 末帧 displacement magnitude rel. error | 2.716% |
+| 末帧 p95 node-averaged von Mises rel. error | 68.646% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 68.646% |
+| 末帧 max node-averaged von Mises rel. error | 45.675% |
+| 末帧 mean node-averaged von Mises rel. error | 69.273% |
+| 末帧 gear 1 prescribed rotation rel. error | 8.14e-6% |
+| 末帧 gear 2 rotation rel. error | 2.923% |
+| 末帧 gear 2 angular velocity rel. error | 2.640% |
+| 末帧 object 1 max displacement rel. error | 3.82e-4% |
+| 末帧 object 2 max displacement rel. error | 2.716% |
+| SFC 末帧 active contact samples | 0 |
+| SFC 末帧 min gap | 0 |
+
+`2.0e-3 s` 窗口显示出一个新的诊断信号：SFC 末帧 active contact samples 为 0，且 min gap 为 0，而 Abaqus penalty 参考在相同时间窗的 node-averaged stress/strain 仍明显更高。位移和整体转动仍在低误差范围内，因此当前主要问题不是驱动/积分时间步，而是 contact status、active set 和 stress recovery 的口径差异。后续应优先做：
+
+1. 在 SFC VTK 中输出 active contact samples / contact pressure 的时间序列云图；
+2. 从 Abaqus 外部 VTK 或可导出的接触变量中提取同时间窗的接触状态/压力指标；
+3. 检查 SFC contact release 条件是否比 Abaqus penalty 接触更早释放；
+4. 将应力对比拆成 contact-active 区域、near-contact 区域和全场区域，而不是只报全场 p95/max/mean。
+
+PVD 时间戳已经同步为 `0:2e-5:2.0e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 200，可继续向 `0.05 s` 推进。
