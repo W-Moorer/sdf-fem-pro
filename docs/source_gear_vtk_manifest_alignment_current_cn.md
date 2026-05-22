@@ -284,3 +284,47 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 该时间点的整体位移和 mean stress/strain 仍与 Abaqus penalty 对照接近，但 p95/max stress/strain 误差重新升高，说明局部接触峰值在该瞬态更敏感。当前记录保留原始 p95/max/mean 三种口径，不用单一指标替代全部云图场判断。
 
 PVD 时间戳已经同步为 `0:2e-5:1.0e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 100，可继续向 `0.05 s` 推进。
+
+## 更新：续跑到 `1.2e-3 s`
+
+SFC 已继续从同一个 checkpoint 续跑到 `1.2e-3 s`。Abaqus penalty 对照也使用同一 `gear_contact.inp`、同一 `dt=1e-5 s`、同一 `frame_stride=2` 跑到 `1.2e-3 s`。两边均使用线性罚函数接触；VTK 均为隔帧保存，不保存每一个增量。
+
+输出目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0012`
+- 独立 manifest 对比：`results/source_gear_penalty_full_stride2_match_step_0012_alignment`
+
+独立 manifest 对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_manifest_alignment.py `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0012\abaqus_vtk\abaqus_manifest.csv `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0012_alignment
+```
+
+`1.2e-3 s` 阶段结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 1.2e-3 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 61 |
+| Abaqus VTK 帧数 | 61 |
+| SFC 续跑 wall time | 62.424 s |
+| Abaqus analysis wall time | 1860.786 s |
+| Abaqus VTK export wall time | 914.661 s |
+| 末帧 displacement magnitude rel. error | 3.188% |
+| 末帧 p95 node-averaged von Mises rel. error | 36.049% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 36.049% |
+| 末帧 max node-averaged von Mises rel. error | 10.890% |
+| 末帧 mean node-averaged von Mises rel. error | 22.822% |
+| 末帧 gear 1 prescribed rotation rel. error | 8.14e-6% |
+| 末帧 gear 2 rotation rel. error | 3.910% |
+| 末帧 gear 2 angular velocity rel. error | 2.669% |
+
+位移、源 deck 规定的 gear 1 角速度/转角以及 gear 2 的整体动力学响应仍保持接近；p95 stress/strain 误差在该瞬态升高，说明局部接触应力分位数比位移和刚体运动量更敏感。后续若要进一步降低应力/应变误差，应优先继续对齐 Abaqus 的接触压力分布、active patch 覆盖范围、surface-to-surface 约束平均和应力采样位置，而不是改变 SDF 查询或通过阻尼/滤波人为压低峰值。
+
+PVD 时间戳已经同步为 `0:2e-5:1.2e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 120，可继续向 `0.05 s` 推进。
