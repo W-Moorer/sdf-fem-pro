@@ -16,6 +16,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse_from_arrays,
     _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
+    _node_average_cell_scalar,
     _source_drive_corotated_visual_state_and_internal,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -34,6 +35,21 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
+
+
+def test_node_average_cell_scalar_matches_incident_cell_average() -> None:
+    cells = np.asarray([[0, 1, 2, 3], [1, 4, 2, 5], [1, 5, 2, 6]], dtype=np.int64)
+    values = np.asarray([2.0, 5.0, 11.0], dtype=float)
+
+    averaged = _node_average_cell_scalar(values, cells, node_count=7)
+
+    assert averaged[0] == pytest.approx(2.0)
+    assert averaged[1] == pytest.approx((2.0 + 5.0 + 11.0) / 3.0)
+    assert averaged[2] == pytest.approx((2.0 + 5.0 + 11.0) / 3.0)
+    assert averaged[3] == pytest.approx(2.0)
+    assert averaged[4] == pytest.approx(5.0)
+    assert averaged[5] == pytest.approx((5.0 + 11.0) / 2.0)
+    assert averaged[6] == pytest.approx(11.0)
 
 
 def test_source_force_only_contact_response_matches_full_force_response() -> None:

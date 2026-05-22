@@ -431,9 +431,9 @@ def _node_average_cell_scalar(cell_values: np.ndarray, cells: np.ndarray, node_c
     counts = np.zeros(int(node_count), dtype=float)
     if values.shape[0] != conn.shape[0]:
         return out
-    for cell_value, cell in zip(values, conn, strict=True):
-        out[cell] += float(cell_value)
-        counts[cell] += 1.0
+    flat_conn = conn.reshape(-1)
+    np.add.at(out, flat_conn, np.repeat(values, conn.shape[1]))
+    np.add.at(counts, flat_conn, 1.0)
     mask = counts > 0.0
     out[mask] /= counts[mask]
     return out
