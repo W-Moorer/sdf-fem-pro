@@ -33,6 +33,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     write_animation_color_ranges,
     write_paraview_animation_setup,
 )
+from validation.run_source_gear_vtk_manifest_alignment import align_manifests
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
@@ -617,6 +618,44 @@ def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None
     assert "max_displacement_magnitude_object2_rel_error" in rows[-1]
     assert "rp2_rotation_z_rad_rel_error" in rows[-1]
     assert "rp2_angular_velocity_z_rad_per_s_rel_error" in rows[-1]
+
+
+def test_source_gear_manifest_alignment_entrypoint_writes_artifacts(tmp_path: Path) -> None:
+    sfc_dir = tmp_path / "sfc_vtk"
+    abaqus_dir = tmp_path / "abaqus_vtk"
+    sfc_dir.mkdir()
+    abaqus_dir.mkdir()
+    sfc_manifest = sfc_dir / "sfc_manifest.csv"
+    abaqus_manifest = abaqus_dir / "abaqus_manifest.csv"
+    sfc_manifest.write_text(
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,p95_von_mises_nodeavg,max_strain_norm_nodeavg,max_equivalent_elastic_strain_nodeavg,p95_equivalent_elastic_strain_nodeavg\n"
+        "0,0,sfc_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
+        "1,1,sfc_0001.vtk,1,1,0.2,7.0,0.03,0.003,6.0,5.0,0.028,0.0028,0.0025\n",
+        encoding="utf-8",
+    )
+    abaqus_manifest.write_text(
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,p95_von_mises_nodeavg,max_le_norm_nodeavg,max_equivalent_elastic_strain_nodeavg,p95_equivalent_elastic_strain_nodeavg\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.25,8.0,0.04,0.004,7.0,6.0,0.038,0.0038,0.003\n",
+        encoding="utf-8",
+    )
+
+    summary = align_manifests(
+        sfc_manifest=sfc_manifest,
+        abaqus_manifest=abaqus_manifest,
+        out_dir=tmp_path / "comparison",
+    )
+
+    assert int(summary["frame_count"]) == 2
+    assert Path(str(summary["summary"])).exists()
+    assert Path(str(summary["errors"])).exists()
+    assert Path(str(summary["curves"])).exists()
+    assert Path(str(summary["ranges"])).exists()
+    script = Path(str(summary["paraview"]))
+    assert script.exists()
+    script_text = script.read_text(encoding="utf-8")
+    assert "../sfc_vtk/sfc.pvd" in script_text
+    assert "../abaqus_vtk/abaqus.pvd" in script_text
 
 
 def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:

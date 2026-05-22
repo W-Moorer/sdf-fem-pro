@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -190,10 +191,7 @@ def write_paraview_animation_setup(
     def script_relative_path(path: Path | None) -> str:
         if path is None:
             return ""
-        try:
-            return Path(path).resolve().relative_to(out_dir.resolve()).as_posix()
-        except ValueError:
-            return str(Path(path))
+        return Path(os.path.relpath(Path(path).resolve(), out_dir.resolve())).as_posix()
 
     sfc_path = script_relative_path(sfc_pvd)
     abaqus_path = script_relative_path(abaqus_pvd)
