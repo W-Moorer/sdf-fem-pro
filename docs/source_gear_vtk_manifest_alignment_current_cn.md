@@ -168,3 +168,41 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 | 末帧 mean node-averaged von Mises rel. error | 1.640% |
 
 PVD 时间戳已经同步为 `0:2e-5:4e-4`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 40，可继续向 `0.05 s` 推进。
+
+## 更新：续跑到 `6e-4 s`
+
+SFC 已继续从同一个 checkpoint 续跑到 `6e-4 s`。Abaqus penalty 对照也使用同一 `gear_contact.inp`、同一 `dt=1e-5 s`、同一 `frame_stride=2` 跑到 `6e-4 s`。
+
+输出目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0006`
+- 独立 manifest 对比：`results/source_gear_penalty_full_stride2_match_step_0006_alignment`
+
+独立 manifest 对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_manifest_alignment.py `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0006\abaqus_vtk\abaqus_manifest.csv `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0006_alignment
+```
+
+`6e-4 s` 阶段结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 6e-4 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 31 |
+| Abaqus VTK 帧数 | 31 |
+| SFC 续跑 wall time | 81.696 s |
+| Abaqus analysis wall time | 881.962 s |
+| 末帧 displacement magnitude rel. error | 4.693% |
+| 末帧 p95 node-averaged von Mises rel. error | 6.275% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 6.275% |
+| 末帧 max node-averaged von Mises rel. error | 5.390% |
+| 末帧 mean node-averaged von Mises rel. error | 4.019% |
+
+PVD 时间戳已经同步为 `0:2e-5:6e-4`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 60，可继续向 `0.05 s` 推进。
