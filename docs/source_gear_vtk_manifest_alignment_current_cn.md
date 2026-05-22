@@ -41,3 +41,63 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 该结果证明当前输出流水线已经能从 SFC/Abaqus 的 VTK 云图字段生成位移、应力、应变曲线，并给出固定色标 ParaView 脚本，解决动画因逐帧自动缩放造成的应力/应变闪动问题。
 
 但这还不是最终验收所需的 0.05 s 全时长结果。全时长仍需要按同一 `gear_contact.inp` 的 `0.05 s / 1e-5 s` 跑完 SFC，并与 Abaqus 全程 VTK manifest 做同一入口的对比。
+
+## 更新：source-penalty 同步帧首块
+
+为了从零建立全时长可续跑结果，当前新建了目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0002`
+
+SFC 命令口径：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --duration 0.0002 `
+  --dt 0.00001 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --source-checkpoint results\source_gear_penalty_full_stride2_match_step\source_drive_checkpoint.npz `
+  --source-checkpoint-stride 20 `
+  --out-dir results\source_gear_penalty_full_stride2_match_step
+```
+
+Abaqus penalty 命令口径：
+
+```powershell
+python validation\run_flexible_gear_source_penalty_abaqus.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --out-dir results\source_gear_abaqus_penalty_full_stride2_match_step_0002 `
+  --pressure-stiffness 5e9 `
+  --frame-stride 2 `
+  --dt 0.00001 `
+  --duration 0.0002 `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --scalars-only
+```
+
+该首块结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 2e-4 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 11 |
+| Abaqus VTK 帧数 | 11 |
+| SFC wall time | 77.042 s |
+| Abaqus analysis wall time | 282.670 s |
+| 末帧 displacement magnitude rel. error | 1.395% |
+| 末帧 p95 node-averaged von Mises rel. error | 39.672% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 39.672% |
+
+PVD 时间戳已经同步为 `0:2e-5:2e-4`。SFC 目录中已写入 `source_drive_checkpoint.npz`，后续可用同一路径和 `--resume-source-checkpoint` 继续推进到 `0.05 s`。

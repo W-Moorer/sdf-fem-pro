@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from validation.abaqus_odb_to_vtk import _tensor_from_symmetric6, _von_mises_from_symmetric6
+from validation.abaqus_odb_to_vtk import _select_frame_indices, _tensor_from_symmetric6, _von_mises_from_symmetric6
 from validation.run_abaqus_sphere_cantilever_explicit import (
     DEFAULT_OUT_DIR,
     ModelConfig,
@@ -69,6 +69,17 @@ def test_abaqus_tensor_helpers_use_symmetric_3d_order() -> None:
 
     assert tensor == ((1.0, 4.0, 5.0), (4.0, 2.0, 6.0), (5.0, 6.0, 3.0))
     assert _von_mises_from_symmetric6((1.0, 1.0, 1.0, 0.0, 0.0, 0.0)) == 0.0
+
+
+def test_odb_frame_selection_supports_stride_and_time_window() -> None:
+    class Frame:
+        def __init__(self, time: float) -> None:
+            self.frameValue = time
+
+    frames = [Frame(i * 1.0e-5) for i in range(11)]
+
+    assert _select_frame_indices(frames, frame_stride=2, time_end=5.0e-5) == [0, 2, 4]
+    assert _select_frame_indices(frames, frame_stride=2, time_start=2.0e-5, time_end=8.0e-5) == [2, 4, 6, 8]
 
 
 def test_parse_abaqus_reported_wallclock_seconds(tmp_path: Path) -> None:

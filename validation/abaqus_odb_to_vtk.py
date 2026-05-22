@@ -324,6 +324,29 @@ def _mean_or_zero(values: list[float]) -> float:
     return sum(float(value) for value in values) / float(len(values)) if values else 0.0
 
 
+def _select_frame_indices(
+    frames: list[object],
+    *,
+    frame_stride: int,
+    time_start: float | None = None,
+    time_end: float | None = None,
+) -> list[int]:
+    """Return ODB frame indices selected by stride and optional time window."""
+
+    stride = max(1, int(frame_stride))
+    selected: list[int] = []
+    eps = 1.0e-12
+    for source_index, frame in enumerate(frames):
+        time_value = float(getattr(frame, "frameValue", 0.0))
+        if time_start is not None and time_value < float(time_start) - eps:
+            continue
+        if time_end is not None and time_value > float(time_end) + eps:
+            continue
+        if source_index % stride == 0 or source_index == len(frames) - 1:
+            selected.append(source_index)
+    return selected
+
+
 def _object_manifest_metrics(
     *,
     object_ids: list[int],
@@ -365,6 +388,8 @@ def export_odb_to_vtk(
     include_tensors: bool = True,
     young: float | None = None,
     poisson: float | None = None,
+    time_start: float | None = None,
+    time_end: float | None = None,
 ) -> dict[str, Path | int | float]:
     """Export all ODB frames in the first step to numbered VTK files."""
 
@@ -410,9 +435,13 @@ def export_odb_to_vtk(
         zero_vector = (0.0, 0.0, 0.0)
         zero_tensor = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         selected_frames = [
-            (source_index, frame)
-            for source_index, frame in enumerate(step.frames)
-            if source_index % stride == 0 or source_index == len(step.frames) - 1
+            (source_index, step.frames[source_index])
+            for source_index in _select_frame_indices(
+                list(step.frames),
+                frame_stride=stride,
+                time_start=time_start,
+                time_end=time_end,
+            )
         ]
         for frame_index, (source_index, frame) in enumerate(selected_frames):
             displacement_by_node = _node_vector_field(frame, "U")
@@ -514,6 +543,8 @@ def export_odb_to_vtk(
             "frame_count": len(datasets),
             "last_time": datasets[-1][0] if datasets else 0.0,
             "include_tensors": bool(include_tensors),
+            "time_start": float(time_start) if time_start is not None else "",
+            "time_end": float(time_end) if time_end is not None else "",
         }
     finally:
         odb.close()
@@ -525,6 +556,8 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--stem", default="frame")
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--time-start", type=float, default=None)
+    parser.add_argument("--time-end", type=float, default=None)
     parser.add_argument("--young", type=float, default=None)
     parser.add_argument("--poisson", type=float, default=None)
     group = parser.add_mutually_exclusive_group()
@@ -539,6 +572,8 @@ def main() -> None:
         include_tensors=bool(args.include_tensors),
         young=args.young,
         poisson=args.poisson,
+        time_start=args.time_start,
+        time_end=args.time_end,
     )
     print(f"VTK frames: {result['frame_count']}")
     print(f"PVD: {result['pvd']}")
