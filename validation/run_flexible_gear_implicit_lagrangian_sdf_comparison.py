@@ -1470,6 +1470,7 @@ def solve_sfc_source_drive_pair(
     tolerance: float = 1.0e-9,
     vtk_out_dir: Path | None = None,
     vtk_frame_stride: int = 1,
+    history_frame_stride: int = 1,
     vtk_stem: str = "sfc",
     vtk_include_tensors: bool = True,
 ) -> tuple[list[Row], Row]:
@@ -1546,6 +1547,7 @@ def solve_sfc_source_drive_pair(
     body_node_slices = (slice(0, n1), slice(n1, X.shape[0]))
     body_reference_points = (np.asarray(pair.gear1.rp, dtype=float), np.asarray(pair.gear2.rp, dtype=float))
     vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
+    history_stride = max(1, int(history_frame_stride))
     vtk_dir = Path(vtk_out_dir) if vtk_out_dir is not None else None
     vtk_datasets: list[tuple[float, Path]] = []
     vtk_manifest_rows: list[Row] = []
@@ -1598,6 +1600,8 @@ def solve_sfc_source_drive_pair(
     vtk_frame_index = 1
     timing_residual = 0.0
     timing_linear = 0.0
+    timing_history = 0.0
+    timing_vtk = 0.0
     source_sparse_cg_count = 0
     source_direct_fallback_count = 0
     for step in range(1, steps + 1):
@@ -1683,7 +1687,6 @@ def solve_sfc_source_drive_pair(
         v_new = v_pred + gamma * float(dt) * a_new
         x_new = model.X + assembly.expand_displacements(q_new)
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
-        last_internal = _linear_reference_internal_response(model, state.x, K_full)
         if not contact_matches_q_guess:
             accepted_arrays = contact.sample_arrays(state.x)
             if accepted_arrays is None:
@@ -1691,33 +1694,39 @@ def solve_sfc_source_drive_pair(
             else:
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
         previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
-        row = _penalty_history_row(
-            time_value=t,
-            closure=0.0,
-            rotation=float(gear1_angular_velocity_z) * t,
-            state=state,
-            model=model,
-            internal=last_internal,
-            contact_response=last_contact,
-            young=young,
-            poisson=poisson,
-            newton_iterations=iteration_count,
-            residual_norm=residual_norm,
-            solver="source_reduced_rp_modified_newton",
-        )
-        row.update(
-            {
-                "rp1_rotation_z": float(q_new[assembly.hub_slice(0).start + 5]),
-                "rp1_angular_velocity_z": float(v_new[assembly.hub_slice(0).start + 5]),
-                "rp1_angular_acceleration_z": float(a_new[assembly.hub_slice(0).start + 5]),
-                "rp2_rotation_z": float(q_new[hub2_slice.start + 5]),
-                "rp2_angular_velocity_z": float(v_new[hub2_slice.start + 5]),
-                "rp2_angular_acceleration_z": float(a_new[hub2_slice.start + 5]),
-                "gear2_torque_z": float(gear2_torque_z),
-            }
-        )
-        rows.append(row)
+        history_due = (step % history_stride == 0) or (step == steps)
+        if history_due:
+            t_section = time.perf_counter()
+            last_internal = _linear_reference_internal_response(model, state.x, K_full)
+            row = _penalty_history_row(
+                time_value=t,
+                closure=0.0,
+                rotation=float(gear1_angular_velocity_z) * t,
+                state=state,
+                model=model,
+                internal=last_internal,
+                contact_response=last_contact,
+                young=young,
+                poisson=poisson,
+                newton_iterations=iteration_count,
+                residual_norm=residual_norm,
+                solver="source_reduced_rp_modified_newton",
+            )
+            row.update(
+                {
+                    "rp1_rotation_z": float(q_new[assembly.hub_slice(0).start + 5]),
+                    "rp1_angular_velocity_z": float(v_new[assembly.hub_slice(0).start + 5]),
+                    "rp1_angular_acceleration_z": float(a_new[assembly.hub_slice(0).start + 5]),
+                    "rp2_rotation_z": float(q_new[hub2_slice.start + 5]),
+                    "rp2_angular_velocity_z": float(v_new[hub2_slice.start + 5]),
+                    "rp2_angular_acceleration_z": float(a_new[hub2_slice.start + 5]),
+                    "gear2_torque_z": float(gear2_torque_z),
+                }
+            )
+            rows.append(row)
+            timing_history += time.perf_counter() - t_section
         if vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps):
+            t_section = time.perf_counter()
             frame_path = vtk_dir / f"{vtk_stem}_{vtk_frame_index:04d}.vtk"
             visual_state, visual_internal = _source_drive_corotated_visual_state_and_internal(
                 model=model,
@@ -1755,6 +1764,7 @@ def solve_sfc_source_drive_pair(
             vtk_manifest_rows.append(frame_row)
             vtk_datasets.append((float(t), frame_path))
             vtk_frame_index += 1
+            timing_vtk += time.perf_counter() - t_section
         q, v, a = q_new, v_new, a_new
     wall = time.perf_counter() - start
     summary = {
@@ -1780,9 +1790,13 @@ def solve_sfc_source_drive_pair(
         "source_stress_strain_postprocess": "corotated_body_elastic_residual",
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
+        "sfc_history_frame_stride": int(history_stride),
+        "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),
         "timing_source_residual_seconds": float(timing_residual),
         "timing_source_linear_seconds": float(timing_linear),
+        "timing_source_history_seconds": float(timing_history),
+        "timing_source_vtk_seconds": float(timing_vtk),
         "source_sparse_cg_count": int(source_sparse_cg_count),
         "source_direct_fallback_count": int(source_direct_fallback_count),
         "status": "completed",

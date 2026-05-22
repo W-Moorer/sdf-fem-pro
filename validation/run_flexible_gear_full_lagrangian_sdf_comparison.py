@@ -569,6 +569,7 @@ def run_full_gear(
     drive_mode: str = "closure",
     hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
     tet4_mass_kind: str = "consistent",
+    history_frame_stride: int = 1,
     use_source_timing: bool = False,
     abaqus_command: str | None = None,
     write_sfc_vtk: bool = False,
@@ -611,6 +612,7 @@ def run_full_gear(
             tet4_mass_kind=str(tet4_mass_kind),
             vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
             vtk_frame_stride=max(1, int(vtk_frame_stride)),
+            history_frame_stride=max(1, int(history_frame_stride)),
             vtk_stem="sfc",
             vtk_include_tensors=bool(vtk_include_tensors),
         )
@@ -764,6 +766,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--drive-mode", choices=("closure", "source_inp"), default="closure")
     parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
     parser.add_argument("--tet4-mass-kind", choices=("consistent", "calculix"), default="consistent")
+    parser.add_argument("--history-frame-stride", type=int, default=1)
     parser.add_argument("--use-source-timing", action="store_true")
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
@@ -796,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
         drive_mode=str(args.drive_mode),
         hht_alpha=float(args.hht_alpha),
         tet4_mass_kind=str(args.tet4_mass_kind),
+        history_frame_stride=int(args.history_frame_stride),
         use_source_timing=bool(args.use_source_timing),
         abaqus_command=args.abaqus_command,
         write_sfc_vtk=bool(args.write_sfc_vtk),

@@ -168,6 +168,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     def fake_solve(*_args, **kwargs):
         captured["hht_alpha"] = float(kwargs["hht_alpha"])
         captured["tet4_mass_kind"] = str(kwargs["tet4_mass_kind"])
+        captured["history_frame_stride"] = int(kwargs["history_frame_stride"])
         return (
             [{"time": 0.1}],
             {
@@ -206,7 +207,9 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         drive_mode="source_inp",
         hht_alpha=-0.05,
         tet4_mass_kind="consistent",
+        history_frame_stride=3,
     )
 
     assert captured["hht_alpha"] == -0.05
     assert captured["tet4_mass_kind"] == "consistent"
+    assert captured["history_frame_stride"] == 3
