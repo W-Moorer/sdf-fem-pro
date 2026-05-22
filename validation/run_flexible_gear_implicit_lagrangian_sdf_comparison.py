@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from sfc.contact.hard_contact import (  # noqa: E402
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
+    ContactResponse,
     InternalResponse,
     MechanicsModel,
     MechanicsState,
@@ -69,6 +71,54 @@ Row = dict[str, Any]
 
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_implicit_lagrangian_sdf"
 DEFAULT_PRESSURE_STIFFNESS = 5.0e9
+
+
+def _assemble_contact_response_force_only(samples: Iterable[Any], n_nodes: int) -> ContactResponse:
+    """Assemble penalty contact force/diagnostics without the tangent blocks."""
+
+    force = np.zeros((int(n_nodes), 3), dtype=float)
+    min_gap = np.inf
+    max_penetration = 0.0
+    active_count = 0
+    normal_force = 0.0
+    energy = 0.0
+    for sample in samples:
+        gap = float(sample.gap)
+        min_gap = min(min_gap, gap)
+        penetration = max(-gap, 0.0)
+        if penetration <= 0.0:
+            continue
+        node_ids = np.asarray(sample.node_ids, dtype=np.int64)
+        weights = np.asarray(sample.shape_weights, dtype=float)
+        normal = np.asarray(sample.normal, dtype=float)
+        normal /= max(float(np.linalg.norm(normal)), 1.0e-30)
+        area = float(sample.area)
+        stiffness = float(sample.stiffness)
+        lam = stiffness * area * penetration
+        master_ids = (
+            np.asarray(sample.master_node_ids, dtype=np.int64)
+            if sample.master_node_ids is not None
+            else np.empty((0,), dtype=np.int64)
+        )
+        master_weights = (
+            np.asarray(sample.master_shape_weights, dtype=float)
+            if sample.master_shape_weights is not None
+            else np.empty((0,), dtype=float)
+        )
+        if master_ids.size != master_weights.size:
+            raise ValueError("master_node_ids and master_shape_weights must have the same length")
+        active_count += 1
+        normal_force += lam
+        max_penetration = max(max_penetration, penetration)
+        energy += 0.5 * stiffness * area * penetration * penetration
+        for local, node in enumerate(node_ids):
+            force[int(node)] += weights[local] * lam * normal
+        for local, node in enumerate(master_ids):
+            force[int(node)] -= master_weights[local] * lam * normal
+    if not np.isfinite(min_gap):
+        min_gap = 0.0
+    tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
+    return ContactResponse(force, tangent, float(min_gap), float(max_penetration), active_count, float(normal_force), float(energy))
 
 
 @dataclass(frozen=True, slots=True)
@@ -632,6 +682,60 @@ def _active_gap_jacobian_sparse(samples: list[Any], *, n_total_dofs: int) -> Any
     return coo_matrix((data, (rows, cols)), shape=(active_row, int(n_total_dofs))).tocsr()
 
 
+def _active_reduced_gap_jacobian_sparse(
+    samples: list[Any],
+    *,
+    transformation: Any,
+    free: np.ndarray,
+) -> Any:
+    """Build active contact gap Jacobian directly in reduced free DOFs."""
+
+    T = transformation.tocsr()
+    free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
+    reduced_to_free = np.full(T.shape[1], -1, dtype=np.int64)
+    reduced_to_free[free_cols] = np.arange(free_cols.size, dtype=np.int64)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    active_row = 0
+    for sample in samples:
+        if float(sample.gap) >= 0.0:
+            continue
+        normal = np.asarray(sample.normal, dtype=float).reshape(3)
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm <= 0.0:
+            raise ValueError("sample normal must be nonzero")
+        normal = normal / normal_norm
+        for sign, node_attr, weight_attr in (
+            (1.0, "node_ids", "shape_weights"),
+            (-1.0, "master_node_ids", "master_shape_weights"),
+        ):
+            node_values = getattr(sample, node_attr, None)
+            weight_values = getattr(sample, weight_attr, None)
+            if node_values is None or weight_values is None:
+                continue
+            nodes = np.asarray(node_values, dtype=np.int64).reshape(-1)
+            weights = np.asarray(weight_values, dtype=float).reshape(-1)
+            if nodes.shape != weights.shape:
+                raise ValueError("contact sample nodes and weights must match")
+            for node, weight in zip(nodes, weights, strict=True):
+                for component in range(3):
+                    coeff = float(sign) * float(weight) * float(normal[component])
+                    if coeff == 0.0:
+                        continue
+                    full_row = 3 * int(node) + component
+                    start = int(T.indptr[full_row])
+                    stop = int(T.indptr[full_row + 1])
+                    for ptr in range(start, stop):
+                        free_col = int(reduced_to_free[int(T.indices[ptr])])
+                        if free_col >= 0:
+                            rows.append(active_row)
+                            cols.append(free_col)
+                            data.append(coeff * float(T.data[ptr]))
+        active_row += 1
+    return coo_matrix((data, (rows, cols)), shape=(active_row, free_cols.size)).tocsr()
+
+
 def _solve_penalty_cg_correction_sparse(
     *,
     base_matrix_free: Any,
@@ -714,9 +818,8 @@ def _solve_reduced_penalty_sparse_cg_correction(
     positive = tangent_scale > 0.0
     if not np.any(positive):
         return None
-    j_full = _active_gap_jacobian_sparse(active_samples, n_total_dofs=int(n_total_dofs))
-    j_reduced = (j_full @ transformation).tocsr()
-    j_free = j_reduced[:, np.asarray(free, dtype=np.int64)].tocsr()
+    _ = int(n_total_dofs)  # kept for API parity with the dense fallback.
+    j_free = _active_reduced_gap_jacobian_sparse(active_samples, transformation=transformation, free=free)
     j_free = j_free[positive]
     tangent_scale = tangent_scale[positive]
     return _solve_penalty_cg_correction_sparse(
@@ -1192,6 +1295,7 @@ def solve_sfc_source_drive_pair(
         master_node_offset=0,
         quadrature="tri3",
         search_radius=max(2.5 * (pair.initial_patch_gap + 1.0e-5), 1.0e-4),
+        compiled_batch_projection=True,
     )
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
@@ -1213,7 +1317,7 @@ def solve_sfc_source_drive_pair(
     q = _project_reduced_fixed(q, fixed0, values0)
     x0 = model.X + assembly.expand_displacements(q)
     samples0 = list(contact.samples(x0))
-    contact0 = assemble_contact_response(samples0, model.n_nodes)
+    contact0 = _assemble_contact_response_force_only(samples0, model.n_nodes)
     previous = external - np.asarray(K_red @ q, dtype=float).reshape(-1) + assembly.reduce_vector(contact0.force)
     free0 = free_dofs(assembly.n_reduced_dofs, fixed0)
     if free0.size and float(np.linalg.norm(previous[free0])) > 0.0:
@@ -1275,14 +1379,15 @@ def solve_sfc_source_drive_pair(
         q_guess = _project_reduced_fixed(q_pred, fixed, values)
         residual_norm = np.inf
         iteration_count = 0
-        last_internal = _linear_reference_internal_response(model, model.X + assembly.expand_displacements(q_guess), K_full)
         last_contact = contact0
+        contact_matches_q_guess = False
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
             t_section = time.perf_counter()
             samples = list(contact.samples(x_guess))
-            last_contact = assemble_contact_response(samples, model.n_nodes)
+            last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
+            contact_matches_q_guess = True
             internal_red = np.asarray(K_red @ q_guess, dtype=float).reshape(-1)
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
@@ -1318,17 +1423,19 @@ def solve_sfc_source_drive_pair(
                 else:
                     source_sparse_cg_count += 1
             timing_linear += time.perf_counter() - t_section
-            q_guess[free] += correction_free
             iteration_count = iteration
             if float(np.linalg.norm(correction_free)) <= float(tolerance) * max(1.0, float(np.linalg.norm(q_guess[free])) if free.size else 1.0):
                 break
+            q_guess[free] += correction_free
+            contact_matches_q_guess = False
         q_new = _project_reduced_fixed(q_guess, fixed, values)
         a_new = c0 * (q_new - q_pred)
         v_new = v_pred + gamma * float(dt) * a_new
         x_new = model.X + assembly.expand_displacements(q_new)
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         last_internal = _linear_reference_internal_response(model, state.x, K_full)
-        last_contact = assemble_contact_response(contact.samples(state.x), model.n_nodes)
+        if not contact_matches_q_guess:
+            last_contact = _assemble_contact_response_force_only(contact.samples(state.x), model.n_nodes)
         previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
         row = _penalty_history_row(
             time_value=t,

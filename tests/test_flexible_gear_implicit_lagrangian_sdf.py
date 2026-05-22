@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -11,12 +12,17 @@ if str(ROOT) not in sys.path:
 
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, parse_gear_input
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
+    _active_reduced_gap_jacobian_sparse,
+    _assemble_contact_response_force_only,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
     solve_sfc_cropped_pair,
     solve_sfc_cropped_pair_hard_contact,
     solve_sfc_source_drive_pair,
 )
+from sfc.contact.hard_contact import hard_contact_gap_jacobian_from_samples
+from sfc.fem.calculix_aligned import ContactSample, assemble_contact_response
+from sfc.fem.rp_mpc import RigidHubMPC, build_rigid_hub_reduced_assembly
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
     compare_animation_manifests,
@@ -25,6 +31,71 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
+
+
+def test_source_force_only_contact_response_matches_full_force_response() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.2, 0.3, 0.5], dtype=float),
+            gap=-0.01,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=0.25,
+            stiffness=1000.0,
+            master_node_ids=np.asarray([3, 4, 5], dtype=np.int64),
+            master_shape_weights=np.asarray([0.4, 0.4, 0.2], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([1.0 / 3.0] * 3, dtype=float),
+            gap=0.02,
+            normal=np.asarray([0.0, 1.0, 0.0], dtype=float),
+            area=0.25,
+            stiffness=1000.0,
+        ),
+    ]
+
+    full = assemble_contact_response(samples, n_nodes=6)
+    fast = _assemble_contact_response_force_only(samples, n_nodes=6)
+
+    np.testing.assert_allclose(fast.force, full.force)
+    assert fast.min_gap == pytest.approx(full.min_gap)
+    assert fast.max_penetration == pytest.approx(full.max_penetration)
+    assert fast.active_count == full.active_count
+    assert fast.normal_force == pytest.approx(full.normal_force)
+    assert fast.energy == pytest.approx(full.energy)
+    assert fast.tangent.nnz == 0
+
+
+def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
+    reference_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    hub = RigidHubMPC(np.asarray([0, 1], dtype=np.int64), reference_nodes, np.zeros(3, dtype=float))
+    assembly = build_rigid_hub_reduced_assembly(reference_nodes, [hub], include_free_nodes=True)
+    sample = ContactSample(
+        node_ids=np.asarray([0, 2, 3], dtype=np.int64),
+        shape_weights=np.asarray([0.2, 0.3, 0.5], dtype=float),
+        gap=-0.01,
+        normal=np.asarray([0.2, 0.3, 0.4], dtype=float),
+        area=0.25,
+        stiffness=1000.0,
+        master_node_ids=np.asarray([1], dtype=np.int64),
+        master_shape_weights=np.asarray([1.0], dtype=float),
+    )
+    free = np.arange(assembly.n_reduced_dofs, dtype=np.int64)
+
+    _gaps, full_jacobian = hard_contact_gap_jacobian_from_samples([sample], n_total_dofs=3 * reference_nodes.shape[0])
+    projected = (full_jacobian @ assembly.transformation)[:, free]
+    direct = _active_reduced_gap_jacobian_sparse([sample], transformation=assembly.transformation, free=free)
+
+    np.testing.assert_allclose(direct.toarray(), np.asarray(projected), atol=1.0e-14)
 
 
 def test_cropped_gear_pair_is_small_and_has_supports() -> None:
