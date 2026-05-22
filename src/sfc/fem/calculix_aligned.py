@@ -389,6 +389,8 @@ def calculix_hht_effective_tangent(
 def tet4_reference_data(X: np.ndarray, elements: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return positive TET4 volumes and reference shape gradients."""
 
+    X_arr = np.asarray(X, dtype=float)
+    elements_arr = np.asarray(elements, dtype=np.int64)
     parent_grads = np.asarray(
         [
             [-1.0, -1.0, -1.0],
@@ -398,43 +400,69 @@ def tet4_reference_data(X: np.ndarray, elements: np.ndarray) -> tuple[np.ndarray
         ],
         dtype=float,
     )
-    volumes = np.zeros(elements.shape[0], dtype=float)
-    grads = np.zeros((elements.shape[0], 4, 3), dtype=float)
-    for e, element in enumerate(elements):
-        Xe = X[element]
-        Dm = np.column_stack((Xe[1] - Xe[0], Xe[2] - Xe[0], Xe[3] - Xe[0]))
-        det = float(np.linalg.det(Dm))
-        if det <= 0.0:
-            raise ValueError("TET4 reference element must have positive orientation")
-        volumes[e] = det / 6.0
-        grads[e] = parent_grads @ np.linalg.inv(Dm)
+    if elements_arr.size == 0:
+        return np.empty(0, dtype=float), np.empty((0, 4, 3), dtype=float)
+
+    Xe = X_arr[elements_arr]
+    Dm = np.stack((Xe[:, 1] - Xe[:, 0], Xe[:, 2] - Xe[:, 0], Xe[:, 3] - Xe[:, 0]), axis=2)
+    det = np.linalg.det(Dm)
+    if np.any(det <= 0.0):
+        raise ValueError("TET4 reference element must have positive orientation")
+    volumes = det / 6.0
+    grads = parent_grads[None, :, :] @ np.linalg.inv(Dm)
     return volumes, grads
+
+
+def _tet4_element_dofs_batch(elements: np.ndarray) -> np.ndarray:
+    elements_arr = np.asarray(elements, dtype=np.int64)
+    return (3 * elements_arr[:, :, None] + np.arange(3, dtype=np.int64)).reshape(elements_arr.shape[0], 12)
+
+
+def _assemble_tet4_mass_from_scalar_template(
+    n_nodes: int,
+    elements: np.ndarray,
+    volumes: np.ndarray,
+    density: float,
+    scalar_template: np.ndarray,
+    denominator: float,
+    *,
+    chunk_size: int = 32768,
+) -> csr_matrix:
+    rho = float(density)
+    if rho <= 0.0:
+        raise ValueError("density must be positive")
+    elements_arr = np.asarray(elements, dtype=np.int64)
+    volumes_arr = np.asarray(volumes, dtype=float)
+    if elements_arr.shape[0] != volumes_arr.shape[0]:
+        raise ValueError("elements and volumes must have matching lengths")
+    if elements_arr.size == 0:
+        return csr_matrix((3 * n_nodes, 3 * n_nodes), dtype=float)
+
+    block_template = np.kron(np.asarray(scalar_template, dtype=float) / float(denominator), np.eye(3))
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    data: list[np.ndarray] = []
+    for start in range(0, elements_arr.shape[0], int(chunk_size)):
+        stop = min(start + int(chunk_size), elements_arr.shape[0])
+        dofs = _tet4_element_dofs_batch(elements_arr[start:stop])
+        rr = np.broadcast_to(dofs[:, :, None], (dofs.shape[0], 12, 12)).reshape(-1)
+        cc = np.broadcast_to(dofs[:, None, :], (dofs.shape[0], 12, 12)).reshape(-1)
+        values = rho * volumes_arr[start:stop, None, None] * block_template[None, :, :]
+        rows.append(np.asarray(rr, dtype=np.int64))
+        cols.append(np.asarray(cc, dtype=np.int64))
+        data.append(np.asarray(values.reshape(-1), dtype=float))
+    return coo_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(3 * n_nodes, 3 * n_nodes),
+    ).tocsr()
 
 
 def assemble_consistent_mass(n_nodes: int, elements: np.ndarray, volumes: np.ndarray, density: float) -> csr_matrix:
     """Assemble the consistent C3D4/TET4 mass matrix."""
 
-    rho = float(density)
-    if rho <= 0.0:
-        raise ValueError("density must be positive")
-    rows: list[np.ndarray] = []
-    cols: list[np.ndarray] = []
-    data: list[np.ndarray] = []
     scalar = np.full((4, 4), 1.0, dtype=float)
     np.fill_diagonal(scalar, 2.0)
-    for element, volume in zip(elements, volumes, strict=True):
-        dofs = _element_dofs(element)
-        Me = np.kron(rho * float(volume) * scalar / 20.0, np.eye(3))
-        rr, cc = np.meshgrid(dofs, dofs, indexing="ij")
-        rows.append(rr.ravel())
-        cols.append(cc.ravel())
-        data.append(Me.ravel())
-    if not data:
-        return csr_matrix((3 * n_nodes, 3 * n_nodes), dtype=float)
-    return coo_matrix(
-        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
-        shape=(3 * n_nodes, 3 * n_nodes),
-    ).tocsr()
+    return _assemble_tet4_mass_from_scalar_template(n_nodes, elements, volumes, density, scalar, 20.0)
 
 
 def assemble_calculix_c3d4_mass(n_nodes: int, elements: np.ndarray, volumes: np.ndarray, density: float) -> csr_matrix:
@@ -447,26 +475,8 @@ def assemble_calculix_c3d4_mass(n_nodes: int, elements: np.ndarray, volumes: np.
     mass matrix used elsewhere in the standalone solver.
     """
 
-    rho = float(density)
-    if rho <= 0.0:
-        raise ValueError("density must be positive")
-    rows: list[np.ndarray] = []
-    cols: list[np.ndarray] = []
-    data: list[np.ndarray] = []
     scalar_template = np.ones((4, 4), dtype=float)
-    for element, volume in zip(elements, volumes, strict=True):
-        dofs = _element_dofs(element)
-        Me = np.kron(rho * float(volume) * scalar_template / 16.0, np.eye(3))
-        rr, cc = np.meshgrid(dofs, dofs, indexing="ij")
-        rows.append(rr.ravel())
-        cols.append(cc.ravel())
-        data.append(Me.ravel())
-    if not data:
-        return csr_matrix((3 * n_nodes, 3 * n_nodes), dtype=float)
-    return coo_matrix(
-        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
-        shape=(3 * n_nodes, 3 * n_nodes),
-    ).tocsr()
+    return _assemble_tet4_mass_from_scalar_template(n_nodes, elements, volumes, density, scalar_template, 16.0)
 
 
 _HEX8_GAUSS_POINTS = (-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0))

@@ -14,6 +14,7 @@ from sfc.fem.calculix_aligned import (
     _restore_contact_state,
     _snapshot_contact_state,
     assemble_calculix_c3d4_mass,
+    assemble_consistent_mass,
     assemble_contact_response,
     calculix_apply_acceleration_increment,
     calculix_dynamic_predictor,
@@ -25,6 +26,7 @@ from sfc.fem.calculix_aligned import (
     static_force_state,
     static_residual_and_tangent,
     stvk_internal_response,
+    tet4_reference_data,
 )
 
 
@@ -220,6 +222,49 @@ def test_tet4_model_can_use_consistent_mass_kind() -> None:
 
     assert ones_x @ (consistent.mass_matrix @ ones_x) == pytest.approx(total_mass)
     assert consistent.mass_matrix[0, 0] != pytest.approx(model.mass_matrix[0, 0])
+
+
+def test_vectorized_tet4_reference_and_mass_match_elementwise_formulas() -> None:
+    model = _block_model()
+    parent_grads = np.asarray(
+        [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    reference_volumes = []
+    reference_grads = []
+    for element in model.elements:
+        Xe = model.X[element]
+        Dm = np.column_stack((Xe[1] - Xe[0], Xe[2] - Xe[0], Xe[3] - Xe[0]))
+        reference_volumes.append(np.linalg.det(Dm) / 6.0)
+        reference_grads.append(parent_grads @ np.linalg.inv(Dm))
+
+    volumes, grads = tet4_reference_data(model.X, model.elements)
+
+    assert volumes == pytest.approx(np.asarray(reference_volumes))
+    assert grads == pytest.approx(np.asarray(reference_grads))
+
+    def dense_reference_mass(template: np.ndarray, denominator: float) -> np.ndarray:
+        matrix = np.zeros((model.n_dofs, model.n_dofs), dtype=float)
+        for element, volume in zip(model.elements, model.volumes, strict=True):
+            dofs = (3 * element[:, None] + np.arange(3, dtype=np.int64)).reshape(-1)
+            block = np.kron(model.density * float(volume) * template / denominator, np.eye(3))
+            matrix[np.ix_(dofs, dofs)] += block
+        return matrix
+
+    consistent_template = np.full((4, 4), 1.0, dtype=float)
+    np.fill_diagonal(consistent_template, 2.0)
+    calculix_template = np.ones((4, 4), dtype=float)
+
+    consistent = assemble_consistent_mass(model.n_nodes, model.elements, model.volumes, model.density)
+    calculix = assemble_calculix_c3d4_mass(model.n_nodes, model.elements, model.volumes, model.density)
+
+    assert consistent.toarray() == pytest.approx(dense_reference_mass(consistent_template, 20.0))
+    assert calculix.toarray() == pytest.approx(dense_reference_mass(calculix_template, 16.0))
 
 
 def test_stvk_tangent_matches_directional_finite_difference() -> None:
