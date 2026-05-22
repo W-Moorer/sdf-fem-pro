@@ -425,3 +425,54 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 4. 再比较完整应力/应变云图，而不是仅用单一分位数判断场误差。
 
 PVD 时间戳已经同步为 `0:2e-5:1.6e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 160，可继续向 `0.05 s` 推进。
+
+## 更新：续跑到 `1.8e-3 s`
+
+SFC 已继续从同一个 checkpoint 续跑到 `1.8e-3 s`。Abaqus penalty 对照也使用同一 `gear_contact.inp`、同一 `dt=1e-5 s`、同一 `frame_stride=2` 跑到 `1.8e-3 s`。两边均使用线性罚函数接触；VTK 均为隔帧保存。
+
+输出目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0018`
+- 独立 manifest 对比：`results/source_gear_penalty_full_stride2_match_step_0018_alignment`
+
+独立 manifest 对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_manifest_alignment.py `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0018\abaqus_vtk\abaqus_manifest.csv `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0018_alignment
+```
+
+`1.8e-3 s` 阶段结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 1.8e-3 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 91 |
+| Abaqus VTK 帧数 | 91 |
+| SFC 续跑 wall time | 49.230 s |
+| Abaqus analysis wall time | 2920.718 s |
+| Abaqus VTK export wall time | 1363.377 s |
+| 末帧 displacement magnitude rel. error | 0.299% |
+| 末帧 p95 node-averaged von Mises rel. error | 62.688% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 62.688% |
+| 末帧 max node-averaged von Mises rel. error | 34.996% |
+| 末帧 mean node-averaged von Mises rel. error | 60.819% |
+| 末帧 gear 1 prescribed rotation rel. error | 3.39e-6% |
+| 末帧 gear 2 rotation rel. error | 3.043% |
+| 末帧 gear 2 angular velocity rel. error | 2.151% |
+| 末帧 object 1 max displacement rel. error | 0.0036% |
+| 末帧 object 2 max displacement rel. error | 0.299% |
+
+`1.8e-3 s` 窗口进一步确认：位移曲线已经非常接近 Abaqus penalty 参考，源 deck 规定的 gear 1 转动几乎完全一致，gear 2 的角速度误差仍在约 2% 水平。与此同时，应力/应变的 p95 与 mean 误差继续偏大，且局部 object 1 的 max node-averaged stress 在该瞬态出现异常高的相对误差。这个状态不应再归因于 SFC 应力动画闪动；当前输出已经使用固定色标脚本和 node-averaged 场。后续需要单独做应力口径诊断：
+
+1. 比较 Abaqus 与 SFC 的元素积分点应力、单元中心应力、节点平均应力三种口径；
+2. 输出接触区 active samples / contact pressure 云图，确认应力偏差是否来自压力分布而非体响应；
+3. 检查 object 1 齿根/齿面局部峰值是否由 nodal averaging 和齿面边缘采样造成；
+4. 在完成上述诊断前，论文主曲线应优先展示位移/转角/角速度和完整云图，避免用单一 p95 stress 指标代表全部物理对齐。
+
+PVD 时间戳已经同步为 `0:2e-5:1.8e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 180，可继续向 `0.05 s` 推进。
