@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import re
 import shutil
@@ -202,6 +203,18 @@ def _write_csv(path: Path, rows: list[Row], fieldnames: list[str] | None = None)
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _elastic_strain_norm_from_stress(stress: np.ndarray, *, young: float, poisson: float) -> np.ndarray:
@@ -1542,6 +1555,85 @@ def _project_reduced_fixed(q: np.ndarray, fixed: np.ndarray, values: np.ndarray)
     return out
 
 
+def _write_source_drive_checkpoint(
+    path: Path,
+    *,
+    step: int,
+    q: np.ndarray,
+    v: np.ndarray,
+    a: np.ndarray,
+    previous: np.ndarray,
+    rows: list[Row],
+    vtk_manifest_rows: list[Row],
+    vtk_frame_index: int,
+    timing_residual: float,
+    timing_linear: float,
+    timing_history: float,
+    timing_vtk: float,
+    timing_source_base_lu: float,
+    source_sparse_cg_count: int,
+    source_sparse_cg_iterations: int,
+    source_sparse_cg_base_lu_preconditioner: int,
+    source_direct_fallback_count: int,
+) -> None:
+    """Persist accepted source-drive state for exact fixed-step continuation."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("wb") as handle:
+        np.savez_compressed(
+            handle,
+            version=np.asarray([1], dtype=np.int64),
+            step=np.asarray([int(step)], dtype=np.int64),
+            q=np.asarray(q, dtype=float),
+            v=np.asarray(v, dtype=float),
+            a=np.asarray(a, dtype=float),
+            previous=np.asarray(previous, dtype=float),
+            rows_json=np.asarray([json.dumps(rows, default=_json_default)], dtype=object),
+            vtk_manifest_json=np.asarray([json.dumps(vtk_manifest_rows, default=_json_default)], dtype=object),
+            vtk_frame_index=np.asarray([int(vtk_frame_index)], dtype=np.int64),
+            timing_residual=np.asarray([float(timing_residual)], dtype=float),
+            timing_linear=np.asarray([float(timing_linear)], dtype=float),
+            timing_history=np.asarray([float(timing_history)], dtype=float),
+            timing_vtk=np.asarray([float(timing_vtk)], dtype=float),
+            timing_source_base_lu=np.asarray([float(timing_source_base_lu)], dtype=float),
+            source_sparse_cg_count=np.asarray([int(source_sparse_cg_count)], dtype=np.int64),
+            source_sparse_cg_iterations=np.asarray([int(source_sparse_cg_iterations)], dtype=np.int64),
+            source_sparse_cg_base_lu_preconditioner=np.asarray(
+                [int(source_sparse_cg_base_lu_preconditioner)], dtype=np.int64
+            ),
+            source_direct_fallback_count=np.asarray([int(source_direct_fallback_count)], dtype=np.int64),
+        )
+    tmp.replace(path)
+
+
+def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
+    """Load a source-drive checkpoint written after an accepted step."""
+
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with np.load(path, allow_pickle=True) as data:
+        return {
+            "step": int(data["step"][0]),
+            "q": np.asarray(data["q"], dtype=float),
+            "v": np.asarray(data["v"], dtype=float),
+            "a": np.asarray(data["a"], dtype=float),
+            "previous": np.asarray(data["previous"], dtype=float),
+            "rows": json.loads(str(data["rows_json"][0])),
+            "vtk_manifest_rows": json.loads(str(data["vtk_manifest_json"][0])),
+            "vtk_frame_index": int(data["vtk_frame_index"][0]),
+            "timing_residual": float(data["timing_residual"][0]),
+            "timing_linear": float(data["timing_linear"][0]),
+            "timing_history": float(data["timing_history"][0]),
+            "timing_vtk": float(data["timing_vtk"][0]),
+            "timing_source_base_lu": float(data["timing_source_base_lu"][0]),
+            "source_sparse_cg_count": int(data["source_sparse_cg_count"][0]),
+            "source_sparse_cg_iterations": int(data["source_sparse_cg_iterations"][0]),
+            "source_sparse_cg_base_lu_preconditioner": int(data["source_sparse_cg_base_lu_preconditioner"][0]),
+            "source_direct_fallback_count": int(data["source_direct_fallback_count"][0]),
+        }
+
+
 def solve_sfc_source_drive_pair(
     pair: CroppedGearPair,
     *,
@@ -1563,6 +1655,9 @@ def solve_sfc_source_drive_pair(
     vtk_stem: str = "sfc",
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
+    source_checkpoint_path: Path | None = None,
+    resume_source_checkpoint: bool = False,
+    source_checkpoint_stride: int = 10,
 ) -> tuple[list[Row], Row]:
     """Solve the source ``gear_contact.inp`` RP-drive case with SFC contact.
 
@@ -1644,7 +1739,55 @@ def solve_sfc_source_drive_pair(
     vtk_manifest_rows: list[Row] = []
     vtk_static_blocks = _build_sfc_tet4_vtk_static_blocks(model, element_object_ids) if vtk_enabled else None
     postprocess_label = str(source_stress_postprocess)
-    if vtk_enabled and vtk_dir is not None:
+    rows: list[Row] = []
+    vtk_frame_index = 1
+    timing_residual = 0.0
+    timing_linear = 0.0
+    timing_history = 0.0
+    timing_vtk = 0.0
+    source_sparse_cg_count = 0
+    source_sparse_cg_iterations = 0
+    source_sparse_cg_base_lu_preconditioner = 0
+    source_direct_fallback_count = 0
+    timing_source_base_lu = 0.0
+    checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
+    start_step = 0
+    if bool(resume_source_checkpoint):
+        if checkpoint_path is None:
+            raise ValueError("resume_source_checkpoint requires source_checkpoint_path")
+        checkpoint = _load_source_drive_checkpoint(checkpoint_path)
+        start_step = int(checkpoint["step"])
+        if start_step > steps:
+            raise ValueError("checkpoint step is beyond requested duration")
+        q = np.asarray(checkpoint["q"], dtype=float).copy()
+        v = np.asarray(checkpoint["v"], dtype=float).copy()
+        a = np.asarray(checkpoint["a"], dtype=float).copy()
+        previous = np.asarray(checkpoint["previous"], dtype=float).copy()
+        rows = list(checkpoint["rows"])
+        vtk_manifest_rows = list(checkpoint["vtk_manifest_rows"])
+        vtk_frame_index = int(checkpoint["vtk_frame_index"])
+        timing_residual = float(checkpoint["timing_residual"])
+        timing_linear = float(checkpoint["timing_linear"])
+        timing_history = float(checkpoint["timing_history"])
+        timing_vtk = float(checkpoint["timing_vtk"])
+        timing_source_base_lu = float(checkpoint["timing_source_base_lu"])
+        source_sparse_cg_count = int(checkpoint["source_sparse_cg_count"])
+        source_sparse_cg_iterations = int(checkpoint["source_sparse_cg_iterations"])
+        source_sparse_cg_base_lu_preconditioner = int(checkpoint["source_sparse_cg_base_lu_preconditioner"])
+        source_direct_fallback_count = int(checkpoint["source_direct_fallback_count"])
+        state = MechanicsState(
+            model.X + assembly.expand_displacements(q),
+            assembly.expand_displacements(v),
+            assembly.expand_displacements(a),
+            time=float(start_step) * float(dt),
+        )
+        if vtk_enabled and vtk_dir is not None:
+            vtk_datasets = [
+                (float(row.get("time", 0.0) or 0.0), vtk_dir / str(row.get("vtk_file", "")))
+                for row in vtk_manifest_rows
+                if row.get("vtk_file")
+            ]
+    if vtk_enabled and vtk_dir is not None and not bool(resume_source_checkpoint):
         vtk_dir.mkdir(parents=True, exist_ok=True)
         for stale in vtk_dir.glob(f"{vtk_stem}_*.vtk"):
             stale.unlink()
@@ -1691,19 +1834,8 @@ def solve_sfc_source_drive_pair(
     base_free = None
     base_lu_cache: list[Any] = [None]
     start = time.perf_counter()
-    rows: list[Row] = []
-    vtk_frame_index = 1
-    timing_residual = 0.0
-    timing_linear = 0.0
-    timing_history = 0.0
-    timing_vtk = 0.0
-    source_sparse_cg_count = 0
-    source_sparse_cg_iterations = 0
-    source_sparse_cg_base_lu_preconditioner = 0
-    source_direct_fallback_count = 0
     base_preconditioner_lu: Any | None = None
-    timing_source_base_lu = 0.0
-    for step in range(1, steps + 1):
+    for step in range(start_step + 1, steps + 1):
         t = step * float(dt)
         fixed, values = _source_drive_fixed_reduced_dofs(assembly, time_value=t, omega_z=gear1_angular_velocity_z)
         free = free_dofs(assembly.n_reduced_dofs, fixed)
@@ -1897,6 +2029,27 @@ def solve_sfc_source_drive_pair(
             vtk_frame_index += 1
             timing_vtk += time.perf_counter() - t_section
         q, v, a = q_new, v_new, a_new
+        if checkpoint_path is not None and (step % max(1, int(source_checkpoint_stride)) == 0 or step == steps):
+            _write_source_drive_checkpoint(
+                checkpoint_path,
+                step=step,
+                q=q,
+                v=v,
+                a=a,
+                previous=previous,
+                rows=rows,
+                vtk_manifest_rows=vtk_manifest_rows,
+                vtk_frame_index=vtk_frame_index,
+                timing_residual=timing_residual,
+                timing_linear=timing_linear,
+                timing_history=timing_history,
+                timing_vtk=timing_vtk,
+                timing_source_base_lu=timing_source_base_lu,
+                source_sparse_cg_count=source_sparse_cg_count,
+                source_sparse_cg_iterations=source_sparse_cg_iterations,
+                source_sparse_cg_base_lu_preconditioner=source_sparse_cg_base_lu_preconditioner,
+                source_direct_fallback_count=source_direct_fallback_count,
+            )
     wall = time.perf_counter() - start
     summary = {
         "sfc_wall_seconds": float(wall),
@@ -1933,6 +2086,9 @@ def solve_sfc_source_drive_pair(
         "source_sparse_cg_iterations": int(source_sparse_cg_iterations),
         "source_sparse_cg_base_lu_preconditioner": int(source_sparse_cg_base_lu_preconditioner),
         "source_direct_fallback_count": int(source_direct_fallback_count),
+        "source_resume_from_step": int(start_step),
+        "source_checkpoint_path": "" if checkpoint_path is None else str(checkpoint_path),
+        "source_checkpoint_stride": int(max(1, int(source_checkpoint_stride))),
         "status": "completed",
     }
     if vtk_enabled and vtk_dir is not None:

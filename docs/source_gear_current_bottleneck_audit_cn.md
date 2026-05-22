@@ -614,3 +614,111 @@ p95 stress/strain 末帧误差推高到约 `55.26%`，明显差于默认 `linear
 的约 `20.83%`。因此，本轮没有把有限 StVK 输出强行设为默认；后续若要真正使用该口径，
 必须同步把 source-drive 求解残差、RP-MPC 有限转动虚功和材料 tangent 改为一致的
 `nlgeom=YES` 形式，而不能只替换后处理。
+
+## 更新：source-drive checkpoint/resume 支持
+
+完整源齿轮工况为 `0.05 s / 1e-5 s = 5000` 个固定时间步。按当前 100-step
+实测速度，SFC 全程需要数小时；一次性运行风险较高，也不利于中途检查 VTK 云图。
+因此 source-drive runner 新增 checkpoint/resume：
+
+```text
+--source-checkpoint PATH
+--source-checkpoint-stride N
+--resume-source-checkpoint
+```
+
+checkpoint 保存的是 accepted reduced state：
+
+- `q, v, a`
+- HHT previous balance `previous`
+- accepted step index
+- 已生成 history rows
+- 已生成 VTK manifest rows
+- VTK frame index
+- 已累计的 solver timing / CG counters
+
+恢复时会重建模型、矩阵、base-LU preconditioner 和 contact geometry，然后从
+`checkpoint_step + 1` 继续固定步推进；不会改变 `dt`、接触 penalty law、SDF/contact
+查询、时间积分或输出应力/应变口径。
+
+测试：
+
+```text
+pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py tests\test_flexible_gear_source_penalty_deck.py -k "not abaqus"
+24 passed, 4 deselected
+```
+
+其中新增测试用 cropped source-drive 工况验证：
+
+```text
+continuous 2-step result == 1-step checkpoint + resume to 2-step result
+```
+
+实际 full-active source gear CLI smoke：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --duration 0.00001 `
+  --dt 0.00001 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 1 `
+  --history-frame-stride 1 `
+  --source-checkpoint results\source_gear_checkpoint_resume_smoke\source_drive_checkpoint.npz `
+  --source-checkpoint-stride 1 `
+  --out-dir results\source_gear_checkpoint_resume_smoke
+
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --duration 0.00002 `
+  --dt 0.00001 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 1 `
+  --history-frame-stride 1 `
+  --source-checkpoint results\source_gear_checkpoint_resume_smoke\source_drive_checkpoint.npz `
+  --resume-source-checkpoint `
+  --source-checkpoint-stride 1 `
+  --out-dir results\source_gear_checkpoint_resume_smoke
+```
+
+smoke 结果：
+
+- resume source step: `1`
+- final requested duration: `2e-5 s`
+- SFC VTK frame count: `3`
+- PVD frame times: `0, 1e-5, 2e-5 s`
+- history row count: `2`
+- final max displacement norm: `2.649183960150182e-05`
+- final min gap: `-7.862271304339353e-04`
+- final normal force: `22.290682754313437`
+
+因此下一轮可以用同一机制分段执行：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --match-source-step `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --source-checkpoint results\source_gear_penalty_full_match_step\source_drive_checkpoint.npz `
+  --source-checkpoint-stride 100 `
+  --out-dir results\source_gear_penalty_full_match_step
+```
+
+若中断，使用相同命令并追加：
+
+```text
+--resume-source-checkpoint
+```

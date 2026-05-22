@@ -332,6 +332,62 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "radian" in text
 
 
+def test_source_drive_checkpoint_resume_matches_continuous_short_run(tmp_path: Path) -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+    checkpoint = tmp_path / "source_drive_checkpoint.npz"
+
+    continuous_history, _continuous_summary = solve_sfc_source_drive_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=2.0e-5,
+        dt=1.0e-5,
+        gear1_angular_velocity_z=model.gear1_angular_velocity_z,
+        gear2_torque_z=model.gear2_torque_z,
+        history_frame_stride=1,
+    )
+    first_history, first_summary = solve_sfc_source_drive_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=1.0e-5,
+        dt=1.0e-5,
+        gear1_angular_velocity_z=model.gear1_angular_velocity_z,
+        gear2_torque_z=model.gear2_torque_z,
+        history_frame_stride=1,
+        source_checkpoint_path=checkpoint,
+        source_checkpoint_stride=1,
+    )
+    resumed_history, resumed_summary = solve_sfc_source_drive_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=2.0e-5,
+        dt=1.0e-5,
+        gear1_angular_velocity_z=model.gear1_angular_velocity_z,
+        gear2_torque_z=model.gear2_torque_z,
+        history_frame_stride=1,
+        source_checkpoint_path=checkpoint,
+        resume_source_checkpoint=True,
+        source_checkpoint_stride=1,
+    )
+
+    assert checkpoint.exists()
+    assert len(first_history) == 1
+    assert len(resumed_history) == 2
+    assert int(first_summary["source_resume_from_step"]) == 0
+    assert int(resumed_summary["source_resume_from_step"]) == 1
+    for key in ("rp1_rotation_z", "rp2_rotation_z", "max_displacement_norm", "min_gap", "normal_force"):
+        assert float(resumed_history[-1][key]) == pytest.approx(float(continuous_history[-1][key]), rel=1.0e-10, abs=1.0e-12)
+
+
 def test_source_drive_corotated_visual_postprocess_removes_rigid_rotation_stress() -> None:
     X = np.asarray(
         [

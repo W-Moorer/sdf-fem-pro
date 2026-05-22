@@ -612,6 +612,9 @@ def run_full_gear(
     vtk_frame_stride: int = 1,
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
+    source_checkpoint_path: Path | None = None,
+    resume_source_checkpoint: bool = False,
+    source_checkpoint_stride: int = 10,
     export_abaqus_vtk: bool = False,
     abaqus_vtk_manifest: Path | None = None,
 ) -> tuple[list[Row], Row]:
@@ -653,6 +656,9 @@ def run_full_gear(
             vtk_stem="sfc",
             vtk_include_tensors=bool(vtk_include_tensors),
             source_stress_postprocess=str(source_stress_postprocess),
+            source_checkpoint_path=source_checkpoint_path,
+            resume_source_checkpoint=bool(resume_source_checkpoint),
+            source_checkpoint_stride=int(source_checkpoint_stride),
         )
     elif mode == "hard":
         history, summary = solve_sfc_cropped_pair_hard_contact(
@@ -829,6 +835,18 @@ def main(argv: list[str] | None = None) -> int:
         default="linear_corotated",
         help="Source-drive SFC stress/strain output mode; does not alter the solve.",
     )
+    parser.add_argument(
+        "--source-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional source-drive checkpoint path for fixed-step continuation.",
+    )
+    parser.add_argument(
+        "--resume-source-checkpoint",
+        action="store_true",
+        help="Resume source-drive SFC solve from --source-checkpoint.",
+    )
+    parser.add_argument("--source-checkpoint-stride", type=int, default=10)
     parser.add_argument("--export-abaqus-vtk", action="store_true")
     parser.add_argument(
         "--abaqus-vtk-manifest",
@@ -861,6 +879,9 @@ def main(argv: list[str] | None = None) -> int:
         vtk_frame_stride=int(args.vtk_frame_stride),
         vtk_include_tensors=not bool(args.vtk_scalars_only),
         source_stress_postprocess=str(args.source_stress_postprocess),
+        source_checkpoint_path=args.source_checkpoint,
+        resume_source_checkpoint=bool(args.resume_source_checkpoint),
+        source_checkpoint_stride=int(args.source_checkpoint_stride),
         export_abaqus_vtk=bool(args.export_abaqus_vtk),
         abaqus_vtk_manifest=args.abaqus_vtk_manifest,
     )

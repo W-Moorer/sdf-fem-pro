@@ -170,6 +170,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         captured["tet4_mass_kind"] = str(kwargs["tet4_mass_kind"])
         captured["history_frame_stride"] = int(kwargs["history_frame_stride"])
         captured["source_stress_postprocess"] = str(kwargs["source_stress_postprocess"])
+        captured["source_checkpoint_stride"] = int(kwargs["source_checkpoint_stride"])
         return (
             [{"time": 0.1}],
             {
@@ -210,9 +211,13 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         tet4_mass_kind="consistent",
         history_frame_stride=3,
         source_stress_postprocess="finite_stvk_visual",
+        source_checkpoint_path=tmp_path / "checkpoint.npz",
+        resume_source_checkpoint=True,
+        source_checkpoint_stride=7,
     )
 
     assert captured["hht_alpha"] == -0.05
     assert captured["tet4_mass_kind"] == "consistent"
     assert captured["history_frame_stride"] == 3
     assert captured["source_stress_postprocess"] == "finite_stvk_visual"
+    assert captured["source_checkpoint_stride"] == 7
