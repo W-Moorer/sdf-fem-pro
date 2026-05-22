@@ -16,7 +16,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     solve_sfc_cropped_pair,
     solve_sfc_cropped_pair_hard_contact,
 )
-from validation.run_flexible_gear_full_lagrangian_sdf_comparison import build_full_active_pair
+from validation.run_flexible_gear_full_lagrangian_sdf_comparison import build_full_active_pair, write_animation_color_ranges
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
@@ -136,6 +136,7 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     assert second.exists()
     assert int(summary["sfc_vtk_frame_count"]) == 2
     assert pvd.read_text(encoding="utf-8").count("<DataSet") == 2
+    assert "max_displacement_magnitude" in manifest.read_text(encoding="utf-8")
     text = second.read_text(encoding="ascii")
     assert "DATASET UNSTRUCTURED_GRID" in text
     assert "VECTORS U float" in text
@@ -166,10 +167,38 @@ def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> Non
     assert "G1_RP, 4, 5" in text
     assert "*Boundary, amplitude=RAMP" in text
     assert "*Dynamic, application=MODERATE DISSIPATION" in text
+    assert "** Rotational boundary values are radians." in text
     assert "G1_RP, 6, 6, 4.000000000000e-03" in text
     assert "S, E, LE" in text
     assert "CPRESS" not in text
     assert "COPEN" not in text
+
+
+def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path) -> None:
+    sfc_manifest = tmp_path / "sfc_manifest.csv"
+    abaqus_manifest = tmp_path / "abaqus_manifest.csv"
+    sfc_manifest.write_text(
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm\n"
+        "0,0,sfc_0000.vtk,1,1,0.1,5.0,0.02\n"
+        "1,1,sfc_0001.vtk,1,1,0.2,7.0,0.03\n",
+        encoding="utf-8",
+    )
+    abaqus_manifest.write_text(
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.15,6.0,0.01\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.25,8.0,0.04\n",
+        encoding="utf-8",
+    )
+
+    ranges = write_animation_color_ranges(tmp_path, sfc_manifest=sfc_manifest, abaqus_manifest=abaqus_manifest)
+    text = ranges.read_text(encoding="utf-8")
+
+    assert "displacement_magnitude" in text
+    assert "von_mises" in text
+    assert "strain_norm" in text
+    assert "0.25" in text
+    assert "8.0" in text
+    assert "0.04" in text
 
 
 def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:

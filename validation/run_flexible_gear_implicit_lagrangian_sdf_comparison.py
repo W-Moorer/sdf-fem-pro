@@ -172,6 +172,7 @@ def _write_sfc_tet4_vtk_frame(
     points = np.asarray(state.x, dtype=float)
     reference = np.asarray(model.X, dtype=float)
     displacement = points - reference
+    displacement_norm = np.linalg.norm(displacement, axis=1)
     velocity = np.asarray(state.v, dtype=float)
     elements = np.asarray(model.elements, dtype=np.int64)
     object_ids = np.asarray(element_object_ids, dtype=np.int64).reshape(-1)
@@ -206,7 +207,7 @@ def _write_sfc_tet4_vtk_frame(
             handle.write(f"{vx:.9e} {vy:.9e} {vz:.9e}\n")
         handle.write("SCALARS displacement_magnitude float 1\n")
         handle.write("LOOKUP_TABLE default\n")
-        for value in np.linalg.norm(displacement, axis=1):
+        for value in displacement_norm:
             handle.write(f"{float(value):.9e}\n")
         handle.write(f"CELL_DATA {elements.shape[0]}\n")
         handle.write("SCALARS object_id int 1\n")
@@ -234,6 +235,7 @@ def _write_sfc_tet4_vtk_frame(
         "vtk_file": path.name,
         "node_count": int(points.shape[0]),
         "element_count": int(elements.shape[0]),
+        "max_displacement_magnitude": float(np.max(displacement_norm)) if displacement_norm.size else 0.0,
         "max_von_mises": float(np.max(von_mises)) if von_mises.size else 0.0,
         "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
     }
@@ -1754,6 +1756,7 @@ def _write_abaqus_alignment_deck(
             "*Step, name=alignment, nlgeom=YES, inc=2000",
             "*Dynamic, application=MODERATE DISSIPATION",
             f"{dt:.12e}, {duration:.12e}, {min(float(dt) * 1.0e-4, 1.0e-8):.12e}, {dt:.12e}",
+            f"** Rotational boundary values are radians. Final G1_RP UR6 = {final_rotation_z:.12e} rad.",
             "*Boundary",
             "G2_RP, 1, 6",
             "G1_RP, 4, 5",
@@ -2369,7 +2372,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=float, default=2.0e-3)
     parser.add_argument("--dt", type=float, default=1.0e-3)
     parser.add_argument("--overclosure", type=float, default=3.0e-4)
-    parser.add_argument("--rotation-rate-z", type=float, default=2.0)
+    parser.add_argument(
+        "--rotation-rate-z",
+        "--rotation-rate-z-rad-s",
+        dest="rotation_rate_z",
+        type=float,
+        default=2.0,
+        help="Prescribed G1 RP angular velocity about z in radians per second.",
+    )
     parser.add_argument("--pressure-stiffness", type=float, default=DEFAULT_PRESSURE_STIFFNESS)
     parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="penalty")
     parser.add_argument(

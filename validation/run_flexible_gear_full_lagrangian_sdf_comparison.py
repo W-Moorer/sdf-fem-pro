@@ -47,6 +47,70 @@ Row = dict[str, Any]
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_full_lagrangian_sdf"
 
 
+def _read_csv_rows(path: Path) -> list[Row]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _max_column(rows: list[Row], column: str) -> float:
+    values: list[float] = []
+    for row in rows:
+        value = row.get(column, "")
+        if value in ("", None):
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return max(values, default=0.0)
+
+
+def write_animation_color_ranges(
+    out_dir: Path,
+    *,
+    sfc_manifest: Path | None = None,
+    abaqus_manifest: Path | None = None,
+) -> Path:
+    """Write fixed ParaView color ranges for the SFC/Abaqus animation series."""
+
+    sfc_rows = _read_csv_rows(sfc_manifest or (out_dir / "sfc_vtk" / "sfc_manifest.csv"))
+    abaqus_rows = _read_csv_rows(abaqus_manifest or (out_dir / "abaqus_vtk" / "abaqus_manifest.csv"))
+    range_rows: list[Row] = [
+        {
+            "field": "displacement_magnitude",
+            "recommended_min": 0.0,
+            "recommended_max": max(
+                _max_column(sfc_rows, "max_displacement_magnitude"),
+                _max_column(abaqus_rows, "max_displacement_magnitude"),
+            ),
+            "sfc_column": "max_displacement_magnitude",
+            "abaqus_column": "max_displacement_magnitude",
+            "paraview_note": "Use this fixed range for both SFC and Abaqus; do not rescale every timestep.",
+        },
+        {
+            "field": "von_mises",
+            "recommended_min": 0.0,
+            "recommended_max": max(_max_column(sfc_rows, "max_von_mises"), _max_column(abaqus_rows, "max_von_mises")),
+            "sfc_column": "max_von_mises",
+            "abaqus_column": "max_von_mises",
+            "paraview_note": "Fixed global range prevents stress-cloud flicker caused by per-frame color rescaling.",
+        },
+        {
+            "field": "strain_norm",
+            "recommended_min": 0.0,
+            "recommended_max": max(_max_column(sfc_rows, "max_strain_norm"), _max_column(abaqus_rows, "max_le_norm")),
+            "sfc_column": "max_strain_norm",
+            "abaqus_column": "max_le_norm",
+            "paraview_note": "SFC field is named strain_norm; Abaqus field is named logarithmic_strain_norm.",
+        },
+    ]
+    path = out_dir / "animation_fixed_color_ranges.csv"
+    _write_csv(path, range_rows)
+    return path
+
+
 def _selected_surface_entries_for_full_mesh(
     mesh: GearMesh,
     entries: tuple[tuple[int, str], ...],
@@ -187,6 +251,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- final p95 equivalent elastic strain: {float(summary.get('final_p95_equivalent_elastic_strain', 0.0)):.6e}",
         f"- final RP reaction norm: {float(summary.get('final_rp_force_norm', 0.0)):.6e}",
         f"- final min gap: {float(summary.get('final_min_gap', 0.0)):.6e}",
+        f"- rotation rate about z: {float(summary.get('rotation_rate_z_rad_per_s', 0.0)):.6e} rad/s",
+        f"- final rotation about z: {float(summary.get('final_rotation_z_rad', 0.0)):.6e} rad",
         f"- history CSV: `{history_path.name}`",
     ]
     if summary.get("sfc_vtk_pvd"):
@@ -216,6 +282,16 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
                 "",
                 f"- Abaqus VTK PVD: `{summary.get('abaqus_vtk_pvd')}`",
                 f"- Abaqus VTK frame count: {int(summary.get('abaqus_vtk_frame_count', 0))}",
+            ]
+        )
+    if summary.get("animation_color_ranges"):
+        lines.extend(
+            [
+                "",
+                "## ParaView Color Ranges",
+                "",
+                f"- fixed color ranges: `{Path(str(summary.get('animation_color_ranges'))).name}`",
+                "- Use fixed global ranges for stress/strain animations; per-frame auto-rescaling can look like stress flicker.",
             ]
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -342,6 +418,8 @@ def run_full_gear(
         summary["final_p95_von_mises"] = float(history[-1].get("p95_von_mises", 0.0))
         summary["final_p95_equivalent_elastic_strain"] = float(history[-1].get("p95_equivalent_elastic_strain", 0.0))
     summary["active_patch_radius_factor"] = float(active_patch_radius_factor)
+    summary["rotation_rate_z_rad_per_s"] = float(rotation_rate_z)
+    summary["final_rotation_z_rad"] = float(rotation_rate_z) * float(duration)
     history_path = out_dir / "sfc_full_gear_lagrangian_sdf_history.csv"
     _write_csv(history_path, history)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
@@ -386,6 +464,14 @@ def run_full_gear(
                 include_tensors=bool(vtk_include_tensors),
             )
         )
+    if summary.get("sfc_vtk_manifest") or summary.get("abaqus_vtk_manifest"):
+        summary["animation_color_ranges"] = str(
+            write_animation_color_ranges(
+                out_dir,
+                sfc_manifest=Path(str(summary["sfc_vtk_manifest"])) if summary.get("sfc_vtk_manifest") else None,
+                abaqus_manifest=Path(str(summary["abaqus_vtk_manifest"])) if summary.get("abaqus_vtk_manifest") else None,
+            )
+        )
     write_full_summary(out_dir / "full_gear_lagrangian_sdf_summary.md", summary, history_path, abaqus_row=abaqus_row)
     _write_csv(out_dir / "full_gear_lagrangian_sdf_summary.csv", [summary])
     return history, summary
@@ -400,7 +486,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=float, default=2.5e-4)
     parser.add_argument("--dt", type=float, default=2.5e-4)
     parser.add_argument("--overclosure", type=float, default=1.0e-5)
-    parser.add_argument("--rotation-rate-z", type=float, default=0.0)
+    parser.add_argument(
+        "--rotation-rate-z",
+        "--rotation-rate-z-rad-s",
+        dest="rotation_rate_z",
+        type=float,
+        default=0.0,
+        help="Prescribed G1 RP angular velocity about z in radians per second.",
+    )
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
     parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="hard")
     parser.add_argument("--hard-max-iterations", type=int, default=4)

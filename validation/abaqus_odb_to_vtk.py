@@ -270,6 +270,7 @@ def export_odb_to_vtk(
                 velocity.append(v)
             stress = [stress_by_element.get(key, zero_tensor) for key in cell_keys]
             strain = [strain_by_element.get(key, zero_tensor) for key in cell_keys]
+            displacement_norm = [math.sqrt(ux * ux + uy * uy + uz * uz) for ux, uy, uz in displacement]
             frame_path = out_dir / f"{stem}_{frame_index:04d}.vtk"
             _write_vtk_frame(
                 frame_path,
@@ -293,6 +294,7 @@ def export_odb_to_vtk(
                     "vtk_file": frame_path.name,
                     "node_count": len(points),
                     "element_count": len(cells),
+                    "max_displacement_magnitude": max(displacement_norm, default=0.0),
                     "max_von_mises": max((_von_mises_from_symmetric6(value) for value in stress), default=0.0),
                     "max_le_norm": max((_tensor_norm_from_symmetric6(value) for value in strain), default=0.0),
                 }
@@ -311,6 +313,7 @@ def export_odb_to_vtk(
                     "vtk_file",
                     "node_count",
                     "element_count",
+                    "max_displacement_magnitude",
                     "max_von_mises",
                     "max_le_norm",
                 ],
