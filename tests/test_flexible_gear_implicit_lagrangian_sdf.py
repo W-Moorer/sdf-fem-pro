@@ -320,6 +320,8 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert float(history[-1]["rp1_rotation_z"]) == pytest.approx(model.gear1_angular_velocity_z * 1.0e-5)
     assert float(history[-1]["gear2_torque_z"]) == pytest.approx(model.gear2_torque_z)
     assert int(summary["reduced_dofs"]) > 0
+    assert float(summary["timing_source_base_lu_seconds"]) >= 0.0
+    assert int(summary["source_sparse_cg_base_lu_preconditioner"]) >= 0
     assert summary["source_rotation_unit"] == "radian"
     manifest = Path(str(summary["sfc_vtk_manifest"]))
     assert manifest.exists()

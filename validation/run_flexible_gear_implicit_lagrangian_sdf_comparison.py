@@ -908,6 +908,7 @@ def _solve_penalty_cg_correction_sparse(
     tangent_scale: np.ndarray,
     tolerance: float,
     stats: dict[str, Any] | None = None,
+    base_lu: Any | None = None,
 ) -> np.ndarray | None:
     """Solve ``(K + J.T W J) x = rhs`` with sparse matrix-free CG."""
 
@@ -931,7 +932,16 @@ def _solve_penalty_cg_correction_sparse(
         diag = diag + contact_diag
     safe_diag = np.where(np.abs(diag) > 1.0e-30, diag, 1.0)
 
-    preconditioner = LinearOperator((b.size, b.size), matvec=lambda value: np.asarray(value, dtype=float) / safe_diag, dtype=float)
+    preconditioner_kind = "diagonal"
+    if base_lu is not None:
+        preconditioner = LinearOperator(
+            (b.size, b.size),
+            matvec=lambda value: np.asarray(base_lu.solve(np.asarray(value, dtype=float)), dtype=float).reshape(-1),
+            dtype=float,
+        )
+        preconditioner_kind = "base_lu"
+    else:
+        preconditioner = LinearOperator((b.size, b.size), matvec=lambda value: np.asarray(value, dtype=float) / safe_diag, dtype=float)
     operator = LinearOperator((b.size, b.size), matvec=matvec, dtype=float)
     rtol = min(1.0e-8, max(1.0e-11, float(tolerance) * 10.0))
     atol = max(float(tolerance) * max(1.0, float(np.linalg.norm(b))) * 1.0e-2, 1.0e-10)
@@ -961,6 +971,7 @@ def _solve_penalty_cg_correction_sparse(
         return None
     if stats is not None:
         stats["iterations"] = int(iterations)
+        stats["preconditioner"] = preconditioner_kind
     return np.asarray(solution, dtype=float).reshape(-1)
 
 
@@ -975,6 +986,7 @@ def _solve_reduced_penalty_sparse_cg_correction(
     equilibrium_scale: float,
     tolerance: float,
     stats: dict[str, Any] | None = None,
+    base_lu: Any | None = None,
 ) -> np.ndarray | None:
     """Solve the reduced contact tangent with sparse matrix-free CG."""
 
@@ -1005,6 +1017,7 @@ def _solve_reduced_penalty_sparse_cg_correction(
         tangent_scale=tangent_scale,
         tolerance=tolerance,
         stats=stats,
+        base_lu=base_lu,
     )
 
 
@@ -1019,6 +1032,7 @@ def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
     pressure_stiffness: float,
     tolerance: float,
     stats: dict[str, Any] | None = None,
+    base_lu: Any | None = None,
 ) -> np.ndarray | None:
     """Solve the reduced contact tangent using batched sample arrays."""
 
@@ -1047,6 +1061,7 @@ def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
         tangent_scale=tangent_scale,
         tolerance=tolerance,
         stats=stats,
+        base_lu=base_lu,
     )
 
 
@@ -1621,13 +1636,23 @@ def solve_sfc_source_drive_pair(
     timing_vtk = 0.0
     source_sparse_cg_count = 0
     source_sparse_cg_iterations = 0
+    source_sparse_cg_base_lu_preconditioner = 0
     source_direct_fallback_count = 0
+    base_preconditioner_lu: Any | None = None
+    timing_source_base_lu = 0.0
     for step in range(1, steps + 1):
         t = step * float(dt)
         fixed, values = _source_drive_fixed_reduced_dofs(assembly, time_value=t, omega_z=gear1_angular_velocity_z)
         free = free_dofs(assembly.n_reduced_dofs, fixed)
         if base_free is None:
             base_free = base_matrix[free[:, None], free].tocsr() if free.size else None
+            if base_free is not None and free.size:
+                t_section = time.perf_counter()
+                try:
+                    base_preconditioner_lu = splu(base_free.tocsc(), permc_spec="COLAMD", diag_pivot_thresh=0.0)
+                except Exception:
+                    base_preconditioner_lu = None
+                timing_source_base_lu += time.perf_counter() - t_section
         q_pred, v_pred, _ = calculix_dynamic_predictor(q, v, a, dt=float(dt), beta=beta, gamma=gamma)
         q_guess = _project_reduced_fixed(q_pred, fixed, values)
         residual_norm = np.inf
@@ -1668,6 +1693,7 @@ def solve_sfc_source_drive_pair(
                         equilibrium_scale=scale,
                         tolerance=float(tolerance),
                         stats=cg_stats,
+                        base_lu=base_preconditioner_lu,
                     )
                 else:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction_from_arrays(
@@ -1680,6 +1706,7 @@ def solve_sfc_source_drive_pair(
                         pressure_stiffness=pressure_stiffness,
                         tolerance=float(tolerance),
                         stats=cg_stats,
+                        base_lu=base_preconditioner_lu,
                     )
                 if correction_free is None:
                     source_direct_fallback_count += 1
@@ -1698,6 +1725,8 @@ def solve_sfc_source_drive_pair(
                 else:
                     source_sparse_cg_count += 1
                     source_sparse_cg_iterations += int(cg_stats.get("iterations", 0))
+                    if str(cg_stats.get("preconditioner", "")) == "base_lu":
+                        source_sparse_cg_base_lu_preconditioner += 1
             timing_linear += time.perf_counter() - t_section
             iteration_count = iteration
             if float(np.linalg.norm(correction_free)) <= float(tolerance) * max(1.0, float(np.linalg.norm(q_guess[free])) if free.size else 1.0):
@@ -1817,10 +1846,12 @@ def solve_sfc_source_drive_pair(
         "reduced_dofs": int(assembly.n_reduced_dofs),
         "timing_source_residual_seconds": float(timing_residual),
         "timing_source_linear_seconds": float(timing_linear),
+        "timing_source_base_lu_seconds": float(timing_source_base_lu),
         "timing_source_history_seconds": float(timing_history),
         "timing_source_vtk_seconds": float(timing_vtk),
         "source_sparse_cg_count": int(source_sparse_cg_count),
         "source_sparse_cg_iterations": int(source_sparse_cg_iterations),
+        "source_sparse_cg_base_lu_preconditioner": int(source_sparse_cg_base_lu_preconditioner),
         "source_direct_fallback_count": int(source_direct_fallback_count),
         "status": "completed",
     }

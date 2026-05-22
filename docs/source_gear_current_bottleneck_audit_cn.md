@@ -148,3 +148,49 @@ timing 变为：
 该结果同时改善了接触搜索成本和 Abaqus 对齐误差，说明原 face-level tube
 对大三角 slave face 过宽，会把远离当前接触管的积分点送入 projection/contact
 响应。点级 tube 裁剪更接近有限滑移接触的局部搜索语义。
+
+## 更新：base-LU 预条件 sparse CG
+
+source-drive penalty 路径中的动态基矩阵
+
+```text
+K_base = M / (beta dt^2) + (1 + alpha) K_ref
+```
+
+在固定时间步、固定 RP-MPC 约束下保持不变。因此当前实现对 free-DOF
+`K_base` 做一次 sparse LU 分解，并将其作为 CG 的左预条件器来求解
+
+```text
+(K_base + J^T W J) delta = rhs
+```
+
+接触切线项 `J^T W J`、CG operator、残差验收和 tolerance 均保持不变；
+如果 LU 分解失败，代码会回退到原来的 diagonal preconditioner。
+
+10-step 复测目录：
+
+```text
+results/source_gear_penalty_10steps_base_lu_pc
+```
+
+timing 变为：
+
+- complete wall time: `46.009660 s`
+- residual/contact sampling time: `23.179764 s`
+- sparse CG linear correction time: `5.242211 s`
+- one-time base LU factorization time: `4.376137 s`
+- history stress/strain diagnostics time: `7.150304 s`
+- VTK cloud output time: `5.915829 s`
+- sparse CG solves: `27`
+- sparse CG iterations: `56`
+
+相同 Abaqus manifest 下的末帧误差保持在同一水平：
+
+- max displacement magnitude relative error: `1.195%`
+- node-averaged von Mises relative error: `0.0736%`
+- node-averaged equivalent elastic strain relative error: `0.0736%`
+- RP2 rotation relative error: `1.149%`
+- RP2 angular velocity relative error: `1.244%`
+
+相比未使用 base-LU 预条件的 qp-cull 路径，10-step wall time 从
+`96.93 s` 降至 `46.01 s`，CG iteration 从 `15090` 降至 `56`。
