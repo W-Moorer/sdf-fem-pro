@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.linalg import LinearOperator, cg, splu
 from scipy.spatial import cKDTree
 
@@ -593,6 +593,141 @@ def _solve_reduced_penalty_low_rank_correction(
     return base_solution - influence @ contact_coeff
 
 
+def _active_gap_jacobian_sparse(samples: list[Any], *, n_total_dofs: int) -> Any:
+    """Build a sparse gap Jacobian for active contact samples only."""
+
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    active_row = 0
+    for sample in samples:
+        if float(sample.gap) >= 0.0:
+            continue
+        normal = np.asarray(sample.normal, dtype=float).reshape(3)
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm <= 0.0:
+            raise ValueError("sample normal must be nonzero")
+        normal = normal / normal_norm
+        for sign, node_attr, weight_attr in (
+            (1.0, "node_ids", "shape_weights"),
+            (-1.0, "master_node_ids", "master_shape_weights"),
+        ):
+            node_values = getattr(sample, node_attr, None)
+            weight_values = getattr(sample, weight_attr, None)
+            if node_values is None or weight_values is None:
+                continue
+            nodes = np.asarray(node_values, dtype=np.int64).reshape(-1)
+            weights = np.asarray(weight_values, dtype=float).reshape(-1)
+            if nodes.shape != weights.shape:
+                raise ValueError("contact sample nodes and weights must match")
+            for node, weight in zip(nodes, weights, strict=True):
+                base = 3 * int(node)
+                for component in range(3):
+                    value = float(sign) * float(weight) * float(normal[component])
+                    if value != 0.0:
+                        rows.append(active_row)
+                        cols.append(base + component)
+                        data.append(value)
+        active_row += 1
+    return coo_matrix((data, (rows, cols)), shape=(active_row, int(n_total_dofs))).tocsr()
+
+
+def _solve_penalty_cg_correction_sparse(
+    *,
+    base_matrix_free: Any,
+    rhs: np.ndarray,
+    j_free: Any,
+    tangent_scale: np.ndarray,
+    tolerance: float,
+) -> np.ndarray | None:
+    """Solve ``(K + J.T W J) x = rhs`` with sparse matrix-free CG."""
+
+    b = np.asarray(rhs, dtype=float).reshape(-1)
+    j = j_free.tocsr()
+    scale = np.asarray(tangent_scale, dtype=float).reshape(-1)
+    if j.shape[0] != scale.shape[0] or j.shape[1] != b.size:
+        return None
+    base = base_matrix_free.tocsr()
+
+    def matvec(value: np.ndarray) -> np.ndarray:
+        vec = np.asarray(value, dtype=float).reshape(-1)
+        out = np.asarray(base @ vec, dtype=float)
+        if j.shape[0]:
+            out += np.asarray(j.T @ (scale * np.asarray(j @ vec, dtype=float)), dtype=float)
+        return out
+
+    diag = np.asarray(base.diagonal(), dtype=float).reshape(-1)
+    if j.shape[0]:
+        contact_diag = np.asarray(j.multiply(j).T @ scale, dtype=float).reshape(-1)
+        diag = diag + contact_diag
+    safe_diag = np.where(np.abs(diag) > 1.0e-30, diag, 1.0)
+    preconditioner = LinearOperator((b.size, b.size), matvec=lambda value: np.asarray(value, dtype=float) / safe_diag, dtype=float)
+    operator = LinearOperator((b.size, b.size), matvec=matvec, dtype=float)
+    rtol = min(1.0e-8, max(1.0e-11, float(tolerance) * 10.0))
+    atol = max(float(tolerance) * max(1.0, float(np.linalg.norm(b))) * 1.0e-2, 1.0e-10)
+    try:
+        solution, info = cg(
+            operator,
+            b,
+            rtol=rtol,
+            atol=atol,
+            maxiter=max(200, min(2000, b.size // 20)),
+            M=preconditioner,
+        )
+    except Exception:
+        return None
+    if info != 0:
+        return None
+    residual = matvec(solution) - b
+    allowed = atol + rtol * max(1.0, float(np.linalg.norm(b)))
+    if float(np.linalg.norm(residual)) > max(50.0 * allowed, 1.0e-7):
+        return None
+    return np.asarray(solution, dtype=float).reshape(-1)
+
+
+def _solve_reduced_penalty_sparse_cg_correction(
+    *,
+    base_matrix_free: Any,
+    residual_free: np.ndarray,
+    samples: list[Any],
+    transformation: Any,
+    free: np.ndarray,
+    n_total_dofs: int,
+    equilibrium_scale: float,
+    tolerance: float,
+) -> np.ndarray | None:
+    """Solve the reduced contact tangent with sparse matrix-free CG."""
+
+    rhs = -np.asarray(residual_free, dtype=float).reshape(-1)
+    if rhs.size == 0:
+        return np.empty(0, dtype=float)
+    active_samples = [sample for sample in samples if float(sample.gap) < 0.0]
+    if not active_samples:
+        try:
+            return np.asarray(cg(base_matrix_free.tocsr(), rhs, rtol=1.0e-10, atol=1.0e-12, maxiter=1000)[0], dtype=float)
+        except Exception:
+            return None
+    tangent_scale = np.asarray(
+        [float(equilibrium_scale) * float(sample.stiffness) * float(sample.area) for sample in active_samples],
+        dtype=float,
+    )
+    positive = tangent_scale > 0.0
+    if not np.any(positive):
+        return None
+    j_full = _active_gap_jacobian_sparse(active_samples, n_total_dofs=int(n_total_dofs))
+    j_reduced = (j_full @ transformation).tocsr()
+    j_free = j_reduced[:, np.asarray(free, dtype=np.int64)].tocsr()
+    j_free = j_free[positive]
+    tangent_scale = tangent_scale[positive]
+    return _solve_penalty_cg_correction_sparse(
+        base_matrix_free=base_matrix_free,
+        rhs=rhs,
+        j_free=j_free,
+        tangent_scale=tangent_scale,
+        tolerance=tolerance,
+    )
+
+
 def _solve_penalty_cg_correction(
     *,
     base_matrix_free: Any,
@@ -1128,6 +1263,8 @@ def solve_sfc_source_drive_pair(
     vtk_frame_index = 1
     timing_residual = 0.0
     timing_linear = 0.0
+    source_sparse_cg_count = 0
+    source_direct_fallback_count = 0
     for step in range(1, steps + 1):
         t = step * float(dt)
         fixed, values = _source_drive_fixed_reduced_dofs(assembly, time_value=t, omega_z=gear1_angular_velocity_z)
@@ -1154,20 +1291,32 @@ def solve_sfc_source_drive_pair(
             residual_norm = float(np.linalg.norm(residual[free])) if free.size else 0.0
             timing_residual += time.perf_counter() - t_section
             t_section = time.perf_counter()
-            correction_free = (
-                _solve_reduced_penalty_low_rank_correction(
+            correction_free = np.empty(0, dtype=float)
+            if free.size:
+                correction_free = _solve_reduced_penalty_sparse_cg_correction(
                     base_matrix_free=base_free,
-                    base_lu_cache=base_lu_cache,
                     residual_free=residual[free],
                     samples=samples,
                     transformation=T,
                     free=free,
                     n_total_dofs=model.n_dofs,
                     equilibrium_scale=scale,
+                    tolerance=float(tolerance),
                 )
-                if free.size
-                else np.empty(0, dtype=float)
-            )
+                if correction_free is None:
+                    source_direct_fallback_count += 1
+                    correction_free = _solve_reduced_penalty_low_rank_correction(
+                        base_matrix_free=base_free,
+                        base_lu_cache=base_lu_cache,
+                        residual_free=residual[free],
+                        samples=samples,
+                        transformation=T,
+                        free=free,
+                        n_total_dofs=model.n_dofs,
+                        equilibrium_scale=scale,
+                    )
+                else:
+                    source_sparse_cg_count += 1
             timing_linear += time.perf_counter() - t_section
             q_guess[free] += correction_free
             iteration_count = iteration
@@ -1244,6 +1393,8 @@ def solve_sfc_source_drive_pair(
         "reduced_dofs": int(assembly.n_reduced_dofs),
         "timing_source_residual_seconds": float(timing_residual),
         "timing_source_linear_seconds": float(timing_linear),
+        "source_sparse_cg_count": int(source_sparse_cg_count),
+        "source_direct_fallback_count": int(source_direct_fallback_count),
         "status": "completed",
     }
     if vtk_enabled and vtk_dir is not None:

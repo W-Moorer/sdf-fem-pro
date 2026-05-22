@@ -286,7 +286,7 @@ class LagrangianSDFContactOracle:
             cached_face_id=cached_face_id,
         )
         if candidates.size:
-            candidate_bounds = self.bvh.aabb_distance_squared(x)[candidates]
+            candidate_bounds = self.bvh.aabb_distance_squared_for_ids(x, candidates)
             order = np.argsort(candidate_bounds, kind="stable")
             candidates = candidates[order]
             candidate_bounds = candidate_bounds[order]

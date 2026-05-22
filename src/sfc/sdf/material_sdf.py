@@ -408,23 +408,32 @@ class ReferencePatchBVH:
         """
 
         x = _as_point(point, "point")
-        dist2 = self.aabb_distance_squared(x)
         if search_radius is None:
             ids = self._hash_candidates_for_point(x)
             if ids.size == 0:
                 ids = np.arange(self.material.face_count, dtype=np.int64)
+            dist2_ids = self.aabb_distance_squared_for_ids(x, ids)
         else:
             radius = float(search_radius)
             if radius < 0.0:
                 raise ValueError("search_radius must be non-negative")
             ids = self._hash_candidates_for_ball(x, radius)
             if ids.size:
-                ids = ids[dist2[ids] <= radius * radius]
+                dist2_ids = self.aabb_distance_squared_for_ids(x, ids)
+                keep = dist2_ids <= radius * radius
+                ids = ids[keep]
+                dist2_ids = dist2_ids[keep]
             else:
-                ids = np.flatnonzero(dist2 <= radius * radius).astype(np.int64)
-            if ids.size == 0 and dist2.size:
-                ids = np.asarray([int(np.argmin(dist2))], dtype=np.int64)
-        ids = ids[np.argsort(dist2[ids], kind="stable")]
+                dist2_all = self.aabb_distance_squared(x)
+                ids = np.flatnonzero(dist2_all <= radius * radius).astype(np.int64)
+                dist2_ids = dist2_all[ids]
+            if ids.size == 0 and self.material.face_count > 0:
+                dist2_all = self.aabb_distance_squared(x)
+                ids = np.asarray([int(np.argmin(dist2_all))], dtype=np.int64)
+                dist2_ids = dist2_all[ids]
+        if ids.size == 0:
+            return ids
+        ids = ids[np.argsort(dist2_ids, kind="stable")]
         if cached_face_id is not None and 0 <= int(cached_face_id) < self.material.face_count:
             cached = int(cached_face_id)
             ids = np.asarray([cached, *[int(i) for i in ids if int(i) != cached]], dtype=np.int64)
@@ -440,6 +449,17 @@ class ReferencePatchBVH:
         x = _as_point(point, "point")
         lower_delta = np.maximum(self.aabb_min - x, 0.0)
         upper_delta = np.maximum(x - self.aabb_max, 0.0)
+        return np.sum((lower_delta + upper_delta) ** 2, axis=1)
+
+    def aabb_distance_squared_for_ids(self, point: np.ndarray, ids: np.ndarray) -> np.ndarray:
+        """Return squared AABB distances for selected patch ids only."""
+
+        x = _as_point(point, "point")
+        idx = np.asarray(ids, dtype=np.int64).reshape(-1)
+        if idx.size == 0:
+            return np.empty(0, dtype=float)
+        lower_delta = np.maximum(self.aabb_min[idx] - x, 0.0)
+        upper_delta = np.maximum(x - self.aabb_max[idx], 0.0)
         return np.sum((lower_delta + upper_delta) ** 2, axis=1)
 
     def _hash_candidates_for_point(self, point: np.ndarray) -> np.ndarray:
