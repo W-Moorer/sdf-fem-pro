@@ -8,9 +8,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
+from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
 
 
-def test_prepare_source_penalty_deck_uses_linear_penalty_and_strided_output() -> None:
+def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:
     source = "\n".join(
         [
             "*Heading",
@@ -42,10 +43,34 @@ def test_prepare_source_penalty_deck_uses_linear_penalty_and_strided_output() ->
     assert "*Surface Behavior, pressure-overclosure=LINEAR" in text
     assert "5.000000000000e+09" in text
     assert "pressure-overclosure=HARD" not in text
-    assert "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE, mechanical constraint=PENALTY" in text
-    assert "1.000000000000e-05,1.000000000000e-04,1e-10,5e-05" in text
+    assert "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE" in text
+    assert "mechanical constraint=PENALTY" not in text
+    assert "1.000000000000e-05,1.000000000000e-04,1.000000000000e-05,1.000000000000e-05" in text
     assert "*Output, field, variable=PRESELECT, frequency=5" in text
     assert "*Output, history, variable=PRESELECT, frequency=5" in text
+
+
+def test_prepare_source_penalty_deck_can_preserve_automatic_increment_bounds() -> None:
+    source = "\n".join(
+        [
+            "*Surface Behavior, pressure-overclosure=HARD",
+            "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE",
+            "S2, S1",
+            "*Dynamic",
+            "1e-05,0.05,1e-10,5e-05",
+        ]
+    )
+
+    text = prepare_source_penalty_deck_text(
+        source,
+        pressure_stiffness=5.0e9,
+        frame_stride=5,
+        dt=1.0e-5,
+        duration=1.0e-4,
+        fixed_increment=False,
+    )
+
+    assert "1.000000000000e-05,1.000000000000e-04,1e-10,5e-05" in text
 
 
 def test_prepare_source_penalty_deck_replaces_existing_linear_data() -> None:
@@ -63,3 +88,44 @@ def test_prepare_source_penalty_deck_replaces_existing_linear_data() -> None:
     assert "7.000000000000e+09" in text
     assert "1.0e3" not in text
     assert text.count("mechanical constraint=PENALTY") == 1
+
+
+def test_prepare_source_penalty_deck_can_write_explicit_style_contact_pair_parameter() -> None:
+    source = "\n".join(
+        [
+            "*Surface Behavior, pressure-overclosure=HARD",
+            "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE",
+            "S2, S1",
+        ]
+    )
+
+    text = prepare_source_penalty_deck_text(
+        source,
+        pressure_stiffness=5.0e9,
+        frame_stride=1,
+        contact_pair_penalty_parameter=True,
+    )
+
+    assert "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE, mechanical constraint=PENALTY" in text
+
+
+def test_source_penalty_summary_states_external_validation_only(tmp_path: Path) -> None:
+    path = tmp_path / "summary.md"
+
+    write_source_penalty_summary(
+        path,
+        {
+            "pressure_stiffness": 5.0e9,
+            "vtk_frame_stride": 5,
+            "abaqus_analysis_wall_seconds": 1.5,
+            "abaqus_reported_wall_seconds": 1.25,
+            "abaqus_vtk_manifest": "abaqus_manifest.csv",
+            "abaqus_vtk_frame_count": 3,
+            "abaqus_vtk_export_frame_stride": 1,
+        },
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert "validation-only" in text
+    assert "frictionless linear penalty pressure-overclosure" in text
+    assert "VTK export frame stride: `1`" in text

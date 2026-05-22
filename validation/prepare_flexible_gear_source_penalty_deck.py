@@ -47,7 +47,13 @@ def _replace_or_add_param(keyword_line: str, name: str, value: str) -> str:
     return ", ".join(kept)
 
 
-def _replace_dynamic_data(line: str, *, dt: float | None, duration: float | None) -> str:
+def _replace_dynamic_data(
+    line: str,
+    *,
+    dt: float | None,
+    duration: float | None,
+    fixed_increment: bool,
+) -> str:
     values = [value.strip() for value in line.strip().split(",")]
     if len(values) < 2:
         return line
@@ -55,6 +61,11 @@ def _replace_dynamic_data(line: str, *, dt: float | None, duration: float | None
         values[0] = f"{float(dt):.12e}"
     if duration is not None:
         values[1] = f"{float(duration):.12e}"
+    if dt is not None and fixed_increment:
+        while len(values) < 4:
+            values.append(f"{float(dt):.12e}")
+        values[2] = f"{float(dt):.12e}"
+        values[3] = f"{float(dt):.12e}"
     return ",".join(values)
 
 
@@ -65,6 +76,8 @@ def prepare_source_penalty_deck_text(
     frame_stride: int,
     dt: float | None = None,
     duration: float | None = None,
+    contact_pair_penalty_parameter: bool = False,
+    fixed_increment: bool = True,
 ) -> str:
     """Return source deck text converted to linear penalty contact.
 
@@ -95,7 +108,7 @@ def prepare_source_penalty_deck_text(
             continue
         if key == "*contact pair":
             rewritten = line
-            if "mechanical constraint" not in line.lower():
+            if contact_pair_penalty_parameter and "mechanical constraint" not in line.lower():
                 rewritten = _replace_or_add_param(rewritten, "mechanical constraint", "PENALTY")
             out.append(rewritten)
             saw_contact_pair = True
@@ -121,7 +134,7 @@ def prepare_source_penalty_deck_text(
                     continue
                 if stripped.startswith("*"):
                     break
-                out.append(_replace_dynamic_data(data_line, dt=dt, duration=duration))
+                out.append(_replace_dynamic_data(data_line, dt=dt, duration=duration, fixed_increment=fixed_increment))
                 saw_dynamic_data = True
                 i += 1
                 break
@@ -156,6 +169,8 @@ def write_source_penalty_deck(
         frame_stride=frame_stride,
         dt=dt,
         duration=duration,
+        contact_pair_penalty_parameter=False,
+        fixed_increment=True,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(converted, encoding=encoding, errors="replace")
