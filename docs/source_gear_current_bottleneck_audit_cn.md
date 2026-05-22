@@ -434,3 +434,86 @@ results/source_gear_penalty_10steps_vtk_static_blocks
 - max displacement magnitude relative error: `1.195%`
 - node-averaged von Mises relative error: `0.0736%`
 - node-averaged equivalent elastic strain relative error: `0.0736%`
+
+## 更新：100-step 同 dt penalty 扩展验证
+
+为了在启动 `0.05 s / 1e-5 s = 5000` 步全程前先检查长程 runner、隔帧云图和曲线口径，
+本轮完成了一个 100-step 扩展验证。该验证仍然保持源 `gear_contact.inp` 的几何、TET4 网格、
+RP-MPC、RP1 角速度和 RP2 扭矩，只把接触改为 frictionless linear penalty，并使用固定
+`dt = 1e-5 s`：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --duration 0.001 `
+  --dt 0.00001 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 10 `
+  --vtk-scalars-only `
+  --history-frame-stride 10 `
+  --out-dir results\source_gear_penalty_100steps_stride10
+```
+
+对应 Abaqus/Standard 外部参考使用同一个源模型转换出的 linear penalty deck：
+
+```powershell
+python validation\run_flexible_gear_source_penalty_abaqus.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --out-dir results\source_gear_penalty_abaqus_100steps_stride10 `
+  --pressure-stiffness 5e9 `
+  --frame-stride 10 `
+  --dt 0.00001 `
+  --duration 0.001 `
+  --sfc-manifest results\source_gear_penalty_100steps_stride10\sfc_vtk\sfc_manifest.csv `
+  --scalars-only
+```
+
+输出帧：
+
+- SFC VTK frame count: `11`
+- Abaqus VTK frame count: `11`
+- frame times: `0, 1e-4, ..., 1e-3 s`
+- SFC cloud output: scalar-only，应力/应变/位移曲线使用和 ParaView 云图相同字段。
+
+时间开销：
+
+- SFC complete wall time: `279.624443 s`
+- SFC residual/contact sampling: `181.486829 s`
+- SFC sparse CG linear correction: `71.188991 s`
+- SFC base LU factorization: `4.492393 s`
+- SFC history diagnostics: `14.448682 s`
+- SFC VTK output: `7.076591 s`
+- Abaqus analysis wall time: `1507.317202 s`
+- Abaqus VTK export wall time: `168.684527 s`
+
+因此，在该 100-step fixed-dt penalty 对齐工况下，完整 SFC solve 相对 Abaqus analysis
+约为 `5.39x` 更快；若把 Abaqus VTK export 也计入外部后处理，端到端比值约为 `6.00x`。
+
+末帧曲线误差：
+
+- max displacement magnitude relative error: `3.927%`
+- node-averaged von Mises relative error: `23.166%`
+- node-averaged equivalent elastic strain relative error: `23.166%`
+- RP2 rotation relative error: `4.303%`
+- RP2 angular velocity relative error: `3.333%`
+
+全程最大曲线误差：
+
+- max displacement magnitude relative error: `4.822%`
+- node-averaged von Mises relative error: `53.899%`
+- node-averaged equivalent elastic strain relative error: `53.899%`
+- RP2 rotation relative error: `4.845%`
+- RP2 angular velocity relative error: `6.340%`
+
+当前判断：
+
+- 位移和 RP 运动已经进入可接受的同趋势范围，且 SFC 在相同 fixed-dt penalty 工况下明显快于 Abaqus。
+- 应力/应变曲线仍未满足最终验收；误差主要集中在局部峰值和早期接触瞬态。
+- 因此，SFC 应力/应变动画闪动问题可以视为输出口径层面已修复，但论文级应力/应变准确性仍需继续对齐
+  Abaqus `nlgeom=YES` 下的材料非线性/应力输出语义，而不能只依赖当前 reference-linear source-drive 路径。
