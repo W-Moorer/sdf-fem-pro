@@ -1537,22 +1537,23 @@ def solve_sfc_source_drive_pair(
     fixed0, values0 = _source_drive_fixed_reduced_dofs(assembly, time_value=0.0, omega_z=gear1_angular_velocity_z)
     q = _project_reduced_fixed(q, fixed0, values0)
     x0 = model.X + assembly.expand_displacements(q)
-    sample_arrays0 = contact.sample_arrays(x0)
-    if sample_arrays0 is None:
-        samples0 = list(contact.samples(x0))
-        contact0 = _assemble_contact_response_force_only(samples0, model.n_nodes)
-    else:
-        contact0 = _assemble_contact_arrays_force_only(sample_arrays0, model.n_nodes, stiffness=pressure_stiffness)
-    initial_rhs_balance = external - np.asarray(K_red @ q, dtype=float).reshape(-1) + assembly.reduce_vector(contact0.force)
     # Abaqus/Standard starts a direct-integration dynamic step from the
     # prescribed initial acceleration field, which is zero unless explicitly
     # initialized.  For a newly started step, the HHT history force is the
     # accepted balance from the end of the previous step, not the load that is
     # first applied in this step.  The source gear deck has no prior preload
-    # step, so the HHT ``B_ini`` vector is zero while the current increment sees
-    # ``initial_rhs_balance`` through ``rhs_balance``.
+    # step, so the HHT ``B_ini`` vector is zero.
     a[:] = 0.0
-    previous = np.zeros_like(initial_rhs_balance)
+    previous = np.zeros_like(external)
+    contact0 = ContactResponse(
+        np.zeros_like(model.X),
+        csr_matrix((model.n_dofs, model.n_dofs), dtype=float),
+        0.0,
+        0.0,
+        0,
+        0.0,
+        0.0,
+    )
     state = MechanicsState(x0, assembly.expand_displacements(v), assembly.expand_displacements(a), time=0.0)
     element_object_ids = np.concatenate(
         [
