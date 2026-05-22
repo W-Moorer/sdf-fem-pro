@@ -284,6 +284,8 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     manifest_text = manifest.read_text(encoding="utf-8")
     assert "max_displacement_magnitude" in manifest_text
     assert "max_equivalent_elastic_strain_nodeavg" in manifest_text
+    assert "p95_von_mises_nodeavg" in manifest_text
+    assert "p95_equivalent_elastic_strain_nodeavg" in manifest_text
     assert "max_displacement_magnitude_object1" in manifest_text
     text = second.read_text(encoding="ascii")
     assert "DATASET UNSTRUCTURED_GRID" in text
@@ -432,15 +434,15 @@ def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None
     sfc_manifest = tmp_path / "sfc_manifest.csv"
     abaqus_manifest = tmp_path / "abaqus_manifest.csv"
     sfc_manifest.write_text(
-        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,max_strain_norm_nodeavg,max_equivalent_elastic_strain_nodeavg,max_displacement_magnitude_object1,max_displacement_magnitude_object2,rp2_rotation_z_rad,rp2_angular_velocity_z_rad_per_s\n"
-        "0,0,sfc_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
-        "1,0.5,sfc_0001.vtk,1,1,0.2,7.0,0.03,0.003,6.0,0.028,0.0028,0.11,0.20,0.06,0.8\n",
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,p95_von_mises_nodeavg,max_strain_norm_nodeavg,max_equivalent_elastic_strain_nodeavg,p95_equivalent_elastic_strain_nodeavg,max_displacement_magnitude_object1,max_displacement_magnitude_object2,rp2_rotation_z_rad,rp2_angular_velocity_z_rad_per_s\n"
+        "0,0,sfc_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
+        "1,0.5,sfc_0001.vtk,1,1,0.2,7.0,0.03,0.003,6.0,5.0,0.028,0.0028,0.0025,0.11,0.20,0.06,0.8\n",
         encoding="utf-8",
     )
     abaqus_manifest.write_text(
-        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,max_le_norm_nodeavg,max_equivalent_elastic_strain_nodeavg,max_displacement_magnitude_object1,max_displacement_magnitude_object2,rp2_rotation_z_rad,rp2_angular_velocity_z_rad_per_s\n"
-        "0,0,0,abaqus_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
-        "1,1,1,abaqus_0001.vtk,1,1,0.4,10.0,0.08,0.006,8.0,0.04,0.0056,0.10,0.30,0.10,1.2\n",
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,p95_von_mises_nodeavg,max_le_norm_nodeavg,max_equivalent_elastic_strain_nodeavg,p95_equivalent_elastic_strain_nodeavg,max_displacement_magnitude_object1,max_displacement_magnitude_object2,rp2_rotation_z_rad,rp2_angular_velocity_z_rad_per_s\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.4,10.0,0.08,0.006,8.0,6.0,0.04,0.0056,0.0030,0.10,0.30,0.10,1.2\n",
         encoding="utf-8",
     )
     out_csv = tmp_path / "errors.csv"
@@ -458,6 +460,8 @@ def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None
     assert len(rows) == 2
     assert float(rows[-1]["abaqus_max_displacement_magnitude"]) == pytest.approx(0.2)
     assert float(rows[-1]["max_von_mises_nodeavg_rel_error"]) == pytest.approx(0.5)
+    assert float(rows[-1]["p95_von_mises_nodeavg_rel_error"]) == pytest.approx(2.0 / 3.0)
+    assert "p95_equivalent_elastic_strain_nodeavg_rel_error" in rows[-1]
     assert "max_equivalent_elastic_strain_nodeavg_rel_error" in rows[-1]
     assert "max_strain_norm_nodeavg_rel_error" not in rows[-1]
     assert "max_displacement_magnitude_object1_rel_error" in rows[-1]

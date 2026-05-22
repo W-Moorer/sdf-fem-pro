@@ -357,6 +357,12 @@ def _write_sfc_tet4_vtk_frame(
         object_metric_columns[f"max_equivalent_elastic_strain_nodeavg_object{object_id}"] = (
             float(np.max(equivalent_strain_nodeavg[object_nodes])) if object_nodes.size else 0.0
         )
+        object_metric_columns[f"p95_von_mises_nodeavg_object{object_id}"] = _percentile_or_zero(
+            von_mises_nodeavg[object_nodes], 95.0
+        )
+        object_metric_columns[f"p95_equivalent_elastic_strain_nodeavg_object{object_id}"] = _percentile_or_zero(
+            equivalent_strain_nodeavg[object_nodes], 95.0
+        )
     with path.open("w", encoding="ascii", newline="\n") as handle:
         handle.write("# vtk DataFile Version 3.0\n")
         handle.write(f"SFC Lagrangian-SDF full gear frame {frame_index} time={float(time_value):.12g}\n")
@@ -418,9 +424,24 @@ def _write_sfc_tet4_vtk_frame(
         "max_equivalent_elastic_strain_nodeavg": float(np.max(equivalent_strain_nodeavg))
         if equivalent_strain_nodeavg.size
         else 0.0,
+        "p95_von_mises_nodeavg": _percentile_or_zero(von_mises_nodeavg, 95.0),
+        "p95_strain_norm_nodeavg": _percentile_or_zero(strain_norm_nodeavg, 95.0),
+        "p95_equivalent_elastic_strain_nodeavg": _percentile_or_zero(equivalent_strain_nodeavg, 95.0),
+        "mean_von_mises_nodeavg": float(np.mean(von_mises_nodeavg)) if von_mises_nodeavg.size else 0.0,
+        "mean_strain_norm_nodeavg": float(np.mean(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
+        "mean_equivalent_elastic_strain_nodeavg": float(np.mean(equivalent_strain_nodeavg))
+        if equivalent_strain_nodeavg.size
+        else 0.0,
     }
     row.update(object_metric_columns)
     return row
+
+
+def _percentile_or_zero(values: np.ndarray, percentile: float) -> float:
+    """Return a finite percentile for manifest diagnostics."""
+
+    array = np.asarray(values, dtype=float).reshape(-1)
+    return float(np.percentile(array, float(percentile))) if array.size else 0.0
 
 
 def _build_sfc_tet4_vtk_static_blocks(model: MechanicsModel, element_object_ids: np.ndarray) -> SFCVTKStaticBlocks:

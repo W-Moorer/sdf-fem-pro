@@ -173,17 +173,42 @@ def compare_animation_manifests(
     t_sfc = np.asarray([float(row.get("time", 0.0) or 0.0) for row in sfc_rows], dtype=float)
     t_abaqus = np.asarray([float(row.get("time", 0.0) or 0.0) for row in abaqus_rows], dtype=float)
     strain_metric = (
-        ("max_equivalent_elastic_strain_nodeavg", "max_equivalent_elastic_strain_nodeavg", "max node-averaged equivalent elastic strain")
+        ("p95_equivalent_elastic_strain_nodeavg", "p95_equivalent_elastic_strain_nodeavg", "p95 node-averaged equivalent elastic strain")
+        if _manifest_column_available(sfc_rows, "p95_equivalent_elastic_strain_nodeavg")
+        and _manifest_column_available(abaqus_rows, "p95_equivalent_elastic_strain_nodeavg")
+        else ("max_equivalent_elastic_strain_nodeavg", "max_equivalent_elastic_strain_nodeavg", "max node-averaged equivalent elastic strain")
         if _manifest_column_available(sfc_rows, "max_equivalent_elastic_strain_nodeavg")
         and _manifest_column_available(abaqus_rows, "max_equivalent_elastic_strain_nodeavg")
         else ("max_strain_norm_nodeavg", "max_le_norm_nodeavg", "max node-averaged strain norm")
     )
+    stress_metric = (
+        ("p95_von_mises_nodeavg", "p95_von_mises_nodeavg", "p95 node-averaged von Mises")
+        if _manifest_column_available(sfc_rows, "p95_von_mises_nodeavg")
+        and _manifest_column_available(abaqus_rows, "p95_von_mises_nodeavg")
+        else ("max_von_mises_nodeavg", "max_von_mises_nodeavg", "max node-averaged von Mises")
+    )
     metrics = [
         ("max_displacement_magnitude", "max_displacement_magnitude", "max displacement magnitude"),
-        ("max_von_mises_nodeavg", "max_von_mises_nodeavg", "max node-averaged von Mises"),
+        stress_metric,
         strain_metric,
     ]
     diagnostic_metrics = list(metrics)
+    for sfc_key, abaqus_key, label in (
+        ("max_von_mises_nodeavg", "max_von_mises_nodeavg", "max node-averaged von Mises"),
+        (
+            "max_equivalent_elastic_strain_nodeavg",
+            "max_equivalent_elastic_strain_nodeavg",
+            "max node-averaged equivalent elastic strain",
+        ),
+        ("mean_von_mises_nodeavg", "mean_von_mises_nodeavg", "mean node-averaged von Mises"),
+        (
+            "mean_equivalent_elastic_strain_nodeavg",
+            "mean_equivalent_elastic_strain_nodeavg",
+            "mean node-averaged equivalent elastic strain",
+        ),
+    ):
+        if _manifest_column_available(sfc_rows, sfc_key) and _manifest_column_available(abaqus_rows, abaqus_key):
+            diagnostic_metrics.append((sfc_key, abaqus_key, label))
     for sfc_key, abaqus_key, label in (
         ("rp1_rotation_z_rad", "rp1_rotation_z_rad", "RP1 rotation about z"),
         ("rp2_rotation_z_rad", "rp2_rotation_z_rad", "RP2 rotation about z"),
@@ -205,9 +230,19 @@ def compare_animation_manifests(
                 f"max node-averaged von Mises object {object_id}",
             ),
             (
+                f"p95_von_mises_nodeavg_object{object_id}",
+                f"p95_von_mises_nodeavg_object{object_id}",
+                f"p95 node-averaged von Mises object {object_id}",
+            ),
+            (
                 f"max_equivalent_elastic_strain_nodeavg_object{object_id}",
                 f"max_equivalent_elastic_strain_nodeavg_object{object_id}",
                 f"max node-averaged equivalent elastic strain object {object_id}",
+            ),
+            (
+                f"p95_equivalent_elastic_strain_nodeavg_object{object_id}",
+                f"p95_equivalent_elastic_strain_nodeavg_object{object_id}",
+                f"p95 node-averaged equivalent elastic strain object {object_id}",
             ),
         ):
             if _manifest_column_available(sfc_rows, sfc_key) and _manifest_column_available(abaqus_rows, abaqus_key):

@@ -517,3 +517,55 @@ python validation\run_flexible_gear_source_penalty_abaqus.py `
 - 应力/应变曲线仍未满足最终验收；误差主要集中在局部峰值和早期接触瞬态。
 - 因此，SFC 应力/应变动画闪动问题可以视为输出口径层面已修复，但论文级应力/应变准确性仍需继续对齐
   Abaqus `nlgeom=YES` 下的材料非线性/应力输出语义，而不能只依赖当前 reference-linear source-drive 路径。
+
+## 更新：p95/mean 应力应变曲线诊断
+
+上一节的 stress/strain 曲线使用 `max node-averaged` 指标，容易被单个局部节点峰值支配。
+为了区分“局部峰值输出语义差异”和“整体云图趋势差异”，SFC 和 Abaqus VTK manifest 现在同时记录：
+
+- `max_von_mises_nodeavg`
+- `p95_von_mises_nodeavg`
+- `mean_von_mises_nodeavg`
+- `max_equivalent_elastic_strain_nodeavg`
+- `p95_equivalent_elastic_strain_nodeavg`
+- `mean_equivalent_elastic_strain_nodeavg`
+
+主曲线优先绘制 p95 stress/strain，同时仍在误差 CSV 中保留 max 和 mean 诊断列。
+该改动只影响 VTK manifest 和曲线统计，不改变求解、接触、时间积分或云图字段。
+
+复测目录：
+
+```text
+SFC:    results/source_gear_penalty_100steps_stride10_p95
+Abaqus: results/source_gear_penalty_abaqus_100steps_stride10_p95
+Curve:  results/source_gear_penalty_100steps_stride10_p95_comparison/sfc_vs_abaqus_penalty_vtk_metric_curves.png
+CSV:    results/source_gear_penalty_100steps_stride10_p95_comparison/sfc_vs_abaqus_penalty_vtk_metric_errors.csv
+```
+
+验证：
+
+```text
+pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py tests\test_flexible_gear_source_penalty_deck.py tests\test_abaqus_sphere_cantilever_export.py -k "not abaqus"
+21 passed, 10 deselected
+```
+
+100-step p95/mean 诊断结果：
+
+| metric | max over frames | final frame |
+|---|---:|---:|
+| max displacement magnitude rel. error | `4.822%` | `3.927%` |
+| p95 von Mises nodeavg rel. error | `50.532%` | `20.832%` |
+| p95 equivalent strain nodeavg rel. error | `50.532%` | `20.832%` |
+| max von Mises nodeavg rel. error | `53.899%` | `23.166%` |
+| max equivalent strain nodeavg rel. error | `53.899%` | `23.166%` |
+| mean von Mises nodeavg rel. error | `30.358%` | `1.065%` |
+| mean equivalent strain nodeavg rel. error | `30.358%` | `1.065%` |
+| RP2 rotation rel. error | `4.845%` | `4.303%` |
+| RP2 angular velocity rel. error | `6.340%` | `3.333%` |
+
+诊断结论：
+
+- 位移曲线、RP 运动和全场平均应力/应变已经较接近。
+- p95/max stress/strain 仍偏差较大，主要来自局部接触瞬态和 object-1/master-side 局部峰值。
+- 后续要继续降低应力/应变峰值误差，应优先对齐 Abaqus `nlgeom=YES` 下的有限变形材料响应、
+  BEAM MPC 有限转动约束力/虚功口径和接触压力局部化，而不是继续只改 SDF 查询或色标。

@@ -303,6 +303,27 @@ def _node_average_cell_scalar(cell_values: list[float], cells: list[list[int]], 
     return out
 
 
+def _percentile_or_zero(values: list[float], percentile: float) -> float:
+    """Return a linearly interpolated percentile without external dependencies."""
+
+    data = sorted(float(value) for value in values)
+    if not data:
+        return 0.0
+    if len(data) == 1:
+        return data[0]
+    position = (len(data) - 1) * float(percentile) / 100.0
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return data[lower]
+    weight = position - lower
+    return (1.0 - weight) * data[lower] + weight * data[upper]
+
+
+def _mean_or_zero(values: list[float]) -> float:
+    return sum(float(value) for value in values) / float(len(values)) if values else 0.0
+
+
 def _object_manifest_metrics(
     *,
     object_ids: list[int],
@@ -328,6 +349,10 @@ def _object_manifest_metrics(
         out[f"max_equivalent_elastic_strain_nodeavg_object{object_id}"] = max(
             float(equivalent_strain_nodeavg[node]) for node in node_list
         )
+        object_vm = [float(von_mises_nodeavg[node]) for node in node_list]
+        object_eq = [float(equivalent_strain_nodeavg[node]) for node in node_list]
+        out[f"p95_von_mises_nodeavg_object{object_id}"] = _percentile_or_zero(object_vm, 95.0)
+        out[f"p95_equivalent_elastic_strain_nodeavg_object{object_id}"] = _percentile_or_zero(object_eq, 95.0)
     return out
 
 
@@ -459,6 +484,12 @@ def export_odb_to_vtk(
                 "max_von_mises_nodeavg": max(von_mises_nodeavg, default=0.0),
                 "max_le_norm_nodeavg": max(strain_norm_nodeavg, default=0.0),
                 "max_equivalent_elastic_strain_nodeavg": max(equivalent_strain_nodeavg, default=0.0),
+                "p95_von_mises_nodeavg": _percentile_or_zero(von_mises_nodeavg, 95.0),
+                "p95_le_norm_nodeavg": _percentile_or_zero(strain_norm_nodeavg, 95.0),
+                "p95_equivalent_elastic_strain_nodeavg": _percentile_or_zero(equivalent_strain_nodeavg, 95.0),
+                "mean_von_mises_nodeavg": _mean_or_zero(von_mises_nodeavg),
+                "mean_le_norm_nodeavg": _mean_or_zero(strain_norm_nodeavg),
+                "mean_equivalent_elastic_strain_nodeavg": _mean_or_zero(equivalent_strain_nodeavg),
             }
             manifest_row.update(_assembly_rp_manifest_metrics(frame))
             manifest_row.update(object_metrics)
