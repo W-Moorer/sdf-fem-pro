@@ -31,6 +31,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
     compare_animation_manifests,
     write_animation_color_ranges,
+    write_paraview_animation_setup,
 )
 
 
@@ -548,6 +549,34 @@ def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path)
     assert "0.04" in text
     assert "7.0" in text
     assert "0.038" in text
+
+
+def test_paraview_animation_setup_uses_nodeavg_fixed_ranges(tmp_path: Path) -> None:
+    ranges = tmp_path / "animation_fixed_color_ranges.csv"
+    ranges.write_text(
+        "field,recommended_min,recommended_max,sfc_column,abaqus_column,paraview_note\n"
+        "displacement_magnitude,0.0,0.25,max_displacement_magnitude,max_displacement_magnitude,note\n"
+        "von_mises_nodeavg,0.0,8.0,max_von_mises_nodeavg,max_von_mises_nodeavg,note\n"
+        "equivalent_elastic_strain_nodeavg,0.0,0.0038,max_equivalent_elastic_strain_nodeavg,max_equivalent_elastic_strain_nodeavg,note\n",
+        encoding="utf-8",
+    )
+    sfc_pvd = tmp_path / "sfc_vtk" / "sfc.pvd"
+    abaqus_pvd = tmp_path / "abaqus_vtk" / "abaqus.pvd"
+
+    script = write_paraview_animation_setup(
+        tmp_path,
+        color_ranges=ranges,
+        sfc_pvd=sfc_pvd,
+        abaqus_pvd=abaqus_pvd,
+    )
+    text = script.read_text(encoding="utf-8")
+
+    assert "DEFAULT_FIELD = \"von_mises_nodeavg\"" in text
+    assert "equivalent_elastic_strain_nodeavg" in text
+    assert "RescaleTransferFunction(float(vmin), float(vmax))" in text
+    assert "sfc_vtk/sfc.pvd" in text
+    assert "abaqus_vtk/abaqus.pvd" in text
+    assert str(tmp_path.resolve()) not in text
 
 
 def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None:

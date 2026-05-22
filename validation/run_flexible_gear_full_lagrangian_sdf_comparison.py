@@ -149,6 +149,116 @@ def write_animation_color_ranges(
     return path
 
 
+def write_paraview_animation_setup(
+    out_dir: Path,
+    *,
+    color_ranges: Path,
+    sfc_pvd: Path | None = None,
+    abaqus_pvd: Path | None = None,
+) -> Path:
+    """Write a ParaView helper that applies fixed stress/strain color ranges.
+
+    The VTK/PVD files carry the raw fields only; ParaView otherwise tends to
+    rescale the color transfer function per timestep.  The generated script is
+    post-processing-only and makes the paper animation use the same global
+    range and the same node-averaged field at every frame.
+    """
+
+    rows = _read_csv_rows(color_ranges)
+    ranges: dict[str, tuple[float, float]] = {}
+    for row in rows:
+        field = str(row.get("field", "")).strip()
+        if not field or "/" in field:
+            continue
+        try:
+            ranges[field] = (
+                float(row.get("recommended_min", 0.0) or 0.0),
+                float(row.get("recommended_max", 0.0) or 0.0),
+            )
+        except (TypeError, ValueError):
+            continue
+    stable_fields = [
+        "displacement_magnitude",
+        "von_mises_nodeavg",
+        "equivalent_elastic_strain_nodeavg",
+    ]
+    embedded_ranges = {
+        field: ranges.get(field, (0.0, 1.0))
+        for field in stable_fields
+    }
+
+    def script_relative_path(path: Path | None) -> str:
+        if path is None:
+            return ""
+        try:
+            return Path(path).resolve().relative_to(out_dir.resolve()).as_posix()
+        except ValueError:
+            return str(Path(path))
+
+    sfc_path = script_relative_path(sfc_pvd)
+    abaqus_path = script_relative_path(abaqus_pvd)
+    script = f'''"""ParaView setup for fixed-range SFC/Abaqus gear animations.
+
+Run with ParaView's Python shell or pvpython from the result directory:
+
+    pvpython {Path("paraview_fixed_range_animation.py").as_posix()}
+
+The script intentionally uses point-data node-averaged fields for stress and
+strain animation.  Cell-data fields remain in the VTK files for quantitative
+element diagnostics.
+"""
+
+from pathlib import Path
+
+from paraview.simple import *  # noqa: F401,F403
+
+SFC_PVD = r"{sfc_path}"
+ABAQUS_PVD = r"{abaqus_path}"
+FIELD_RANGES = {embedded_ranges!r}
+DEFAULT_FIELD = "von_mises_nodeavg"
+ROOT = Path(__file__).resolve().parent
+
+
+def _open_pvd(path):
+    return PVDReader(FileName=str((ROOT / path).resolve())) if path else None
+
+
+def _display(source, view, field_name):
+    if source is None:
+        return None
+    shown = Show(source, view)
+    ColorBy(shown, ("POINTS", field_name))
+    shown.RescaleTransferFunctionToDataRange(False, True)
+    shown.SetScalarBarVisibility(view, True)
+    lut = GetColorTransferFunction(field_name)
+    vmin, vmax = FIELD_RANGES.get(field_name, (0.0, 1.0))
+    lut.RescaleTransferFunction(float(vmin), float(vmax))
+    opacity = GetOpacityTransferFunction(field_name)
+    opacity.RescaleTransferFunction(float(vmin), float(vmax))
+    return shown
+
+
+view = GetActiveViewOrCreate("RenderView")
+view.ViewSize = [1400, 850]
+view.UseColorPaletteForBackground = 0
+view.Background = [1.0, 1.0, 1.0]
+
+sfc = _open_pvd(SFC_PVD)
+abaqus = _open_pvd(ABAQUS_PVD)
+_display(sfc, view, DEFAULT_FIELD)
+_display(abaqus, view, DEFAULT_FIELD)
+ResetCamera(view)
+
+print("Loaded fixed-range animation setup.")
+print("Stable fields:", ", ".join(FIELD_RANGES))
+print("Default field:", DEFAULT_FIELD, FIELD_RANGES.get(DEFAULT_FIELD))
+print("Switch DEFAULT_FIELD to displacement_magnitude or equivalent_elastic_strain_nodeavg for other clouds.")
+'''
+    path = out_dir / "paraview_fixed_range_animation.py"
+    path.write_text(script, encoding="utf-8")
+    return path
+
+
 def compare_animation_manifests(
     *,
     sfc_manifest: Path,
@@ -516,6 +626,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
                 "## ParaView Color Ranges",
                 "",
                 f"- fixed color ranges: `{Path(str(summary.get('animation_color_ranges'))).name}`",
+                f"- fixed-range setup script: `{Path(str(summary.get('paraview_animation_setup', ''))).name}`",
                 "- Use fixed global ranges for stress/strain animations; per-frame auto-rescaling can look like stress flicker.",
             ]
         )
@@ -780,11 +891,18 @@ def run_full_gear(
         summary["animation_metric_errors"] = str(animation_errors)
         summary["animation_metric_figure"] = str(animation_figure)
     if summary.get("sfc_vtk_manifest") or summary.get("abaqus_vtk_manifest"):
-        summary["animation_color_ranges"] = str(
-            write_animation_color_ranges(
+        color_ranges = write_animation_color_ranges(
+            out_dir,
+            sfc_manifest=Path(str(summary["sfc_vtk_manifest"])) if summary.get("sfc_vtk_manifest") else None,
+            abaqus_manifest=Path(str(summary["abaqus_vtk_manifest"])) if summary.get("abaqus_vtk_manifest") else None,
+        )
+        summary["animation_color_ranges"] = str(color_ranges)
+        summary["paraview_animation_setup"] = str(
+            write_paraview_animation_setup(
                 out_dir,
-                sfc_manifest=Path(str(summary["sfc_vtk_manifest"])) if summary.get("sfc_vtk_manifest") else None,
-                abaqus_manifest=Path(str(summary["abaqus_vtk_manifest"])) if summary.get("abaqus_vtk_manifest") else None,
+                color_ranges=color_ranges,
+                sfc_pvd=Path(str(summary["sfc_vtk_pvd"])) if summary.get("sfc_vtk_pvd") else None,
+                abaqus_pvd=Path(str(summary["abaqus_vtk_pvd"])) if summary.get("abaqus_vtk_pvd") else None,
             )
         )
     write_full_summary(out_dir / "full_gear_lagrangian_sdf_summary.md", summary, history_path, abaqus_row=abaqus_row)
