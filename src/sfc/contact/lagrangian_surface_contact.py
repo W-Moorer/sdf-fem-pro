@@ -284,24 +284,18 @@ class LagrangianSDFSurfaceContactGeometry:
         if not (bool(self.compiled_batch_projection) and _cpp_projection_available() and _cpp_closest_points_all_faces is not None):
             return None
         X, master_x, master_tree, master_max_radius, barycentric, weight_scale = self._prepare_sampling(x_current)
-        sample_nodes: list[np.ndarray] = []
-        sample_weights: list[np.ndarray] = []
-        areas: list[float] = []
-        points: list[np.ndarray] = []
-        for face in self.slave_faces:
-            global_face = face + int(self.slave_node_offset)
-            tri = X[global_face]
-            area = _triangle_area(tri)
-            if area <= 0.0:
-                continue
-            if master_tree is not None and _slave_face_outside_master_tube(tri, master_tree, master_max_radius, float(self.search_radius)):
-                continue
-            for weights, scale in zip(barycentric, weight_scale, strict=True):
-                points.append(weights @ tri)
-                sample_nodes.append(global_face.copy())
-                sample_weights.append(weights.copy())
-                areas.append(float(area * scale))
-        if not points:
+        global_faces = self.slave_faces + int(self.slave_node_offset)
+        triangles = X[global_faces]
+        cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        face_areas = 0.5 * np.linalg.norm(cross, axis=1)
+        keep = face_areas > 0.0
+        if master_tree is not None and np.any(keep):
+            slave_centroids = np.mean(triangles, axis=1)
+            slave_radii = np.max(np.linalg.norm(triangles - slave_centroids[:, None, :], axis=2), axis=1)
+            nearest = np.asarray(master_tree.query(slave_centroids, k=1)[0], dtype=float)
+            tube_radius = float(self.search_radius) + slave_radii + float(master_max_radius)
+            keep &= nearest <= tube_radius + 1.0e-14
+        if not np.any(keep):
             return {
                 "sample_node_ids": np.empty((0, 3), dtype=np.int64),
                 "sample_weights": np.empty((0, 3), dtype=float),
@@ -311,7 +305,14 @@ class LagrangianSDFSurfaceContactGeometry:
                 "master_node_ids": np.empty((0, 3), dtype=np.int64),
                 "master_weights": np.empty((0, 3), dtype=float),
             }
-        point_array = np.vstack(points)
+        kept_faces = global_faces[keep]
+        kept_triangles = triangles[keep]
+        kept_areas = face_areas[keep]
+        n_quadrature = barycentric.shape[0]
+        point_array = np.einsum("qa,fad->fqd", barycentric, kept_triangles).reshape((-1, 3))
+        sample_nodes = np.repeat(kept_faces, n_quadrature, axis=0)
+        sample_weights = np.tile(barycentric, (kept_faces.shape[0], 1))
+        areas = (kept_areas[:, None] * weight_scale[None, :]).reshape(-1)
         if _cpp_closest_points_padded_aabb is not None:
             bvh = self._oracle.bvh
             gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_padded_aabb(

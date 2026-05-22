@@ -272,6 +272,52 @@ def test_lagrangian_sdf_surface_contact_compiled_batch_matches_scalar_oracle() -
         np.testing.assert_allclose(got.master_shape_weights, expected.master_shape_weights, atol=1.0e-14)
 
 
+def test_lagrangian_sdf_surface_contact_vectorized_sampling_matches_scalar_order() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.05],
+            [1.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+            [1.0, 1.0, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=float)
+    x_current = np.vstack([slave_nodes, master_nodes])
+    slave_faces = np.asarray([[0, 1, 2], [1, 3, 2]], dtype=np.int64)
+    master_faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    material = MaterialSDF.from_triangle_surface(master_nodes, master_faces)
+    scalar = LagrangianSDFSurfaceContactGeometry(
+        slave_faces,
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=4,
+        quadrature="tri3",
+    )
+    compiled = LagrangianSDFSurfaceContactGeometry(
+        slave_faces,
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=4,
+        quadrature="tri3",
+        compiled_batch_projection=True,
+    )
+
+    arrays = compiled.sample_arrays(x_current)
+    scalar_samples = list(scalar.samples(x_current))
+
+    if arrays is None:
+        pytest.skip("compiled projection backend is not available")
+    assert arrays is not None
+    assert arrays["sample_node_ids"].shape == (6, 3)
+    for index, sample in enumerate(scalar_samples):
+        np.testing.assert_array_equal(arrays["sample_node_ids"][index], sample.node_ids)
+        np.testing.assert_allclose(arrays["sample_weights"][index], sample.shape_weights)
+        assert float(arrays["areas"][index]) == pytest.approx(sample.area)
+
+
 def test_lagrangian_sdf_surface_contact_skips_faces_outside_conservative_tube() -> None:
     slave_nodes = np.asarray([[10.0, 0.0, -0.05], [11.0, 0.0, -0.05], [10.0, 1.0, -0.05]], dtype=float)
     master_nodes = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=float)
