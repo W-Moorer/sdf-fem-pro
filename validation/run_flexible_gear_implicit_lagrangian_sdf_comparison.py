@@ -63,6 +63,7 @@ from validation.run_flexible_gear_explicit_sdf_comparison import (  # noqa: E402
     GearMesh,
     parse_gear_input,
 )
+from validation.vtk_frame_series import write_pvd  # noqa: E402
 
 Row = dict[str, Any]
 
@@ -152,6 +153,97 @@ def _linear_reference_internal_response(
     energy = 0.5 * float(u_flat @ np.asarray(force, dtype=float).reshape(-1))
     empty = csr_matrix((model.n_dofs, model.n_dofs), dtype=float)
     return InternalResponse(force, strain, stress, vm, energy, empty, empty)
+
+
+def _write_sfc_tet4_vtk_frame(
+    path: Path,
+    *,
+    model: MechanicsModel,
+    state: MechanicsState,
+    internal: InternalResponse,
+    element_object_ids: np.ndarray,
+    time_value: float,
+    frame_index: int,
+    include_tensors: bool = True,
+) -> Row:
+    """Write one SFC TET4 state as a legacy VTK unstructured grid."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    points = np.asarray(state.x, dtype=float)
+    reference = np.asarray(model.X, dtype=float)
+    displacement = points - reference
+    velocity = np.asarray(state.v, dtype=float)
+    elements = np.asarray(model.elements, dtype=np.int64)
+    object_ids = np.asarray(element_object_ids, dtype=np.int64).reshape(-1)
+    if object_ids.shape != (elements.shape[0],):
+        raise ValueError("element_object_ids must match element count")
+    stress = _tensor_field_or_zeros(internal.stress, elements.shape[0])
+    strain = _tensor_field_or_zeros(internal.strain, elements.shape[0])
+    von_mises = np.asarray(internal.von_mises, dtype=float).reshape(-1)
+    if von_mises.shape != (elements.shape[0],):
+        von_mises = _von_mises_local(stress)
+    strain_norm = np.linalg.norm(strain, axis=(1, 2))
+    equivalent_strain = _equivalent_elastic_strain_from_mises(von_mises, young=model.E, poisson=model.nu)
+    with path.open("w", encoding="ascii", newline="\n") as handle:
+        handle.write("# vtk DataFile Version 3.0\n")
+        handle.write(f"SFC Lagrangian-SDF full gear frame {frame_index} time={float(time_value):.12g}\n")
+        handle.write("ASCII\n")
+        handle.write("DATASET UNSTRUCTURED_GRID\n")
+        handle.write(f"POINTS {points.shape[0]} float\n")
+        for x, y, z in points:
+            handle.write(f"{x:.9e} {y:.9e} {z:.9e}\n")
+        handle.write(f"CELLS {elements.shape[0]} {elements.shape[0] * 5}\n")
+        for element in elements:
+            handle.write("4 " + " ".join(str(int(node)) for node in element) + "\n")
+        handle.write(f"CELL_TYPES {elements.shape[0]}\n")
+        handle.write(("10\n" * elements.shape[0]))
+        handle.write(f"POINT_DATA {points.shape[0]}\n")
+        handle.write("VECTORS U float\n")
+        for ux, uy, uz in displacement:
+            handle.write(f"{ux:.9e} {uy:.9e} {uz:.9e}\n")
+        handle.write("VECTORS V float\n")
+        for vx, vy, vz in velocity:
+            handle.write(f"{vx:.9e} {vy:.9e} {vz:.9e}\n")
+        handle.write("SCALARS displacement_magnitude float 1\n")
+        handle.write("LOOKUP_TABLE default\n")
+        for value in np.linalg.norm(displacement, axis=1):
+            handle.write(f"{float(value):.9e}\n")
+        handle.write(f"CELL_DATA {elements.shape[0]}\n")
+        handle.write("SCALARS object_id int 1\n")
+        handle.write("LOOKUP_TABLE default\n")
+        for value in object_ids:
+            handle.write(f"{int(value)}\n")
+        for name, values in (
+            ("von_mises", von_mises),
+            ("strain_norm", strain_norm),
+            ("equivalent_elastic_strain", equivalent_strain),
+        ):
+            handle.write(f"SCALARS {name} float 1\n")
+            handle.write("LOOKUP_TABLE default\n")
+            for value in values:
+                handle.write(f"{float(value):.9e}\n")
+        if include_tensors:
+            for name, tensor_values in (("E", strain), ("LE", strain), ("S", stress)):
+                handle.write(f"TENSORS {name} float\n")
+                for tensor in tensor_values:
+                    for row in tensor:
+                        handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
+    return {
+        "frame": int(frame_index),
+        "time": float(time_value),
+        "vtk_file": path.name,
+        "node_count": int(points.shape[0]),
+        "element_count": int(elements.shape[0]),
+        "max_von_mises": float(np.max(von_mises)) if von_mises.size else 0.0,
+        "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+    }
+
+
+def _tensor_field_or_zeros(values: np.ndarray, count: int) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if array.shape == (int(count), 3, 3):
+        return array
+    return np.zeros((int(count), 3, 3), dtype=float)
 
 
 def _lame_parameters_local(young: float, poisson: float) -> tuple[float, float]:
@@ -491,6 +583,10 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
     max_iterations: int,
     tolerance: float,
     material_linearization: str,
+    vtk_out_dir: Path | None = None,
+    vtk_frame_stride: int = 1,
+    vtk_stem: str = "sfc",
+    vtk_include_tensors: bool = True,
 ) -> tuple[list[Row], Row]:
     """Solve linear penalty contact with exact residuals and a reused base tangent.
 
@@ -530,6 +626,41 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
     if material_mode == "reference_linear":
         reference_internal = stvk_internal_response(model, model.X, assemble_tangent=True)
         reference_tangent = reference_internal.tangent.tocsr()
+    vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
+    vtk_dir = Path(vtk_out_dir) if vtk_out_dir is not None else None
+    vtk_datasets: list[tuple[float, Path]] = []
+    vtk_manifest_rows: list[Row] = []
+    element_object_ids = np.concatenate(
+        [
+            np.ones(pair.gear1.elements.shape[0], dtype=np.int64),
+            np.full(pair.gear2.elements.shape[0], 2, dtype=np.int64),
+        ]
+    )
+    if vtk_enabled and vtk_dir is not None:
+        vtk_dir.mkdir(parents=True, exist_ok=True)
+        for stale in vtk_dir.glob(f"{vtk_stem}_*.vtk"):
+            stale.unlink()
+        for stale in (vtk_dir / f"{vtk_stem}.pvd", vtk_dir / f"{vtk_stem}_manifest.csv"):
+            if stale.exists():
+                stale.unlink()
+        if material_mode == "reference_linear" and reference_tangent is not None:
+            initial_internal = _linear_reference_internal_response(model, state.x, reference_tangent)
+        else:
+            initial_internal = stvk_internal_response(model, state.x, assemble_tangent=False)
+        frame_path = vtk_dir / f"{vtk_stem}_{0:04d}.vtk"
+        vtk_manifest_rows.append(
+            _write_sfc_tet4_vtk_frame(
+                frame_path,
+                model=model,
+                state=state,
+                internal=initial_internal,
+                element_object_ids=element_object_ids,
+                time_value=0.0,
+                frame_index=0,
+                include_tensors=vtk_include_tensors,
+            )
+        )
+        vtk_datasets.append((0.0, frame_path))
     start = time.perf_counter()
     timing_base_tangent = 0.0
     timing_base_factor = 0.0
@@ -538,6 +669,7 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
     timing_contact_low_rank = 0.0
     timing_fallback = 0.0
     fallback_count = 0
+    vtk_frame_index = 1
     for step in range(1, steps + 1):
         t = step * float(dt)
         ramp = t / max(float(duration), float(dt))
@@ -657,6 +789,22 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
                 solver="full_newton_fallback",
             )
             rows.append(row)
+            if vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps):
+                frame_path = vtk_dir / f"{vtk_stem}_{vtk_frame_index:04d}.vtk"
+                vtk_manifest_rows.append(
+                    _write_sfc_tet4_vtk_frame(
+                        frame_path,
+                        model=model,
+                        state=state,
+                        internal=internal,
+                        element_object_ids=element_object_ids,
+                        time_value=t,
+                        frame_index=vtk_frame_index,
+                        include_tensors=vtk_include_tensors,
+                    )
+                )
+                vtk_datasets.append((float(t), frame_path))
+                vtk_frame_index += 1
             continue
         u_new = project_fixed_dofs(u_guess, fixed, values)
         a_new = c0 * (u_new - u_pred)
@@ -697,6 +845,22 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
                 solver="modified_newton",
             )
         )
+        if vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps):
+            frame_path = vtk_dir / f"{vtk_stem}_{vtk_frame_index:04d}.vtk"
+            vtk_manifest_rows.append(
+                _write_sfc_tet4_vtk_frame(
+                    frame_path,
+                    model=model,
+                    state=state,
+                    internal=last_internal,
+                element_object_ids=element_object_ids,
+                time_value=t,
+                frame_index=vtk_frame_index,
+                include_tensors=vtk_include_tensors,
+            )
+        )
+            vtk_datasets.append((float(t), frame_path))
+            vtk_frame_index += 1
     wall = time.perf_counter() - start
     summary = {
         "sfc_wall_seconds": wall,
@@ -724,6 +888,20 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
         "timing_penalty_fallback_seconds": float(timing_fallback),
         "status": "completed",
     }
+    if vtk_enabled and vtk_dir is not None:
+        pvd_path = vtk_dir / f"{vtk_stem}.pvd"
+        manifest_path = vtk_dir / f"{vtk_stem}_manifest.csv"
+        write_pvd(pvd_path, vtk_datasets)
+        _write_csv(manifest_path, vtk_manifest_rows)
+        summary.update(
+            {
+                "sfc_vtk_pvd": str(pvd_path),
+                "sfc_vtk_manifest": str(manifest_path),
+                "sfc_vtk_frame_count": int(len(vtk_datasets)),
+                "sfc_vtk_frame_stride": int(vtk_frame_stride),
+                "sfc_vtk_include_tensors": bool(vtk_include_tensors),
+            }
+        )
     return rows, summary
 
 
@@ -741,6 +919,10 @@ def solve_sfc_cropped_pair(
     hht_alpha: float = -0.05,
     penalty_solver: str = "full_newton",
     material_linearization: str = "stvk",
+    vtk_out_dir: Path | None = None,
+    vtk_frame_stride: int = 1,
+    vtk_stem: str = "sfc",
+    vtk_include_tensors: bool = True,
 ) -> tuple[list[Row], Row]:
     solver = str(penalty_solver).lower()
     if solver not in {"full_newton", "modified_newton"}:
@@ -760,6 +942,10 @@ def solve_sfc_cropped_pair(
             max_iterations=12,
             tolerance=1.0e-9,
             material_linearization=material_linearization,
+            vtk_out_dir=vtk_out_dir,
+            vtk_frame_stride=vtk_frame_stride,
+            vtk_stem=vtk_stem,
+            vtk_include_tensors=vtk_include_tensors,
         )
     n1 = pair.gear1.nodes.shape[0]
     X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])

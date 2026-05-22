@@ -105,6 +105,44 @@ def test_cropped_gear_modified_newton_penalty_path_runs_one_implicit_step() -> N
     assert history[-1]["newton_iterations"] >= 1
 
 
+def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+    vtk_dir = tmp_path / "sfc_vtk"
+
+    _history, summary = solve_sfc_cropped_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=1.0e-3,
+        dt=1.0e-3,
+        target_overclosure=1.0e-5,
+        rotation_rate_z=0.0,
+        penalty_solver="modified_newton",
+        material_linearization="reference_linear",
+        vtk_out_dir=vtk_dir,
+        vtk_frame_stride=1,
+    )
+
+    pvd = Path(str(summary["sfc_vtk_pvd"]))
+    manifest = Path(str(summary["sfc_vtk_manifest"]))
+    first = vtk_dir / "sfc_0000.vtk"
+    second = vtk_dir / "sfc_0001.vtk"
+    assert pvd.exists()
+    assert manifest.exists()
+    assert first.exists()
+    assert second.exists()
+    assert int(summary["sfc_vtk_frame_count"]) == 2
+    assert pvd.read_text(encoding="utf-8").count("<DataSet") == 2
+    text = second.read_text(encoding="ascii")
+    assert "DATASET UNSTRUCTURED_GRID" in text
+    assert "VECTORS U float" in text
+    assert "SCALARS von_mises float 1" in text
+    assert "TENSORS S float" in text
+
+
 def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)

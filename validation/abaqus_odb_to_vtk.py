@@ -18,6 +18,7 @@ VTK_CELL_TYPES = {
     "C3D4": 10,
     "C3D8": 12,
     "C3D8R": 12,
+    "R3D3": 5,
     "R3D4": 9,
 }
 
@@ -88,6 +89,8 @@ def _node_vector_field(frame, field_name: str) -> dict[tuple[str, int], tuple[fl
     for value in frame.fieldOutputs[field_name].values:
         if not hasattr(value, "nodeLabel") or value.nodeLabel is None:
             continue
+        if getattr(value, "instance", None) is None:
+            continue
         data = tuple(float(component) for component in value.data)
         if len(data) < 3:
             continue
@@ -115,9 +118,9 @@ def _object_id_from_instance(instance_name: str) -> int:
     """Return a stable visualization id from an Abaqus instance name."""
 
     upper = instance_name.upper()
-    if "PLANE" in upper or "GROUND" in upper:
+    if "PLANE" in upper or "GROUND" in upper or "RIGID" in upper:
         return 0
-    if "CUBE" in upper or "BLOCK" in upper or "BEAM" in upper:
+    if "CUBE" in upper or "BLOCK" in upper or "BEAM" in upper or "FLEX" in upper:
         return 1
     if "SPHERE" in upper or "BALL" in upper:
         return 2
@@ -136,6 +139,7 @@ def _write_vtk_frame(
     velocity: list[tuple[float, float, float]],
     stress: list[tuple[float, ...]],
     strain: list[tuple[float, ...]],
+    include_tensors: bool = True,
 ) -> None:
     cell_size = sum(len(cell) + 1 for cell in cells)
     with path.open("w", encoding="ascii", newline="\n") as handle:
@@ -153,12 +157,16 @@ def _write_vtk_frame(
         for cell_type in cell_types:
             handle.write(f"{cell_type}\n")
         handle.write(f"POINT_DATA {len(points)}\n")
-        handle.write("VECTORS displacement float\n")
+        handle.write("VECTORS U float\n")
         for ux, uy, uz in displacement:
             handle.write(f"{ux:.9e} {uy:.9e} {uz:.9e}\n")
-        handle.write("VECTORS velocity float\n")
+        handle.write("VECTORS V float\n")
         for vx, vy, vz in velocity:
             handle.write(f"{vx:.9e} {vy:.9e} {vz:.9e}\n")
+        handle.write("SCALARS displacement_magnitude float 1\n")
+        handle.write("LOOKUP_TABLE default\n")
+        for ux, uy, uz in displacement:
+            handle.write(f"{math.sqrt(ux * ux + uy * uy + uz * uz):.9e}\n")
         handle.write(f"CELL_DATA {len(cells)}\n")
         handle.write("SCALARS object_id int 1\n")
         handle.write("LOOKUP_TABLE default\n")
@@ -172,21 +180,30 @@ def _write_vtk_frame(
         handle.write("LOOKUP_TABLE default\n")
         for value in strain:
             handle.write(f"{_tensor_norm_from_symmetric6(value):.9e}\n")
-        handle.write("TENSORS abaqus_LE float\n")
-        for value in strain:
-            for row in _tensor_from_symmetric6(value):
-                handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
-        handle.write("TENSORS abaqus_S float\n")
-        for value in stress:
-            for row in _tensor_from_symmetric6(value):
-                handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
+        if include_tensors:
+            handle.write("TENSORS LE float\n")
+            for value in strain:
+                for row in _tensor_from_symmetric6(value):
+                    handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
+            handle.write("TENSORS S float\n")
+            for value in stress:
+                for row in _tensor_from_symmetric6(value):
+                    handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
 
 
-def export_odb_to_vtk(odb_path: Path, out_dir: Path, *, stem: str = "frame") -> dict[str, Path | int | float]:
+def export_odb_to_vtk(
+    odb_path: Path,
+    out_dir: Path,
+    *,
+    stem: str = "frame",
+    frame_stride: int = 1,
+    include_tensors: bool = True,
+) -> dict[str, Path | int | float]:
     """Export all ODB frames in the first step to numbered VTK files."""
 
     from odbAccess import openOdb  # type: ignore[import-not-found]
 
+    stride = max(1, int(frame_stride))
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob(f"{stem}_*.vtk"):
         stale.unlink()
@@ -225,7 +242,12 @@ def export_odb_to_vtk(odb_path: Path, out_dir: Path, *, stem: str = "frame") -> 
         manifest_rows: list[dict[str, str | int | float]] = []
         zero_vector = (0.0, 0.0, 0.0)
         zero_tensor = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        for frame_index, frame in enumerate(step.frames):
+        selected_frames = [
+            (source_index, frame)
+            for source_index, frame in enumerate(step.frames)
+            if source_index % stride == 0 or source_index == len(step.frames) - 1
+        ]
+        for frame_index, (source_index, frame) in enumerate(selected_frames):
             displacement_by_node = _node_vector_field(frame, "U")
             velocity_by_node = _node_vector_field(frame, "V")
             stress_by_element = _average_element_field(frame, "S")
@@ -251,7 +273,7 @@ def export_odb_to_vtk(odb_path: Path, out_dir: Path, *, stem: str = "frame") -> 
             frame_path = out_dir / f"{stem}_{frame_index:04d}.vtk"
             _write_vtk_frame(
                 frame_path,
-                title=f"Abaqus sphere cantilever frame {frame_index} time={frame.frameValue:.12g}",
+                title=f"Abaqus ODB frame {frame_index} time={frame.frameValue:.12g}",
                 points=points,
                 cells=cells,
                 cell_types=cell_types,
@@ -260,11 +282,13 @@ def export_odb_to_vtk(odb_path: Path, out_dir: Path, *, stem: str = "frame") -> 
                 velocity=velocity,
                 stress=stress,
                 strain=strain,
+                include_tensors=include_tensors,
             )
             datasets.append((float(frame.frameValue), frame_path))
             manifest_rows.append(
                 {
                     "frame": frame_index,
+                    "source_frame": source_index,
                     "time": float(frame.frameValue),
                     "vtk_file": frame_path.name,
                     "node_count": len(points),
@@ -280,7 +304,16 @@ def export_odb_to_vtk(odb_path: Path, out_dir: Path, *, stem: str = "frame") -> 
         with manifest_path.open("w", encoding="ascii", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["frame", "time", "vtk_file", "node_count", "element_count", "max_von_mises", "max_le_norm"],
+                fieldnames=[
+                    "frame",
+                    "source_frame",
+                    "time",
+                    "vtk_file",
+                    "node_count",
+                    "element_count",
+                    "max_von_mises",
+                    "max_le_norm",
+                ],
             )
             writer.writeheader()
             writer.writerows(manifest_rows)
@@ -290,6 +323,7 @@ def export_odb_to_vtk(odb_path: Path, out_dir: Path, *, stem: str = "frame") -> 
             "first_frame": datasets[0][1] if datasets else out_dir / f"{stem}_0000.vtk",
             "frame_count": len(datasets),
             "last_time": datasets[-1][0] if datasets else 0.0,
+            "include_tensors": bool(include_tensors),
         }
     finally:
         odb.close()
@@ -300,8 +334,18 @@ def main() -> None:
     parser.add_argument("--odb", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--stem", default="frame")
+    parser.add_argument("--frame-stride", type=int, default=1)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--include-tensors", dest="include_tensors", action="store_true", default=True)
+    group.add_argument("--scalars-only", dest="include_tensors", action="store_false")
     args = parser.parse_args()
-    result = export_odb_to_vtk(args.odb, args.out_dir, stem=args.stem)
+    result = export_odb_to_vtk(
+        args.odb,
+        args.out_dir,
+        stem=args.stem,
+        frame_stride=args.frame_stride,
+        include_tensors=bool(args.include_tensors),
+    )
     print(f"VTK frames: {result['frame_count']}")
     print(f"PVD: {result['pvd']}")
     print(f"Manifest: {result['manifest']}")

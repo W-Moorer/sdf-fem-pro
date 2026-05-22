@@ -32,6 +32,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     CroppedGearPatch,
     _face_centroids,
     _orient_faces_toward,
+    _resolve_abaqus_command,
+    _run_command,
     _write_abaqus_alignment_deck,
     _write_csv,
     run_abaqus_alignment,
@@ -187,6 +189,13 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- final min gap: {float(summary.get('final_min_gap', 0.0)):.6e}",
         f"- history CSV: `{history_path.name}`",
     ]
+    if summary.get("sfc_vtk_pvd"):
+        lines.extend(
+            [
+                f"- SFC VTK PVD: `{summary.get('sfc_vtk_pvd')}`",
+                f"- SFC VTK frame count: {int(summary.get('sfc_vtk_frame_count', 0))}",
+            ]
+        )
     if abaqus_row is not None:
         lines.extend(
             [
@@ -199,7 +208,66 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
                 f"- alignment figure: `{Path(str(summary.get('alignment_figure', ''))).name}`",
             ]
         )
+    if summary.get("abaqus_vtk_pvd"):
+        lines.extend(
+            [
+                "",
+                "## VTK Animation",
+                "",
+                f"- Abaqus VTK PVD: `{summary.get('abaqus_vtk_pvd')}`",
+                f"- Abaqus VTK frame count: {int(summary.get('abaqus_vtk_frame_count', 0))}",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def export_abaqus_vtk_frames(
+    *,
+    out_dir: Path,
+    abaqus_command: str | None,
+    frame_stride: int,
+    include_tensors: bool,
+) -> Row:
+    """Export the existing full-gear Abaqus ODB to a strided VTK/PVD series."""
+
+    run_dir = out_dir / "abaqus_run"
+    odb = run_dir / "cropped_gear_alignment.odb"
+    if not odb.exists():
+        raise FileNotFoundError(odb)
+    vtk_dir = out_dir / "abaqus_vtk"
+    command = _resolve_abaqus_command(abaqus_command)
+    script = ROOT / "validation" / "abaqus_odb_to_vtk.py"
+    wall = _run_command(
+        [
+            command,
+            "python",
+            str(script.resolve()),
+            "--odb",
+            str(odb.resolve()),
+            "--out-dir",
+            str(vtk_dir.resolve()),
+            "--stem",
+            "abaqus",
+            "--frame-stride",
+            str(max(1, int(frame_stride))),
+            "--include-tensors" if include_tensors else "--scalars-only",
+        ],
+        cwd=run_dir,
+        log_path=out_dir / "abaqus_vtk_export_stdout.log",
+    )
+    manifest = vtk_dir / "abaqus_manifest.csv"
+    frame_count = 0
+    if manifest.exists():
+        with manifest.open("r", newline="", encoding="ascii") as handle:
+            frame_count = max(0, sum(1 for _ in handle) - 1)
+    return {
+        "abaqus_vtk_export_wall_seconds": float(wall),
+        "abaqus_vtk_pvd": str(vtk_dir / "abaqus.pvd"),
+        "abaqus_vtk_manifest": str(manifest),
+        "abaqus_vtk_frame_count": int(frame_count),
+        "abaqus_vtk_frame_stride": int(frame_stride),
+        "abaqus_vtk_include_tensors": bool(include_tensors),
+    }
 
 
 def run_full_gear(
@@ -217,6 +285,11 @@ def run_full_gear(
     contact_mode: str,
     run_abaqus: bool,
     abaqus_command: str | None = None,
+    write_sfc_vtk: bool = False,
+    sfc_vtk_dir: Path | None = None,
+    vtk_frame_stride: int = 1,
+    vtk_include_tensors: bool = True,
+    export_abaqus_vtk: bool = False,
 ) -> tuple[list[Row], Row]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = parse_gear_input(source)
@@ -259,6 +332,10 @@ def run_full_gear(
             hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
             penalty_solver="modified_newton",
             material_linearization="reference_linear",
+            vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
+            vtk_frame_stride=max(1, int(vtk_frame_stride)),
+            vtk_stem="sfc",
+            vtk_include_tensors=bool(vtk_include_tensors),
         )
     if history:
         summary["final_max_displacement_norm"] = float(history[-1].get("max_displacement_norm", 0.0))
@@ -300,6 +377,15 @@ def run_full_gear(
         plot_alignment_curves(history_path, abaqus_metrics, error_rows, figure_path)
         summary["alignment_errors"] = str(out_dir / "sfc_vs_abaqus_alignment_errors.csv")
         summary["alignment_figure"] = str(figure_path)
+    if export_abaqus_vtk:
+        summary.update(
+            export_abaqus_vtk_frames(
+                out_dir=out_dir,
+                abaqus_command=abaqus_command,
+                frame_stride=max(1, int(vtk_frame_stride)),
+                include_tensors=bool(vtk_include_tensors),
+            )
+        )
     write_full_summary(out_dir / "full_gear_lagrangian_sdf_summary.md", summary, history_path, abaqus_row=abaqus_row)
     _write_csv(out_dir / "full_gear_lagrangian_sdf_summary.csv", [summary])
     return history, summary
@@ -320,6 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
     parser.add_argument("--abaqus-command", type=str, default=None)
+    parser.add_argument("--write-sfc-vtk", action="store_true")
+    parser.add_argument("--sfc-vtk-dir", type=Path, default=None)
+    parser.add_argument("--vtk-frame-stride", type=int, default=1)
+    parser.add_argument("--vtk-scalars-only", action="store_true")
+    parser.add_argument("--export-abaqus-vtk", action="store_true")
     args = parser.parse_args(argv)
     history, summary = run_full_gear(
         source=args.source,
@@ -335,6 +426,11 @@ def main(argv: list[str] | None = None) -> int:
         contact_mode=str(args.contact_mode),
         run_abaqus=bool(args.run_abaqus),
         abaqus_command=args.abaqus_command,
+        write_sfc_vtk=bool(args.write_sfc_vtk),
+        sfc_vtk_dir=args.sfc_vtk_dir,
+        vtk_frame_stride=int(args.vtk_frame_stride),
+        vtk_include_tensors=not bool(args.vtk_scalars_only),
+        export_abaqus_vtk=bool(args.export_abaqus_vtk),
     )
     print((args.out_dir / "full_gear_lagrangian_sdf_summary.md").read_text(encoding="utf-8"))
     return 0 if history and summary.get("status") == "completed" else 1
