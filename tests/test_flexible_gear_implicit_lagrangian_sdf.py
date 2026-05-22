@@ -295,6 +295,8 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     assert "SCALARS von_mises_nodeavg float 1" in text
     assert "SCALARS strain_norm_nodeavg float 1" in text
     assert "SCALARS equivalent_elastic_strain_nodeavg float 1" in text
+    assert "SCALARS contact_pressure_nodeavg float 1" in text
+    assert "SCALARS contact_active_node float 1" in text
     assert "SCALARS von_mises float 1" in text
     assert "TENSORS S float" in text
 
@@ -332,6 +334,12 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     text = manifest.read_text(encoding="utf-8")
     assert "linear_corotated" in text
     assert "radian" in text
+    assert "active_contact_node_count" in text
+    assert "max_contact_pressure_nodeavg" in text
+    vtk_text = (vtk_dir / "sfc_0001.vtk").read_text(encoding="ascii")
+    assert "SCALARS contact_pressure_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_penetration_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_gap_min_node float 1" in vtk_text
 
 
 def test_source_drive_checkpoint_resume_matches_continuous_short_run(tmp_path: Path) -> None:

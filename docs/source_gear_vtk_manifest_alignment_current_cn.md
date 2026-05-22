@@ -529,3 +529,76 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 4. 将应力对比拆成 contact-active 区域、near-contact 区域和全场区域，而不是只报全场 p95/max/mean。
 
 PVD 时间戳已经同步为 `0:2e-5:2.0e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 200，可继续向 `0.05 s` 推进。
+
+## 更新：SFC 接触状态/压力诊断输出
+
+`2.0e-3 s` 窗口显示 SFC 末帧已释放接触，而 Abaqus penalty 参考仍有较高 stress/strain。为避免继续只看位移和应力分位数，已在 SFC VTK/manifest 输出中加入接触状态诊断字段。该修改不改变接触力、时间积分、罚函数刚度或求解路径，只增加后处理字段。
+
+新增 SFC VTK point-data 字段：
+
+- `contact_pressure_nodeavg`
+- `contact_penetration_nodeavg`
+- `contact_active_node`
+- `contact_gap_min_node`
+- `contact_sample_area_weight`
+
+新增 manifest/history 统计字段：
+
+- `active_contact_node_count`
+- `max_contact_pressure_nodeavg`
+- `p95_contact_pressure_nodeavg`
+- `mean_active_contact_pressure_nodeavg`
+- `max_contact_penetration_nodeavg`
+- `min_contact_gap_node`
+
+验证：
+
+```powershell
+pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py -k "writes_sfc_vtk_frames or source_drive_path_advances_rp_rotation or checkpoint_resume_matches_continuous_short_run or animation_setup"
+```
+
+结果：
+
+```text
+4 passed, 20 deselected
+```
+
+随后使用当前真实全齿轮 checkpoint 从 step 200 续跑到 step 202，即 `2.02e-3 s`，只生成一个新的 SFC 隔帧 VTK 用于确认诊断字段落盘：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --duration 0.00202 `
+  --dt 0.00001 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --source-checkpoint results\source_gear_penalty_full_stride2_match_step\source_drive_checkpoint.npz `
+  --resume-source-checkpoint `
+  --source-checkpoint-stride 20 `
+  --out-dir results\source_gear_penalty_full_stride2_match_step
+```
+
+`2.02e-3 s` 诊断帧：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 新增 SFC VTK | `results/source_gear_penalty_full_stride2_match_step/sfc_vtk/sfc_0101.vtk` |
+| VTK 字段检查 | `contact_pressure_nodeavg`, `contact_active_node`, `contact_penetration_nodeavg`, `contact_gap_min_node` 已存在 |
+| 时间 | `2.02e-3 s` |
+| SFC VTK 帧数 | 102 |
+| active_contact_node_count | 0 |
+| max_contact_pressure_nodeavg | 0 |
+| p95_contact_pressure_nodeavg | 0 |
+| min_contact_gap_node | 0 |
+| max displacement magnitude | 0.041392 |
+| p95 node-averaged von Mises | 4.367104e6 |
+
+这说明后续不需要再依赖 aggregate `active_contact_samples` 猜测接触状态，可以直接在 ParaView 中查看 SFC 的接触压力/激活云图。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 202；后续可继续向 `0.05 s` 推进，或者先提取 Abaqus 的相同 contact status/pressure 参考量，再按 contact-active 区域、near-contact 区域和全场区域分别比较 stress/strain。

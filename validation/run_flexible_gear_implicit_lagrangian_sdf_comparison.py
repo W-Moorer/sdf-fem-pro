@@ -171,6 +171,227 @@ def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_
     )
 
 
+def _empty_contact_node_diagnostics(n_nodes: int) -> dict[str, Any]:
+    """Return zero-valued contact fields for VTK/manifest diagnostics."""
+
+    count = int(n_nodes)
+    fields = {
+        "contact_pressure_nodeavg": np.zeros(count, dtype=float),
+        "contact_penetration_nodeavg": np.zeros(count, dtype=float),
+        "contact_active_node": np.zeros(count, dtype=float),
+        "contact_gap_min_node": np.zeros(count, dtype=float),
+        "contact_sample_area_weight": np.zeros(count, dtype=float),
+    }
+    metrics: Row = {
+        "active_contact_node_count": 0,
+        "max_contact_pressure_nodeavg": 0.0,
+        "p95_contact_pressure_nodeavg": 0.0,
+        "mean_active_contact_pressure_nodeavg": 0.0,
+        "max_contact_penetration_nodeavg": 0.0,
+        "min_contact_gap_node": 0.0,
+    }
+    return {"fields": fields, "metrics": metrics}
+
+
+def _finalize_contact_node_diagnostics(
+    *,
+    n_nodes: int,
+    weighted_pressure: np.ndarray,
+    weighted_penetration: np.ndarray,
+    area_weight: np.ndarray,
+    active_hit: np.ndarray,
+    gap_min: np.ndarray,
+) -> dict[str, Any]:
+    """Convert accumulated sample contact quantities to nodal diagnostic fields."""
+
+    count = int(n_nodes)
+    if count == 0:
+        return _empty_contact_node_diagnostics(0)
+    pressure = np.zeros(count, dtype=float)
+    penetration = np.zeros(count, dtype=float)
+    nonzero = area_weight > 0.0
+    pressure[nonzero] = weighted_pressure[nonzero] / area_weight[nonzero]
+    penetration[nonzero] = weighted_penetration[nonzero] / area_weight[nonzero]
+    active_node = (active_hit > 0.0).astype(float)
+    finite_gap = np.isfinite(gap_min)
+    gap = np.zeros(count, dtype=float)
+    gap[finite_gap] = gap_min[finite_gap]
+    active_pressure = pressure[active_node > 0.0]
+    fields = {
+        "contact_pressure_nodeavg": pressure,
+        "contact_penetration_nodeavg": penetration,
+        "contact_active_node": active_node,
+        "contact_gap_min_node": gap,
+        "contact_sample_area_weight": area_weight.copy(),
+    }
+    metrics: Row = {
+        "active_contact_node_count": int(np.count_nonzero(active_node)),
+        "max_contact_pressure_nodeavg": float(np.max(active_pressure)) if active_pressure.size else 0.0,
+        "p95_contact_pressure_nodeavg": _percentile_or_zero(active_pressure, 95.0),
+        "mean_active_contact_pressure_nodeavg": float(np.mean(active_pressure)) if active_pressure.size else 0.0,
+        "max_contact_penetration_nodeavg": float(np.max(penetration)) if penetration.size else 0.0,
+        "min_contact_gap_node": float(np.min(gap[finite_gap])) if np.any(finite_gap) else 0.0,
+    }
+    return {"fields": fields, "metrics": metrics}
+
+
+def _accumulate_contact_nodes(
+    *,
+    nodes: np.ndarray,
+    weights: np.ndarray,
+    gaps: np.ndarray,
+    pressures: np.ndarray,
+    penetrations: np.ndarray,
+    areas: np.ndarray,
+    active: np.ndarray,
+    weighted_pressure: np.ndarray,
+    weighted_penetration: np.ndarray,
+    area_weight: np.ndarray,
+    active_hit: np.ndarray,
+    gap_min: np.ndarray,
+) -> None:
+    """Accumulate quadrature-sample contact diagnostics onto VTK nodes."""
+
+    node_ids = np.asarray(nodes, dtype=np.int64)
+    shape_weights = np.asarray(weights, dtype=float)
+    if node_ids.size == 0 or shape_weights.size == 0:
+        return
+    if node_ids.shape != shape_weights.shape:
+        raise ValueError("contact diagnostic node and weight arrays must have matching shapes")
+    contrib = np.asarray(areas, dtype=float).reshape((-1, 1)) * shape_weights
+    flat_nodes = node_ids.reshape(-1)
+    flat_contrib = contrib.reshape(-1)
+    flat_pressure = (contrib * np.asarray(pressures, dtype=float).reshape((-1, 1))).reshape(-1)
+    flat_penetration = (contrib * np.asarray(penetrations, dtype=float).reshape((-1, 1))).reshape(-1)
+    flat_active = (shape_weights * np.asarray(active, dtype=bool).reshape((-1, 1))).reshape(-1)
+    flat_gaps = np.repeat(np.asarray(gaps, dtype=float).reshape(-1), node_ids.shape[1])
+    np.add.at(weighted_pressure, flat_nodes, flat_pressure)
+    np.add.at(weighted_penetration, flat_nodes, flat_penetration)
+    np.add.at(area_weight, flat_nodes, flat_contrib)
+    np.add.at(active_hit, flat_nodes, flat_active)
+    np.minimum.at(gap_min, flat_nodes, flat_gaps)
+
+
+def _contact_node_diagnostics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    n_nodes: int,
+    *,
+    stiffness: float,
+) -> dict[str, Any]:
+    """Map batched contact samples to nodal pressure/active diagnostic fields."""
+
+    if sample_arrays is None:
+        return _empty_contact_node_diagnostics(n_nodes)
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    count = int(n_nodes)
+    if gaps.size == 0:
+        return _empty_contact_node_diagnostics(count)
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    penetrations = np.maximum(-gaps, 0.0)
+    pressures = float(stiffness) * penetrations
+    active = penetrations > 0.0
+    weighted_pressure = np.zeros(count, dtype=float)
+    weighted_penetration = np.zeros(count, dtype=float)
+    area_weight = np.zeros(count, dtype=float)
+    active_hit = np.zeros(count, dtype=float)
+    gap_min = np.full(count, np.inf, dtype=float)
+    _accumulate_contact_nodes(
+        nodes=np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64),
+        weights=np.asarray(sample_arrays["sample_weights"], dtype=float),
+        gaps=gaps,
+        pressures=pressures,
+        penetrations=penetrations,
+        areas=areas,
+        active=active,
+        weighted_pressure=weighted_pressure,
+        weighted_penetration=weighted_penetration,
+        area_weight=area_weight,
+        active_hit=active_hit,
+        gap_min=gap_min,
+    )
+    _accumulate_contact_nodes(
+        nodes=np.asarray(sample_arrays["master_node_ids"], dtype=np.int64),
+        weights=np.asarray(sample_arrays["master_weights"], dtype=float),
+        gaps=gaps,
+        pressures=pressures,
+        penetrations=penetrations,
+        areas=areas,
+        active=active,
+        weighted_pressure=weighted_pressure,
+        weighted_penetration=weighted_penetration,
+        area_weight=area_weight,
+        active_hit=active_hit,
+        gap_min=gap_min,
+    )
+    return _finalize_contact_node_diagnostics(
+        n_nodes=count,
+        weighted_pressure=weighted_pressure,
+        weighted_penetration=weighted_penetration,
+        area_weight=area_weight,
+        active_hit=active_hit,
+        gap_min=gap_min,
+    )
+
+
+def _contact_node_diagnostics_from_samples(samples: Iterable[Any] | None, n_nodes: int) -> dict[str, Any]:
+    """Map Python contact samples to nodal pressure/active diagnostic fields."""
+
+    count = int(n_nodes)
+    sample_list = list(samples or [])
+    if not sample_list:
+        return _empty_contact_node_diagnostics(count)
+    weighted_pressure = np.zeros(count, dtype=float)
+    weighted_penetration = np.zeros(count, dtype=float)
+    area_weight = np.zeros(count, dtype=float)
+    active_hit = np.zeros(count, dtype=float)
+    gap_min = np.full(count, np.inf, dtype=float)
+    for sample in sample_list:
+        gap = float(sample.gap)
+        penetration = max(-gap, 0.0)
+        pressure = float(sample.stiffness) * penetration
+        area = float(sample.area)
+        active = penetration > 0.0
+        _accumulate_contact_nodes(
+            nodes=np.asarray(sample.node_ids, dtype=np.int64).reshape((1, -1)),
+            weights=np.asarray(sample.shape_weights, dtype=float).reshape((1, -1)),
+            gaps=np.asarray([gap], dtype=float),
+            pressures=np.asarray([pressure], dtype=float),
+            penetrations=np.asarray([penetration], dtype=float),
+            areas=np.asarray([area], dtype=float),
+            active=np.asarray([active], dtype=bool),
+            weighted_pressure=weighted_pressure,
+            weighted_penetration=weighted_penetration,
+            area_weight=area_weight,
+            active_hit=active_hit,
+            gap_min=gap_min,
+        )
+        master_ids = getattr(sample, "master_node_ids", None)
+        master_weights = getattr(sample, "master_shape_weights", None)
+        if master_ids is not None and master_weights is not None:
+            _accumulate_contact_nodes(
+                nodes=np.asarray(master_ids, dtype=np.int64).reshape((1, -1)),
+                weights=np.asarray(master_weights, dtype=float).reshape((1, -1)),
+                gaps=np.asarray([gap], dtype=float),
+                pressures=np.asarray([pressure], dtype=float),
+                penetrations=np.asarray([penetration], dtype=float),
+                areas=np.asarray([area], dtype=float),
+                active=np.asarray([active], dtype=bool),
+                weighted_pressure=weighted_pressure,
+                weighted_penetration=weighted_penetration,
+                area_weight=area_weight,
+                active_hit=active_hit,
+                gap_min=gap_min,
+            )
+    return _finalize_contact_node_diagnostics(
+        n_nodes=count,
+        weighted_pressure=weighted_pressure,
+        weighted_penetration=weighted_penetration,
+        area_weight=area_weight,
+        active_hit=active_hit,
+        gap_min=gap_min,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CroppedGearPatch:
     name: str
@@ -347,6 +568,7 @@ def _write_sfc_tet4_vtk_frame(
     frame_index: int,
     include_tensors: bool = True,
     static_blocks: SFCVTKStaticBlocks | None = None,
+    contact_node_diagnostics: dict[str, Any] | None = None,
 ) -> Row:
     """Write one SFC TET4 state as a legacy VTK unstructured grid."""
 
@@ -369,6 +591,9 @@ def _write_sfc_tet4_vtk_frame(
     von_mises_nodeavg = _node_average_cell_scalar(von_mises, elements, points.shape[0])
     strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, points.shape[0])
     equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, points.shape[0])
+    contact_diag = contact_node_diagnostics or _empty_contact_node_diagnostics(points.shape[0])
+    contact_fields = dict(contact_diag.get("fields", {}))
+    contact_metrics = dict(contact_diag.get("metrics", {}))
     object_metric_columns: Row = {}
     for object_id, object_nodes in static.object_node_ids_by_object:
         object_metric_columns[f"max_displacement_magnitude_object{object_id}"] = (
@@ -416,6 +641,14 @@ def _write_sfc_tet4_vtk_frame(
             handle.write("LOOKUP_TABLE default\n")
             for value in values:
                 handle.write(f"{float(value):.9e}\n")
+        for name, values in contact_fields.items():
+            array = np.asarray(values, dtype=float).reshape(-1)
+            if array.shape != (points.shape[0],):
+                raise ValueError(f"contact diagnostic field {name!r} has incompatible shape")
+            handle.write(f"SCALARS {name} float 1\n")
+            handle.write("LOOKUP_TABLE default\n")
+            for value in array:
+                handle.write(f"{float(value):.9e}\n")
         handle.write(static.object_id_block)
         for name, values in (
             ("von_mises", von_mises),
@@ -457,6 +690,7 @@ def _write_sfc_tet4_vtk_frame(
         else 0.0,
     }
     row.update(object_metric_columns)
+    row.update(contact_metrics)
     return row
 
 
@@ -1853,6 +2087,8 @@ def solve_sfc_source_drive_pair(
         residual_norm = np.inf
         iteration_count = 0
         last_contact = contact0
+        last_sample_arrays: dict[str, np.ndarray] | None = None
+        last_samples: list[Any] | None = None
         contact_matches_q_guess = False
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
@@ -1862,9 +2098,13 @@ def solve_sfc_source_drive_pair(
             if sample_arrays is None:
                 samples = list(contact.samples(x_guess))
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
+                last_samples = samples
+                last_sample_arrays = None
             else:
                 samples = []
                 last_contact = _assemble_contact_arrays_force_only(sample_arrays, model.n_nodes, stiffness=pressure_stiffness)
+                last_sample_arrays = sample_arrays
+                last_samples = None
             contact_matches_q_guess = True
             internal_red = np.asarray(K_red @ q_guess, dtype=float).reshape(-1)
             contact_red = assembly.reduce_vector(last_contact.force)
@@ -1936,14 +2176,26 @@ def solve_sfc_source_drive_pair(
         if not contact_matches_q_guess:
             accepted_arrays = contact.sample_arrays(state.x)
             if accepted_arrays is None:
-                last_contact = _assemble_contact_response_force_only(contact.samples(state.x), model.n_nodes)
+                accepted_samples = list(contact.samples(state.x))
+                last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
+                last_samples = accepted_samples
+                last_sample_arrays = None
             else:
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
+                last_sample_arrays = accepted_arrays
+                last_samples = None
         previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
         history_due = (step % history_stride == 0) or (step == steps)
         vtk_due = vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps)
         output_state: MechanicsState | None = None
         output_internal: InternalResponse | None = None
+        contact_node_diagnostics: dict[str, Any] | None = None
+        if history_due or vtk_due:
+            contact_node_diagnostics = (
+                _contact_node_diagnostics_from_arrays(last_sample_arrays, model.n_nodes, stiffness=pressure_stiffness)
+                if last_sample_arrays is not None
+                else _contact_node_diagnostics_from_samples(last_samples, model.n_nodes)
+            )
         if history_due:
             t_section = time.perf_counter()
             output_state, output_internal = _source_drive_corotated_visual_state_and_internal(
@@ -1983,6 +2235,8 @@ def solve_sfc_source_drive_pair(
                     "gear2_torque_z": float(gear2_torque_z),
                 }
             )
+            if contact_node_diagnostics is not None:
+                row.update(contact_node_diagnostics.get("metrics", {}))
             rows.append(row)
             timing_history += time.perf_counter() - t_section
         if vtk_due:
@@ -2011,6 +2265,7 @@ def solve_sfc_source_drive_pair(
                 frame_index=vtk_frame_index,
                 include_tensors=vtk_include_tensors,
                 static_blocks=vtk_static_blocks,
+                contact_node_diagnostics=contact_node_diagnostics,
             )
             frame_row.update(
                 {
