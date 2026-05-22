@@ -328,7 +328,7 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     manifest = Path(str(summary["sfc_vtk_manifest"]))
     assert manifest.exists()
     text = manifest.read_text(encoding="utf-8")
-    assert "corotated_body_elastic_residual" in text
+    assert "linear_corotated" in text
     assert "radian" in text
 
 
@@ -366,6 +366,70 @@ def test_source_drive_corotated_visual_postprocess_removes_rigid_rotation_stress
     expected_node1 = np.asarray([np.cos(theta), np.sin(theta), 0.0], dtype=float)
     np.testing.assert_allclose(visual_state.x[1], expected_node1, atol=1.0e-14)
     assert float(np.max(internal.von_mises)) <= 1.0e-10
+
+
+def test_source_drive_visual_postprocess_is_objective_for_large_rotation() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=1.0)
+    reference_internal = stvk_internal_response(model, model.X, assemble_tangent=True)
+    theta = 2.4
+    small_rigid = np.cross(np.asarray([[0.0, 0.0, theta]], dtype=float), X)
+    state = MechanicsState(
+        X + small_rigid,
+        np.zeros_like(X),
+        np.zeros_like(X),
+        time=0.0,
+    )
+
+    visual_state, internal = _source_drive_corotated_visual_state_and_internal(
+        model=model,
+        state=state,
+        reference_tangent=reference_internal.tangent,
+        body_node_slices=(slice(0, 4), slice(4, 4)),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta, 0.0),
+        stress_postprocess="finite_stvk_visual",
+    )
+
+    expected_node1 = np.asarray([np.cos(theta), np.sin(theta), 0.0], dtype=float)
+    np.testing.assert_allclose(visual_state.x[1], expected_node1, atol=1.0e-14)
+    assert float(np.max(internal.von_mises)) <= 1.0e-9
+
+
+def test_source_drive_visual_postprocess_rejects_unknown_mode() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=1.0)
+    reference_internal = stvk_internal_response(model, model.X, assemble_tangent=True)
+    state = MechanicsState(X.copy(), np.zeros_like(X), np.zeros_like(X), time=0.0)
+
+    with pytest.raises(ValueError, match="stress_postprocess"):
+        _source_drive_corotated_visual_state_and_internal(
+            model=model,
+            state=state,
+            reference_tangent=reference_internal.tangent,
+            body_node_slices=(slice(0, 4), slice(4, 4)),
+            body_reference_points=(np.zeros(3), np.zeros(3)),
+            body_rotation_z=(0.0, 0.0),
+            stress_postprocess="bad_mode",
+        )
 
 
 def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> None:

@@ -611,6 +611,7 @@ def run_full_gear(
     sfc_vtk_dir: Path | None = None,
     vtk_frame_stride: int = 1,
     vtk_include_tensors: bool = True,
+    source_stress_postprocess: str = "linear_corotated",
     export_abaqus_vtk: bool = False,
     abaqus_vtk_manifest: Path | None = None,
 ) -> tuple[list[Row], Row]:
@@ -651,6 +652,7 @@ def run_full_gear(
             history_frame_stride=max(1, int(history_frame_stride)),
             vtk_stem="sfc",
             vtk_include_tensors=bool(vtk_include_tensors),
+            source_stress_postprocess=str(source_stress_postprocess),
         )
     elif mode == "hard":
         history, summary = solve_sfc_cropped_pair_hard_contact(
@@ -821,6 +823,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sfc-vtk-dir", type=Path, default=None)
     parser.add_argument("--vtk-frame-stride", type=int, default=2)
     parser.add_argument("--vtk-scalars-only", action="store_true")
+    parser.add_argument(
+        "--source-stress-postprocess",
+        choices=("linear_corotated", "finite_stvk_visual"),
+        default="linear_corotated",
+        help="Source-drive SFC stress/strain output mode; does not alter the solve.",
+    )
     parser.add_argument("--export-abaqus-vtk", action="store_true")
     parser.add_argument(
         "--abaqus-vtk-manifest",
@@ -852,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
         sfc_vtk_dir=args.sfc_vtk_dir,
         vtk_frame_stride=int(args.vtk_frame_stride),
         vtk_include_tensors=not bool(args.vtk_scalars_only),
+        source_stress_postprocess=str(args.source_stress_postprocess),
         export_abaqus_vtk=bool(args.export_abaqus_vtk),
         abaqus_vtk_manifest=args.abaqus_vtk_manifest,
     )

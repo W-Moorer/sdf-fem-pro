@@ -569,3 +569,48 @@ pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py tests\test_flexibl
 - p95/max stress/strain 仍偏差较大，主要来自局部接触瞬态和 object-1/master-side 局部峰值。
 - 后续要继续降低应力/应变峰值误差，应优先对齐 Abaqus `nlgeom=YES` 下的有限变形材料响应、
   BEAM MPC 有限转动约束力/虚功口径和接触压力局部化，而不是继续只改 SDF 查询或色标。
+
+## 更新：有限转动 StVK 输出后处理作为诊断模式保留
+
+source-drive 路径现在显式区分两种 SFC 应力/应变输出后处理：
+
+```text
+--source-stress-postprocess linear_corotated      # 默认
+--source-stress-postprocess finite_stvk_visual    # 诊断
+```
+
+含义：
+
+- `linear_corotated`：先从当前小转角 RP-MPC reduced displacement 中剥离线性化刚体转动，
+  再用参考刚度/线性弹性应力口径输出。它与当前 source-drive 求解器的
+  `material_linearization = reference_linear` 一致，因此作为默认。
+- `finite_stvk_visual`：先构造有限转动可视化构型，再在该构型上计算 StVK stress/strain。
+  它对纯刚体有限转动是客观的，适合作为 Abaqus `nlgeom=YES` 输出语义诊断，但当前不作为默认，
+  因为它与现有 reference-linear source-drive 求解残差不一致。
+
+新增测试：
+
+```text
+pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py tests\test_flexible_gear_source_penalty_deck.py tests\test_rp_mpc_and_lagrangian_surface_contact.py -k "not abaqus"
+44 passed, 4 deselected
+```
+
+2-step smoke 目录：
+
+```text
+results/source_gear_penalty_2steps_stress_postprocess_smoke
+```
+
+验证项：
+
+- `source_stress_strain_postprocess = linear_corotated`
+- VTK manifest 中每帧记录 `stress_strain_postprocess = linear_corotated`
+- VTK frame count: `3`
+
+反证结果：
+
+`finite_stvk_visual` 在 10-step 下能保持很好的短程应力曲线，但在 100-step 下会把
+p95 stress/strain 末帧误差推高到约 `55.26%`，明显差于默认 `linear_corotated`
+的约 `20.83%`。因此，本轮没有把有限 StVK 输出强行设为默认；后续若要真正使用该口径，
+必须同步把 source-drive 求解残差、RP-MPC 有限转动虚功和材料 tangent 改为一致的
+`nlgeom=YES` 形式，而不能只替换后处理。

@@ -270,6 +270,7 @@ def _source_drive_corotated_visual_state_and_internal(
     body_node_slices: tuple[slice, slice],
     body_reference_points: tuple[np.ndarray, np.ndarray],
     body_rotation_z: tuple[float, float],
+    stress_postprocess: str = "linear_corotated",
 ) -> tuple[MechanicsState, InternalResponse]:
     """Return finite-rotation visual state and objective elastic stress fields.
 
@@ -277,10 +278,13 @@ def _source_drive_corotated_visual_state_and_internal(
     radians.  A small-strain postprocess of the raw linearized BEAM-MPC
     displacement would incorrectly interpret the large rigid gear rotation as
     strain.  For visualization and field-curve metrics, remove the linearized
-    rigid z-rotation from each body, place the body with the corresponding
-    finite z-rotation, and compute stress/strain only from the residual elastic
-    displacement.  This is a generic corotational postprocess for hub-driven
-    bodies; it does not smooth, filter, or alter the contact solve.
+    rigid z-rotation from each body's reduced-coordinate displacement, place the
+    body with the corresponding finite z-rotation, and compute stress/strain
+    from the residual elastic field.  The default ``linear_corotated`` mode
+    matches the current source-drive solve, which still uses a reference
+    stiffness.  ``finite_stvk_visual`` is available as a diagnostic for the
+    finite-rotation visual configuration.  Neither mode smooths, filters, or
+    alters the contact solve.
     """
 
     X = np.asarray(model.X, dtype=float)
@@ -309,7 +313,13 @@ def _source_drive_corotated_visual_state_and_internal(
         np.asarray(state.a, dtype=float).copy(),
         time=float(state.time),
     )
-    internal = _linear_reference_internal_response(model, X + u_elastic, reference_tangent)
+    mode = str(stress_postprocess).lower()
+    if mode in {"linear_corotated", "corotated_body_elastic_residual", "linear"}:
+        internal = _linear_reference_internal_response(model, X + u_elastic, reference_tangent)
+    elif mode in {"finite_stvk_visual", "stvk_visual"}:
+        internal = stvk_internal_response(model, visual_state.x, assemble_tangent=False)
+    else:
+        raise ValueError("stress_postprocess must be 'linear_corotated' or 'finite_stvk_visual'")
     return visual_state, internal
 
 
@@ -1552,6 +1562,7 @@ def solve_sfc_source_drive_pair(
     history_frame_stride: int = 1,
     vtk_stem: str = "sfc",
     vtk_include_tensors: bool = True,
+    source_stress_postprocess: str = "linear_corotated",
 ) -> tuple[list[Row], Row]:
     """Solve the source ``gear_contact.inp`` RP-drive case with SFC contact.
 
@@ -1632,6 +1643,7 @@ def solve_sfc_source_drive_pair(
     vtk_datasets: list[tuple[float, Path]] = []
     vtk_manifest_rows: list[Row] = []
     vtk_static_blocks = _build_sfc_tet4_vtk_static_blocks(model, element_object_ids) if vtk_enabled else None
+    postprocess_label = str(source_stress_postprocess)
     if vtk_enabled and vtk_dir is not None:
         vtk_dir.mkdir(parents=True, exist_ok=True)
         for stale in vtk_dir.glob(f"{vtk_stem}_*.vtk"):
@@ -1646,6 +1658,7 @@ def solve_sfc_source_drive_pair(
             body_node_slices=body_node_slices,
             body_reference_points=body_reference_points,
             body_rotation_z=(0.0, 0.0),
+            stress_postprocess=postprocess_label,
         )
         frame_path = vtk_dir / f"{vtk_stem}_{0:04d}.vtk"
         frame_row = _write_sfc_tet4_vtk_frame(
@@ -1661,7 +1674,7 @@ def solve_sfc_source_drive_pair(
         )
         frame_row.update(
             {
-                "stress_strain_postprocess": "corotated_body_elastic_residual",
+                "stress_strain_postprocess": postprocess_label,
                 "rotation_unit": "radian",
                 "rp1_rotation_z_rad": 0.0,
                 "rp2_rotation_z_rad": 0.0,
@@ -1811,6 +1824,7 @@ def solve_sfc_source_drive_pair(
                     float(q_new[assembly.hub_slice(0).start + 5]),
                     float(q_new[hub2_slice.start + 5]),
                 ),
+                stress_postprocess=postprocess_label,
             )
             row = _penalty_history_row(
                 time_value=t,
@@ -1853,6 +1867,7 @@ def solve_sfc_source_drive_pair(
                         float(q_new[assembly.hub_slice(0).start + 5]),
                         float(q_new[hub2_slice.start + 5]),
                     ),
+                    stress_postprocess=postprocess_label,
                 )
             frame_row = _write_sfc_tet4_vtk_frame(
                 frame_path,
@@ -1867,7 +1882,7 @@ def solve_sfc_source_drive_pair(
             )
             frame_row.update(
                 {
-                    "stress_strain_postprocess": "corotated_body_elastic_residual",
+                    "stress_strain_postprocess": postprocess_label,
                     "rotation_unit": "radian",
                     "rp1_rotation_z_rad": float(q_new[assembly.hub_slice(0).start + 5]),
                     "rp2_rotation_z_rad": float(q_new[hub2_slice.start + 5]),
@@ -1903,7 +1918,7 @@ def solve_sfc_source_drive_pair(
         "source_gear1_angular_velocity_z_rad_per_s": float(gear1_angular_velocity_z),
         "source_gear2_torque_z": float(gear2_torque_z),
         "source_rotation_unit": "radian",
-        "source_stress_strain_postprocess": "corotated_body_elastic_residual",
+        "source_stress_strain_postprocess": postprocess_label,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
         "sfc_history_frame_stride": int(history_stride),
