@@ -107,6 +107,67 @@ def _node_vector_field(frame, field_name: str) -> dict[tuple[str, int], tuple[fl
     return values
 
 
+def _assembly_node_vector_field(frame, field_name: str) -> dict[int, tuple[float, float, float]]:  # noqa: ANN001
+    """Return root-assembly nodal vectors keyed by assembly node label.
+
+    Abaqus reference points in the source gear deck live directly on the root
+    assembly, not inside a part instance.  They therefore have ``instance is
+    None`` in ODB field values and are not part of the exported volume mesh.
+    Keeping them in the manifest gives a clean RP/MPC diagnostic without
+    changing the VTK mesh.
+    """
+
+    if field_name not in frame.fieldOutputs:
+        return {}
+    values: dict[int, tuple[float, float, float]] = {}
+    for value in frame.fieldOutputs[field_name].values:
+        if getattr(value, "instance", None) is not None:
+            continue
+        node_label = getattr(value, "nodeLabel", None)
+        if node_label is None:
+            continue
+        data = tuple(float(component) for component in value.data)
+        if len(data) < 3:
+            continue
+        values[int(node_label)] = (data[0], data[1], data[2])
+    return values
+
+
+def _assembly_rp_manifest_metrics(frame) -> dict[str, float]:  # noqa: ANN001
+    """Return root-assembly RP diagnostics for source-gear validation decks."""
+
+    field_map = {
+        "rotation": "UR",
+        "angular_velocity": "VR",
+        "angular_acceleration": "AR",
+        "reaction_force": "RF",
+        "reaction_moment": "RM",
+        "applied_force": "CF",
+        "applied_moment": "CM",
+    }
+    vectors = {name: _assembly_node_vector_field(frame, field_name) for name, field_name in field_map.items()}
+    metrics: dict[str, float] = {}
+    for rp_index, node_label in ((1, 1), (2, 2)):
+        prefix = f"rp{rp_index}"
+        for name, values in vectors.items():
+            vector = values.get(node_label)
+            if vector is None:
+                continue
+            metrics[f"{prefix}_{name}_x"] = float(vector[0])
+            metrics[f"{prefix}_{name}_y"] = float(vector[1])
+            metrics[f"{prefix}_{name}_z"] = float(vector[2])
+            metrics[f"{prefix}_{name}_norm"] = math.sqrt(vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2])
+    if "rp1_rotation_z" in metrics:
+        metrics["rp1_rotation_z_rad"] = metrics["rp1_rotation_z"]
+    if "rp2_rotation_z" in metrics:
+        metrics["rp2_rotation_z_rad"] = metrics["rp2_rotation_z"]
+    if "rp1_angular_velocity_z" in metrics:
+        metrics["rp1_angular_velocity_z_rad_per_s"] = metrics["rp1_angular_velocity_z"]
+    if "rp2_angular_velocity_z" in metrics:
+        metrics["rp2_angular_velocity_z_rad_per_s"] = metrics["rp2_angular_velocity_z"]
+    return metrics
+
+
 def _write_pvd(path: Path, datasets: list[tuple[float, Path]]) -> None:
     lines = [
         '<?xml version="1.0"?>',
@@ -399,6 +460,7 @@ def export_odb_to_vtk(
                 "max_le_norm_nodeavg": max(strain_norm_nodeavg, default=0.0),
                 "max_equivalent_elastic_strain_nodeavg": max(equivalent_strain_nodeavg, default=0.0),
             }
+            manifest_row.update(_assembly_rp_manifest_metrics(frame))
             manifest_row.update(object_metrics)
             manifest_rows.append(manifest_row)
 

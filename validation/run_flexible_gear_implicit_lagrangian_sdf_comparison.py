@@ -1526,13 +1526,16 @@ def solve_sfc_source_drive_pair(
         contact0 = _assemble_contact_response_force_only(samples0, model.n_nodes)
     else:
         contact0 = _assemble_contact_arrays_force_only(sample_arrays0, model.n_nodes, stiffness=pressure_stiffness)
-    previous = external - np.asarray(K_red @ q, dtype=float).reshape(-1) + assembly.reduce_vector(contact0.force)
-    free0 = free_dofs(assembly.n_reduced_dofs, fixed0)
-    if free0.size and float(np.linalg.norm(previous[free0])) > 0.0:
-        try:
-            a[free0] = np.asarray(splu(M_red[free0[:, None], free0].tocsc()).solve(previous[free0]), dtype=float)
-        except Exception:
-            a[free0] = np.asarray(cg(M_red[free0[:, None], free0].tocsr(), previous[free0], atol=1.0e-12, rtol=1.0e-10)[0], dtype=float)
+    initial_rhs_balance = external - np.asarray(K_red @ q, dtype=float).reshape(-1) + assembly.reduce_vector(contact0.force)
+    # Abaqus/Standard starts a direct-integration dynamic step from the
+    # prescribed initial acceleration field, which is zero unless explicitly
+    # initialized.  For a newly started step, the HHT history force is the
+    # accepted balance from the end of the previous step, not the load that is
+    # first applied in this step.  The source gear deck has no prior preload
+    # step, so the HHT ``B_ini`` vector is zero while the current increment sees
+    # ``initial_rhs_balance`` through ``rhs_balance``.
+    a[:] = 0.0
+    previous = np.zeros_like(initial_rhs_balance)
     state = MechanicsState(x0, assembly.expand_displacements(v), assembly.expand_displacements(a), time=0.0)
     element_object_ids = np.concatenate(
         [
@@ -1578,6 +1581,10 @@ def solve_sfc_source_drive_pair(
                 "rotation_unit": "radian",
                 "rp1_rotation_z_rad": 0.0,
                 "rp2_rotation_z_rad": 0.0,
+                "rp1_angular_velocity_z_rad_per_s": float(v[assembly.hub_slice(0).start + 5]),
+                "rp2_angular_velocity_z_rad_per_s": float(v[hub2_slice.start + 5]),
+                "rp1_angular_acceleration_z_rad_per_s2": float(a[assembly.hub_slice(0).start + 5]),
+                "rp2_angular_acceleration_z_rad_per_s2": float(a[hub2_slice.start + 5]),
             }
         )
         vtk_manifest_rows.append(frame_row)
@@ -1702,8 +1709,10 @@ def solve_sfc_source_drive_pair(
             {
                 "rp1_rotation_z": float(q_new[assembly.hub_slice(0).start + 5]),
                 "rp1_angular_velocity_z": float(v_new[assembly.hub_slice(0).start + 5]),
+                "rp1_angular_acceleration_z": float(a_new[assembly.hub_slice(0).start + 5]),
                 "rp2_rotation_z": float(q_new[hub2_slice.start + 5]),
                 "rp2_angular_velocity_z": float(v_new[hub2_slice.start + 5]),
+                "rp2_angular_acceleration_z": float(a_new[hub2_slice.start + 5]),
                 "gear2_torque_z": float(gear2_torque_z),
             }
         )
@@ -1737,6 +1746,10 @@ def solve_sfc_source_drive_pair(
                     "rotation_unit": "radian",
                     "rp1_rotation_z_rad": float(q_new[assembly.hub_slice(0).start + 5]),
                     "rp2_rotation_z_rad": float(q_new[hub2_slice.start + 5]),
+                    "rp1_angular_velocity_z_rad_per_s": float(v_new[assembly.hub_slice(0).start + 5]),
+                    "rp2_angular_velocity_z_rad_per_s": float(v_new[hub2_slice.start + 5]),
+                    "rp1_angular_acceleration_z_rad_per_s2": float(a_new[assembly.hub_slice(0).start + 5]),
+                    "rp2_angular_acceleration_z_rad_per_s2": float(a_new[hub2_slice.start + 5]),
                 }
             )
             vtk_manifest_rows.append(frame_row)
@@ -1765,6 +1778,8 @@ def solve_sfc_source_drive_pair(
         "source_gear2_torque_z": float(gear2_torque_z),
         "source_rotation_unit": "radian",
         "source_stress_strain_postprocess": "corotated_body_elastic_residual",
+        "source_initial_acceleration": "abaqus_zero_dynamic_step",
+        "source_initial_hht_history": "zero_previous_step_balance",
         "reduced_dofs": int(assembly.n_reduced_dofs),
         "timing_source_residual_seconds": float(timing_residual),
         "timing_source_linear_seconds": float(timing_linear),

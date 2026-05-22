@@ -184,6 +184,14 @@ def compare_animation_manifests(
         strain_metric,
     ]
     diagnostic_metrics = list(metrics)
+    for sfc_key, abaqus_key, label in (
+        ("rp1_rotation_z_rad", "rp1_rotation_z_rad", "RP1 rotation about z"),
+        ("rp2_rotation_z_rad", "rp2_rotation_z_rad", "RP2 rotation about z"),
+        ("rp1_angular_velocity_z_rad_per_s", "rp1_angular_velocity_z_rad_per_s", "RP1 angular velocity about z"),
+        ("rp2_angular_velocity_z_rad_per_s", "rp2_angular_velocity_z_rad_per_s", "RP2 angular velocity about z"),
+    ):
+        if _manifest_column_available(sfc_rows, sfc_key) and _manifest_column_available(abaqus_rows, abaqus_key):
+            diagnostic_metrics.append((sfc_key, abaqus_key, label))
     for object_id in (1, 2):
         for sfc_key, abaqus_key, label in (
             (
