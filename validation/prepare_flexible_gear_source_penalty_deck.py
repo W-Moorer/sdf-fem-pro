@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
-    parser.add_argument("--frame-stride", type=int, default=5)
+    parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--dt", type=float, default=None, help="Optional override for the Abaqus *Dynamic initial increment.")
     parser.add_argument("--duration", type=float, default=None, help="Optional override for the Abaqus *Dynamic total time.")
     args = parser.parse_args(argv)
