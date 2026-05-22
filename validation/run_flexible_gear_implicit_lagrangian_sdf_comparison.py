@@ -136,15 +136,16 @@ def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_
     penetration = np.maximum(-gaps, 0.0)
     active = penetration > 0.0
     lam = float(stiffness) * areas * penetration
-    contact_vectors = lam[:, None] * normals
-    slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
-    slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
-    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
-    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
-    for local in range(slave_nodes.shape[1]):
-        np.add.at(force, slave_nodes[:, local], slave_weights[:, local, None] * contact_vectors)
-    for local in range(master_nodes.shape[1]):
-        np.add.at(force, master_nodes[:, local], -master_weights[:, local, None] * contact_vectors)
+    if np.any(active):
+        active_vectors = lam[active, None] * normals[active]
+        slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)[active]
+        slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)[active]
+        master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)[active]
+        master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)[active]
+        for local in range(slave_nodes.shape[1]):
+            np.add.at(force, slave_nodes[:, local], slave_weights[:, local, None] * active_vectors)
+        for local in range(master_nodes.shape[1]):
+            np.add.at(force, master_nodes[:, local], -master_weights[:, local, None] * active_vectors)
     tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
     return ContactResponse(
         force,
@@ -906,6 +907,7 @@ def _solve_penalty_cg_correction_sparse(
     j_free: Any,
     tangent_scale: np.ndarray,
     tolerance: float,
+    stats: dict[str, Any] | None = None,
 ) -> np.ndarray | None:
     """Solve ``(K + J.T W J) x = rhs`` with sparse matrix-free CG."""
 
@@ -928,10 +930,17 @@ def _solve_penalty_cg_correction_sparse(
         contact_diag = np.asarray(j.multiply(j).T @ scale, dtype=float).reshape(-1)
         diag = diag + contact_diag
     safe_diag = np.where(np.abs(diag) > 1.0e-30, diag, 1.0)
+
     preconditioner = LinearOperator((b.size, b.size), matvec=lambda value: np.asarray(value, dtype=float) / safe_diag, dtype=float)
     operator = LinearOperator((b.size, b.size), matvec=matvec, dtype=float)
     rtol = min(1.0e-8, max(1.0e-11, float(tolerance) * 10.0))
     atol = max(float(tolerance) * max(1.0, float(np.linalg.norm(b))) * 1.0e-2, 1.0e-10)
+    iterations = 0
+
+    def count_iteration(_value: np.ndarray) -> None:
+        nonlocal iterations
+        iterations += 1
+
     try:
         solution, info = cg(
             operator,
@@ -940,6 +949,7 @@ def _solve_penalty_cg_correction_sparse(
             atol=atol,
             maxiter=max(200, min(2000, b.size // 20)),
             M=preconditioner,
+            callback=count_iteration,
         )
     except Exception:
         return None
@@ -949,6 +959,8 @@ def _solve_penalty_cg_correction_sparse(
     allowed = atol + rtol * max(1.0, float(np.linalg.norm(b)))
     if float(np.linalg.norm(residual)) > max(50.0 * allowed, 1.0e-7):
         return None
+    if stats is not None:
+        stats["iterations"] = int(iterations)
     return np.asarray(solution, dtype=float).reshape(-1)
 
 
@@ -962,6 +974,7 @@ def _solve_reduced_penalty_sparse_cg_correction(
     n_total_dofs: int,
     equilibrium_scale: float,
     tolerance: float,
+    stats: dict[str, Any] | None = None,
 ) -> np.ndarray | None:
     """Solve the reduced contact tangent with sparse matrix-free CG."""
 
@@ -991,6 +1004,7 @@ def _solve_reduced_penalty_sparse_cg_correction(
         j_free=j_free,
         tangent_scale=tangent_scale,
         tolerance=tolerance,
+        stats=stats,
     )
 
 
@@ -1004,6 +1018,7 @@ def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
     equilibrium_scale: float,
     pressure_stiffness: float,
     tolerance: float,
+    stats: dict[str, Any] | None = None,
 ) -> np.ndarray | None:
     """Solve the reduced contact tangent using batched sample arrays."""
 
@@ -1031,6 +1046,7 @@ def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
         j_free=j_free,
         tangent_scale=tangent_scale,
         tolerance=tolerance,
+        stats=stats,
     )
 
 
@@ -1603,6 +1619,7 @@ def solve_sfc_source_drive_pair(
     timing_history = 0.0
     timing_vtk = 0.0
     source_sparse_cg_count = 0
+    source_sparse_cg_iterations = 0
     source_direct_fallback_count = 0
     for step in range(1, steps + 1):
         t = step * float(dt)
@@ -1638,6 +1655,7 @@ def solve_sfc_source_drive_pair(
             t_section = time.perf_counter()
             correction_free = np.empty(0, dtype=float)
             if free.size:
+                cg_stats: dict[str, Any] = {}
                 if sample_arrays is None:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction(
                         base_matrix_free=base_free,
@@ -1648,6 +1666,7 @@ def solve_sfc_source_drive_pair(
                         n_total_dofs=model.n_dofs,
                         equilibrium_scale=scale,
                         tolerance=float(tolerance),
+                        stats=cg_stats,
                     )
                 else:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction_from_arrays(
@@ -1659,6 +1678,7 @@ def solve_sfc_source_drive_pair(
                         equilibrium_scale=scale,
                         pressure_stiffness=pressure_stiffness,
                         tolerance=float(tolerance),
+                        stats=cg_stats,
                     )
                 if correction_free is None:
                     source_direct_fallback_count += 1
@@ -1676,6 +1696,7 @@ def solve_sfc_source_drive_pair(
                     )
                 else:
                     source_sparse_cg_count += 1
+                    source_sparse_cg_iterations += int(cg_stats.get("iterations", 0))
             timing_linear += time.perf_counter() - t_section
             iteration_count = iteration
             if float(np.linalg.norm(correction_free)) <= float(tolerance) * max(1.0, float(np.linalg.norm(q_guess[free])) if free.size else 1.0):
@@ -1798,6 +1819,7 @@ def solve_sfc_source_drive_pair(
         "timing_source_history_seconds": float(timing_history),
         "timing_source_vtk_seconds": float(timing_vtk),
         "source_sparse_cg_count": int(source_sparse_cg_count),
+        "source_sparse_cg_iterations": int(source_sparse_cg_iterations),
         "source_direct_fallback_count": int(source_direct_fallback_count),
         "status": "completed",
     }
