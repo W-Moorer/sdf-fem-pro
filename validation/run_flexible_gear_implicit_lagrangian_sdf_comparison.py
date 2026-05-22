@@ -69,6 +69,18 @@ from validation.vtk_frame_series import write_pvd  # noqa: E402
 
 Row = dict[str, Any]
 
+
+@dataclass(frozen=True, slots=True)
+class SFCVTKStaticBlocks:
+    """Static legacy-VTK blocks for a fixed TET4 topology."""
+
+    elements: np.ndarray
+    object_ids: np.ndarray
+    object_node_ids_by_object: tuple[tuple[int, np.ndarray], ...]
+    cells_block: str
+    cell_types_block: str
+    object_id_block: str
+
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_implicit_lagrangian_sdf"
 DEFAULT_PRESSURE_STIFFNESS = 5.0e9
 
@@ -311,6 +323,7 @@ def _write_sfc_tet4_vtk_frame(
     time_value: float,
     frame_index: int,
     include_tensors: bool = True,
+    static_blocks: SFCVTKStaticBlocks | None = None,
 ) -> Row:
     """Write one SFC TET4 state as a legacy VTK unstructured grid."""
 
@@ -320,10 +333,9 @@ def _write_sfc_tet4_vtk_frame(
     displacement = points - reference
     displacement_norm = np.linalg.norm(displacement, axis=1)
     velocity = np.asarray(state.v, dtype=float)
-    elements = np.asarray(model.elements, dtype=np.int64)
-    object_ids = np.asarray(element_object_ids, dtype=np.int64).reshape(-1)
-    if object_ids.shape != (elements.shape[0],):
-        raise ValueError("element_object_ids must match element count")
+    static = static_blocks if static_blocks is not None else _build_sfc_tet4_vtk_static_blocks(model, element_object_ids)
+    elements = static.elements
+    object_ids = static.object_ids
     stress = _tensor_field_or_zeros(internal.stress, elements.shape[0])
     strain = _tensor_field_or_zeros(internal.strain, elements.shape[0])
     von_mises = np.asarray(internal.von_mises, dtype=float).reshape(-1)
@@ -335,11 +347,7 @@ def _write_sfc_tet4_vtk_frame(
     strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, points.shape[0])
     equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, points.shape[0])
     object_metric_columns: Row = {}
-    for object_id in sorted(int(value) for value in np.unique(object_ids)):
-        elem_mask = object_ids == object_id
-        if not np.any(elem_mask):
-            continue
-        object_nodes = np.unique(elements[elem_mask].reshape(-1))
+    for object_id, object_nodes in static.object_node_ids_by_object:
         object_metric_columns[f"max_displacement_magnitude_object{object_id}"] = (
             float(np.max(displacement_norm[object_nodes])) if object_nodes.size else 0.0
         )
@@ -357,11 +365,8 @@ def _write_sfc_tet4_vtk_frame(
         handle.write(f"POINTS {points.shape[0]} float\n")
         for x, y, z in points:
             handle.write(f"{x:.9e} {y:.9e} {z:.9e}\n")
-        handle.write(f"CELLS {elements.shape[0]} {elements.shape[0] * 5}\n")
-        for element in elements:
-            handle.write("4 " + " ".join(str(int(node)) for node in element) + "\n")
-        handle.write(f"CELL_TYPES {elements.shape[0]}\n")
-        handle.write(("10\n" * elements.shape[0]))
+        handle.write(static.cells_block)
+        handle.write(static.cell_types_block)
         handle.write(f"POINT_DATA {points.shape[0]}\n")
         handle.write("VECTORS U float\n")
         for ux, uy, uz in displacement:
@@ -382,11 +387,7 @@ def _write_sfc_tet4_vtk_frame(
             handle.write("LOOKUP_TABLE default\n")
             for value in values:
                 handle.write(f"{float(value):.9e}\n")
-        handle.write(f"CELL_DATA {elements.shape[0]}\n")
-        handle.write("SCALARS object_id int 1\n")
-        handle.write("LOOKUP_TABLE default\n")
-        for value in object_ids:
-            handle.write(f"{int(value)}\n")
+        handle.write(static.object_id_block)
         for name, values in (
             ("von_mises", von_mises),
             ("strain_norm", strain_norm),
@@ -420,6 +421,32 @@ def _write_sfc_tet4_vtk_frame(
     }
     row.update(object_metric_columns)
     return row
+
+
+def _build_sfc_tet4_vtk_static_blocks(model: MechanicsModel, element_object_ids: np.ndarray) -> SFCVTKStaticBlocks:
+    """Precompute fixed topology blocks for repeated SFC VTK frame writes."""
+
+    elements = np.asarray(model.elements, dtype=np.int64)
+    object_ids = np.asarray(element_object_ids, dtype=np.int64).reshape(-1)
+    if object_ids.shape != (elements.shape[0],):
+        raise ValueError("element_object_ids must match element count")
+    object_node_ids: list[tuple[int, np.ndarray]] = []
+    for object_id in sorted(int(value) for value in np.unique(object_ids)):
+        elem_mask = object_ids == object_id
+        if np.any(elem_mask):
+            object_node_ids.append((object_id, np.unique(elements[elem_mask].reshape(-1))))
+    cells_lines = [f"CELLS {elements.shape[0]} {elements.shape[0] * 5}\n"]
+    cells_lines.extend("4 " + " ".join(str(int(node)) for node in element) + "\n" for element in elements)
+    object_lines = [f"CELL_DATA {elements.shape[0]}\n", "SCALARS object_id int 1\n", "LOOKUP_TABLE default\n"]
+    object_lines.extend(f"{int(value)}\n" for value in object_ids)
+    return SFCVTKStaticBlocks(
+        elements=elements,
+        object_ids=object_ids,
+        object_node_ids_by_object=tuple(object_node_ids),
+        cells_block="".join(cells_lines),
+        cell_types_block=f"CELL_TYPES {elements.shape[0]}\n" + ("10\n" * elements.shape[0]),
+        object_id_block="".join(object_lines),
+    )
 
 
 def _node_average_cell_scalar(cell_values: np.ndarray, cells: np.ndarray, node_count: int) -> np.ndarray:
@@ -1583,6 +1610,7 @@ def solve_sfc_source_drive_pair(
     vtk_dir = Path(vtk_out_dir) if vtk_out_dir is not None else None
     vtk_datasets: list[tuple[float, Path]] = []
     vtk_manifest_rows: list[Row] = []
+    vtk_static_blocks = _build_sfc_tet4_vtk_static_blocks(model, element_object_ids) if vtk_enabled else None
     if vtk_enabled and vtk_dir is not None:
         vtk_dir.mkdir(parents=True, exist_ok=True)
         for stale in vtk_dir.glob(f"{vtk_stem}_*.vtk"):
@@ -1608,6 +1636,7 @@ def solve_sfc_source_drive_pair(
             time_value=0.0,
             frame_index=0,
             include_tensors=vtk_include_tensors,
+            static_blocks=vtk_static_blocks,
         )
         frame_row.update(
             {
@@ -1813,6 +1842,7 @@ def solve_sfc_source_drive_pair(
                 time_value=t,
                 frame_index=vtk_frame_index,
                 include_tensors=vtk_include_tensors,
+                static_blocks=vtk_static_blocks,
             )
             frame_row.update(
                 {

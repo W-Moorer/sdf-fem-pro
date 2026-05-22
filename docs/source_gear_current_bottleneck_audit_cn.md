@@ -380,3 +380,57 @@ results/source_gear_penalty_10steps_output_reuse
 - max displacement magnitude relative error: `1.195%`
 - node-averaged von Mises relative error: `0.0736%`
 - node-averaged equivalent elastic strain relative error: `0.0736%`
+
+## 更新：penalty 接触与隔帧保存作为当前齿轮对比口径
+
+当前 source-drive 全齿轮对比固定采用 SFC frictionless linear penalty contact：
+
+```text
+--drive-mode source_inp
+--contact-mode penalty
+--pressure-stiffness 5e9
+```
+
+`source_inp` 路径会拒绝 `hard` contact，因此不会在该齿轮源工况中混入非罚函数接触。
+为了避免无必要的全帧云图写出，当前推荐并作为 CLI 默认的保存口径是：
+
+```text
+--history-frame-stride 2
+--vtk-frame-stride 2
+--vtk-scalars-only
+```
+
+这表示应力、应变和位移云图隔步保存；对 10-step 短程验证，会输出初始帧以及
+第 2、4、6、8、10 步。若总步数不是 stride 的整数倍，runner 仍会额外保存最终步，
+保证末态误差对比和 ParaView 动画末帧完整。
+
+为降低隔帧输出本身的开销，SFC VTK writer 现在预计算固定 TET4 拓扑块
+（connectivity、cell type、object id 和各 body node set），每个输出步只写当前点坐标、
+速度、位移和标量场。该改动只影响输出路径，不改变求解残差、接触 gap、normal、
+penalty force、contact tangent、时间积分或应力/应变数值。
+
+10-step source-drive penalty 复测目录：
+
+```text
+results/source_gear_penalty_10steps_vtk_static_blocks
+```
+
+验证结果：
+
+- affected pytest: `21 passed, 4 deselected`
+- complete wall time: `40.618832 s`
+- residual/contact sampling: `19.740190 s`
+- sparse CG linear correction: `5.424877 s`
+- one-time base LU factorization: `4.569960 s`
+- history stress/strain diagnostics: `7.114775 s`
+- VTK cloud output: `3.621164 s`
+- sparse CG iterations: `56`
+- final active contact samples: `900`
+- final min gap: `-7.522933791806687e-04`
+- final normal force: `76.72803452060242`
+
+相同 Abaqus VTK manifest 下的末帧误差保持为：
+
+- max displacement magnitude relative error: `1.195%`
+- node-averaged von Mises relative error: `0.0736%`
+- node-averaged equivalent elastic strain relative error: `0.0736%`
