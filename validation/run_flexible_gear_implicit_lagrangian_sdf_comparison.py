@@ -185,6 +185,9 @@ def _write_sfc_tet4_vtk_frame(
         von_mises = _von_mises_local(stress)
     strain_norm = np.linalg.norm(strain, axis=(1, 2))
     equivalent_strain = _equivalent_elastic_strain_from_mises(von_mises, young=model.E, poisson=model.nu)
+    von_mises_nodeavg = _node_average_cell_scalar(von_mises, elements, points.shape[0])
+    strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, points.shape[0])
+    equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, points.shape[0])
     with path.open("w", encoding="ascii", newline="\n") as handle:
         handle.write("# vtk DataFile Version 3.0\n")
         handle.write(f"SFC Lagrangian-SDF full gear frame {frame_index} time={float(time_value):.12g}\n")
@@ -209,6 +212,15 @@ def _write_sfc_tet4_vtk_frame(
         handle.write("LOOKUP_TABLE default\n")
         for value in displacement_norm:
             handle.write(f"{float(value):.9e}\n")
+        for name, values in (
+            ("von_mises_nodeavg", von_mises_nodeavg),
+            ("strain_norm_nodeavg", strain_norm_nodeavg),
+            ("equivalent_elastic_strain_nodeavg", equivalent_strain_nodeavg),
+        ):
+            handle.write(f"SCALARS {name} float 1\n")
+            handle.write("LOOKUP_TABLE default\n")
+            for value in values:
+                handle.write(f"{float(value):.9e}\n")
         handle.write(f"CELL_DATA {elements.shape[0]}\n")
         handle.write("SCALARS object_id int 1\n")
         handle.write("LOOKUP_TABLE default\n")
@@ -238,7 +250,26 @@ def _write_sfc_tet4_vtk_frame(
         "max_displacement_magnitude": float(np.max(displacement_norm)) if displacement_norm.size else 0.0,
         "max_von_mises": float(np.max(von_mises)) if von_mises.size else 0.0,
         "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+        "max_von_mises_nodeavg": float(np.max(von_mises_nodeavg)) if von_mises_nodeavg.size else 0.0,
+        "max_strain_norm_nodeavg": float(np.max(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
     }
+
+
+def _node_average_cell_scalar(cell_values: np.ndarray, cells: np.ndarray, node_count: int) -> np.ndarray:
+    """Return incident-cell averaged nodal values for visualization only."""
+
+    values = np.asarray(cell_values, dtype=float).reshape(-1)
+    conn = np.asarray(cells, dtype=np.int64)
+    out = np.zeros(int(node_count), dtype=float)
+    counts = np.zeros(int(node_count), dtype=float)
+    if values.shape[0] != conn.shape[0]:
+        return out
+    for cell_value, cell in zip(values, conn, strict=True):
+        out[cell] += float(cell_value)
+        counts[cell] += 1.0
+    mask = counts > 0.0
+    out[mask] /= counts[mask]
+    return out
 
 
 def _tensor_field_or_zeros(values: np.ndarray, count: int) -> np.ndarray:

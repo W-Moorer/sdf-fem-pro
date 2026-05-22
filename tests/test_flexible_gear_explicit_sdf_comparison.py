@@ -31,6 +31,13 @@ def test_parse_flexible_gear_input_extracts_contact_and_hub_data() -> None:
     assert model.density == pytest.approx(7850.0)
     assert model.young == pytest.approx(2.05e11)
     assert model.poisson == pytest.approx(0.28)
+    assert model.gear1_angular_velocity_z == pytest.approx(52.36)
+    assert model.gear2_torque_z == pytest.approx(50.0)
+    assert model.dynamic_initial_dt == pytest.approx(1.0e-5)
+    assert model.dynamic_duration == pytest.approx(5.0e-2)
+    assert model.dynamic_min_dt == pytest.approx(1.0e-10)
+    assert model.dynamic_max_dt == pytest.approx(5.0e-5)
+    assert model.contact_pressure_overclosure == "HARD"
 
 
 def test_compact_explicit_deck_uses_penalty_linear_contact() -> None:

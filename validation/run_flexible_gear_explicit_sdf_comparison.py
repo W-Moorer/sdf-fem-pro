@@ -80,6 +80,11 @@ class GearInputModel:
     poisson: float
     gear1_angular_velocity_z: float
     gear2_torque_z: float
+    dynamic_initial_dt: float = 1.0e-5
+    dynamic_duration: float = 5.0e-2
+    dynamic_min_dt: float = 1.0e-10
+    dynamic_max_dt: float = 5.0e-5
+    contact_pressure_overclosure: str = "HARD"
 
 
 def _write_csv(path: Path, rows: list[Row], fieldnames: list[str] | None = None) -> None:
@@ -296,6 +301,11 @@ def parse_gear_input(path: Path) -> GearInputModel:
     poisson = 0.28
     gear1_angular_velocity_z = 52.36
     gear2_torque_z = 50.0
+    dynamic_initial_dt = 1.0e-5
+    dynamic_duration = 5.0e-2
+    dynamic_min_dt = 1.0e-10
+    dynamic_max_dt = 5.0e-5
+    contact_pressure_overclosure = "HARD"
     current_part = ""
     in_assembly = False
     index = 0
@@ -338,6 +348,28 @@ def parse_gear_input(path: Path) -> GearInputModel:
                         data = _values(row)
                         young = float(data[0])
                         poisson = float(data[1])
+                    break
+                next_index += 1
+            index += 1
+            continue
+        if key == "*surface behavior":
+            contact_pressure_overclosure = params.get("pressure-overclosure", contact_pressure_overclosure).upper()
+            index += 1
+            continue
+        if key == "*dynamic":
+            next_index = index + 1
+            while next_index < len(lines):
+                row = lines[next_index].strip()
+                if row and not row.startswith("**"):
+                    if not row.startswith("*"):
+                        data = _values(row)
+                        if len(data) >= 2:
+                            dynamic_initial_dt = float(data[0])
+                            dynamic_duration = float(data[1])
+                        if len(data) >= 3:
+                            dynamic_min_dt = float(data[2])
+                        if len(data) >= 4:
+                            dynamic_max_dt = float(data[3])
                     break
                 next_index += 1
             index += 1
@@ -411,6 +443,11 @@ def parse_gear_input(path: Path) -> GearInputModel:
         poisson=float(poisson),
         gear1_angular_velocity_z=float(gear1_angular_velocity_z),
         gear2_torque_z=float(gear2_torque_z),
+        dynamic_initial_dt=float(dynamic_initial_dt),
+        dynamic_duration=float(dynamic_duration),
+        dynamic_min_dt=float(dynamic_min_dt),
+        dynamic_max_dt=float(dynamic_max_dt),
+        contact_pressure_overclosure=str(contact_pressure_overclosure).upper(),
     )
 
 

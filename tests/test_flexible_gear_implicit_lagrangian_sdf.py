@@ -140,6 +140,8 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     text = second.read_text(encoding="ascii")
     assert "DATASET UNSTRUCTURED_GRID" in text
     assert "VECTORS U float" in text
+    assert "SCALARS von_mises_nodeavg float 1" in text
+    assert "SCALARS strain_norm_nodeavg float 1" in text
     assert "SCALARS von_mises float 1" in text
     assert "TENSORS S float" in text
 
@@ -178,15 +180,15 @@ def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path)
     sfc_manifest = tmp_path / "sfc_manifest.csv"
     abaqus_manifest = tmp_path / "abaqus_manifest.csv"
     sfc_manifest.write_text(
-        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm\n"
-        "0,0,sfc_0000.vtk,1,1,0.1,5.0,0.02\n"
-        "1,1,sfc_0001.vtk,1,1,0.2,7.0,0.03\n",
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_von_mises_nodeavg,max_strain_norm_nodeavg\n"
+        "0,0,sfc_0000.vtk,1,1,0.1,5.0,0.02,4.0,0.018\n"
+        "1,1,sfc_0001.vtk,1,1,0.2,7.0,0.03,6.0,0.028\n",
         encoding="utf-8",
     )
     abaqus_manifest.write_text(
-        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm\n"
-        "0,0,0,abaqus_0000.vtk,1,1,0.15,6.0,0.01\n"
-        "1,1,1,abaqus_0001.vtk,1,1,0.25,8.0,0.04\n",
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_von_mises_nodeavg,max_le_norm_nodeavg\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.15,6.0,0.01,5.0,0.009\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.25,8.0,0.04,7.0,0.038\n",
         encoding="utf-8",
     )
 
@@ -196,9 +198,13 @@ def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path)
     assert "displacement_magnitude" in text
     assert "von_mises" in text
     assert "strain_norm" in text
+    assert "von_mises_nodeavg" in text
+    assert "strain_norm_nodeavg" in text
     assert "0.25" in text
     assert "8.0" in text
     assert "0.04" in text
+    assert "7.0" in text
+    assert "0.038" in text
 
 
 def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:

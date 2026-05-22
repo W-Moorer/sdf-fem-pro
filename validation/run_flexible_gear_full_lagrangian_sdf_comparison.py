@@ -98,12 +98,34 @@ def write_animation_color_ranges(
             "paraview_note": "Fixed global range prevents stress-cloud flicker caused by per-frame color rescaling.",
         },
         {
+            "field": "von_mises_nodeavg",
+            "recommended_min": 0.0,
+            "recommended_max": max(
+                _max_column(sfc_rows, "max_von_mises_nodeavg"),
+                _max_column(abaqus_rows, "max_von_mises_nodeavg"),
+            ),
+            "sfc_column": "max_von_mises_nodeavg",
+            "abaqus_column": "max_von_mises_nodeavg",
+            "paraview_note": "Use this point-data field for smooth animations while retaining cell von_mises for quantitative checks.",
+        },
+        {
             "field": "strain_norm",
             "recommended_min": 0.0,
             "recommended_max": max(_max_column(sfc_rows, "max_strain_norm"), _max_column(abaqus_rows, "max_le_norm")),
             "sfc_column": "max_strain_norm",
             "abaqus_column": "max_le_norm",
             "paraview_note": "SFC field is named strain_norm; Abaqus field is named logarithmic_strain_norm.",
+        },
+        {
+            "field": "strain_norm_nodeavg / logarithmic_strain_norm_nodeavg",
+            "recommended_min": 0.0,
+            "recommended_max": max(
+                _max_column(sfc_rows, "max_strain_norm_nodeavg"),
+                _max_column(abaqus_rows, "max_le_norm_nodeavg"),
+            ),
+            "sfc_column": "max_strain_norm_nodeavg",
+            "abaqus_column": "max_le_norm_nodeavg",
+            "paraview_note": "Use the node-averaged point-data field for animation; use cell data for exact element statistics.",
         },
     ]
     path = out_dir / "animation_fixed_color_ranges.csv"

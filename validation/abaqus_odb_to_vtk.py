@@ -142,6 +142,10 @@ def _write_vtk_frame(
     include_tensors: bool = True,
 ) -> None:
     cell_size = sum(len(cell) + 1 for cell in cells)
+    von_mises = [_von_mises_from_symmetric6(value) for value in stress]
+    strain_norm = [_tensor_norm_from_symmetric6(value) for value in strain]
+    von_mises_nodeavg = _node_average_cell_scalar(von_mises, cells, len(points))
+    strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, cells, len(points))
     with path.open("w", encoding="ascii", newline="\n") as handle:
         handle.write("# vtk DataFile Version 3.0\n")
         handle.write(title + "\n")
@@ -167,6 +171,14 @@ def _write_vtk_frame(
         handle.write("LOOKUP_TABLE default\n")
         for ux, uy, uz in displacement:
             handle.write(f"{math.sqrt(ux * ux + uy * uy + uz * uz):.9e}\n")
+        for name, values in (
+            ("von_mises_nodeavg", von_mises_nodeavg),
+            ("logarithmic_strain_norm_nodeavg", strain_norm_nodeavg),
+        ):
+            handle.write(f"SCALARS {name} float 1\n")
+            handle.write("LOOKUP_TABLE default\n")
+            for value in values:
+                handle.write(f"{float(value):.9e}\n")
         handle.write(f"CELL_DATA {len(cells)}\n")
         handle.write("SCALARS object_id int 1\n")
         handle.write("LOOKUP_TABLE default\n")
@@ -174,12 +186,12 @@ def _write_vtk_frame(
             handle.write(f"{object_id}\n")
         handle.write("SCALARS von_mises float 1\n")
         handle.write("LOOKUP_TABLE default\n")
-        for value in stress:
-            handle.write(f"{_von_mises_from_symmetric6(value):.9e}\n")
+        for value in von_mises:
+            handle.write(f"{value:.9e}\n")
         handle.write("SCALARS logarithmic_strain_norm float 1\n")
         handle.write("LOOKUP_TABLE default\n")
-        for value in strain:
-            handle.write(f"{_tensor_norm_from_symmetric6(value):.9e}\n")
+        for value in strain_norm:
+            handle.write(f"{value:.9e}\n")
         if include_tensors:
             handle.write("TENSORS LE float\n")
             for value in strain:
@@ -189,6 +201,23 @@ def _write_vtk_frame(
             for value in stress:
                 for row in _tensor_from_symmetric6(value):
                     handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
+
+
+def _node_average_cell_scalar(cell_values: list[float], cells: list[list[int]], node_count: int) -> list[float]:
+    """Return incident-cell averaged nodal scalars for VTK visualization."""
+
+    out = [0.0] * int(node_count)
+    counts = [0] * int(node_count)
+    if len(cell_values) != len(cells):
+        return out
+    for value, cell in zip(cell_values, cells):
+        for node in cell:
+            out[int(node)] += float(value)
+            counts[int(node)] += 1
+    for index, count in enumerate(counts):
+        if count:
+            out[index] /= float(count)
+    return out
 
 
 def export_odb_to_vtk(
@@ -271,6 +300,10 @@ def export_odb_to_vtk(
             stress = [stress_by_element.get(key, zero_tensor) for key in cell_keys]
             strain = [strain_by_element.get(key, zero_tensor) for key in cell_keys]
             displacement_norm = [math.sqrt(ux * ux + uy * uy + uz * uz) for ux, uy, uz in displacement]
+            von_mises_values = [_von_mises_from_symmetric6(value) for value in stress]
+            strain_norm_values = [_tensor_norm_from_symmetric6(value) for value in strain]
+            von_mises_nodeavg = _node_average_cell_scalar(von_mises_values, cells, len(points))
+            strain_norm_nodeavg = _node_average_cell_scalar(strain_norm_values, cells, len(points))
             frame_path = out_dir / f"{stem}_{frame_index:04d}.vtk"
             _write_vtk_frame(
                 frame_path,
@@ -295,8 +328,10 @@ def export_odb_to_vtk(
                     "node_count": len(points),
                     "element_count": len(cells),
                     "max_displacement_magnitude": max(displacement_norm, default=0.0),
-                    "max_von_mises": max((_von_mises_from_symmetric6(value) for value in stress), default=0.0),
-                    "max_le_norm": max((_tensor_norm_from_symmetric6(value) for value in strain), default=0.0),
+                    "max_von_mises": max(von_mises_values, default=0.0),
+                    "max_le_norm": max(strain_norm_values, default=0.0),
+                    "max_von_mises_nodeavg": max(von_mises_nodeavg, default=0.0),
+                    "max_le_norm_nodeavg": max(strain_norm_nodeavg, default=0.0),
                 }
             )
 
@@ -316,6 +351,8 @@ def export_odb_to_vtk(
                     "max_displacement_magnitude",
                     "max_von_mises",
                     "max_le_norm",
+                    "max_von_mises_nodeavg",
+                    "max_le_norm_nodeavg",
                 ],
             )
             writer.writeheader()
