@@ -374,3 +374,54 @@ python validation\run_source_gear_vtk_manifest_alignment.py `
 位移和源 deck 中规定的 gear 1 运动继续保持强一致；gear 2 的整体转动量仍在约 2.5--3.6% 误差范围内。应力/应变误差主要集中在 object 2 的局部接触区域统计，object 1 的 max node-averaged von Mises 已在 6% 内。这个结果进一步说明剩余误差更可能来自 Abaqus 与 SFC 对接触压力分布、active patch 覆盖、surface-to-surface 约束平均和应力采样位置的定义差异，而不是转动单位、时间步长或全局位移曲线错配。
 
 PVD 时间戳已经同步为 `0:2e-5:1.4e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 140，可继续向 `0.05 s` 推进。
+
+## 更新：续跑到 `1.6e-3 s`
+
+SFC 已继续从同一个 checkpoint 续跑到 `1.6e-3 s`。Abaqus penalty 对照也使用同一 `gear_contact.inp`、同一 `dt=1e-5 s`、同一 `frame_stride=2` 跑到 `1.6e-3 s`。两边均使用线性罚函数接触；VTK 均为隔帧保存。
+
+输出目录：
+
+- SFC：`results/source_gear_penalty_full_stride2_match_step`
+- Abaqus penalty：`results/source_gear_abaqus_penalty_full_stride2_match_step_0016`
+- 独立 manifest 对比：`results/source_gear_penalty_full_stride2_match_step_0016_alignment`
+
+独立 manifest 对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_manifest_alignment.py `
+  --sfc-manifest results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0016\abaqus_vtk\abaqus_manifest.csv `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0016_alignment
+```
+
+`1.6e-3 s` 阶段结果：
+
+| 项目 | 数值 |
+| --- | ---: |
+| 时间窗 | `0 ~ 1.6e-3 s` |
+| 固定步长 | `1e-5 s` |
+| VTK 保存间隔 | 每 2 步 |
+| SFC VTK 帧数 | 81 |
+| Abaqus VTK 帧数 | 81 |
+| SFC 续跑 wall time | 56.538 s |
+| Abaqus analysis wall time | 2591.466 s |
+| Abaqus VTK export wall time | 1226.457 s |
+| 末帧 displacement magnitude rel. error | 1.209% |
+| 末帧 p95 node-averaged von Mises rel. error | 52.750% |
+| 末帧 p95 node-averaged equivalent elastic strain rel. error | 52.750% |
+| 末帧 max node-averaged von Mises rel. error | 51.606% |
+| 末帧 mean node-averaged von Mises rel. error | 48.600% |
+| 末帧 gear 1 prescribed rotation rel. error | 3.39e-6% |
+| 末帧 gear 2 rotation rel. error | 3.283% |
+| 末帧 gear 2 angular velocity rel. error | 2.192% |
+| 末帧 object 1 max displacement rel. error | 0.020% |
+| 末帧 object 2 max displacement rel. error | 1.209% |
+
+位移曲线和源 deck 中规定的 gear 1 运动继续收敛式接近 Abaqus；gear 2 的整体转动误差也保持在约 2--3% 水平。相反，node-averaged stress/strain 的 p95、max、mean 误差都明显升高，说明现阶段不能把 SFC 与 Abaqus 的应力云图差异解释为转动单位、时间步长或动画色标问题。后续优先级应转向：
+
+1. 对齐 Abaqus surface-to-surface penalty 接触压力在约束区域内的分布/平均方式；
+2. 检查 active patch 覆盖范围是否漏掉或过早剔除齿面边缘接触；
+3. 对齐 Abaqus 与 SFC 的应力/应变采样位置和 nodal averaging 规则；
+4. 再比较完整应力/应变云图，而不是仅用单一分位数判断场误差。
+
+PVD 时间戳已经同步为 `0:2e-5:1.6e-3`。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 160，可继续向 `0.05 s` 推进。
