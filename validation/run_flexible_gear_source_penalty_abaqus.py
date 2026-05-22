@@ -23,6 +23,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     compare_animation_manifests,
     write_animation_color_ranges,
 )
+from validation.run_flexible_gear_explicit_sdf_comparison import parse_gear_input
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _abaqus_wallclock_seconds,
     _resolve_abaqus_command,
@@ -55,6 +56,7 @@ def run_source_penalty_abaqus(
     """Run the source-derived Abaqus penalty deck and export VTK frames."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    model = parse_gear_input(source)
     run_dir = out_dir / "abaqus_run"
     run_dir.mkdir(parents=True, exist_ok=True)
     job_name = "gear_contact_source_penalty"
@@ -99,6 +101,10 @@ def run_source_penalty_abaqus(
             "abaqus",
             "--frame-stride",
             str(vtk_export_stride),
+            "--young",
+            f"{float(model.young):.16e}",
+            "--poisson",
+            f"{float(model.poisson):.16e}",
             "--include-tensors" if include_tensors else "--scalars-only",
         ],
         cwd=run_dir,
@@ -114,6 +120,8 @@ def run_source_penalty_abaqus(
         "abaqus_export_wall_seconds": float(export_wall),
         "abaqus_reported_wall_seconds": _abaqus_wallclock_seconds(run_dir / f"{job_name}.sta") or 0.0,
         "pressure_stiffness": float(pressure_stiffness),
+        "young": float(model.young),
+        "poisson": float(model.poisson),
         "dt_override": "" if dt is None else float(dt),
         "duration_override": "" if duration is None else float(duration),
         "vtk_frame_stride": int(max(1, int(frame_stride))),

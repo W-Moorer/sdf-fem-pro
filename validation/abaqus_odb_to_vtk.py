@@ -59,6 +59,15 @@ def _tensor_norm_from_symmetric6(data: tuple[float, ...] | list[float]) -> float
     return math.sqrt(s11 * s11 + s22 * s22 + s33 * s33 + 2.0 * (s12 * s12 + s13 * s13 + s23 * s23))
 
 
+def _equivalent_elastic_strain_from_mises(mises: float, *, young: float | None, poisson: float | None) -> float:
+    """Return the J2 equivalent elastic strain implied by von Mises stress."""
+
+    if young is None or poisson is None:
+        return 0.0
+    shear = float(young) / (2.0 * (1.0 + float(poisson)))
+    return float(mises) / max(3.0 * shear, 1.0e-30)
+
+
 def _average_element_field(frame, field_name: str) -> dict[tuple[str, int], tuple[float, ...]]:  # noqa: ANN001
     """Average an element field over all values reported for each element."""
 
@@ -139,13 +148,17 @@ def _write_vtk_frame(
     velocity: list[tuple[float, float, float]],
     stress: list[tuple[float, ...]],
     strain: list[tuple[float, ...]],
+    young: float | None = None,
+    poisson: float | None = None,
     include_tensors: bool = True,
 ) -> None:
     cell_size = sum(len(cell) + 1 for cell in cells)
     von_mises = [_von_mises_from_symmetric6(value) for value in stress]
     strain_norm = [_tensor_norm_from_symmetric6(value) for value in strain]
+    equivalent_strain = [_equivalent_elastic_strain_from_mises(value, young=young, poisson=poisson) for value in von_mises]
     von_mises_nodeavg = _node_average_cell_scalar(von_mises, cells, len(points))
     strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, cells, len(points))
+    equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, cells, len(points))
     with path.open("w", encoding="ascii", newline="\n") as handle:
         handle.write("# vtk DataFile Version 3.0\n")
         handle.write(title + "\n")
@@ -174,6 +187,7 @@ def _write_vtk_frame(
         for name, values in (
             ("von_mises_nodeavg", von_mises_nodeavg),
             ("logarithmic_strain_norm_nodeavg", strain_norm_nodeavg),
+            ("equivalent_elastic_strain_nodeavg", equivalent_strain_nodeavg),
         ):
             handle.write(f"SCALARS {name} float 1\n")
             handle.write("LOOKUP_TABLE default\n")
@@ -191,6 +205,10 @@ def _write_vtk_frame(
         handle.write("SCALARS logarithmic_strain_norm float 1\n")
         handle.write("LOOKUP_TABLE default\n")
         for value in strain_norm:
+            handle.write(f"{value:.9e}\n")
+        handle.write("SCALARS equivalent_elastic_strain float 1\n")
+        handle.write("LOOKUP_TABLE default\n")
+        for value in equivalent_strain:
             handle.write(f"{value:.9e}\n")
         if include_tensors:
             handle.write("TENSORS LE float\n")
@@ -227,6 +245,8 @@ def export_odb_to_vtk(
     stem: str = "frame",
     frame_stride: int = 1,
     include_tensors: bool = True,
+    young: float | None = None,
+    poisson: float | None = None,
 ) -> dict[str, Path | int | float]:
     """Export all ODB frames in the first step to numbered VTK files."""
 
@@ -302,8 +322,12 @@ def export_odb_to_vtk(
             displacement_norm = [math.sqrt(ux * ux + uy * uy + uz * uz) for ux, uy, uz in displacement]
             von_mises_values = [_von_mises_from_symmetric6(value) for value in stress]
             strain_norm_values = [_tensor_norm_from_symmetric6(value) for value in strain]
+            equivalent_strain_values = [
+                _equivalent_elastic_strain_from_mises(value, young=young, poisson=poisson) for value in von_mises_values
+            ]
             von_mises_nodeavg = _node_average_cell_scalar(von_mises_values, cells, len(points))
             strain_norm_nodeavg = _node_average_cell_scalar(strain_norm_values, cells, len(points))
+            equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain_values, cells, len(points))
             frame_path = out_dir / f"{stem}_{frame_index:04d}.vtk"
             _write_vtk_frame(
                 frame_path,
@@ -316,6 +340,8 @@ def export_odb_to_vtk(
                 velocity=velocity,
                 stress=stress,
                 strain=strain,
+                young=young,
+                poisson=poisson,
                 include_tensors=include_tensors,
             )
             datasets.append((float(frame.frameValue), frame_path))
@@ -330,8 +356,10 @@ def export_odb_to_vtk(
                     "max_displacement_magnitude": max(displacement_norm, default=0.0),
                     "max_von_mises": max(von_mises_values, default=0.0),
                     "max_le_norm": max(strain_norm_values, default=0.0),
+                    "max_equivalent_elastic_strain": max(equivalent_strain_values, default=0.0),
                     "max_von_mises_nodeavg": max(von_mises_nodeavg, default=0.0),
                     "max_le_norm_nodeavg": max(strain_norm_nodeavg, default=0.0),
+                    "max_equivalent_elastic_strain_nodeavg": max(equivalent_strain_nodeavg, default=0.0),
                 }
             )
 
@@ -351,8 +379,10 @@ def export_odb_to_vtk(
                     "max_displacement_magnitude",
                     "max_von_mises",
                     "max_le_norm",
+                    "max_equivalent_elastic_strain",
                     "max_von_mises_nodeavg",
                     "max_le_norm_nodeavg",
+                    "max_equivalent_elastic_strain_nodeavg",
                 ],
             )
             writer.writeheader()
@@ -375,6 +405,8 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--stem", default="frame")
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--young", type=float, default=None)
+    parser.add_argument("--poisson", type=float, default=None)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--include-tensors", dest="include_tensors", action="store_true", default=True)
     group.add_argument("--scalars-only", dest="include_tensors", action="store_false")
@@ -385,6 +417,8 @@ def main() -> None:
         stem=args.stem,
         frame_stride=args.frame_stride,
         include_tensors=bool(args.include_tensors),
+        young=args.young,
+        poisson=args.poisson,
     )
     print(f"VTK frames: {result['frame_count']}")
     print(f"PVD: {result['pvd']}")

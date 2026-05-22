@@ -265,12 +265,15 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     assert second.exists()
     assert int(summary["sfc_vtk_frame_count"]) == 2
     assert pvd.read_text(encoding="utf-8").count("<DataSet") == 2
-    assert "max_displacement_magnitude" in manifest.read_text(encoding="utf-8")
+    manifest_text = manifest.read_text(encoding="utf-8")
+    assert "max_displacement_magnitude" in manifest_text
+    assert "max_equivalent_elastic_strain_nodeavg" in manifest_text
     text = second.read_text(encoding="ascii")
     assert "DATASET UNSTRUCTURED_GRID" in text
     assert "VECTORS U float" in text
     assert "SCALARS von_mises_nodeavg float 1" in text
     assert "SCALARS strain_norm_nodeavg float 1" in text
+    assert "SCALARS equivalent_elastic_strain_nodeavg float 1" in text
     assert "SCALARS von_mises float 1" in text
     assert "TENSORS S float" in text
 
@@ -378,15 +381,15 @@ def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path)
     sfc_manifest = tmp_path / "sfc_manifest.csv"
     abaqus_manifest = tmp_path / "abaqus_manifest.csv"
     sfc_manifest.write_text(
-        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_von_mises_nodeavg,max_strain_norm_nodeavg\n"
-        "0,0,sfc_0000.vtk,1,1,0.1,5.0,0.02,4.0,0.018\n"
-        "1,1,sfc_0001.vtk,1,1,0.2,7.0,0.03,6.0,0.028\n",
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,max_strain_norm_nodeavg,max_equivalent_elastic_strain_nodeavg\n"
+        "0,0,sfc_0000.vtk,1,1,0.1,5.0,0.02,0.002,4.0,0.018,0.0018\n"
+        "1,1,sfc_0001.vtk,1,1,0.2,7.0,0.03,0.003,6.0,0.028,0.0028\n",
         encoding="utf-8",
     )
     abaqus_manifest.write_text(
-        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_von_mises_nodeavg,max_le_norm_nodeavg\n"
-        "0,0,0,abaqus_0000.vtk,1,1,0.15,6.0,0.01,5.0,0.009\n"
-        "1,1,1,abaqus_0001.vtk,1,1,0.25,8.0,0.04,7.0,0.038\n",
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,max_le_norm_nodeavg,max_equivalent_elastic_strain_nodeavg\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.15,6.0,0.01,0.001,5.0,0.009,0.0009\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.25,8.0,0.04,0.004,7.0,0.038,0.0038\n",
         encoding="utf-8",
     )
 
@@ -398,6 +401,7 @@ def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path)
     assert "strain_norm" in text
     assert "von_mises_nodeavg" in text
     assert "strain_norm_nodeavg" in text
+    assert "equivalent_elastic_strain_nodeavg" in text
     assert "0.25" in text
     assert "8.0" in text
     assert "0.04" in text
@@ -409,15 +413,15 @@ def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None
     sfc_manifest = tmp_path / "sfc_manifest.csv"
     abaqus_manifest = tmp_path / "abaqus_manifest.csv"
     sfc_manifest.write_text(
-        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_von_mises_nodeavg,max_strain_norm_nodeavg\n"
-        "0,0,sfc_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0\n"
-        "1,0.5,sfc_0001.vtk,1,1,0.2,7.0,0.03,6.0,0.028\n",
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,max_strain_norm_nodeavg,max_equivalent_elastic_strain_nodeavg\n"
+        "0,0,sfc_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
+        "1,0.5,sfc_0001.vtk,1,1,0.2,7.0,0.03,0.003,6.0,0.028,0.0028\n",
         encoding="utf-8",
     )
     abaqus_manifest.write_text(
-        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_von_mises_nodeavg,max_le_norm_nodeavg\n"
-        "0,0,0,abaqus_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0\n"
-        "1,1,1,abaqus_0001.vtk,1,1,0.4,10.0,0.08,8.0,0.04\n",
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_equivalent_elastic_strain,max_von_mises_nodeavg,max_le_norm_nodeavg,max_equivalent_elastic_strain_nodeavg\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0,0.0,0.0\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.4,10.0,0.08,0.006,8.0,0.04,0.0056\n",
         encoding="utf-8",
     )
     out_csv = tmp_path / "errors.csv"
@@ -435,6 +439,8 @@ def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None
     assert len(rows) == 2
     assert float(rows[-1]["abaqus_max_displacement_magnitude"]) == pytest.approx(0.2)
     assert float(rows[-1]["max_von_mises_nodeavg_rel_error"]) == pytest.approx(0.5)
+    assert "max_equivalent_elastic_strain_nodeavg_rel_error" in rows[-1]
+    assert "max_strain_norm_nodeavg_rel_error" not in rows[-1]
 
 
 def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:

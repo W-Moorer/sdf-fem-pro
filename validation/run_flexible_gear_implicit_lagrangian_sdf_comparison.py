@@ -395,8 +395,12 @@ def _write_sfc_tet4_vtk_frame(
         "max_displacement_magnitude": float(np.max(displacement_norm)) if displacement_norm.size else 0.0,
         "max_von_mises": float(np.max(von_mises)) if von_mises.size else 0.0,
         "max_strain_norm": float(np.max(strain_norm)) if strain_norm.size else 0.0,
+        "max_equivalent_elastic_strain": float(np.max(equivalent_strain)) if equivalent_strain.size else 0.0,
         "max_von_mises_nodeavg": float(np.max(von_mises_nodeavg)) if von_mises_nodeavg.size else 0.0,
         "max_strain_norm_nodeavg": float(np.max(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
+        "max_equivalent_elastic_strain_nodeavg": float(np.max(equivalent_strain_nodeavg))
+        if equivalent_strain_nodeavg.size
+        else 0.0,
     }
 
 

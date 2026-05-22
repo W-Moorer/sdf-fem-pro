@@ -68,6 +68,10 @@ def _max_column(rows: list[Row], column: str) -> float:
     return max(values, default=0.0)
 
 
+def _manifest_column_available(rows: list[Row], column: str) -> bool:
+    return bool(rows) and column in rows[0]
+
+
 def write_animation_color_ranges(
     out_dir: Path,
     *,
@@ -128,6 +132,17 @@ def write_animation_color_ranges(
             "abaqus_column": "max_le_norm_nodeavg",
             "paraview_note": "Use the node-averaged point-data field for animation; use cell data for exact element statistics.",
         },
+        {
+            "field": "equivalent_elastic_strain_nodeavg",
+            "recommended_min": 0.0,
+            "recommended_max": max(
+                _max_column(sfc_rows, "max_equivalent_elastic_strain_nodeavg"),
+                _max_column(abaqus_rows, "max_equivalent_elastic_strain_nodeavg"),
+            ),
+            "sfc_column": "max_equivalent_elastic_strain_nodeavg",
+            "abaqus_column": "max_equivalent_elastic_strain_nodeavg",
+            "paraview_note": "Use for paper-facing strain curves when raw SFC and Abaqus strain tensor measures differ.",
+        },
     ]
     path = out_dir / "animation_fixed_color_ranges.csv"
     _write_csv(path, range_rows)
@@ -157,10 +172,16 @@ def compare_animation_manifests(
         raise RuntimeError(f"Abaqus VTK manifest has no frames: {abaqus_manifest}")
     t_sfc = np.asarray([float(row.get("time", 0.0) or 0.0) for row in sfc_rows], dtype=float)
     t_abaqus = np.asarray([float(row.get("time", 0.0) or 0.0) for row in abaqus_rows], dtype=float)
+    strain_metric = (
+        ("max_equivalent_elastic_strain_nodeavg", "max_equivalent_elastic_strain_nodeavg", "max node-averaged equivalent elastic strain")
+        if _manifest_column_available(sfc_rows, "max_equivalent_elastic_strain_nodeavg")
+        and _manifest_column_available(abaqus_rows, "max_equivalent_elastic_strain_nodeavg")
+        else ("max_strain_norm_nodeavg", "max_le_norm_nodeavg", "max node-averaged strain norm")
+    )
     metrics = [
         ("max_displacement_magnitude", "max_displacement_magnitude", "max displacement magnitude"),
         ("max_von_mises_nodeavg", "max_von_mises_nodeavg", "max node-averaged von Mises"),
-        ("max_strain_norm_nodeavg", "max_le_norm_nodeavg", "max node-averaged strain norm"),
+        strain_metric,
     ]
     rows: list[Row] = []
     for frame, (t_value, sfc_row) in enumerate(zip(t_sfc, sfc_rows, strict=True)):
@@ -449,6 +470,8 @@ def export_abaqus_vtk_frames(
     abaqus_command: str | None,
     frame_stride: int,
     include_tensors: bool,
+    young: float | None = None,
+    poisson: float | None = None,
 ) -> Row:
     """Export the existing full-gear Abaqus ODB to a strided VTK/PVD series."""
 
@@ -459,21 +482,24 @@ def export_abaqus_vtk_frames(
     vtk_dir = out_dir / "abaqus_vtk"
     command = _resolve_abaqus_command(abaqus_command)
     script = ROOT / "validation" / "abaqus_odb_to_vtk.py"
+    export_command = [
+        command,
+        "python",
+        str(script.resolve()),
+        "--odb",
+        str(odb.resolve()),
+        "--out-dir",
+        str(vtk_dir.resolve()),
+        "--stem",
+        "abaqus",
+        "--frame-stride",
+        str(max(1, int(frame_stride))),
+    ]
+    if young is not None and poisson is not None:
+        export_command.extend(["--young", f"{float(young):.16e}", "--poisson", f"{float(poisson):.16e}"])
+    export_command.append("--include-tensors" if include_tensors else "--scalars-only")
     wall = _run_command(
-        [
-            command,
-            "python",
-            str(script.resolve()),
-            "--odb",
-            str(odb.resolve()),
-            "--out-dir",
-            str(vtk_dir.resolve()),
-            "--stem",
-            "abaqus",
-            "--frame-stride",
-            str(max(1, int(frame_stride))),
-            "--include-tensors" if include_tensors else "--scalars-only",
-        ],
+        export_command,
         cwd=run_dir,
         log_path=out_dir / "abaqus_vtk_export_stdout.log",
     )
@@ -646,6 +672,8 @@ def run_full_gear(
                 abaqus_command=abaqus_command,
                 frame_stride=max(1, int(vtk_frame_stride)),
                 include_tensors=bool(vtk_include_tensors),
+                young=float(model.young),
+                poisson=float(model.poisson),
             )
         )
     if abaqus_vtk_manifest is not None:
