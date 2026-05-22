@@ -133,7 +133,7 @@ def test_source_penalty_summary_states_external_validation_only(tmp_path: Path) 
 
 
 def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, float] = {}
+    captured: dict[str, object] = {}
 
     def fake_parse(_source: Path):
         class Model:
@@ -167,6 +167,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
 
     def fake_solve(*_args, **kwargs):
         captured["hht_alpha"] = float(kwargs["hht_alpha"])
+        captured["tet4_mass_kind"] = str(kwargs["tet4_mass_kind"])
         return (
             [{"time": 0.1}],
             {
@@ -204,6 +205,8 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         run_abaqus=False,
         drive_mode="source_inp",
         hht_alpha=-0.05,
+        tet4_mass_kind="consistent",
     )
 
     assert captured["hht_alpha"] == -0.05
+    assert captured["tet4_mass_kind"] == "consistent"

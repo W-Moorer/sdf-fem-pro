@@ -130,11 +130,18 @@ class MechanicsModel:
         E: float,
         nu: float,
         density: float,
+        mass_kind: str = "calculix",
     ) -> "MechanicsModel":
         X_arr = np.asarray(X, dtype=float)
         elements_arr = np.asarray(elements, dtype=np.int64)
         volumes, grads = tet4_reference_data(X_arr, elements_arr)
-        mass = assemble_calculix_c3d4_mass(X_arr.shape[0], elements_arr, volumes, density)
+        normalized_mass_kind = str(mass_kind).lower()
+        if normalized_mass_kind in {"calculix", "calculix_c3d4", "one_point"}:
+            mass = assemble_calculix_c3d4_mass(X_arr.shape[0], elements_arr, volumes, density)
+        elif normalized_mass_kind == "consistent":
+            mass = assemble_consistent_mass(X_arr.shape[0], elements_arr, volumes, density)
+        else:
+            raise ValueError("mass_kind must be 'calculix' or 'consistent'")
         return cls(X_arr, elements_arr, float(E), float(nu), float(density), volumes, grads, mass, element_type="c3d4")
 
     @classmethod

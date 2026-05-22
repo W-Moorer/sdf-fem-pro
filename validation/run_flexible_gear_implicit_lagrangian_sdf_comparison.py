@@ -1465,6 +1465,7 @@ def solve_sfc_source_drive_pair(
     gear1_angular_velocity_z: float,
     gear2_torque_z: float,
     hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+    tet4_mass_kind: str = "consistent",
     max_iterations: int = 8,
     tolerance: float = 1.0e-9,
     vtk_out_dir: Path | None = None,
@@ -1483,7 +1484,7 @@ def solve_sfc_source_drive_pair(
     n1 = pair.gear1.nodes.shape[0]
     X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])
     elements = np.vstack([pair.gear1.elements, pair.gear2.elements + n1])
-    model = MechanicsModel.from_tet4_mesh(X, elements, E=young, nu=poisson, density=density)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=young, nu=poisson, density=density, mass_kind=tet4_mass_kind)
     hub1 = RigidHubMPC(pair.gear1.support_nodes, X, pair.gear1.rp)
     hub2 = RigidHubMPC(pair.gear2.support_nodes + n1, X, pair.gear2.rp)
     assembly = build_rigid_hub_reduced_assembly(X, [hub1, hub2], include_free_nodes=True)
@@ -1759,6 +1760,7 @@ def solve_sfc_source_drive_pair(
         "contact_mode": "source_penalty",
         "penalty_solver": "source_reduced_rp_modified_newton",
         "material_linearization": "reference_linear",
+        "tet4_mass_kind": str(tet4_mass_kind),
         "source_gear1_angular_velocity_z_rad_per_s": float(gear1_angular_velocity_z),
         "source_gear2_torque_z": float(gear2_torque_z),
         "source_rotation_unit": "radian",

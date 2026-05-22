@@ -211,6 +211,17 @@ def test_calculix_c3d4_mass_matches_public_assembler() -> None:
     assert (assembled - model.mass_matrix).nnz == 0
 
 
+def test_tet4_model_can_use_consistent_mass_kind() -> None:
+    model = _unit_tet_model()
+    consistent = MechanicsModel.from_tet4_mesh(model.X, model.elements, E=model.E, nu=model.nu, density=model.density, mass_kind="consistent")
+    total_mass = model.density * np.sum(model.volumes)
+    ones_x = np.zeros(model.n_dofs)
+    ones_x[0::3] = 1.0
+
+    assert ones_x @ (consistent.mass_matrix @ ones_x) == pytest.approx(total_mass)
+    assert consistent.mass_matrix[0, 0] != pytest.approx(model.mass_matrix[0, 0])
+
+
 def test_stvk_tangent_matches_directional_finite_difference() -> None:
     model = _unit_tet_model()
     x = model.X.copy()

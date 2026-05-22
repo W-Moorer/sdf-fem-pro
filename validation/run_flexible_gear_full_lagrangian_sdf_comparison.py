@@ -222,6 +222,7 @@ def compare_animation_manifests(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
     plt.rcParams.update(
         {
@@ -272,6 +273,10 @@ def compare_animation_manifests(
             )
         ax.set_title(label, fontsize=9.5)
         ax.set_xlabel("time (s)", fontsize=9)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+        formatter = ScalarFormatter(useMathText=True)
+        formatter.set_powerlimits((-2, 2))
+        ax.xaxis.set_major_formatter(formatter)
         ax.grid(True, linewidth=0.35, alpha=0.35)
         ax.legend(loc="best", fontsize=7.5, frameon=False)
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -555,6 +560,7 @@ def run_full_gear(
     run_abaqus: bool,
     drive_mode: str = "closure",
     hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+    tet4_mass_kind: str = "consistent",
     use_source_timing: bool = False,
     abaqus_command: str | None = None,
     write_sfc_vtk: bool = False,
@@ -594,6 +600,7 @@ def run_full_gear(
             gear1_angular_velocity_z=model.gear1_angular_velocity_z,
             gear2_torque_z=model.gear2_torque_z,
             hht_alpha=float(hht_alpha),
+            tet4_mass_kind=str(tet4_mass_kind),
             vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
             vtk_frame_stride=max(1, int(vtk_frame_stride)),
             vtk_stem="sfc",
@@ -748,13 +755,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="hard")
     parser.add_argument("--drive-mode", choices=("closure", "source_inp"), default="closure")
     parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
+    parser.add_argument("--tet4-mass-kind", choices=("consistent", "calculix"), default="consistent")
     parser.add_argument("--use-source-timing", action="store_true")
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--write-sfc-vtk", action="store_true")
     parser.add_argument("--sfc-vtk-dir", type=Path, default=None)
-    parser.add_argument("--vtk-frame-stride", type=int, default=1)
+    parser.add_argument("--vtk-frame-stride", type=int, default=2)
     parser.add_argument("--vtk-scalars-only", action="store_true")
     parser.add_argument("--export-abaqus-vtk", action="store_true")
     parser.add_argument(
@@ -779,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         run_abaqus=bool(args.run_abaqus),
         drive_mode=str(args.drive_mode),
         hht_alpha=float(args.hht_alpha),
+        tet4_mass_kind=str(args.tet4_mass_kind),
         use_source_timing=bool(args.use_source_timing),
         abaqus_command=args.abaqus_command,
         write_sfc_vtk=bool(args.write_sfc_vtk),
