@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
 from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
+from validation.run_flexible_gear_full_lagrangian_sdf_comparison import run_full_gear
 
 
 def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:
@@ -129,3 +130,80 @@ def test_source_penalty_summary_states_external_validation_only(tmp_path: Path) 
     assert "validation-only" in text
     assert "frictionless linear penalty pressure-overclosure" in text
     assert "VTK export frame stride: `1`" in text
+
+
+def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, float] = {}
+
+    def fake_parse(_source: Path):
+        class Model:
+            young = 1.0
+            poisson = 0.25
+            density = 1.0
+            dynamic_duration = 1.0
+            dynamic_initial_dt = 0.1
+            dynamic_min_dt = 0.1
+            dynamic_max_dt = 0.1
+            contact_pressure_overclosure = "LINEAR"
+            gear1_angular_velocity_z = 2.0
+            gear2_torque_z = 3.0
+
+        return Model()
+
+    def fake_build(*_args, **_kwargs):
+        class Patch:
+            nodes = __import__("numpy").zeros((1, 3))
+            elements = __import__("numpy").zeros((0, 4), dtype=int)
+            contact_faces = __import__("numpy").zeros((0, 3), dtype=int)
+            support_nodes = __import__("numpy").zeros((1,), dtype=int)
+            rp = __import__("numpy").zeros(3)
+
+        class Pair:
+            gear1 = Patch()
+            gear2 = Patch()
+            initial_patch_gap = 0.0
+
+        return Pair()
+
+    def fake_solve(*_args, **kwargs):
+        captured["hht_alpha"] = float(kwargs["hht_alpha"])
+        return (
+            [{"time": 0.1}],
+            {
+                "status": "completed",
+                "nodes": 2,
+                "elements": 0,
+                "gear1_contact_faces": 0,
+                "gear2_contact_faces": 0,
+                "gear1_support_nodes": 1,
+                "gear2_support_nodes": 1,
+                "sfc_wall_seconds": 0.0,
+            },
+        )
+
+    monkeypatch.setattr("validation.run_flexible_gear_full_lagrangian_sdf_comparison.parse_gear_input", fake_parse)
+    monkeypatch.setattr("validation.run_flexible_gear_full_lagrangian_sdf_comparison.build_full_active_pair", fake_build)
+    monkeypatch.setattr("validation.run_flexible_gear_full_lagrangian_sdf_comparison.solve_sfc_source_drive_pair", fake_solve)
+    monkeypatch.setattr(
+        "validation.run_flexible_gear_full_lagrangian_sdf_comparison._write_abaqus_alignment_deck",
+        lambda *_args, **_kwargs: None,
+    )
+
+    run_full_gear(
+        source=tmp_path / "dummy.inp",
+        out_dir=tmp_path,
+        active_faces_per_body=0,
+        active_patch_radius_factor=1.0,
+        duration=0.1,
+        dt=0.1,
+        target_overclosure=0.0,
+        rotation_rate_z=0.0,
+        pressure_stiffness=1.0,
+        hard_max_iterations=1,
+        contact_mode="penalty",
+        run_abaqus=False,
+        drive_mode="source_inp",
+        hht_alpha=-0.05,
+    )
+
+    assert captured["hht_alpha"] == -0.05

@@ -127,6 +127,10 @@ def _object_id_from_instance(instance_name: str) -> int:
     """Return a stable visualization id from an Abaqus instance name."""
 
     upper = instance_name.upper()
+    if "GEAR1" in upper:
+        return 1
+    if "GEAR2" in upper:
+        return 2
     if "PLANE" in upper or "GROUND" in upper or "RIGID" in upper:
         return 0
     if "CUBE" in upper or "BLOCK" in upper or "BEAM" in upper or "FLEX" in upper:
@@ -238,6 +242,34 @@ def _node_average_cell_scalar(cell_values: list[float], cells: list[list[int]], 
     return out
 
 
+def _object_manifest_metrics(
+    *,
+    object_ids: list[int],
+    cells: list[list[int]],
+    displacement_norm: list[float],
+    von_mises_nodeavg: list[float],
+    equivalent_strain_nodeavg: list[float],
+) -> dict[str, float]:
+    """Return per-object manifest metrics from cell object ids."""
+
+    out: dict[str, float] = {}
+    unique_object_ids = sorted(set(int(value) for value in object_ids))
+    for object_id in unique_object_ids:
+        nodes: set[int] = set()
+        for cell_object_id, cell in zip(object_ids, cells):
+            if int(cell_object_id) == object_id:
+                nodes.update(int(node) for node in cell)
+        if not nodes:
+            continue
+        node_list = sorted(nodes)
+        out[f"max_displacement_magnitude_object{object_id}"] = max(float(displacement_norm[node]) for node in node_list)
+        out[f"max_von_mises_nodeavg_object{object_id}"] = max(float(von_mises_nodeavg[node]) for node in node_list)
+        out[f"max_equivalent_elastic_strain_nodeavg_object{object_id}"] = max(
+            float(equivalent_strain_nodeavg[node]) for node in node_list
+        )
+    return out
+
+
 def export_odb_to_vtk(
     odb_path: Path,
     out_dir: Path,
@@ -328,6 +360,13 @@ def export_odb_to_vtk(
             von_mises_nodeavg = _node_average_cell_scalar(von_mises_values, cells, len(points))
             strain_norm_nodeavg = _node_average_cell_scalar(strain_norm_values, cells, len(points))
             equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain_values, cells, len(points))
+            object_metrics = _object_manifest_metrics(
+                object_ids=object_ids,
+                cells=cells,
+                displacement_norm=displacement_norm,
+                von_mises_nodeavg=von_mises_nodeavg,
+                equivalent_strain_nodeavg=equivalent_strain_nodeavg,
+            )
             frame_path = out_dir / f"{stem}_{frame_index:04d}.vtk"
             _write_vtk_frame(
                 frame_path,
@@ -345,46 +384,34 @@ def export_odb_to_vtk(
                 include_tensors=include_tensors,
             )
             datasets.append((float(frame.frameValue), frame_path))
-            manifest_rows.append(
-                {
-                    "frame": frame_index,
-                    "source_frame": source_index,
-                    "time": float(frame.frameValue),
-                    "vtk_file": frame_path.name,
-                    "node_count": len(points),
-                    "element_count": len(cells),
-                    "max_displacement_magnitude": max(displacement_norm, default=0.0),
-                    "max_von_mises": max(von_mises_values, default=0.0),
-                    "max_le_norm": max(strain_norm_values, default=0.0),
-                    "max_equivalent_elastic_strain": max(equivalent_strain_values, default=0.0),
-                    "max_von_mises_nodeavg": max(von_mises_nodeavg, default=0.0),
-                    "max_le_norm_nodeavg": max(strain_norm_nodeavg, default=0.0),
-                    "max_equivalent_elastic_strain_nodeavg": max(equivalent_strain_nodeavg, default=0.0),
-                }
-            )
+            manifest_row = {
+                "frame": frame_index,
+                "source_frame": source_index,
+                "time": float(frame.frameValue),
+                "vtk_file": frame_path.name,
+                "node_count": len(points),
+                "element_count": len(cells),
+                "max_displacement_magnitude": max(displacement_norm, default=0.0),
+                "max_von_mises": max(von_mises_values, default=0.0),
+                "max_le_norm": max(strain_norm_values, default=0.0),
+                "max_equivalent_elastic_strain": max(equivalent_strain_values, default=0.0),
+                "max_von_mises_nodeavg": max(von_mises_nodeavg, default=0.0),
+                "max_le_norm_nodeavg": max(strain_norm_nodeavg, default=0.0),
+                "max_equivalent_elastic_strain_nodeavg": max(equivalent_strain_nodeavg, default=0.0),
+            }
+            manifest_row.update(object_metrics)
+            manifest_rows.append(manifest_row)
 
         pvd_path = out_dir / f"{stem}.pvd"
         _write_pvd(pvd_path, datasets)
         manifest_path = out_dir / f"{stem}_manifest.csv"
         with manifest_path.open("w", encoding="ascii", newline="") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "frame",
-                    "source_frame",
-                    "time",
-                    "vtk_file",
-                    "node_count",
-                    "element_count",
-                    "max_displacement_magnitude",
-                    "max_von_mises",
-                    "max_le_norm",
-                    "max_equivalent_elastic_strain",
-                    "max_von_mises_nodeavg",
-                    "max_le_norm_nodeavg",
-                    "max_equivalent_elastic_strain_nodeavg",
-                ],
-            )
+            fieldnames: list[str] = []
+            for row in manifest_rows:
+                for key in row:
+                    if key not in fieldnames:
+                        fieldnames.append(key)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(manifest_rows)
         return {

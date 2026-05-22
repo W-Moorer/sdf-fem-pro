@@ -183,10 +183,31 @@ def compare_animation_manifests(
         ("max_von_mises_nodeavg", "max_von_mises_nodeavg", "max node-averaged von Mises"),
         strain_metric,
     ]
+    diagnostic_metrics = list(metrics)
+    for object_id in (1, 2):
+        for sfc_key, abaqus_key, label in (
+            (
+                f"max_displacement_magnitude_object{object_id}",
+                f"max_displacement_magnitude_object{object_id}",
+                f"max displacement magnitude object {object_id}",
+            ),
+            (
+                f"max_von_mises_nodeavg_object{object_id}",
+                f"max_von_mises_nodeavg_object{object_id}",
+                f"max node-averaged von Mises object {object_id}",
+            ),
+            (
+                f"max_equivalent_elastic_strain_nodeavg_object{object_id}",
+                f"max_equivalent_elastic_strain_nodeavg_object{object_id}",
+                f"max node-averaged equivalent elastic strain object {object_id}",
+            ),
+        ):
+            if _manifest_column_available(sfc_rows, sfc_key) and _manifest_column_available(abaqus_rows, abaqus_key):
+                diagnostic_metrics.append((sfc_key, abaqus_key, label))
     rows: list[Row] = []
     for frame, (t_value, sfc_row) in enumerate(zip(t_sfc, sfc_rows, strict=True)):
         row: Row = {"frame": int(frame), "time": float(t_value)}
-        for sfc_key, abaqus_key, _label in metrics:
+        for sfc_key, abaqus_key, _label in diagnostic_metrics:
             sfc_value = float(sfc_row.get(sfc_key, 0.0) or 0.0)
             abaqus_series = np.asarray([float(item.get(abaqus_key, 0.0) or 0.0) for item in abaqus_rows], dtype=float)
             abaqus_value = float(np.interp(float(t_value), t_abaqus, abaqus_series))
@@ -533,6 +554,7 @@ def run_full_gear(
     contact_mode: str,
     run_abaqus: bool,
     drive_mode: str = "closure",
+    hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
     use_source_timing: bool = False,
     abaqus_command: str | None = None,
     write_sfc_vtk: bool = False,
@@ -571,7 +593,7 @@ def run_full_gear(
             dt=dt,
             gear1_angular_velocity_z=model.gear1_angular_velocity_z,
             gear2_torque_z=model.gear2_torque_z,
-            hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+            hht_alpha=float(hht_alpha),
             vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
             vtk_frame_stride=max(1, int(vtk_frame_stride)),
             vtk_stem="sfc",
@@ -591,7 +613,7 @@ def run_full_gear(
             max_iterations=hard_max_iterations,
             hard_enforcement="abaqus_standard_penalty",
             constraint_averaging="slave_face",
-            hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+            hht_alpha=float(hht_alpha),
             linear_solver="sparse",
         )
     else:
@@ -605,7 +627,7 @@ def run_full_gear(
             dt=dt,
             target_overclosure=target_overclosure,
             rotation_rate_z=rotation_rate_z,
-            hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+            hht_alpha=float(hht_alpha),
             penalty_solver="modified_newton",
             material_linearization="reference_linear",
             vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
@@ -725,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
     parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="hard")
     parser.add_argument("--drive-mode", choices=("closure", "source_inp"), default="closure")
+    parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
     parser.add_argument("--use-source-timing", action="store_true")
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
@@ -755,6 +778,7 @@ def main(argv: list[str] | None = None) -> int:
         contact_mode=str(args.contact_mode),
         run_abaqus=bool(args.run_abaqus),
         drive_mode=str(args.drive_mode),
+        hht_alpha=float(args.hht_alpha),
         use_source_timing=bool(args.use_source_timing),
         abaqus_command=args.abaqus_command,
         write_sfc_vtk=bool(args.write_sfc_vtk),

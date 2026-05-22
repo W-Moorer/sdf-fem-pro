@@ -333,6 +333,21 @@ def _write_sfc_tet4_vtk_frame(
     von_mises_nodeavg = _node_average_cell_scalar(von_mises, elements, points.shape[0])
     strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, points.shape[0])
     equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, points.shape[0])
+    object_metric_columns: Row = {}
+    for object_id in sorted(int(value) for value in np.unique(object_ids)):
+        elem_mask = object_ids == object_id
+        if not np.any(elem_mask):
+            continue
+        object_nodes = np.unique(elements[elem_mask].reshape(-1))
+        object_metric_columns[f"max_displacement_magnitude_object{object_id}"] = (
+            float(np.max(displacement_norm[object_nodes])) if object_nodes.size else 0.0
+        )
+        object_metric_columns[f"max_von_mises_nodeavg_object{object_id}"] = (
+            float(np.max(von_mises_nodeavg[object_nodes])) if object_nodes.size else 0.0
+        )
+        object_metric_columns[f"max_equivalent_elastic_strain_nodeavg_object{object_id}"] = (
+            float(np.max(equivalent_strain_nodeavg[object_nodes])) if object_nodes.size else 0.0
+        )
     with path.open("w", encoding="ascii", newline="\n") as handle:
         handle.write("# vtk DataFile Version 3.0\n")
         handle.write(f"SFC Lagrangian-SDF full gear frame {frame_index} time={float(time_value):.12g}\n")
@@ -386,7 +401,7 @@ def _write_sfc_tet4_vtk_frame(
                 for tensor in tensor_values:
                     for row in tensor:
                         handle.write(f"{row[0]:.9e} {row[1]:.9e} {row[2]:.9e}\n")
-    return {
+    row: Row = {
         "frame": int(frame_index),
         "time": float(time_value),
         "vtk_file": path.name,
@@ -402,6 +417,8 @@ def _write_sfc_tet4_vtk_frame(
         if equivalent_strain_nodeavg.size
         else 0.0,
     }
+    row.update(object_metric_columns)
+    return row
 
 
 def _node_average_cell_scalar(cell_values: np.ndarray, cells: np.ndarray, node_count: int) -> np.ndarray:
