@@ -208,6 +208,39 @@ def test_cpp_projection_backend_matches_numpy_batch_when_built() -> None:
     assert np.allclose(closest, reference.p, atol=1.0e-13)
 
 
+def test_cpp_indexed_projection_matches_all_faces_with_exact_fallback_when_built() -> None:
+    if not cpp_projection_available():
+        pytest.skip("C++ projection backend is not built")
+    from sfc.sdf._cpp_projection import closest_points_indexed_faces
+
+    X, faces = _nonplanar_surface(resolution=4)
+    points = np.asarray(
+        [
+            [0.35, 0.25, _nonplanar_z(0.35, 0.25) + 0.035],
+            [0.62, 0.58, _nonplanar_z(0.62, 0.58) - 0.025],
+            [0.48, 0.72, _nonplanar_z(0.48, 0.72) + 0.015],
+            [1.35, 1.25, 0.25],
+        ],
+        dtype=float,
+    )
+    reference = surface_projection_distance_kernel_batch_all_faces(points, X, faces)
+    offsets = np.asarray([0, 1, 2, 3, 3], dtype=np.int64)
+    candidate_face_ids = np.asarray(reference.face_id[:3], dtype=np.int64)
+    g, normals, face_id, bary, closest = closest_points_indexed_faces(
+        points,
+        X,
+        faces,
+        offsets,
+        candidate_face_ids,
+        0.1,
+    )
+    assert np.allclose(g, reference.g, atol=1.0e-13)
+    assert np.allclose(normals, reference.n, atol=1.0e-13)
+    assert np.array_equal(face_id, reference.face_id)
+    assert np.allclose(bary, reference.w, atol=1.0e-13)
+    assert np.allclose(closest, reference.p, atol=1.0e-13)
+
+
 def test_compiled_padded_aabb_projection_matches_all_faces_in_band() -> None:
     if not compiled_projection_available():
         pytest.skip("compiled projection backend is not available")

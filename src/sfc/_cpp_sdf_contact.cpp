@@ -505,6 +505,134 @@ py::tuple closest_points_padded_aabb(
     return py::make_tuple(gaps, normals, face_ids, barycentric, closest);
 }
 
+py::tuple closest_points_indexed_faces(
+    py::array_t<double, py::array::c_style | py::array::forcecast> points,
+    py::array_t<double, py::array::c_style | py::array::forcecast> x_current,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> boundary_faces,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_offsets,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_face_ids,
+    double fallback_distance
+) {
+    const auto P = points.unchecked<2>();
+    const auto X = x_current.unchecked<2>();
+    const auto faces = boundary_faces.unchecked<2>();
+    const auto offsets = candidate_offsets.unchecked<1>();
+    const auto candidate_ids = candidate_face_ids.unchecked<1>();
+    const py::ssize_t n_points = P.shape(0);
+    const py::ssize_t n_faces = faces.shape(0);
+    const py::ssize_t n_offsets = offsets.shape(0);
+    const py::ssize_t n_candidates = candidate_ids.shape(0);
+    if (n_offsets != n_points + 1) {
+        throw std::runtime_error("candidate_offsets must have n_points + 1 entries");
+    }
+    const double fallback_dist2 = fallback_distance * fallback_distance;
+
+    py::array_t<double> gaps({n_points});
+    py::array_t<double> normals({n_points, py::ssize_t(3)});
+    py::array_t<std::int64_t> face_ids({n_points});
+    py::array_t<double> barycentric({n_points, py::ssize_t(3)});
+    py::array_t<double> closest({n_points, py::ssize_t(3)});
+    auto g = gaps.mutable_unchecked<1>();
+    auto n = normals.mutable_unchecked<2>();
+    auto fid = face_ids.mutable_unchecked<1>();
+    auto w = barycentric.mutable_unchecked<2>();
+    auto cp = closest.mutable_unchecked<2>();
+
+    for (py::ssize_t ip = 0; ip < n_points; ++ip) {
+        const py::ssize_t start = static_cast<py::ssize_t>(offsets(ip));
+        const py::ssize_t stop = static_cast<py::ssize_t>(offsets(ip + 1));
+        if (start < 0 || stop < start || stop > n_candidates) {
+            throw std::runtime_error("candidate offsets are not monotone or exceed candidate_face_ids");
+        }
+        const double px = P(ip, 0);
+        const double py = P(ip, 1);
+        const double pz = P(ip, 2);
+        double best_dist2 = std::numeric_limits<double>::infinity();
+        std::int64_t best_face = -1;
+        double best_px = 0.0, best_py = 0.0, best_pz = 0.0;
+        double best_w0 = 0.0, best_w1 = 0.0, best_w2 = 0.0;
+        double best_nx = 0.0, best_ny = 0.0, best_nz = 0.0;
+
+        for (py::ssize_t ptr = start; ptr < stop; ++ptr) {
+            const py::ssize_t jf = static_cast<py::ssize_t>(candidate_ids(ptr));
+            if (jf < 0 || jf >= n_faces) {
+                throw std::runtime_error("candidate face id is outside boundary_faces");
+            }
+            const auto ia = faces(jf, 0);
+            const auto ib = faces(jf, 1);
+            const auto ic = faces(jf, 2);
+            const Projection proj = project_point_triangle(
+                px, py, pz,
+                X(ia, 0), X(ia, 1), X(ia, 2),
+                X(ib, 0), X(ib, 1), X(ib, 2),
+                X(ic, 0), X(ic, 1), X(ic, 2)
+            );
+            if (proj.nx == 0.0 && proj.ny == 0.0 && proj.nz == 0.0) {
+                continue;
+            }
+            if (proj.dist2 < best_dist2) {
+                best_dist2 = proj.dist2;
+                best_face = static_cast<std::int64_t>(jf);
+                best_px = proj.qx;
+                best_py = proj.qy;
+                best_pz = proj.qz;
+                best_w0 = proj.w0;
+                best_w1 = proj.w1;
+                best_w2 = proj.w2;
+                best_nx = proj.nx;
+                best_ny = proj.ny;
+                best_nz = proj.nz;
+            }
+        }
+        if (best_face == -1 || best_dist2 > fallback_dist2) {
+            best_dist2 = std::numeric_limits<double>::infinity();
+            best_face = -1;
+            best_px = 0.0;
+            best_py = 0.0;
+            best_pz = 0.0;
+            best_w0 = 0.0;
+            best_w1 = 0.0;
+            best_w2 = 0.0;
+            best_nx = 0.0;
+            best_ny = 0.0;
+            best_nz = 0.0;
+            for (py::ssize_t jf = 0; jf < n_faces; ++jf) {
+                const auto ia = faces(jf, 0);
+                const auto ib = faces(jf, 1);
+                const auto ic = faces(jf, 2);
+                const Projection proj = project_point_triangle(
+                    px, py, pz,
+                    X(ia, 0), X(ia, 1), X(ia, 2),
+                    X(ib, 0), X(ib, 1), X(ib, 2),
+                    X(ic, 0), X(ic, 1), X(ic, 2)
+                );
+                if (proj.nx == 0.0 && proj.ny == 0.0 && proj.nz == 0.0) {
+                    continue;
+                }
+                if (proj.dist2 < best_dist2) {
+                    best_dist2 = proj.dist2;
+                    best_face = static_cast<std::int64_t>(jf);
+                    best_px = proj.qx;
+                    best_py = proj.qy;
+                    best_pz = proj.qz;
+                    best_w0 = proj.w0;
+                    best_w1 = proj.w1;
+                    best_w2 = proj.w2;
+                    best_nx = proj.nx;
+                    best_ny = proj.ny;
+                    best_nz = proj.nz;
+                }
+            }
+        }
+        store_best_projection(
+            ip, px, py, pz, best_dist2, best_face, best_px, best_py, best_pz,
+            best_w0, best_w1, best_w2, best_nx, best_ny, best_nz,
+            g, n, fid, w, cp
+        );
+    }
+    return py::make_tuple(gaps, normals, face_ids, barycentric, closest);
+}
+
 py::tuple surface_penalty_response(
     py::array_t<double, py::array::c_style | py::array::forcecast> points,
     py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> sample_node_ids,
@@ -1464,6 +1592,7 @@ PYBIND11_MODULE(_sfc_cpp, m) {
     m.doc() = "C++ fused SDF field-population and field-contact kernels";
     m.def("closest_points_all_faces", &closest_points_all_faces);
     m.def("closest_points_padded_aabb", &closest_points_padded_aabb);
+    m.def("closest_points_indexed_faces", &closest_points_indexed_faces);
     m.def("surface_penalty_response", &surface_penalty_response);
     m.def("contact_stiffness_matvec", &contact_stiffness_matvec);
     m.def("quadrilateral_master_penalty_response", &quadrilateral_master_penalty_response);

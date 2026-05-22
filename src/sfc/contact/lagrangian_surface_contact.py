@@ -13,11 +13,15 @@ from sfc.sdf.material_sdf import MaterialSDF
 
 try:  # pragma: no cover - optional backend availability is platform-dependent.
     from sfc.sdf._cpp_projection import closest_points_all_faces as _cpp_closest_points_all_faces
+    from sfc.sdf._cpp_projection import closest_points_indexed_faces as _cpp_closest_points_indexed_faces
     from sfc.sdf._cpp_projection import closest_points_padded_aabb as _cpp_closest_points_padded_aabb
+    from sfc.sdf._cpp_projection import indexed_faces_available as _cpp_indexed_faces_available
     from sfc.sdf._cpp_projection import is_available as _cpp_projection_available
 except Exception:  # pragma: no cover
     _cpp_closest_points_all_faces = None
+    _cpp_closest_points_indexed_faces = None
     _cpp_closest_points_padded_aabb = None
+    _cpp_indexed_faces_available = lambda: False
     _cpp_projection_available = lambda: False
 
 
@@ -283,7 +287,16 @@ class LagrangianSDFSurfaceContactGeometry:
 
         if not (bool(self.compiled_batch_projection) and _cpp_projection_available() and _cpp_closest_points_all_faces is not None):
             return None
-        X, master_x, master_tree, master_max_radius, barycentric, weight_scale = self._prepare_sampling(x_current)
+        use_indexed_projection = (
+            _cpp_closest_points_indexed_faces is not None
+            and _cpp_indexed_faces_available()
+            and self.search_radius is not None
+        )
+        needs_oracle_bvh = _cpp_closest_points_padded_aabb is not None and not use_indexed_projection
+        X, master_x, master_tree, master_max_radius, barycentric, weight_scale = self._prepare_sampling(
+            x_current,
+            refit_oracle=needs_oracle_bvh,
+        )
         global_faces = self.slave_faces + int(self.slave_node_offset)
         triangles = X[global_faces]
         cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
@@ -313,9 +326,17 @@ class LagrangianSDFSurfaceContactGeometry:
         sample_nodes = np.repeat(kept_faces, n_quadrature, axis=0)
         sample_weights = np.tile(barycentric, (kept_faces.shape[0], 1))
         areas = (kept_areas[:, None] * weight_scale[None, :]).reshape(-1)
+        candidate_offsets = None
+        candidate_face_ids = None
         if master_tree is not None and point_array.size:
-            point_nearest = np.asarray(master_tree.query(point_array, k=1)[0], dtype=float)
-            point_keep = point_nearest <= float(self.search_radius) + float(master_max_radius) + 1.0e-14
+            candidate_radius = float(self.search_radius) + float(master_max_radius) + 1.0e-14
+            use_indexed_candidates = use_indexed_projection
+            if use_indexed_candidates:
+                raw_candidates = master_tree.query_ball_point(point_array, candidate_radius, return_sorted=False)
+                point_keep = np.fromiter((len(ids) > 0 for ids in raw_candidates), dtype=bool, count=len(raw_candidates))
+            else:
+                point_nearest = np.asarray(master_tree.query(point_array, k=1)[0], dtype=float)
+                point_keep = point_nearest <= candidate_radius
             if not np.any(point_keep):
                 return {
                     "sample_node_ids": np.empty((0, 3), dtype=np.int64),
@@ -330,7 +351,19 @@ class LagrangianSDFSurfaceContactGeometry:
             sample_nodes = sample_nodes[point_keep]
             sample_weights = sample_weights[point_keep]
             areas = areas[point_keep]
-        if _cpp_closest_points_padded_aabb is not None:
+            if use_indexed_candidates:
+                kept_candidates = [raw_candidates[int(index)] for index in np.flatnonzero(point_keep)]
+                candidate_offsets, candidate_face_ids = _flatten_candidate_lists(kept_candidates)
+        if candidate_offsets is not None and candidate_face_ids is not None and _cpp_closest_points_indexed_faces is not None:
+            gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_indexed_faces(
+                point_array,
+                master_x,
+                self.master_material.boundary_faces,
+                candidate_offsets,
+                candidate_face_ids,
+                float(self.search_radius) if self.search_radius is not None else 0.0,
+            )
+        elif _cpp_closest_points_padded_aabb is not None:
             bvh = self._oracle.bvh
             gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_padded_aabb(
                 point_array,
@@ -360,6 +393,8 @@ class LagrangianSDFSurfaceContactGeometry:
     def _prepare_sampling(
         self,
         x_current: np.ndarray,
+        *,
+        refit_oracle: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, cKDTree | None, float, np.ndarray, np.ndarray]:
         X = np.asarray(x_current, dtype=float)
         if X.ndim != 2 or X.shape[1] != 3:
@@ -369,7 +404,8 @@ class LagrangianSDFSurfaceContactGeometry:
         if master_stop > X.shape[0]:
             raise ValueError("master_node_offset places master nodes outside x_current")
         master_x = X[master_start:master_stop]
-        self._oracle.refit(master_x)
+        if bool(refit_oracle):
+            self._oracle.refit(master_x)
         master_tree = None
         master_max_radius = 0.0
         if self.search_radius is not None:
@@ -561,6 +597,18 @@ def _triangle_bounding_spheres(triangles: np.ndarray) -> tuple[np.ndarray, np.nd
     centroids = np.mean(T, axis=1)
     radii = np.max(np.linalg.norm(T - centroids[:, None, :], axis=2), axis=1)
     return centroids, radii
+
+
+def _flatten_candidate_lists(candidate_lists) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten per-query candidate face ids for the C++ indexed projection."""
+
+    offsets = np.empty(len(candidate_lists) + 1, dtype=np.int64)
+    offsets[0] = 0
+    flat: list[int] = []
+    for idx, ids in enumerate(candidate_lists):
+        flat.extend(int(face_id) for face_id in ids)
+        offsets[idx + 1] = len(flat)
+    return offsets, np.asarray(flat, dtype=np.int64)
 
 
 def _slave_face_outside_master_tube(tri: np.ndarray, master_tree: cKDTree, master_max_radius: float, search_radius: float) -> bool:

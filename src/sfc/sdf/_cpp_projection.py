@@ -20,6 +20,12 @@ def is_available() -> bool:
     return _BACKEND is not None
 
 
+def indexed_faces_available() -> bool:
+    """Return whether the backend exposes indexed candidate projection."""
+
+    return _BACKEND is not None and hasattr(_BACKEND, "closest_points_indexed_faces")
+
+
 def _require_backend() -> None:
     if _BACKEND is None:
         raise RuntimeError("C++ projection backend is not available") from _IMPORT_ERROR
@@ -57,5 +63,26 @@ def closest_points_padded_aabb(
         np.ascontiguousarray(boundary_faces, dtype=np.int64),
         np.ascontiguousarray(aabb_min, dtype=np.float64),
         np.ascontiguousarray(aabb_max, dtype=np.float64),
+        float(fallback_distance),
+    )
+
+
+def closest_points_indexed_faces(
+    points: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+    candidate_offsets: np.ndarray,
+    candidate_face_ids: np.ndarray,
+    fallback_distance: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Project using per-point candidate faces with exact all-face fallback."""
+
+    _require_backend()
+    return _BACKEND.closest_points_indexed_faces(
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(x_current, dtype=np.float64),
+        np.ascontiguousarray(boundary_faces, dtype=np.int64),
+        np.ascontiguousarray(candidate_offsets, dtype=np.int64),
+        np.ascontiguousarray(candidate_face_ids, dtype=np.int64),
         float(fallback_distance),
     )

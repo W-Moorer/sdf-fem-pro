@@ -273,3 +273,69 @@ python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py `
 10-step `46.01 s` 的实测速度线性外推，完整端到端 wall time 仍可能达到数小时；
 因此在启动完整全程前，下一层优化重点应继续放在 source-drive residual/contact
 sampling 和 VTK/history 输出开销，而不是改变接触精度或时间步。
+
+## 更新：indexed candidate projection + exact fallback
+
+source-drive compiled contact sampling 现在新增一条 C++ indexed projection 路径：
+
+```text
+per-query nearby face candidates
+-> C++ closest projection over candidate faces
+-> exact all-face fallback if candidate result is outside search radius
+```
+
+候选面只用于减少第一轮投影核的扫描面数；如果候选投影没有在 `search_radius`
+内命中，则立即回退到全量 master faces 投影。因此该优化不改变 gap、normal、
+closest-feature payload 或罚函数接触律。为了进一步减少重复工作，compiled batch
+路径在使用 indexed projection 时不再重建未使用的 oracle BVH；它仍然用当前
+master 坐标构造保守的 centroid tree 来枚举候选面。
+
+新增/更新测试：
+
+```text
+tests/test_dynamic_narrow_band_sdf.py::test_cpp_indexed_projection_matches_all_faces_with_exact_fallback_when_built
+tests/test_rp_mpc_and_lagrangian_surface_contact.py
+tests/test_flexible_gear_implicit_lagrangian_sdf.py
+tests/test_flexible_gear_source_penalty_deck.py
+```
+
+验证结果：
+
+```text
+43 passed, 4 deselected
+```
+
+10-step source-drive penalty 复测目录：
+
+```text
+results/source_gear_penalty_10steps_indexed_no_bvh_refit
+```
+
+与上一轮 base-LU 结果相比：
+
+| metric | base-LU only | indexed projection |
+|---|---:|---:|
+| complete wall time | `46.009660 s` | `42.523000 s` |
+| residual/contact sampling | `23.179764 s` | `19.167068 s` |
+| sparse CG linear correction | `5.242211 s` | `5.251324 s` |
+| one-time base LU | `4.376137 s` | `4.345154 s` |
+| history diagnostics | `7.150304 s` | `6.887624 s` |
+| VTK output | `5.915829 s` | `6.735551 s` |
+| sparse CG iterations | `56` | `56` |
+
+数值结果保持一致：
+
+- final active contact samples: `900`
+- final min gap: `-7.522933791806687e-04`
+- final normal force: `76.72803452060242`
+- final max displacement norm: `2.2541615995428984e-04`
+- final p95 von Mises: `1.1876012449640669e+07`
+- final p95 equivalent elastic strain: `4.9435108733463595e-05`
+
+相同 Abaqus VTK manifest 下的末帧误差仍为：
+
+- max displacement magnitude relative error: `1.195%`
+- node-averaged von Mises relative error: `0.0736%`
+- node-averaged equivalent elastic strain relative error: `0.0736%`
+- RP2 rotation relative error: `1.149%`
+- RP2 angular velocity relative error: `1.244%`
