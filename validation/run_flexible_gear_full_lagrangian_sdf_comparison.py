@@ -584,7 +584,8 @@ def run_full_gear(
     drive = str(drive_mode).lower()
     if drive not in {"closure", "source_inp"}:
         raise ValueError("drive_mode must be 'closure' or 'source_inp'")
-    if bool(use_source_timing):
+    source_step_matched = bool(use_source_timing)
+    if source_step_matched:
         duration = float(model.dynamic_duration)
         dt = float(model.dynamic_initial_dt)
     pair = build_full_active_pair(
@@ -658,6 +659,10 @@ def run_full_gear(
         summary["final_p95_equivalent_elastic_strain"] = float(history[-1].get("p95_equivalent_elastic_strain", 0.0))
     summary["active_patch_radius_factor"] = float(active_patch_radius_factor)
     summary["drive_mode"] = drive
+    summary["sfc_match_source_step"] = bool(source_step_matched)
+    summary["sfc_duration"] = float(duration)
+    summary["sfc_dt"] = float(dt)
+    summary["sfc_increment_count"] = int(round(float(duration) / float(dt))) if float(dt) > 0.0 else 0
     summary["source_dynamic_initial_dt"] = float(model.dynamic_initial_dt)
     summary["source_dynamic_duration"] = float(model.dynamic_duration)
     summary["source_dynamic_min_dt"] = float(model.dynamic_min_dt)
@@ -767,7 +772,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
     parser.add_argument("--tet4-mass-kind", choices=("consistent", "calculix"), default="consistent")
     parser.add_argument("--history-frame-stride", type=int, default=2)
-    parser.add_argument("--use-source-timing", action="store_true")
+    parser.add_argument(
+        "--use-source-timing",
+        "--match-source-step",
+        dest="use_source_timing",
+        action="store_true",
+        help="Use the *Dynamic step time and initial increment parsed from the source inp deck.",
+    )
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
     parser.add_argument("--abaqus-command", type=str, default=None)

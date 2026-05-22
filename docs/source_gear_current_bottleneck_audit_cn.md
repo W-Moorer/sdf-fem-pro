@@ -194,3 +194,82 @@ timing 变为：
 
 相比未使用 base-LU 预条件的 qp-cull 路径，10-step wall time 从
 `96.93 s` 降至 `46.01 s`，CG iteration 从 `15090` 降至 `56`。
+
+## 更新：source step 匹配入口和隔帧输出语义
+
+`validation/run_flexible_gear_full_lagrangian_sdf_comparison.py` 现在提供更明确的
+`--match-source-step` 入口，作为既有 `--use-source-timing` 的别名。启用后，SFC
+会直接采用 `gear_contact.inp` 中 `*Dynamic` 行解析出的时间设置：
+
+```text
+initial dt = 1.0e-5 s
+duration   = 5.0e-2 s
+min dt     = 1.0e-10 s
+max dt     = 5.0e-5 s
+```
+
+source-drive 路径仍强制使用 SFC 线性罚函数接触：
+
+```text
+--drive-mode source_inp --contact-mode penalty
+```
+
+并且默认隔帧保存：
+
+```text
+--history-frame-stride 2
+--vtk-frame-stride 2
+```
+
+本轮 smoke 验证目录：
+
+```text
+results/source_gear_penalty_2steps_match_step_fields_smoke
+```
+
+验证结果：
+
+- affected pytest: `21 passed, 4 deselected`
+- SFC smoke wall time: `12.549438 s`
+- smoke increments: `2`
+- SFC VTK frame count: `2`
+- `sfc_vtk_frame_stride`: `2`
+- `sfc_history_frame_stride`: `2`
+- stress/strain postprocess: `corotated_body_elastic_residual`
+- rotation unit: `radian`
+
+summary 现在显式记录：
+
+- `sfc_match_source_step`
+- `sfc_duration`
+- `sfc_dt`
+- `sfc_increment_count`
+- `source_dynamic_initial_dt`
+- `source_dynamic_duration`
+- `source_dynamic_min_dt`
+- `source_dynamic_max_dt`
+
+后续全程命令应使用：
+
+```powershell
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --match-source-step `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --abaqus-vtk-manifest results/flexible_gear_source_penalty_abaqus_stride2_10steps_rpdiag/abaqus_vtk/abaqus_manifest.csv `
+  --out-dir results/source_gear_penalty_full_match_step
+```
+
+注意：`--match-source-step` 会触发 `0.05 s / 1e-5 s = 5000` 个 SFC 增量。按当前
+10-step `46.01 s` 的实测速度线性外推，完整端到端 wall time 仍可能达到数小时；
+因此在启动完整全程前，下一层优化重点应继续放在 source-drive residual/contact
+sampling 和 VTK/history 输出开销，而不是改变接触精度或时间步。
