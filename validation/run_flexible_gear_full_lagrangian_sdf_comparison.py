@@ -41,6 +41,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     plot_alignment_curves,
     solve_sfc_cropped_pair,
     solve_sfc_cropped_pair_hard_contact,
+    solve_sfc_source_drive_pair,
 )
 
 Row = dict[str, Any]
@@ -131,6 +132,110 @@ def write_animation_color_ranges(
     path = out_dir / "animation_fixed_color_ranges.csv"
     _write_csv(path, range_rows)
     return path
+
+
+def compare_animation_manifests(
+    *,
+    sfc_manifest: Path,
+    abaqus_manifest: Path,
+    out_csv: Path,
+    out_png: Path,
+) -> list[Row]:
+    """Compare SFC and Abaqus VTK animation metrics on the SFC frame times.
+
+    The VTK animation manifests are field-output summaries, not solver inputs.
+    They are useful for the paper-facing displacement/stress/strain curves
+    because both solvers can be compared from the exact fields that are opened
+    in ParaView.
+    """
+
+    sfc_rows = _read_csv_rows(sfc_manifest)
+    abaqus_rows = _read_csv_rows(abaqus_manifest)
+    if not sfc_rows:
+        raise RuntimeError(f"SFC VTK manifest has no frames: {sfc_manifest}")
+    if not abaqus_rows:
+        raise RuntimeError(f"Abaqus VTK manifest has no frames: {abaqus_manifest}")
+    t_sfc = np.asarray([float(row.get("time", 0.0) or 0.0) for row in sfc_rows], dtype=float)
+    t_abaqus = np.asarray([float(row.get("time", 0.0) or 0.0) for row in abaqus_rows], dtype=float)
+    metrics = [
+        ("max_displacement_magnitude", "max_displacement_magnitude", "max displacement magnitude"),
+        ("max_von_mises_nodeavg", "max_von_mises_nodeavg", "max node-averaged von Mises"),
+        ("max_strain_norm_nodeavg", "max_le_norm_nodeavg", "max node-averaged strain norm"),
+    ]
+    rows: list[Row] = []
+    for frame, (t_value, sfc_row) in enumerate(zip(t_sfc, sfc_rows, strict=True)):
+        row: Row = {"frame": int(frame), "time": float(t_value)}
+        for sfc_key, abaqus_key, _label in metrics:
+            sfc_value = float(sfc_row.get(sfc_key, 0.0) or 0.0)
+            abaqus_series = np.asarray([float(item.get(abaqus_key, 0.0) or 0.0) for item in abaqus_rows], dtype=float)
+            abaqus_value = float(np.interp(float(t_value), t_abaqus, abaqus_series))
+            row[f"sfc_{sfc_key}"] = sfc_value
+            row[f"abaqus_{abaqus_key}"] = abaqus_value
+            row[f"{sfc_key}_abs_error"] = abs(sfc_value - abaqus_value)
+            row[f"{sfc_key}_rel_error"] = abs(sfc_value - abaqus_value) / max(abs(abaqus_value), 1.0e-12)
+        rows.append(row)
+    _write_csv(out_csv, rows)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update(
+        {
+            "font.family": "Times New Roman",
+            "mathtext.fontset": "stix",
+            "axes.unicode_minus": False,
+        }
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(9.0, 2.75), constrained_layout=True)
+    for ax, (sfc_key, abaqus_key, label) in zip(axes, metrics, strict=True):
+        sfc_y = np.asarray([float(row.get(sfc_key, 0.0) or 0.0) for row in sfc_rows], dtype=float)
+        abaqus_y = np.asarray([float(row.get(abaqus_key, 0.0) or 0.0) for row in abaqus_rows], dtype=float)
+        interp_abaqus_y = np.asarray(
+            [float(row[f"abaqus_{abaqus_key}"]) for row in rows],
+            dtype=float,
+        )
+        rel_key = f"{sfc_key}_rel_error"
+        final_error = float(rows[-1].get(rel_key, 0.0)) if rows else 0.0
+        ax.plot(t_sfc, interp_abaqus_y, color="#1f77b4", linewidth=1.7, label="Abaqus/Standard")
+        if t_abaqus.size <= 80:
+            in_window = t_abaqus <= (float(np.max(t_sfc)) if t_sfc.size else 0.0) + 1.0e-14
+            if np.any(in_window):
+                ax.plot(
+                    t_abaqus[in_window],
+                    abaqus_y[in_window],
+                    color="#1f77b4",
+                    linestyle="none",
+                    marker="o",
+                    markersize=2.5,
+                    alpha=0.75,
+                )
+        ax.plot(
+            t_sfc,
+            sfc_y,
+            color="#d95f02",
+            linewidth=1.7,
+            linestyle="--",
+            label=f"SFC ({final_error * 100:.2f}% final err.)",
+        )
+        if t_sfc.size > 1:
+            ax.fill_between(
+                t_sfc,
+                np.minimum(sfc_y, interp_abaqus_y),
+                np.maximum(sfc_y, interp_abaqus_y),
+                color="#d95f02",
+                alpha=0.10,
+                linewidth=0.0,
+            )
+        ax.set_title(label, fontsize=9.5)
+        ax.set_xlabel("time (s)", fontsize=9)
+        ax.grid(True, linewidth=0.35, alpha=0.35)
+        ax.legend(loc="best", fontsize=7.5, frameon=False)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=300)
+    plt.close(fig)
+    return rows
 
 
 def _selected_surface_entries_for_full_mesh(
@@ -316,6 +421,17 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
                 "- Use fixed global ranges for stress/strain animations; per-frame auto-rescaling can look like stress flicker.",
             ]
         )
+    if summary.get("animation_metric_errors"):
+        lines.extend(
+            [
+                "",
+                "## VTK Field-Curve Alignment",
+                "",
+                f"- VTK metric errors: `{Path(str(summary.get('animation_metric_errors'))).name}`",
+                f"- VTK metric curves: `{Path(str(summary.get('animation_metric_figure'))).name}`",
+                "- Curves use the same displacement/stress/strain fields written to the SFC and Abaqus VTK animations.",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -382,15 +498,24 @@ def run_full_gear(
     hard_max_iterations: int,
     contact_mode: str,
     run_abaqus: bool,
+    drive_mode: str = "closure",
+    use_source_timing: bool = False,
     abaqus_command: str | None = None,
     write_sfc_vtk: bool = False,
     sfc_vtk_dir: Path | None = None,
     vtk_frame_stride: int = 1,
     vtk_include_tensors: bool = True,
     export_abaqus_vtk: bool = False,
+    abaqus_vtk_manifest: Path | None = None,
 ) -> tuple[list[Row], Row]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = parse_gear_input(source)
+    drive = str(drive_mode).lower()
+    if drive not in {"closure", "source_inp"}:
+        raise ValueError("drive_mode must be 'closure' or 'source_inp'")
+    if bool(use_source_timing):
+        duration = float(model.dynamic_duration)
+        dt = float(model.dynamic_initial_dt)
     pair = build_full_active_pair(
         model,
         active_faces_per_body=active_faces_per_body,
@@ -399,7 +524,26 @@ def run_full_gear(
     mode = str(contact_mode).lower()
     if mode not in {"penalty", "hard"}:
         raise ValueError("contact_mode must be 'penalty' or 'hard'")
-    if mode == "hard":
+    if drive == "source_inp":
+        if mode == "hard":
+            raise ValueError("source_inp drive currently supports SFC penalty contact; use --contact-mode penalty")
+        history, summary = solve_sfc_source_drive_pair(
+            pair,
+            young=model.young,
+            poisson=model.poisson,
+            density=model.density,
+            pressure_stiffness=pressure_stiffness,
+            duration=duration,
+            dt=dt,
+            gear1_angular_velocity_z=model.gear1_angular_velocity_z,
+            gear2_torque_z=model.gear2_torque_z,
+            hht_alpha=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+            vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
+            vtk_frame_stride=max(1, int(vtk_frame_stride)),
+            vtk_stem="sfc",
+            vtk_include_tensors=bool(vtk_include_tensors),
+        )
+    elif mode == "hard":
         history, summary = solve_sfc_cropped_pair_hard_contact(
             pair,
             young=model.young,
@@ -440,8 +584,18 @@ def run_full_gear(
         summary["final_p95_von_mises"] = float(history[-1].get("p95_von_mises", 0.0))
         summary["final_p95_equivalent_elastic_strain"] = float(history[-1].get("p95_equivalent_elastic_strain", 0.0))
     summary["active_patch_radius_factor"] = float(active_patch_radius_factor)
+    summary["drive_mode"] = drive
+    summary["source_dynamic_initial_dt"] = float(model.dynamic_initial_dt)
+    summary["source_dynamic_duration"] = float(model.dynamic_duration)
+    summary["source_dynamic_min_dt"] = float(model.dynamic_min_dt)
+    summary["source_dynamic_max_dt"] = float(model.dynamic_max_dt)
+    summary["source_contact_pressure_overclosure"] = str(model.contact_pressure_overclosure)
     summary["rotation_rate_z_rad_per_s"] = float(rotation_rate_z)
     summary["final_rotation_z_rad"] = float(rotation_rate_z) * float(duration)
+    if drive == "source_inp":
+        summary["rotation_rate_z_rad_per_s"] = float(model.gear1_angular_velocity_z)
+        summary["final_rotation_z_rad"] = float(model.gear1_angular_velocity_z) * float(duration)
+        summary["gear2_torque_z"] = float(model.gear2_torque_z)
     history_path = out_dir / "sfc_full_gear_lagrangian_sdf_history.csv"
     _write_csv(history_path, history)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
@@ -486,6 +640,22 @@ def run_full_gear(
                 include_tensors=bool(vtk_include_tensors),
             )
         )
+    if abaqus_vtk_manifest is not None:
+        external_manifest = Path(abaqus_vtk_manifest)
+        summary["abaqus_vtk_manifest"] = str(external_manifest)
+        summary["abaqus_vtk_pvd"] = str(external_manifest.with_name("abaqus.pvd"))
+        summary["abaqus_vtk_frame_count"] = int(len(_read_csv_rows(external_manifest)))
+    if summary.get("sfc_vtk_manifest") and summary.get("abaqus_vtk_manifest"):
+        animation_errors = out_dir / "sfc_vs_abaqus_vtk_metric_errors.csv"
+        animation_figure = out_dir / "sfc_vs_abaqus_vtk_metric_curves.png"
+        compare_animation_manifests(
+            sfc_manifest=Path(str(summary["sfc_vtk_manifest"])),
+            abaqus_manifest=Path(str(summary["abaqus_vtk_manifest"])),
+            out_csv=animation_errors,
+            out_png=animation_figure,
+        )
+        summary["animation_metric_errors"] = str(animation_errors)
+        summary["animation_metric_figure"] = str(animation_figure)
     if summary.get("sfc_vtk_manifest") or summary.get("abaqus_vtk_manifest"):
         summary["animation_color_ranges"] = str(
             write_animation_color_ranges(
@@ -518,6 +688,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
     parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="hard")
+    parser.add_argument("--drive-mode", choices=("closure", "source_inp"), default="closure")
+    parser.add_argument("--use-source-timing", action="store_true")
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
     parser.add_argument("--abaqus-command", type=str, default=None)
@@ -526,6 +698,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vtk-frame-stride", type=int, default=1)
     parser.add_argument("--vtk-scalars-only", action="store_true")
     parser.add_argument("--export-abaqus-vtk", action="store_true")
+    parser.add_argument(
+        "--abaqus-vtk-manifest",
+        type=Path,
+        default=None,
+        help="Existing Abaqus VTK manifest to compare against the generated SFC VTK field curves.",
+    )
     args = parser.parse_args(argv)
     history, summary = run_full_gear(
         source=args.source,
@@ -540,12 +718,15 @@ def main(argv: list[str] | None = None) -> int:
         hard_max_iterations=int(args.hard_max_iterations),
         contact_mode=str(args.contact_mode),
         run_abaqus=bool(args.run_abaqus),
+        drive_mode=str(args.drive_mode),
+        use_source_timing=bool(args.use_source_timing),
         abaqus_command=args.abaqus_command,
         write_sfc_vtk=bool(args.write_sfc_vtk),
         sfc_vtk_dir=args.sfc_vtk_dir,
         vtk_frame_stride=int(args.vtk_frame_stride),
         vtk_include_tensors=not bool(args.vtk_scalars_only),
         export_abaqus_vtk=bool(args.export_abaqus_vtk),
+        abaqus_vtk_manifest=args.abaqus_vtk_manifest,
     )
     print((args.out_dir / "full_gear_lagrangian_sdf_summary.md").read_text(encoding="utf-8"))
     return 0 if history and summary.get("status") == "completed" else 1

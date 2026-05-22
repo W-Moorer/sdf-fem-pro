@@ -15,8 +15,13 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     build_cropped_pair,
     solve_sfc_cropped_pair,
     solve_sfc_cropped_pair_hard_contact,
+    solve_sfc_source_drive_pair,
 )
-from validation.run_flexible_gear_full_lagrangian_sdf_comparison import build_full_active_pair, write_animation_color_ranges
+from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
+    build_full_active_pair,
+    compare_animation_manifests,
+    write_animation_color_ranges,
+)
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
@@ -146,6 +151,30 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     assert "TENSORS S float" in text
 
 
+def test_cropped_gear_source_drive_path_advances_rp_rotation() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+
+    history, summary = solve_sfc_source_drive_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=1.0e-5,
+        dt=1.0e-5,
+        gear1_angular_velocity_z=model.gear1_angular_velocity_z,
+        gear2_torque_z=model.gear2_torque_z,
+    )
+
+    assert len(history) == 1
+    assert summary["status"] == "completed"
+    assert summary["contact_mode"] == "source_penalty"
+    assert float(history[-1]["rp1_rotation_z"]) == pytest.approx(model.gear1_angular_velocity_z * 1.0e-5)
+    assert float(history[-1]["gear2_torque_z"]) == pytest.approx(model.gear2_torque_z)
+    assert int(summary["reduced_dofs"]) > 0
+
+
 def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
@@ -205,6 +234,38 @@ def test_animation_color_ranges_use_global_sfc_and_abaqus_limits(tmp_path: Path)
     assert "0.04" in text
     assert "7.0" in text
     assert "0.038" in text
+
+
+def test_compare_animation_manifests_writes_curve_inputs(tmp_path: Path) -> None:
+    sfc_manifest = tmp_path / "sfc_manifest.csv"
+    abaqus_manifest = tmp_path / "abaqus_manifest.csv"
+    sfc_manifest.write_text(
+        "frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_strain_norm,max_von_mises_nodeavg,max_strain_norm_nodeavg\n"
+        "0,0,sfc_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0\n"
+        "1,0.5,sfc_0001.vtk,1,1,0.2,7.0,0.03,6.0,0.028\n",
+        encoding="utf-8",
+    )
+    abaqus_manifest.write_text(
+        "frame,source_frame,time,vtk_file,node_count,element_count,max_displacement_magnitude,max_von_mises,max_le_norm,max_von_mises_nodeavg,max_le_norm_nodeavg\n"
+        "0,0,0,abaqus_0000.vtk,1,1,0.0,0.0,0.0,0.0,0.0\n"
+        "1,1,1,abaqus_0001.vtk,1,1,0.4,10.0,0.08,8.0,0.04\n",
+        encoding="utf-8",
+    )
+    out_csv = tmp_path / "errors.csv"
+    out_png = tmp_path / "curves.png"
+
+    rows = compare_animation_manifests(
+        sfc_manifest=sfc_manifest,
+        abaqus_manifest=abaqus_manifest,
+        out_csv=out_csv,
+        out_png=out_png,
+    )
+
+    assert out_csv.exists()
+    assert out_png.exists()
+    assert len(rows) == 2
+    assert float(rows[-1]["abaqus_max_displacement_magnitude"]) == pytest.approx(0.2)
+    assert float(rows[-1]["max_von_mises_nodeavg_rel_error"]) == pytest.approx(0.5)
 
 
 def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:

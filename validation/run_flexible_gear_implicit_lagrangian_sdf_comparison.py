@@ -55,7 +55,7 @@ from sfc.fem.calculix_aligned import (  # noqa: E402
 )
 from sfc.fem.constraints import free_dofs, project_fixed_dofs  # noqa: E402
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet  # noqa: E402
-from sfc.fem.rp_mpc import RigidHubMPC, merge_dirichlet_conditions  # noqa: E402
+from sfc.fem.rp_mpc import RigidHubMPC, build_rigid_hub_reduced_assembly, merge_dirichlet_conditions  # noqa: E402
 from sfc.sdf.material_sdf import MaterialSDF  # noqa: E402
 from validation.run_flexible_gear_explicit_sdf_comparison import (  # noqa: E402
     DEFAULT_SOURCE,
@@ -549,6 +549,50 @@ def _solve_penalty_low_rank_correction(
     return base_solution - influence @ contact_coeff
 
 
+def _solve_reduced_penalty_low_rank_correction(
+    *,
+    base_matrix_free: Any,
+    base_lu_cache: list[Any],
+    residual_free: np.ndarray,
+    samples: list[Any],
+    transformation: Any,
+    free: np.ndarray,
+    n_total_dofs: int,
+    equilibrium_scale: float,
+) -> np.ndarray:
+    """Solve a reduced-coordinate Newton correction with active contact tangent."""
+
+    rhs = -np.asarray(residual_free, dtype=float).reshape(-1)
+    if rhs.size == 0:
+        return np.empty(0, dtype=float)
+    active_samples = [sample for sample in samples if float(sample.gap) < 0.0]
+    j_free = np.empty((0, rhs.size), dtype=float)
+    tangent_scale = np.asarray(
+        [float(equilibrium_scale) * float(sample.stiffness) * float(sample.area) for sample in active_samples],
+        dtype=float,
+    )
+    if active_samples:
+        _gaps, gap_jacobian = hard_contact_gap_jacobian_from_samples(active_samples, n_total_dofs=int(n_total_dofs))
+        j_reduced = gap_jacobian @ transformation
+        j_free = np.asarray(j_reduced[:, np.asarray(free, dtype=np.int64)], dtype=float)
+        positive = tangent_scale > 0.0
+        j_free = j_free[positive]
+        tangent_scale = tangent_scale[positive]
+    if base_lu_cache[0] is None:
+        base_lu_cache[0] = splu(base_matrix_free.tocsc())
+    base_lu = base_lu_cache[0]
+    base_solution = np.asarray(base_lu.solve(rhs), dtype=float).reshape(-1)
+    if not active_samples or j_free.size == 0:
+        return base_solution
+    influence = np.asarray(base_lu.solve(j_free.T), dtype=float)
+    schur = np.diag(1.0 / tangent_scale) + j_free @ influence
+    try:
+        contact_coeff = np.linalg.solve(schur, j_free @ base_solution)
+    except np.linalg.LinAlgError:
+        contact_coeff, *_ = np.linalg.lstsq(schur, j_free @ base_solution, rcond=None)
+    return base_solution - influence @ contact_coeff
+
+
 def _solve_penalty_cg_correction(
     *,
     base_matrix_free: Any,
@@ -919,6 +963,287 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
         "timing_penalty_linear_solve_seconds": float(timing_linear_solve),
         "timing_penalty_low_rank_seconds": float(timing_contact_low_rank),
         "timing_penalty_fallback_seconds": float(timing_fallback),
+        "status": "completed",
+    }
+    if vtk_enabled and vtk_dir is not None:
+        pvd_path = vtk_dir / f"{vtk_stem}.pvd"
+        manifest_path = vtk_dir / f"{vtk_stem}_manifest.csv"
+        write_pvd(pvd_path, vtk_datasets)
+        _write_csv(manifest_path, vtk_manifest_rows)
+        summary.update(
+            {
+                "sfc_vtk_pvd": str(pvd_path),
+                "sfc_vtk_manifest": str(manifest_path),
+                "sfc_vtk_frame_count": int(len(vtk_datasets)),
+                "sfc_vtk_frame_stride": int(vtk_frame_stride),
+                "sfc_vtk_include_tensors": bool(vtk_include_tensors),
+            }
+        )
+    return rows, summary
+
+
+def _source_drive_fixed_reduced_dofs(assembly: Any, *, time_value: float, omega_z: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return reduced RP constraints matching the source Abaqus gear-contact deck."""
+
+    hub1 = assembly.hub_slice(0)
+    hub2 = assembly.hub_slice(1)
+    fixed = [
+        hub1.start + 0,
+        hub1.start + 1,
+        hub1.start + 2,
+        hub1.start + 3,
+        hub1.start + 4,
+        hub1.start + 5,
+        hub2.start + 0,
+        hub2.start + 1,
+        hub2.start + 2,
+        hub2.start + 3,
+        hub2.start + 4,
+    ]
+    values = [0.0] * len(fixed)
+    values[5] = float(omega_z) * float(time_value)
+    return np.asarray(fixed, dtype=np.int64), np.asarray(values, dtype=float)
+
+
+def _project_reduced_fixed(q: np.ndarray, fixed: np.ndarray, values: np.ndarray) -> np.ndarray:
+    out = np.asarray(q, dtype=float).reshape(-1).copy()
+    if fixed.size:
+        out[np.asarray(fixed, dtype=np.int64)] = np.asarray(values, dtype=float)
+    return out
+
+
+def solve_sfc_source_drive_pair(
+    pair: CroppedGearPair,
+    *,
+    young: float,
+    poisson: float,
+    density: float,
+    pressure_stiffness: float,
+    duration: float,
+    dt: float,
+    gear1_angular_velocity_z: float,
+    gear2_torque_z: float,
+    hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
+    max_iterations: int = 8,
+    tolerance: float = 1.0e-9,
+    vtk_out_dir: Path | None = None,
+    vtk_frame_stride: int = 1,
+    vtk_stem: str = "sfc",
+    vtk_include_tensors: bool = True,
+) -> tuple[list[Row], Row]:
+    """Solve the source ``gear_contact.inp`` RP-drive case with SFC contact.
+
+    The model keeps both flexible gear volume meshes.  Gear 1 follows the
+    Abaqus source velocity boundary on RP dof 6, gear 2 keeps RP dofs 1--5
+    fixed and receives the source moment on RP dof 6.  Contact uses gear 2 as
+    slave and gear 1 as master, matching the source contact-pair order.
+    """
+
+    n1 = pair.gear1.nodes.shape[0]
+    X = np.vstack([pair.gear1.nodes, pair.gear2.nodes])
+    elements = np.vstack([pair.gear1.elements, pair.gear2.elements + n1])
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=young, nu=poisson, density=density)
+    hub1 = RigidHubMPC(pair.gear1.support_nodes, X, pair.gear1.rp)
+    hub2 = RigidHubMPC(pair.gear2.support_nodes + n1, X, pair.gear2.rp)
+    assembly = build_rigid_hub_reduced_assembly(X, [hub1, hub2], include_free_nodes=True)
+    T = assembly.transformation.tocsr()
+    master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
+    contact = LagrangianSDFSurfaceContactGeometry(
+        pair.gear2.contact_faces,
+        master,
+        pair.gear1.nodes,
+        pressure_stiffness=pressure_stiffness,
+        slave_node_offset=n1,
+        master_node_offset=0,
+        quadrature="tri3",
+        search_radius=max(2.5 * (pair.initial_patch_gap + 1.0e-5), 1.0e-4),
+    )
+    beta, gamma = hht_newmark_parameters(float(hht_alpha))
+    scale = 1.0 + float(hht_alpha)
+    steps = max(1, int(round(float(duration) / float(dt))))
+    if not np.isclose(steps * float(dt), float(duration), rtol=1.0e-9, atol=1.0e-14):
+        raise ValueError("duration must be an integer multiple of dt for source-drive SFC")
+    reference_internal = stvk_internal_response(model, model.X, assemble_tangent=True)
+    K_full = reference_internal.tangent.tocsr()
+    K_red = assembly.reduce_matrix(K_full).tocsr()
+    M_red = assembly.reduce_matrix(model.mass_matrix).tocsr()
+    external = np.zeros(assembly.n_reduced_dofs, dtype=float)
+    hub2_slice = assembly.hub_slice(1)
+    external[hub2_slice.start + 5] = float(gear2_torque_z)
+    q = np.zeros(assembly.n_reduced_dofs, dtype=float)
+    v = np.zeros_like(q)
+    a = np.zeros_like(q)
+    v[assembly.hub_slice(0).start + 5] = float(gear1_angular_velocity_z)
+    fixed0, values0 = _source_drive_fixed_reduced_dofs(assembly, time_value=0.0, omega_z=gear1_angular_velocity_z)
+    q = _project_reduced_fixed(q, fixed0, values0)
+    x0 = model.X + assembly.expand_displacements(q)
+    samples0 = list(contact.samples(x0))
+    contact0 = assemble_contact_response(samples0, model.n_nodes)
+    previous = external - np.asarray(K_red @ q, dtype=float).reshape(-1) + assembly.reduce_vector(contact0.force)
+    free0 = free_dofs(assembly.n_reduced_dofs, fixed0)
+    if free0.size and float(np.linalg.norm(previous[free0])) > 0.0:
+        try:
+            a[free0] = np.asarray(splu(M_red[free0[:, None], free0].tocsc()).solve(previous[free0]), dtype=float)
+        except Exception:
+            a[free0] = np.asarray(cg(M_red[free0[:, None], free0].tocsr(), previous[free0], atol=1.0e-12, rtol=1.0e-10)[0], dtype=float)
+    state = MechanicsState(x0, assembly.expand_displacements(v), assembly.expand_displacements(a), time=0.0)
+    element_object_ids = np.concatenate(
+        [
+            np.ones(pair.gear1.elements.shape[0], dtype=np.int64),
+            np.full(pair.gear2.elements.shape[0], 2, dtype=np.int64),
+        ]
+    )
+    vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
+    vtk_dir = Path(vtk_out_dir) if vtk_out_dir is not None else None
+    vtk_datasets: list[tuple[float, Path]] = []
+    vtk_manifest_rows: list[Row] = []
+    if vtk_enabled and vtk_dir is not None:
+        vtk_dir.mkdir(parents=True, exist_ok=True)
+        for stale in vtk_dir.glob(f"{vtk_stem}_*.vtk"):
+            stale.unlink()
+        for stale in (vtk_dir / f"{vtk_stem}.pvd", vtk_dir / f"{vtk_stem}_manifest.csv"):
+            if stale.exists():
+                stale.unlink()
+        initial_internal = _linear_reference_internal_response(model, state.x, K_full)
+        frame_path = vtk_dir / f"{vtk_stem}_{0:04d}.vtk"
+        vtk_manifest_rows.append(
+            _write_sfc_tet4_vtk_frame(
+                frame_path,
+                model=model,
+                state=state,
+                internal=initial_internal,
+                element_object_ids=element_object_ids,
+                time_value=0.0,
+                frame_index=0,
+                include_tensors=vtk_include_tensors,
+            )
+        )
+        vtk_datasets.append((0.0, frame_path))
+    c0 = 1.0 / (beta * float(dt) * float(dt))
+    base_matrix = (M_red * c0 + K_red * scale).tocsr()
+    base_free = None
+    base_lu_cache: list[Any] = [None]
+    start = time.perf_counter()
+    rows: list[Row] = []
+    vtk_frame_index = 1
+    timing_residual = 0.0
+    timing_linear = 0.0
+    for step in range(1, steps + 1):
+        t = step * float(dt)
+        fixed, values = _source_drive_fixed_reduced_dofs(assembly, time_value=t, omega_z=gear1_angular_velocity_z)
+        free = free_dofs(assembly.n_reduced_dofs, fixed)
+        if base_free is None:
+            base_free = base_matrix[free[:, None], free].tocsr() if free.size else None
+        q_pred, v_pred, _ = calculix_dynamic_predictor(q, v, a, dt=float(dt), beta=beta, gamma=gamma)
+        q_guess = _project_reduced_fixed(q_pred, fixed, values)
+        residual_norm = np.inf
+        iteration_count = 0
+        last_internal = _linear_reference_internal_response(model, model.X + assembly.expand_displacements(q_guess), K_full)
+        last_contact = contact0
+        for iteration in range(1, max(1, int(max_iterations)) + 1):
+            q_guess = _project_reduced_fixed(q_guess, fixed, values)
+            x_guess = model.X + assembly.expand_displacements(q_guess)
+            t_section = time.perf_counter()
+            samples = list(contact.samples(x_guess))
+            last_contact = assemble_contact_response(samples, model.n_nodes)
+            internal_red = np.asarray(K_red @ q_guess, dtype=float).reshape(-1)
+            contact_red = assembly.reduce_vector(last_contact.force)
+            rhs_balance = external - internal_red + contact_red
+            a_guess = c0 * (q_guess - q_pred)
+            residual = np.asarray(M_red @ a_guess, dtype=float).reshape(-1) - scale * rhs_balance + float(hht_alpha) * previous
+            residual_norm = float(np.linalg.norm(residual[free])) if free.size else 0.0
+            timing_residual += time.perf_counter() - t_section
+            t_section = time.perf_counter()
+            correction_free = (
+                _solve_reduced_penalty_low_rank_correction(
+                    base_matrix_free=base_free,
+                    base_lu_cache=base_lu_cache,
+                    residual_free=residual[free],
+                    samples=samples,
+                    transformation=T,
+                    free=free,
+                    n_total_dofs=model.n_dofs,
+                    equilibrium_scale=scale,
+                )
+                if free.size
+                else np.empty(0, dtype=float)
+            )
+            timing_linear += time.perf_counter() - t_section
+            q_guess[free] += correction_free
+            iteration_count = iteration
+            if float(np.linalg.norm(correction_free)) <= float(tolerance) * max(1.0, float(np.linalg.norm(q_guess[free])) if free.size else 1.0):
+                break
+        q_new = _project_reduced_fixed(q_guess, fixed, values)
+        a_new = c0 * (q_new - q_pred)
+        v_new = v_pred + gamma * float(dt) * a_new
+        x_new = model.X + assembly.expand_displacements(q_new)
+        state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
+        last_internal = _linear_reference_internal_response(model, state.x, K_full)
+        last_contact = assemble_contact_response(contact.samples(state.x), model.n_nodes)
+        previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
+        row = _penalty_history_row(
+            time_value=t,
+            closure=0.0,
+            rotation=float(gear1_angular_velocity_z) * t,
+            state=state,
+            model=model,
+            internal=last_internal,
+            contact_response=last_contact,
+            young=young,
+            poisson=poisson,
+            newton_iterations=iteration_count,
+            residual_norm=residual_norm,
+            solver="source_reduced_rp_modified_newton",
+        )
+        row.update(
+            {
+                "rp1_rotation_z": float(q_new[assembly.hub_slice(0).start + 5]),
+                "rp1_angular_velocity_z": float(v_new[assembly.hub_slice(0).start + 5]),
+                "rp2_rotation_z": float(q_new[hub2_slice.start + 5]),
+                "rp2_angular_velocity_z": float(v_new[hub2_slice.start + 5]),
+                "gear2_torque_z": float(gear2_torque_z),
+            }
+        )
+        rows.append(row)
+        if vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps):
+            frame_path = vtk_dir / f"{vtk_stem}_{vtk_frame_index:04d}.vtk"
+            vtk_manifest_rows.append(
+                _write_sfc_tet4_vtk_frame(
+                    frame_path,
+                    model=model,
+                    state=state,
+                    internal=last_internal,
+                    element_object_ids=element_object_ids,
+                    time_value=t,
+                    frame_index=vtk_frame_index,
+                    include_tensors=vtk_include_tensors,
+                )
+            )
+            vtk_datasets.append((float(t), frame_path))
+            vtk_frame_index += 1
+        q, v, a = q_new, v_new, a_new
+    wall = time.perf_counter() - start
+    summary = {
+        "sfc_wall_seconds": float(wall),
+        "nodes": int(X.shape[0]),
+        "elements": int(elements.shape[0]),
+        "gear1_contact_faces": int(pair.gear1.contact_faces.shape[0]),
+        "gear2_contact_faces": int(pair.gear2.contact_faces.shape[0]),
+        "gear1_support_nodes": int(pair.gear1.support_nodes.size),
+        "gear2_support_nodes": int(pair.gear2.support_nodes.size),
+        "initial_patch_gap": float(pair.initial_patch_gap),
+        "final_active_contact_samples": int(rows[-1]["active_contact_samples"]) if rows else 0,
+        "final_min_gap": float(rows[-1]["min_gap"]) if rows else 0.0,
+        "final_normal_force": float(rows[-1]["normal_force"]) if rows else 0.0,
+        "hht_alpha": float(hht_alpha),
+        "contact_mode": "source_penalty",
+        "penalty_solver": "source_reduced_rp_modified_newton",
+        "material_linearization": "reference_linear",
+        "source_gear1_angular_velocity_z_rad_per_s": float(gear1_angular_velocity_z),
+        "source_gear2_torque_z": float(gear2_torque_z),
+        "reduced_dofs": int(assembly.n_reduced_dofs),
+        "timing_source_residual_seconds": float(timing_residual),
+        "timing_source_linear_seconds": float(timing_linear),
         "status": "completed",
     }
     if vtk_enabled and vtk_dir is not None:
