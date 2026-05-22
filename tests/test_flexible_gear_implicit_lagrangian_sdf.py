@@ -13,7 +13,10 @@ if str(ROOT) not in sys.path:
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, parse_gear_input
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse,
+    _active_reduced_gap_jacobian_sparse_from_arrays,
+    _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
+    _source_drive_corotated_visual_state_and_internal,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
     solve_sfc_cropped_pair,
@@ -21,7 +24,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     solve_sfc_source_drive_pair,
 )
 from sfc.contact.hard_contact import hard_contact_gap_jacobian_from_samples
-from sfc.fem.calculix_aligned import ContactSample, assemble_contact_response
+from sfc.fem.calculix_aligned import ContactSample, MechanicsModel, MechanicsState, assemble_contact_response, stvk_internal_response
 from sfc.fem.rp_mpc import RigidHubMPC, build_rigid_hub_reduced_assembly
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
@@ -57,14 +60,41 @@ def test_source_force_only_contact_response_matches_full_force_response() -> Non
 
     full = assemble_contact_response(samples, n_nodes=6)
     fast = _assemble_contact_response_force_only(samples, n_nodes=6)
+    arrays = {
+        "sample_node_ids": np.vstack([sample.node_ids for sample in samples]),
+        "sample_weights": np.vstack([sample.shape_weights for sample in samples]),
+        "gaps": np.asarray([sample.gap for sample in samples], dtype=float),
+        "normals": np.vstack([sample.normal for sample in samples]),
+        "areas": np.asarray([sample.area for sample in samples], dtype=float),
+        "master_node_ids": np.vstack(
+            [
+                sample.master_node_ids if sample.master_node_ids is not None else np.asarray([0, 0, 0], dtype=np.int64)
+                for sample in samples
+            ]
+        ),
+        "master_weights": np.vstack(
+            [
+                sample.master_shape_weights if sample.master_shape_weights is not None else np.zeros(3, dtype=float)
+                for sample in samples
+            ]
+        ),
+    }
+    batched = _assemble_contact_arrays_force_only(arrays, n_nodes=6, stiffness=1000.0)
 
     np.testing.assert_allclose(fast.force, full.force)
+    np.testing.assert_allclose(batched.force, full.force)
     assert fast.min_gap == pytest.approx(full.min_gap)
+    assert batched.min_gap == pytest.approx(full.min_gap)
     assert fast.max_penetration == pytest.approx(full.max_penetration)
+    assert batched.max_penetration == pytest.approx(full.max_penetration)
     assert fast.active_count == full.active_count
+    assert batched.active_count == full.active_count
     assert fast.normal_force == pytest.approx(full.normal_force)
+    assert batched.normal_force == pytest.approx(full.normal_force)
     assert fast.energy == pytest.approx(full.energy)
+    assert batched.energy == pytest.approx(full.energy)
     assert fast.tangent.nnz == 0
+    assert batched.tangent.nnz == 0
 
 
 def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
@@ -94,8 +124,19 @@ def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
     _gaps, full_jacobian = hard_contact_gap_jacobian_from_samples([sample], n_total_dofs=3 * reference_nodes.shape[0])
     projected = (full_jacobian @ assembly.transformation)[:, free]
     direct = _active_reduced_gap_jacobian_sparse([sample], transformation=assembly.transformation, free=free)
+    arrays = {
+        "sample_node_ids": sample.node_ids.reshape(1, 3),
+        "sample_weights": sample.shape_weights.reshape(1, 3),
+        "gaps": np.asarray([sample.gap], dtype=float),
+        "normals": sample.normal.reshape(1, 3),
+        "areas": np.asarray([sample.area], dtype=float),
+        "master_node_ids": np.asarray([[1, 1, 1]], dtype=np.int64),
+        "master_weights": np.asarray([[1.0, 0.0, 0.0]], dtype=float),
+    }
+    direct_arrays = _active_reduced_gap_jacobian_sparse_from_arrays(arrays, transformation=assembly.transformation, free=free)
 
     np.testing.assert_allclose(direct.toarray(), np.asarray(projected), atol=1.0e-14)
+    np.testing.assert_allclose(direct_arrays.toarray(), np.asarray(projected), atol=1.0e-14)
 
 
 def test_cropped_gear_pair_is_small_and_has_supports() -> None:
@@ -234,9 +275,10 @@ def test_cropped_gear_modified_newton_writes_sfc_vtk_frames(tmp_path: Path) -> N
     assert "TENSORS S float" in text
 
 
-def test_cropped_gear_source_drive_path_advances_rp_rotation() -> None:
+def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+    vtk_dir = tmp_path / "source_sfc_vtk"
 
     history, summary = solve_sfc_source_drive_pair(
         pair,
@@ -248,6 +290,8 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation() -> None:
         dt=1.0e-5,
         gear1_angular_velocity_z=model.gear1_angular_velocity_z,
         gear2_torque_z=model.gear2_torque_z,
+        vtk_out_dir=vtk_dir,
+        vtk_frame_stride=1,
     )
 
     assert len(history) == 1
@@ -256,6 +300,48 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation() -> None:
     assert float(history[-1]["rp1_rotation_z"]) == pytest.approx(model.gear1_angular_velocity_z * 1.0e-5)
     assert float(history[-1]["gear2_torque_z"]) == pytest.approx(model.gear2_torque_z)
     assert int(summary["reduced_dofs"]) > 0
+    assert summary["source_rotation_unit"] == "radian"
+    manifest = Path(str(summary["sfc_vtk_manifest"]))
+    assert manifest.exists()
+    text = manifest.read_text(encoding="utf-8")
+    assert "corotated_body_elastic_residual" in text
+    assert "radian" in text
+
+
+def test_source_drive_corotated_visual_postprocess_removes_rigid_rotation_stress() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=1.0)
+    reference_internal = stvk_internal_response(model, model.X, assemble_tangent=True)
+    theta = 0.7
+    small_rigid = np.cross(np.asarray([[0.0, 0.0, theta]], dtype=float), X)
+    state = MechanicsState(
+        X + small_rigid,
+        np.zeros_like(X),
+        np.zeros_like(X),
+        time=0.0,
+    )
+
+    visual_state, internal = _source_drive_corotated_visual_state_and_internal(
+        model=model,
+        state=state,
+        reference_tangent=reference_internal.tangent,
+        body_node_slices=(slice(0, 4), slice(4, 4)),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta, 0.0),
+    )
+
+    expected_node1 = np.asarray([np.cos(theta), np.sin(theta), 0.0], dtype=float)
+    np.testing.assert_allclose(visual_state.x[1], expected_node1, atol=1.0e-14)
+    assert float(np.max(internal.von_mises)) <= 1.0e-10
 
 
 def test_cropped_gear_abaqus_deck_prescribes_matching_rp_motion(tmp_path) -> None:

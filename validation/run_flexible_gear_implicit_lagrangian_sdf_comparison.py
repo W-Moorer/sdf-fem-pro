@@ -121,6 +121,42 @@ def _assemble_contact_response_force_only(samples: Iterable[Any], n_nodes: int) 
     return ContactResponse(force, tangent, float(min_gap), float(max_penetration), active_count, float(normal_force), float(energy))
 
 
+def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_nodes: int, *, stiffness: float) -> ContactResponse:
+    """Assemble contact force/diagnostics from batched sample arrays."""
+
+    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
+    force = np.zeros((int(n_nodes), 3), dtype=float)
+    if gaps.size == 0:
+        tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
+        return ContactResponse(force, tangent, 0.0, 0.0, 0, 0.0, 0.0)
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    normal_norm = np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)
+    normals = normals / normal_norm[:, None]
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    penetration = np.maximum(-gaps, 0.0)
+    active = penetration > 0.0
+    lam = float(stiffness) * areas * penetration
+    contact_vectors = lam[:, None] * normals
+    slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    for local in range(slave_nodes.shape[1]):
+        np.add.at(force, slave_nodes[:, local], slave_weights[:, local, None] * contact_vectors)
+    for local in range(master_nodes.shape[1]):
+        np.add.at(force, master_nodes[:, local], -master_weights[:, local, None] * contact_vectors)
+    tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
+    return ContactResponse(
+        force,
+        tangent,
+        float(np.min(gaps)),
+        float(np.max(penetration)) if penetration.size else 0.0,
+        int(np.count_nonzero(active)),
+        float(np.sum(lam[active])) if np.any(active) else 0.0,
+        float(0.5 * float(stiffness) * np.sum(areas * penetration * penetration)),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CroppedGearPatch:
     name: str
@@ -203,6 +239,65 @@ def _linear_reference_internal_response(
     energy = 0.5 * float(u_flat @ np.asarray(force, dtype=float).reshape(-1))
     empty = csr_matrix((model.n_dofs, model.n_dofs), dtype=float)
     return InternalResponse(force, strain, stress, vm, energy, empty, empty)
+
+
+def _rotation_z_matrix(angle_rad: float) -> np.ndarray:
+    """Return an active z-axis rotation matrix for an angle in radians."""
+
+    c = float(np.cos(float(angle_rad)))
+    s = float(np.sin(float(angle_rad)))
+    return np.asarray([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+
+
+def _source_drive_corotated_visual_state_and_internal(
+    *,
+    model: MechanicsModel,
+    state: MechanicsState,
+    reference_tangent: Any,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+    body_rotation_z: tuple[float, float],
+) -> tuple[MechanicsState, InternalResponse]:
+    """Return finite-rotation visual state and objective elastic stress fields.
+
+    The source Abaqus gear deck uses ``nlgeom=YES`` and RP rotations measured in
+    radians.  A small-strain postprocess of the raw linearized BEAM-MPC
+    displacement would incorrectly interpret the large rigid gear rotation as
+    strain.  For visualization and field-curve metrics, remove the linearized
+    rigid z-rotation from each body, place the body with the corresponding
+    finite z-rotation, and compute stress/strain only from the residual elastic
+    displacement.  This is a generic corotational postprocess for hub-driven
+    bodies; it does not smooth, filter, or alter the contact solve.
+    """
+
+    X = np.asarray(model.X, dtype=float)
+    x_raw = np.asarray(state.x, dtype=float)
+    u_raw = x_raw - X
+    x_visual = x_raw.copy()
+    u_elastic = u_raw.copy()
+    theta_vectors = (
+        np.asarray([0.0, 0.0, float(body_rotation_z[0])], dtype=float),
+        np.asarray([0.0, 0.0, float(body_rotation_z[1])], dtype=float),
+    )
+    for node_slice, rp, theta_vec in zip(body_node_slices, body_reference_points, theta_vectors, strict=True):
+        ids = np.arange(node_slice.start or 0, node_slice.stop, dtype=np.int64)
+        if ids.size == 0:
+            continue
+        reference_point = np.asarray(rp, dtype=float).reshape(3)
+        lever = X[ids] - reference_point[None, :]
+        small_rigid = np.cross(theta_vec[None, :], lever)
+        elastic = u_raw[ids] - small_rigid
+        R = _rotation_z_matrix(float(theta_vec[2]))
+        x_visual[ids] = reference_point[None, :] + lever @ R.T + elastic
+        u_elastic[ids] = elastic
+    visual_state = MechanicsState(
+        x_visual,
+        np.asarray(state.v, dtype=float).copy(),
+        np.asarray(state.a, dtype=float).copy(),
+        time=float(state.time),
+    )
+    internal = _linear_reference_internal_response(model, X + u_elastic, reference_tangent)
+    return visual_state, internal
 
 
 def _write_sfc_tet4_vtk_frame(
@@ -736,6 +831,53 @@ def _active_reduced_gap_jacobian_sparse(
     return coo_matrix((data, (rows, cols)), shape=(active_row, free_cols.size)).tocsr()
 
 
+def _active_reduced_gap_jacobian_sparse_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    transformation: Any,
+    free: np.ndarray,
+) -> Any:
+    """Build active reduced gap Jacobian from batched sample arrays."""
+
+    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
+    active_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
+    T = transformation.tocsr()
+    free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
+    reduced_to_free = np.full(T.shape[1], -1, dtype=np.int64)
+    reduced_to_free[free_cols] = np.arange(free_cols.size, dtype=np.int64)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    normal_norm = np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)
+    normals = normals / normal_norm[:, None]
+    for out_row, sample_id in enumerate(active_ids):
+        normal = normals[int(sample_id)]
+        for sign, nodes, weights in (
+            (1.0, slave_nodes[int(sample_id)], slave_weights[int(sample_id)]),
+            (-1.0, master_nodes[int(sample_id)], master_weights[int(sample_id)]),
+        ):
+            for node, weight in zip(nodes, weights, strict=True):
+                for component in range(3):
+                    coeff = float(sign) * float(weight) * float(normal[component])
+                    if coeff == 0.0:
+                        continue
+                    full_row = 3 * int(node) + component
+                    start = int(T.indptr[full_row])
+                    stop = int(T.indptr[full_row + 1])
+                    for ptr in range(start, stop):
+                        free_col = int(reduced_to_free[int(T.indices[ptr])])
+                        if free_col >= 0:
+                            rows.append(out_row)
+                            cols.append(free_col)
+                            data.append(coeff * float(T.data[ptr]))
+    return coo_matrix((data, (rows, cols)), shape=(active_ids.size, free_cols.size)).tocsr()
+
+
 def _solve_penalty_cg_correction_sparse(
     *,
     base_matrix_free: Any,
@@ -820,6 +962,46 @@ def _solve_reduced_penalty_sparse_cg_correction(
         return None
     _ = int(n_total_dofs)  # kept for API parity with the dense fallback.
     j_free = _active_reduced_gap_jacobian_sparse(active_samples, transformation=transformation, free=free)
+    j_free = j_free[positive]
+    tangent_scale = tangent_scale[positive]
+    return _solve_penalty_cg_correction_sparse(
+        base_matrix_free=base_matrix_free,
+        rhs=rhs,
+        j_free=j_free,
+        tangent_scale=tangent_scale,
+        tolerance=tolerance,
+    )
+
+
+def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
+    *,
+    base_matrix_free: Any,
+    residual_free: np.ndarray,
+    sample_arrays: dict[str, np.ndarray],
+    transformation: Any,
+    free: np.ndarray,
+    equilibrium_scale: float,
+    pressure_stiffness: float,
+    tolerance: float,
+) -> np.ndarray | None:
+    """Solve the reduced contact tangent using batched sample arrays."""
+
+    rhs = -np.asarray(residual_free, dtype=float).reshape(-1)
+    if rhs.size == 0:
+        return np.empty(0, dtype=float)
+    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
+    active = gaps < 0.0
+    if not np.any(active):
+        try:
+            return np.asarray(cg(base_matrix_free.tocsr(), rhs, rtol=1.0e-10, atol=1.0e-12, maxiter=1000)[0], dtype=float)
+        except Exception:
+            return None
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    tangent_scale = float(equilibrium_scale) * float(pressure_stiffness) * areas[active]
+    positive = tangent_scale > 0.0
+    if not np.any(positive):
+        return None
+    j_free = _active_reduced_gap_jacobian_sparse_from_arrays(sample_arrays, transformation=transformation, free=free)
     j_free = j_free[positive]
     tangent_scale = tangent_scale[positive]
     return _solve_penalty_cg_correction_sparse(
@@ -1316,8 +1498,12 @@ def solve_sfc_source_drive_pair(
     fixed0, values0 = _source_drive_fixed_reduced_dofs(assembly, time_value=0.0, omega_z=gear1_angular_velocity_z)
     q = _project_reduced_fixed(q, fixed0, values0)
     x0 = model.X + assembly.expand_displacements(q)
-    samples0 = list(contact.samples(x0))
-    contact0 = _assemble_contact_response_force_only(samples0, model.n_nodes)
+    sample_arrays0 = contact.sample_arrays(x0)
+    if sample_arrays0 is None:
+        samples0 = list(contact.samples(x0))
+        contact0 = _assemble_contact_response_force_only(samples0, model.n_nodes)
+    else:
+        contact0 = _assemble_contact_arrays_force_only(sample_arrays0, model.n_nodes, stiffness=pressure_stiffness)
     previous = external - np.asarray(K_red @ q, dtype=float).reshape(-1) + assembly.reduce_vector(contact0.force)
     free0 = free_dofs(assembly.n_reduced_dofs, fixed0)
     if free0.size and float(np.linalg.norm(previous[free0])) > 0.0:
@@ -1332,6 +1518,8 @@ def solve_sfc_source_drive_pair(
             np.full(pair.gear2.elements.shape[0], 2, dtype=np.int64),
         ]
     )
+    body_node_slices = (slice(0, n1), slice(n1, X.shape[0]))
+    body_reference_points = (np.asarray(pair.gear1.rp, dtype=float), np.asarray(pair.gear2.rp, dtype=float))
     vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
     vtk_dir = Path(vtk_out_dir) if vtk_out_dir is not None else None
     vtk_datasets: list[tuple[float, Path]] = []
@@ -1343,20 +1531,34 @@ def solve_sfc_source_drive_pair(
         for stale in (vtk_dir / f"{vtk_stem}.pvd", vtk_dir / f"{vtk_stem}_manifest.csv"):
             if stale.exists():
                 stale.unlink()
-        initial_internal = _linear_reference_internal_response(model, state.x, K_full)
-        frame_path = vtk_dir / f"{vtk_stem}_{0:04d}.vtk"
-        vtk_manifest_rows.append(
-            _write_sfc_tet4_vtk_frame(
-                frame_path,
-                model=model,
-                state=state,
-                internal=initial_internal,
-                element_object_ids=element_object_ids,
-                time_value=0.0,
-                frame_index=0,
-                include_tensors=vtk_include_tensors,
-            )
+        visual_state, initial_internal = _source_drive_corotated_visual_state_and_internal(
+            model=model,
+            state=state,
+            reference_tangent=K_full,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=(0.0, 0.0),
         )
+        frame_path = vtk_dir / f"{vtk_stem}_{0:04d}.vtk"
+        frame_row = _write_sfc_tet4_vtk_frame(
+            frame_path,
+            model=model,
+            state=visual_state,
+            internal=initial_internal,
+            element_object_ids=element_object_ids,
+            time_value=0.0,
+            frame_index=0,
+            include_tensors=vtk_include_tensors,
+        )
+        frame_row.update(
+            {
+                "stress_strain_postprocess": "corotated_body_elastic_residual",
+                "rotation_unit": "radian",
+                "rp1_rotation_z_rad": 0.0,
+                "rp2_rotation_z_rad": 0.0,
+            }
+        )
+        vtk_manifest_rows.append(frame_row)
         vtk_datasets.append((0.0, frame_path))
     c0 = 1.0 / (beta * float(dt) * float(dt))
     base_matrix = (M_red * c0 + K_red * scale).tocsr()
@@ -1385,8 +1587,13 @@ def solve_sfc_source_drive_pair(
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
             t_section = time.perf_counter()
-            samples = list(contact.samples(x_guess))
-            last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
+            sample_arrays = contact.sample_arrays(x_guess)
+            if sample_arrays is None:
+                samples = list(contact.samples(x_guess))
+                last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
+            else:
+                samples = []
+                last_contact = _assemble_contact_arrays_force_only(sample_arrays, model.n_nodes, stiffness=pressure_stiffness)
             contact_matches_q_guess = True
             internal_red = np.asarray(K_red @ q_guess, dtype=float).reshape(-1)
             contact_red = assembly.reduce_vector(last_contact.force)
@@ -1398,18 +1605,32 @@ def solve_sfc_source_drive_pair(
             t_section = time.perf_counter()
             correction_free = np.empty(0, dtype=float)
             if free.size:
-                correction_free = _solve_reduced_penalty_sparse_cg_correction(
-                    base_matrix_free=base_free,
-                    residual_free=residual[free],
-                    samples=samples,
-                    transformation=T,
-                    free=free,
-                    n_total_dofs=model.n_dofs,
-                    equilibrium_scale=scale,
-                    tolerance=float(tolerance),
-                )
+                if sample_arrays is None:
+                    correction_free = _solve_reduced_penalty_sparse_cg_correction(
+                        base_matrix_free=base_free,
+                        residual_free=residual[free],
+                        samples=samples,
+                        transformation=T,
+                        free=free,
+                        n_total_dofs=model.n_dofs,
+                        equilibrium_scale=scale,
+                        tolerance=float(tolerance),
+                    )
+                else:
+                    correction_free = _solve_reduced_penalty_sparse_cg_correction_from_arrays(
+                        base_matrix_free=base_free,
+                        residual_free=residual[free],
+                        sample_arrays=sample_arrays,
+                        transformation=T,
+                        free=free,
+                        equilibrium_scale=scale,
+                        pressure_stiffness=pressure_stiffness,
+                        tolerance=float(tolerance),
+                    )
                 if correction_free is None:
                     source_direct_fallback_count += 1
+                    if sample_arrays is not None:
+                        samples = list(contact.samples(x_guess))
                     correction_free = _solve_reduced_penalty_low_rank_correction(
                         base_matrix_free=base_free,
                         base_lu_cache=base_lu_cache,
@@ -1435,7 +1656,11 @@ def solve_sfc_source_drive_pair(
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         last_internal = _linear_reference_internal_response(model, state.x, K_full)
         if not contact_matches_q_guess:
-            last_contact = _assemble_contact_response_force_only(contact.samples(state.x), model.n_nodes)
+            accepted_arrays = contact.sample_arrays(state.x)
+            if accepted_arrays is None:
+                last_contact = _assemble_contact_response_force_only(contact.samples(state.x), model.n_nodes)
+            else:
+                last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
         previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
         row = _penalty_history_row(
             time_value=t,
@@ -1463,18 +1688,36 @@ def solve_sfc_source_drive_pair(
         rows.append(row)
         if vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps):
             frame_path = vtk_dir / f"{vtk_stem}_{vtk_frame_index:04d}.vtk"
-            vtk_manifest_rows.append(
-                _write_sfc_tet4_vtk_frame(
-                    frame_path,
-                    model=model,
-                    state=state,
-                    internal=last_internal,
-                    element_object_ids=element_object_ids,
-                    time_value=t,
-                    frame_index=vtk_frame_index,
-                    include_tensors=vtk_include_tensors,
-                )
+            visual_state, visual_internal = _source_drive_corotated_visual_state_and_internal(
+                model=model,
+                state=state,
+                reference_tangent=K_full,
+                body_node_slices=body_node_slices,
+                body_reference_points=body_reference_points,
+                body_rotation_z=(
+                    float(q_new[assembly.hub_slice(0).start + 5]),
+                    float(q_new[hub2_slice.start + 5]),
+                ),
             )
+            frame_row = _write_sfc_tet4_vtk_frame(
+                frame_path,
+                model=model,
+                state=visual_state,
+                internal=visual_internal,
+                element_object_ids=element_object_ids,
+                time_value=t,
+                frame_index=vtk_frame_index,
+                include_tensors=vtk_include_tensors,
+            )
+            frame_row.update(
+                {
+                    "stress_strain_postprocess": "corotated_body_elastic_residual",
+                    "rotation_unit": "radian",
+                    "rp1_rotation_z_rad": float(q_new[assembly.hub_slice(0).start + 5]),
+                    "rp2_rotation_z_rad": float(q_new[hub2_slice.start + 5]),
+                }
+            )
+            vtk_manifest_rows.append(frame_row)
             vtk_datasets.append((float(t), frame_path))
             vtk_frame_index += 1
         q, v, a = q_new, v_new, a_new
@@ -1497,6 +1740,8 @@ def solve_sfc_source_drive_pair(
         "material_linearization": "reference_linear",
         "source_gear1_angular_velocity_z_rad_per_s": float(gear1_angular_velocity_z),
         "source_gear2_torque_z": float(gear2_torque_z),
+        "source_rotation_unit": "radian",
+        "source_stress_strain_postprocess": "corotated_body_elastic_residual",
         "reduced_dofs": int(assembly.n_reduced_dofs),
         "timing_source_residual_seconds": float(timing_residual),
         "timing_source_linear_seconds": float(timing_linear),
