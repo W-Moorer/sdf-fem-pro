@@ -1746,16 +1746,29 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
         previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
         history_due = (step % history_stride == 0) or (step == steps)
+        vtk_due = vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps)
+        output_state: MechanicsState | None = None
+        output_internal: InternalResponse | None = None
         if history_due:
             t_section = time.perf_counter()
-            last_internal = _linear_reference_internal_response(model, state.x, K_full)
+            output_state, output_internal = _source_drive_corotated_visual_state_and_internal(
+                model=model,
+                state=state,
+                reference_tangent=K_full,
+                body_node_slices=body_node_slices,
+                body_reference_points=body_reference_points,
+                body_rotation_z=(
+                    float(q_new[assembly.hub_slice(0).start + 5]),
+                    float(q_new[hub2_slice.start + 5]),
+                ),
+            )
             row = _penalty_history_row(
                 time_value=t,
                 closure=0.0,
                 rotation=float(gear1_angular_velocity_z) * t,
-                state=state,
+                state=output_state,
                 model=model,
-                internal=last_internal,
+                internal=output_internal,
                 contact_response=last_contact,
                 young=young,
                 poisson=poisson,
@@ -1776,25 +1789,26 @@ def solve_sfc_source_drive_pair(
             )
             rows.append(row)
             timing_history += time.perf_counter() - t_section
-        if vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps):
+        if vtk_due:
             t_section = time.perf_counter()
             frame_path = vtk_dir / f"{vtk_stem}_{vtk_frame_index:04d}.vtk"
-            visual_state, visual_internal = _source_drive_corotated_visual_state_and_internal(
-                model=model,
-                state=state,
-                reference_tangent=K_full,
-                body_node_slices=body_node_slices,
-                body_reference_points=body_reference_points,
-                body_rotation_z=(
-                    float(q_new[assembly.hub_slice(0).start + 5]),
-                    float(q_new[hub2_slice.start + 5]),
-                ),
-            )
+            if output_state is None or output_internal is None:
+                output_state, output_internal = _source_drive_corotated_visual_state_and_internal(
+                    model=model,
+                    state=state,
+                    reference_tangent=K_full,
+                    body_node_slices=body_node_slices,
+                    body_reference_points=body_reference_points,
+                    body_rotation_z=(
+                        float(q_new[assembly.hub_slice(0).start + 5]),
+                        float(q_new[hub2_slice.start + 5]),
+                    ),
+                )
             frame_row = _write_sfc_tet4_vtk_frame(
                 frame_path,
                 model=model,
-                state=visual_state,
-                internal=visual_internal,
+                state=output_state,
+                internal=output_internal,
                 element_object_ids=element_object_ids,
                 time_value=t,
                 frame_index=vtk_frame_index,

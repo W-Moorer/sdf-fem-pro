@@ -339,3 +339,44 @@ results/source_gear_penalty_10steps_indexed_no_bvh_refit
 - node-averaged equivalent elastic strain relative error: `0.0736%`
 - RP2 rotation relative error: `1.149%`
 - RP2 angular velocity relative error: `1.244%`
+
+## 更新：source-drive history 与 VTK 云图使用同一应力/应变口径
+
+此前 source-drive 路径中，history row 使用 raw linear reference stress/strain，
+而 VTK 云图和 VTK metric curve 使用 `corotated_body_elastic_residual`。这会造成
+summary/history 曲线和实际写入 ParaView 的应力/应变云图口径不完全一致。
+
+现在 source-drive 输出步统一为：
+
+```text
+accepted state
+-> corotated finite-rotation visual state
+-> elastic residual stress/strain
+-> history row and VTK frame
+```
+
+当 `history_frame_stride` 与 `vtk_frame_stride` 同时命中同一步时，history 和 VTK
+复用同一份 corotated stress/strain 后处理结果。该改动不进入求解残差、接触力、
+接触 tangent 或时间积分，只影响输出诊断口径，使曲线与云图一致。
+
+10-step 验证目录：
+
+```text
+results/source_gear_penalty_10steps_output_reuse
+```
+
+验证结果：
+
+- affected pytest: `21 passed, 4 deselected`
+- complete wall time: `42.689094 s`
+- residual/contact sampling: `19.804506 s`
+- sparse CG iterations: `56`
+- final active contact samples: `900`
+- final min gap: `-7.522933791806687e-04`
+- final normal force: `76.72803452060242`
+
+相同 Abaqus VTK manifest 下的末帧误差不变：
+
+- max displacement magnitude relative error: `1.195%`
+- node-averaged von Mises relative error: `0.0736%`
+- node-averaged equivalent elastic strain relative error: `0.0736%`
