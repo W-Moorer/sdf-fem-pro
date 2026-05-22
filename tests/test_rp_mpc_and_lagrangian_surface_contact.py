@@ -236,6 +236,24 @@ def test_lagrangian_sdf_surface_contact_provides_master_payload_tangent() -> Non
     assert response.tangent.nnz > 0
 
 
+def test_lagrangian_sdf_surface_contact_skips_faces_outside_conservative_tube() -> None:
+    slave_nodes = np.asarray([[10.0, 0.0, -0.05], [11.0, 0.0, -0.05], [10.0, 1.0, -0.05]], dtype=float)
+    master_nodes = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=float)
+    x_current = np.vstack([slave_nodes, master_nodes])
+    material = MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64))
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=3,
+        quadrature="tri3",
+        search_radius=0.1,
+    )
+
+    assert list(contact.samples(x_current)) == []
+
+
 def test_lagrangian_sdf_quadrilateral_surface_contact_uses_q4_weights() -> None:
     slave_nodes = np.asarray(
         [

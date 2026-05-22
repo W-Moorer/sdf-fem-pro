@@ -292,7 +292,15 @@ def _nearest_active_surface_ids(
     distances, ids2 = tree2.query(centroids1, k=1)
     seed1 = int(np.argmin(distances))
     seed2 = int(ids2[seed1])
-    n = max(1, int(active_faces_per_body))
+    if int(active_faces_per_body) <= 0:
+        ids1 = np.arange(centroids1.shape[0], dtype=np.int64)
+        ids2_active = np.arange(centroids2.shape[0], dtype=np.int64)
+        c1 = centroids1[seed1]
+        c2 = centroids2[seed2]
+        drive = c2 - c1
+        drive /= max(float(np.linalg.norm(drive)), 1.0e-30)
+        return ids1, ids2_active, float(distances[seed1]), drive
+    n = int(active_faces_per_body)
     tree1 = cKDTree(centroids1)
     ids1 = _nearest_ids(tree1, centroids1[seed1], k=n, count=centroids1.shape[0])
     ids2_active = _nearest_ids(tree2, centroids2[seed2], k=n, count=centroids2.shape[0])

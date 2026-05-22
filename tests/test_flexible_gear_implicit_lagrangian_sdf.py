@@ -58,6 +58,18 @@ def test_full_active_gear_pair_keeps_complete_volume_mesh() -> None:
     assert expanded.gear2.contact_faces.shape[0] >= pair.gear2.contact_faces.shape[0]
 
 
+def test_full_active_gear_pair_can_use_all_source_contact_faces() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_full_active_pair(model, active_faces_per_body=0)
+
+    assert pair.gear1.nodes.shape == model.gear1.nodes.shape
+    assert pair.gear2.nodes.shape == model.gear2.nodes.shape
+    assert pair.gear1.contact_faces.shape[0] == model.gear1_contact_faces.shape[0]
+    assert pair.gear2.contact_faces.shape[0] == model.gear2_contact_faces.shape[0]
+    assert pair.gear1.surface_entries == model.gear1_surface_entries
+    assert pair.gear2.surface_entries == model.gear2_surface_entries
+
+
 def test_cropped_gear_sfc_lagrangian_sdf_path_runs_one_implicit_step() -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)

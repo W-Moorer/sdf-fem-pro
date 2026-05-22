@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from sfc.contact.lagrangian_sdf_oracle import LagrangianSDFContactOracle
 from sfc.fem.calculix_aligned import ContactSample
@@ -237,6 +238,15 @@ class LagrangianSDFSurfaceContactGeometry:
             raise ValueError("master_node_offset places master nodes outside x_current")
         master_x = X[master_start:master_stop]
         self._oracle.refit(master_x)
+        master_tree = None
+        master_max_radius = 0.0
+        if self.search_radius is not None:
+            master_centroids, master_radii = _triangle_bounding_spheres(
+                master_x[self.master_material.boundary_faces],
+            )
+            if master_centroids.size:
+                master_tree = cKDTree(master_centroids)
+                master_max_radius = float(np.max(master_radii)) if master_radii.size else 0.0
         barycentric = np.asarray([[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]], dtype=float)
         weight_scale = np.asarray([1.0], dtype=float)
         if self.quadrature == "tri3":
@@ -249,6 +259,13 @@ class LagrangianSDFSurfaceContactGeometry:
             area = _triangle_area(tri)
             if area <= 0.0:
                 continue
+            if master_tree is not None:
+                slave_centroid = np.mean(tri, axis=0)
+                slave_radius = float(np.max(np.linalg.norm(tri - slave_centroid, axis=1)))
+                nearest_distance = float(master_tree.query(slave_centroid, k=1)[0])
+                tube_radius = float(self.search_radius) + slave_radius + master_max_radius
+                if nearest_distance > tube_radius + 1.0e-14:
+                    continue
             for qp, (weights, scale) in enumerate(zip(barycentric, weight_scale, strict=True)):
                 point = weights @ tri
                 query = self._oracle.query(point, cache_key=(int(face_id), int(qp)))
@@ -427,6 +444,19 @@ def _triangle_area(tri: np.ndarray) -> float:
     if T.shape != (3, 3):
         raise ValueError("tri must have shape (3, 3)")
     return 0.5 * float(np.linalg.norm(np.cross(T[1] - T[0], T[2] - T[0])))
+
+
+def _triangle_bounding_spheres(triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return centroids and conservative radii for triangular facets."""
+
+    T = np.asarray(triangles, dtype=float)
+    if T.size == 0:
+        return np.empty((0, 3), dtype=float), np.empty(0, dtype=float)
+    if T.ndim != 3 or T.shape[1:] != (3, 3):
+        raise ValueError("triangles must have shape (n, 3, 3)")
+    centroids = np.mean(T, axis=1)
+    radii = np.max(np.linalg.norm(T - centroids[:, None, :], axis=2), axis=1)
+    return centroids, radii
 
 
 def _q4_shape_functions(xi: float, eta: float) -> np.ndarray:
