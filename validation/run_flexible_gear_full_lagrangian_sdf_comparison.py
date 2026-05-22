@@ -762,11 +762,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Prescribed G1 RP angular velocity about z in radians per second.",
     )
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
-    parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="hard")
+    parser.add_argument("--contact-mode", choices=("penalty", "hard"), default="penalty")
     parser.add_argument("--drive-mode", choices=("closure", "source_inp"), default="closure")
     parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
     parser.add_argument("--tet4-mass-kind", choices=("consistent", "calculix"), default="consistent")
-    parser.add_argument("--history-frame-stride", type=int, default=1)
+    parser.add_argument("--history-frame-stride", type=int, default=2)
     parser.add_argument("--use-source-timing", action="store_true")
     parser.add_argument("--hard-max-iterations", type=int, default=4)
     parser.add_argument("--run-abaqus", action="store_true")
