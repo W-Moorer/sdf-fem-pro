@@ -81,6 +81,24 @@ Abaqus min gap = -2.86e-4
 
 因此，继续调接触刚度、SDF 查询或法向平滑不能解决这个问题。
 
+## 有限转动惯性探针
+
+进一步加入了一个显式可选的有限 RP 离心惯性残差：
+
+```text
+source_rotating_inertia=centripetal
+```
+
+该项默认关闭，仅用于诊断高速旋转柔性体缺失的惯性贡献。短程 `0.0001 s` 中它影响很小；跑到 `0.0014 s` 后可见它确实改变应力增长，但尚不稳定：
+
+```text
+t = 0.0010 s: SFC p95 von Mises = 6.065404e6, Abaqus = 5.967272e6, rel. error = 1.64%
+t = 0.0012 s: SFC p95 von Mises = 9.888824e7, Abaqus = 7.068862e6, rel. error = 1298.93%
+t = 0.0014 s: SFC p95 von Mises = 4.773172e6, Abaqus = 8.360519e6, rel. error = 42.91%
+```
+
+这说明问题方向正确，但不能只向残差里加离心项。要达到 Abaqus 长程应力对齐，必须同时加入一致的有限转动惯性 tangent、陀螺项/Euler 项以及与 HHT 时间积分一致的中间时刻评估。
+
 ## 下一步必须实现
 
 要让 full gear 长程应力/应变和 Abaqus 对齐，需要进入下一层理论实现：

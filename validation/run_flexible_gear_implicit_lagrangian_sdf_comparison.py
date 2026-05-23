@@ -767,6 +767,44 @@ def _source_drive_corotated_elastic_matrix(
     return elastic.tocsr()
 
 
+def _source_drive_centripetal_acceleration(
+    *,
+    reference_nodes: np.ndarray,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+    body_rotation_z: tuple[float, float],
+    body_angular_velocity_z: tuple[float, float],
+) -> np.ndarray:
+    """Return finite-RP centripetal acceleration for each body node.
+
+    This is the rotating-frame inertial term missing from a purely linearized
+    RP-MPC displacement solve.  It is needed for high-speed ``nlgeom=YES`` gear
+    comparisons because Abaqus carries the finite rigid rotation in the
+    inertial dynamics, while a corotated elastic residual alone only removes
+    the rigid rotation from strain.
+    """
+
+    X = np.asarray(reference_nodes, dtype=float)
+    acceleration = np.zeros_like(X)
+    for node_slice, rp, theta, omega_z in zip(
+        body_node_slices,
+        body_reference_points,
+        body_rotation_z,
+        body_angular_velocity_z,
+        strict=True,
+    ):
+        ids = np.arange(node_slice.start or 0, node_slice.stop, dtype=np.int64)
+        if ids.size == 0:
+            continue
+        reference_point = np.asarray(rp, dtype=float).reshape(3)
+        lever = X[ids] - reference_point[None, :]
+        R = _rotation_z_matrix(float(theta))
+        current_lever = lever @ R.T
+        omega = np.asarray([0.0, 0.0, float(omega_z)], dtype=float)
+        acceleration[ids] = np.cross(omega[None, :], np.cross(omega[None, :], current_lever))
+    return acceleration
+
+
 def _write_sfc_tet4_vtk_frame(
     path: Path,
     *,
@@ -2103,6 +2141,7 @@ def solve_sfc_source_drive_pair(
     source_contact_kinematics: str = "linearized_mpc",
     source_contact_normal_filter: str = "none",
     source_internal_kinematics: str = "linearized_mpc",
+    source_rotating_inertia: str = "none",
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -2147,6 +2186,9 @@ def solve_sfc_source_drive_pair(
     internal_kinematics = str(source_internal_kinematics).lower()
     if internal_kinematics not in {"linearized_mpc", "corotated_rp"}:
         raise ValueError("source_internal_kinematics must be 'linearized_mpc' or 'corotated_rp'")
+    rotating_inertia = str(source_rotating_inertia).lower()
+    if rotating_inertia not in {"none", "centripetal"}:
+        raise ValueError("source_rotating_inertia must be 'none' or 'centripetal'")
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
     steps = max(1, int(round(float(duration) / float(dt))))
@@ -2215,6 +2257,24 @@ def solve_sfc_source_drive_pair(
                 float(q_reduced[hub2_slice.start + 5]),
             ),
         )[0]
+
+    def centripetal_reduced_from_state(q_reduced: np.ndarray, v_reduced: np.ndarray) -> np.ndarray:
+        if rotating_inertia == "none":
+            return np.zeros(assembly.n_reduced_dofs, dtype=float)
+        acc = _source_drive_centripetal_acceleration(
+            reference_nodes=model.X,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=(
+                float(q_reduced[assembly.hub_slice(0).start + 5]),
+                float(q_reduced[hub2_slice.start + 5]),
+            ),
+            body_angular_velocity_z=(
+                float(v_reduced[assembly.hub_slice(0).start + 5]),
+                float(v_reduced[hub2_slice.start + 5]),
+            ),
+        )
+        return assembly.reduce_vector(model.mass_matrix @ acc.reshape(-1))
 
     vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
     history_stride = max(1, int(history_frame_stride))
@@ -2373,7 +2433,13 @@ def solve_sfc_source_drive_pair(
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
             a_guess = c0 * (q_guess - q_pred)
-            residual = np.asarray(M_red @ a_guess, dtype=float).reshape(-1) - scale * rhs_balance + float(hht_alpha) * previous
+            centripetal_red = centripetal_reduced_from_state(q_guess, v_pred + gamma * float(dt) * a_guess)
+            residual = (
+                np.asarray(M_red @ a_guess, dtype=float).reshape(-1)
+                + scale * centripetal_red
+                - scale * rhs_balance
+                + float(hht_alpha) * previous
+            )
             residual_norm = float(np.linalg.norm(residual[free])) if free.size else 0.0
             timing_residual += time.perf_counter() - t_section
             t_section = time.perf_counter()
@@ -2460,7 +2526,12 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
                 last_sample_arrays = accepted_arrays
                 last_samples = None
-        previous = external - np.asarray(K_solve @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
+        previous = (
+            external
+            - np.asarray(K_solve @ q_new, dtype=float).reshape(-1)
+            + assembly.reduce_vector(last_contact.force)
+            - centripetal_reduced_from_state(q_new, v_new)
+        )
         history_due = (step % history_stride == 0) or (step == steps)
         vtk_due = vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps)
         output_state: MechanicsState | None = None
@@ -2607,6 +2678,7 @@ def solve_sfc_source_drive_pair(
         "source_contact_kinematics": contact_kinematics,
         "source_contact_normal_filter": contact_normal_filter,
         "source_internal_kinematics": internal_kinematics,
+        "source_rotating_inertia": rotating_inertia,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
         "sfc_history_frame_stride": int(history_stride),

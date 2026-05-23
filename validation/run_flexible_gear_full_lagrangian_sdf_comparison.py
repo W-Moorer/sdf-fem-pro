@@ -572,6 +572,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source contact kinematics: {summary.get('source_contact_kinematics', '')}",
         f"- source contact normal filter: {summary.get('source_contact_normal_filter', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
+        f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
         f"- penalty solver: {summary.get('penalty_solver', '')}",
         f"- material linearization: {summary.get('material_linearization', '')}",
         f"- RP reaction definition: {summary.get('rp_reaction_definition', '')}",
@@ -729,6 +730,7 @@ def run_full_gear(
     source_contact_kinematics: str = "linearized_mpc",
     source_contact_normal_filter: str = "none",
     source_internal_kinematics: str = "linearized_mpc",
+    source_rotating_inertia: str = "none",
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -777,6 +779,7 @@ def run_full_gear(
             source_contact_kinematics=str(source_contact_kinematics),
             source_contact_normal_filter=str(source_contact_normal_filter),
             source_internal_kinematics=str(source_internal_kinematics),
+            source_rotating_inertia=str(source_rotating_inertia),
             source_checkpoint_path=source_checkpoint_path,
             resume_source_checkpoint=bool(resume_source_checkpoint),
             source_checkpoint_stride=int(source_checkpoint_stride),
@@ -988,6 +991,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Internal elastic residual map for source-drive large RP rotations.",
     )
     parser.add_argument(
+        "--source-rotating-inertia",
+        choices=("none", "centripetal"),
+        default="none",
+        help="Optional finite-RP centripetal inertia residual for source-drive dynamics.",
+    )
+    parser.add_argument(
         "--source-checkpoint",
         type=Path,
         default=None,
@@ -1035,6 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
         source_contact_kinematics=str(args.source_contact_kinematics),
         source_contact_normal_filter=str(args.source_contact_normal_filter),
         source_internal_kinematics=str(args.source_internal_kinematics),
+        source_rotating_inertia=str(args.source_rotating_inertia),
         source_checkpoint_path=args.source_checkpoint,
         resume_source_checkpoint=bool(args.resume_source_checkpoint),
         source_checkpoint_stride=int(args.source_checkpoint_stride),

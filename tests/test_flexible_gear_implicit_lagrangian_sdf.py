@@ -21,6 +21,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _node_average_cell_scalar,
     _source_drive_corotated_elastic_matrix,
     _source_drive_corotated_positions_and_elastic_displacement,
+    _source_drive_centripetal_acceleration,
     _source_drive_corotated_visual_state_and_internal,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -592,6 +593,29 @@ def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None
     q[assembly.hub_slice(0).start + 5] = 1.7
 
     np.testing.assert_allclose(np.asarray(elastic @ q).reshape((-1, 3)), 0.0, atol=1.0e-14)
+
+
+def test_source_drive_centripetal_acceleration_points_inward() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    acc = _source_drive_centripetal_acceleration(
+        reference_nodes=X,
+        body_node_slices=(slice(0, 3), slice(3, 3)),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(0.0, 0.0),
+        body_angular_velocity_z=(4.0, 0.0),
+    )
+
+    np.testing.assert_allclose(acc[0], [0.0, 0.0, 0.0], atol=1.0e-14)
+    np.testing.assert_allclose(acc[1], [-32.0, 0.0, 0.0], atol=1.0e-14)
+    np.testing.assert_allclose(acc[2], [0.0, -48.0, 0.0], atol=1.0e-14)
 
 
 def test_source_drive_visual_postprocess_is_objective_for_large_rotation() -> None:
