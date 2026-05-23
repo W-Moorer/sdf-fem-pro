@@ -250,3 +250,28 @@ python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
 4. pressure RMSE 仍在 `45%` 量级，说明压力空间分布仍未与 Abaqus 对齐。
 
 因此当前定位更加明确：误差不应继续通过改变 SDF 查询或 gap 投影来修；下一层应对齐 Abaqus surface-to-surface enforcement 的 constraint-region pressure/overclosure averaging、active status averaging 和等效面积权重。`secondary_line` 只能作为诊断和后续可选 projection kernel，不能作为验收路径。
+
+## 本轮新增验证：constraint-region averaging 口径
+
+新增两个通用 averaging 口径用于定位 Abaqus-style surface-to-surface enforcement：
+
+- `*_constraint`：先对 constraint region 做 signed gap 平均，再决定 active 状态。
+- `*_area_average`：保持正穿透面积积分，但 normal / slave support / master payload 使用区域面积平均，而不是穿透量加权。
+
+短程齿轮窗口结果：
+
+| 设置 | full displacement p95 error | full von Mises p95 error | active-union von Mises p95 error | pressure active-union RMSE | active-set Jaccard |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| secondary_average + slave_node_region | `0.348%` | `10.161%` | `13.879%` | `49.173%` | `0.709` |
+| secondary_average + slave_node_region_constraint | `30.019%` | `9.257%` | `53.979%` | `49.274%` | `0.757` |
+| secondary_average + slave_node_region_area_average | `29.985%` | `8.986%` | `54.025%` | `54.960%` | `0.732` |
+| secondary_average + opposing_search + slave_node_region | `30.287%` | `7.471%` | `37.891%` | `54.105%` | `0.786` |
+
+这些结果说明：
+
+1. signed-average 或 area-average support 会让 full-field p95 von Mises 看起来低于 10%，但同时造成位移误差约 30%，active contact 区域应力和 pressure RMSE 明显恶化。
+2. opposing-search 候选筛选也提高了 active-set overlap，但破坏了整体位移和接触载荷。
+3. 因此当前最可信的阶段性路径仍是 `secondary_average + closest_feature + slave_node_region`。
+4. 剩余误差更可能来自 Abaqus 内部 contact pressure smoothing / constraint enforcement stiffness / active status transition 的组合口径，而不是简单的 signed gap averaging 或候选筛选。
+
+下一层不应接受这些“全场 p95 过线但 active 区错误”的模式。应继续定位 Abaqus penalty enforcement 的等效接触刚度和区域压力平滑：用一个最小法向压入 benchmark 先对齐 RF--penetration 曲线，再把该 enforcement 口径接回齿轮工况。

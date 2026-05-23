@@ -847,6 +847,72 @@ def test_contact_averaging_preserves_positive_overclosure_integral() -> None:
     np.testing.assert_allclose(merged.normal, [1.0, 0.0, 0.0], atol=1.0e-14)
 
 
+def test_constraint_region_averaging_uses_signed_gap_before_activation() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.5, 0.3, 0.2], dtype=float),
+            gap=-1.0e-3,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=1.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([3, 4, 5], dtype=np.int64),
+            master_shape_weights=np.asarray([0.2, 0.3, 0.5], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.5, 0.3, 0.2], dtype=float),
+            gap=3.0e-3,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=1.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([3, 4, 5], dtype=np.int64),
+            master_shape_weights=np.asarray([0.2, 0.3, 0.5], dtype=float),
+        ),
+    ]
+
+    positive_integral = _aggregate_contact_samples(samples, "slave_node_region")
+    signed_constraint = _aggregate_contact_samples(samples, "slave_node_region_constraint")
+
+    assert len(positive_integral) == len(signed_constraint) == 3
+    assert any(sample.gap < 0.0 for sample in positive_integral)
+    assert all(sample.gap > 0.0 for sample in signed_constraint)
+    for sample in signed_constraint:
+        np.testing.assert_allclose(sample.shape_weights, [0.5, 0.3, 0.2])
+
+
+def test_area_average_constraint_keeps_integral_gap_but_not_pressure_weighted_support() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([1.0, 0.0, 0.0], dtype=float),
+            gap=-2.0e-3,
+            normal=np.asarray([1.0, 0.0, 0.0], dtype=float),
+            area=1.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([3, 4, 5], dtype=np.int64),
+            master_shape_weights=np.asarray([1.0, 0.0, 0.0], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.0, 1.0, 0.0], dtype=float),
+            gap=-1.0e-3,
+            normal=np.asarray([0.0, 1.0, 0.0], dtype=float),
+            area=1.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([3, 4, 5], dtype=np.int64),
+            master_shape_weights=np.asarray([0.0, 1.0, 0.0], dtype=float),
+        ),
+    ]
+
+    pressure_weighted = _aggregate_contact_samples(samples, "slave_face")[0]
+    area_average = _aggregate_contact_samples(samples, "slave_face_area_average")[0]
+
+    assert pressure_weighted.gap == pytest.approx(area_average.gap)
+    np.testing.assert_allclose(pressure_weighted.shape_weights, [2.0 / 3.0, 1.0 / 3.0, 0.0])
+    np.testing.assert_allclose(area_average.shape_weights, [0.5, 0.5, 0.0])
+
+
 def test_lagrangian_surface_contact_nodal_samples_use_slave_corner_gaps() -> None:
     master_nodes = np.asarray(
         [

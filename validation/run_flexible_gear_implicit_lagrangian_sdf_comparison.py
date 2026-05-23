@@ -228,21 +228,33 @@ def _combined_shape_weights(
     return ids, weights
 
 
-def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSample:
+def _aggregate_contact_sample_group(
+    samples: list[ContactSample],
+    *,
+    overclosure_mode: str = "positive_integral",
+) -> ContactSample:
     """Area-average contact samples into one surface-to-surface constraint.
 
-    For a linear pressure-overclosure law, aggregation must preserve the
-    positive overclosure integral over the constraint region.  Averaging signed
-    gaps first and then applying ``max(-g, 0)`` would let separated portions of
-    a region cancel penetrating portions, changing both contact status and
-    integrated penalty force.  The equivalent aggregated gap therefore stores
-    ``-mean(max(-g_l, 0))`` whenever any sub-sample is overclosed; otherwise it
-    stores the signed area-averaged clearance.  Normals use the same pressure
-    weights in active regions, falling back to area weights for open regions.
+    ``positive_integral`` preserves the positive overclosure integral used by
+    earlier SFC diagnostics and uses pressure-weighted normals/kinematics in
+    active regions.  ``positive_integral_area_average`` keeps the same
+    integrated overclosure but uses area-averaged normals and shape weights,
+    matching the idea that a surface-to-surface constraint region has its own
+    average normal/support rather than a pressure-peak-biased direction.
+    ``signed_average`` follows Abaqus/Standard's
+    surface-to-surface wording more closely: the constraint value is considered
+    in an average sense over a finite secondary-surface region, so the signed
+    clearance is averaged before the pressure-overclosure law decides whether
+    that region is active.
     """
 
     if not samples:
         raise ValueError("samples must not be empty")
+    mode = str(overclosure_mode).lower()
+    if mode not in {"positive_integral", "positive_integral_area_average", "signed_average"}:
+        raise ValueError(
+            "overclosure_mode must be 'positive_integral', 'positive_integral_area_average', or 'signed_average'"
+        )
     areas = np.asarray([max(float(sample.area), 0.0) for sample in samples], dtype=float)
     total_area = float(np.sum(areas))
     if total_area <= 0.0:
@@ -251,16 +263,25 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     else:
         group_weights = areas / total_area
     gaps = np.asarray([float(sample.gap) for sample in samples], dtype=float)
-    penetrations = np.maximum(-gaps, 0.0)
-    penetration_integral = float(areas @ penetrations)
-    if penetration_integral > 0.0:
-        constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
-        normal_weights = areas * penetrations / penetration_integral
-        kinematic_weights = normal_weights
-    else:
+    if mode == "signed_average":
         constraint_gap = float(group_weights @ gaps)
         normal_weights = group_weights
         kinematic_weights = group_weights
+    else:
+        penetrations = np.maximum(-gaps, 0.0)
+        penetration_integral = float(areas @ penetrations)
+        if penetration_integral > 0.0:
+            constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
+            if mode == "positive_integral_area_average":
+                normal_weights = group_weights
+                kinematic_weights = group_weights
+            else:
+                normal_weights = areas * penetrations / penetration_integral
+                kinematic_weights = normal_weights
+        else:
+            constraint_gap = float(group_weights @ gaps)
+            normal_weights = group_weights
+            kinematic_weights = group_weights
     normal = np.sum(
         np.asarray([normal_weights[idx] * np.asarray(sample.normal, dtype=float) for idx, sample in enumerate(samples)], dtype=float),
         axis=0,
@@ -386,13 +407,30 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
     """Aggregate contact samples using Abaqus-style surface constraint regions."""
 
     averaging = str(mode).lower()
-    if averaging not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
+    signed_mode = averaging.endswith("_constraint")
+    area_average_mode = averaging.endswith("_area_average")
+    if signed_mode and area_average_mode:
+        raise ValueError("contact averaging mode cannot combine '_constraint' and '_area_average'")
+    if signed_mode:
+        base_mode = averaging[: -len("_constraint")]
+    elif area_average_mode:
+        base_mode = averaging[: -len("_area_average")]
+    else:
+        base_mode = averaging
+    if base_mode not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
         raise ValueError(
-            "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', or 'surface_patch'"
+            "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
+            "'surface_patch', or the corresponding '*_constraint'/'*_area_average' modes"
         )
-    if averaging == "none" or not samples:
+    if base_mode == "none" or not samples:
         return samples
-    if averaging == "slave_face":
+    if signed_mode:
+        overclosure_mode = "signed_average"
+    elif area_average_mode:
+        overclosure_mode = "positive_integral_area_average"
+    else:
+        overclosure_mode = "positive_integral"
+    if base_mode == "slave_face":
         groups: dict[tuple[int, ...], list[ContactSample]] = {}
         order: list[tuple[int, ...]] = []
         for sample in samples:
@@ -401,8 +439,8 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
                 groups[key] = []
                 order.append(key)
             groups[key].append(sample)
-        return [_aggregate_contact_sample_group(groups[key]) for key in order]
-    if averaging == "slave_node":
+        return [_aggregate_contact_sample_group(groups[key], overclosure_mode=overclosure_mode) for key in order]
+    if base_mode == "slave_node":
         groups: dict[int, list[ContactSample]] = {}
         order: list[int] = []
         for sample in samples:
@@ -412,8 +450,8 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
                     groups[active_node] = []
                     order.append(active_node)
                 groups[active_node].append(split)
-        return [_aggregate_contact_sample_group(groups[key]) for key in order]
-    if averaging == "slave_node_region":
+        return [_aggregate_contact_sample_group(groups[key], overclosure_mode=overclosure_mode) for key in order]
+    if base_mode == "slave_node_region":
         groups: dict[int, list[ContactSample]] = {}
         order: list[int] = []
         for sample in samples:
@@ -422,9 +460,15 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
                     groups[active_node] = []
                     order.append(active_node)
                 groups[active_node].append(tributary_sample)
-        return [_aggregate_contact_sample_group(groups[key]) for key in order]
+        return [_aggregate_contact_sample_group(groups[key], overclosure_mode=overclosure_mode) for key in order]
     groups = _sample_connected_components(samples)
-    return [_aggregate_contact_sample_group([samples[int(index)] for index in group]) for group in groups]
+    return [
+        _aggregate_contact_sample_group(
+            [samples[int(index)] for index in group],
+            overclosure_mode=overclosure_mode,
+        )
+        for group in groups
+    ]
 
 
 def _filter_contact_samples_by_normal_compatibility(
@@ -2848,10 +2892,26 @@ def solve_sfc_source_drive_pair(
     else:
         contact_geometries = (make_contact(contact_pair_order, float(pressure_stiffness)),)
     contact_averaging = str(source_contact_averaging).lower()
-    if contact_averaging not in {"none", "slave_face", "slave_node", "slave_node_region", "slave_node_point", "surface_patch"}:
+    valid_contact_averaging = {
+        "none",
+        "slave_face",
+        "slave_node",
+        "slave_node_region",
+        "slave_node_point",
+        "surface_patch",
+        "slave_face_constraint",
+        "slave_node_constraint",
+        "slave_node_region_constraint",
+        "surface_patch_constraint",
+        "slave_face_area_average",
+        "slave_node_area_average",
+        "slave_node_region_area_average",
+        "surface_patch_area_average",
+    }
+    if contact_averaging not in valid_contact_averaging:
         raise ValueError(
             "source_contact_averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
-            "'slave_node_point', or 'surface_patch'"
+            "'slave_node_point', 'surface_patch', or a '*_constraint' signed-average mode"
         )
     contact_kinematics = str(source_contact_kinematics).lower()
     if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
@@ -3175,7 +3235,15 @@ def solve_sfc_source_drive_pair(
                 elif hasattr(geometry, "secondary_normal_projection_samples"):
                     collected.extend(list(geometry.secondary_normal_projection_samples(x_contact)))
             elif use_compatible_query:
-                collected.extend(list(geometry.normal_compatible_samples(x_contact)))
+                arrays = (
+                    geometry.normal_compatible_sample_arrays(x_contact)
+                    if hasattr(geometry, "normal_compatible_sample_arrays")
+                    else None
+                )
+                if arrays is not None:
+                    collected.extend(_contact_samples_from_arrays(arrays, stiffness=pressure_stiffness))
+                else:
+                    collected.extend(list(geometry.normal_compatible_samples(x_contact)))
             elif contact_averaging == "slave_node_point":
                 collected.extend(list(geometry.nodal_samples(x_contact)))
             else:

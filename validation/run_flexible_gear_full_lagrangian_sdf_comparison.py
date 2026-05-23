@@ -987,7 +987,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-contact-averaging",
-        choices=("none", "slave_face", "slave_node", "slave_node_region", "slave_node_point", "surface_patch"),
+        choices=(
+            "none",
+            "slave_face",
+            "slave_node",
+            "slave_node_region",
+            "slave_node_point",
+            "surface_patch",
+            "slave_face_constraint",
+            "slave_node_constraint",
+            "slave_node_region_constraint",
+            "surface_patch_constraint",
+            "slave_face_area_average",
+            "slave_node_area_average",
+            "slave_node_region_area_average",
+            "surface_patch_area_average",
+        ),
         default="none",
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
     )
