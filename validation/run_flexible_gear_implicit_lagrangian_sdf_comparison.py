@@ -921,6 +921,52 @@ def _source_drive_corotated_elastic_matrix(
     return elastic.tocsr()
 
 
+def _source_drive_finite_visual_jacobian(
+    *,
+    assembly: Any,
+    reference_nodes: np.ndarray,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+    body_rotation_z: tuple[float, float],
+) -> csr_matrix:
+    """Return ``d x_visual / d q`` for the finite-RP visual map.
+
+    The source Abaqus deck uses ``nlgeom=YES`` with RP rotations in radians.
+    For finite-rotation internal-force diagnostics the reduced residual must
+    be the virtual-work projection ``J_visual.T @ f_int(x_visual)`` rather
+    than a projection through the small-rotation BEAM-MPC matrix.  This helper
+    is the exact sparse Jacobian of
+    :func:`_source_drive_corotated_positions_and_elastic_displacement` with
+    respect to the reduced coordinates for the z-rotation path implemented by
+    the source gear runner.
+    """
+
+    nodes = np.asarray(reference_nodes, dtype=float)
+    visual = _source_drive_corotated_elastic_matrix(
+        assembly=assembly,
+        reference_nodes=nodes,
+        body_node_slices=body_node_slices,
+        body_reference_points=body_reference_points,
+    ).tolil(copy=True)
+    for body_index, (node_slice, rp, theta) in enumerate(
+        zip(body_node_slices, body_reference_points, body_rotation_z, strict=True)
+    ):
+        ids = np.arange(node_slice.start or 0, node_slice.stop, dtype=np.int64)
+        if ids.size == 0:
+            continue
+        col = int(assembly.hub_slice(body_index).start + 5)
+        reference_point = np.asarray(rp, dtype=float).reshape(3)
+        lever = nodes[ids] - reference_point[None, :]
+        current_lever = lever @ _rotation_z_matrix(float(theta)).T
+        d_current_lever = np.column_stack((-current_lever[:, 1], current_lever[:, 0], np.zeros(ids.size, dtype=float)))
+        for local, node in enumerate(ids):
+            for axis in range(3):
+                value = float(d_current_lever[local, axis])
+                if value != 0.0:
+                    visual[3 * int(node) + axis, col] = float(visual[3 * int(node) + axis, col]) + value
+    return visual.tocsr()
+
+
 def _source_drive_centripetal_acceleration(
     *,
     reference_nodes: np.ndarray,
@@ -2451,8 +2497,10 @@ def solve_sfc_source_drive_pair(
     if contact_normal_filter not in {"none", "opposing"}:
         raise ValueError("source_contact_normal_filter must be 'none' or 'opposing'")
     internal_kinematics = str(source_internal_kinematics).lower()
-    if internal_kinematics not in {"linearized_mpc", "corotated_rp"}:
-        raise ValueError("source_internal_kinematics must be 'linearized_mpc' or 'corotated_rp'")
+    if internal_kinematics not in {"linearized_mpc", "corotated_rp", "finite_stvk_visual"}:
+        raise ValueError(
+            "source_internal_kinematics must be 'linearized_mpc', 'corotated_rp', or 'finite_stvk_visual'"
+        )
     rotating_inertia = str(source_rotating_inertia).lower()
     if rotating_inertia not in {"none", "centripetal"}:
         raise ValueError("source_rotating_inertia must be 'none' or 'centripetal'")
@@ -2502,7 +2550,7 @@ def solve_sfc_source_drive_pair(
     body_node_slices = (slice(0, n1), slice(n1, X.shape[0]))
     body_reference_points = (np.asarray(pair.gear1.rp, dtype=float), np.asarray(pair.gear2.rp, dtype=float))
     elastic_map = assembly.transformation
-    if internal_kinematics == "corotated_rp":
+    if internal_kinematics in {"corotated_rp", "finite_stvk_visual"}:
         elastic_map = _source_drive_corotated_elastic_matrix(
             assembly=assembly,
             reference_nodes=model.X,
@@ -2524,6 +2572,31 @@ def solve_sfc_source_drive_pair(
                 float(q_reduced[hub2_slice.start + 5]),
             ),
         )[0]
+
+    def internal_reduced_from_state(q_reduced: np.ndarray) -> np.ndarray:
+        if internal_kinematics != "finite_stvk_visual":
+            return np.asarray(K_solve @ q_reduced, dtype=float).reshape(-1)
+        x_linear = model.X + assembly.expand_displacements(q_reduced)
+        theta = (
+            float(q_reduced[assembly.hub_slice(0).start + 5]),
+            float(q_reduced[hub2_slice.start + 5]),
+        )
+        x_visual = _source_drive_corotated_positions_and_elastic_displacement(
+            model=model,
+            x_raw=x_linear,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=theta,
+        )[0]
+        internal = stvk_internal_response(model, x_visual, assemble_tangent=False)
+        visual_jacobian = _source_drive_finite_visual_jacobian(
+            assembly=assembly,
+            reference_nodes=model.X,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=theta,
+        )
+        return np.asarray(visual_jacobian.T @ np.asarray(internal.force, dtype=float).reshape(-1), dtype=float).reshape(-1)
 
     def centripetal_reduced_from_state(q_reduced: np.ndarray, v_reduced: np.ndarray) -> np.ndarray:
         if rotating_inertia == "none":
@@ -2722,7 +2795,7 @@ def solve_sfc_source_drive_pair(
                 last_sample_arrays = sample_arrays
                 last_samples = None
             contact_matches_q_guess = True
-            internal_red = np.asarray(K_solve @ q_guess, dtype=float).reshape(-1)
+            internal_red = internal_reduced_from_state(q_guess)
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
             a_guess = c0 * (q_guess - q_pred)
@@ -2834,7 +2907,7 @@ def solve_sfc_source_drive_pair(
                 last_samples = None
         previous = (
             external
-            - np.asarray(K_solve @ q_new, dtype=float).reshape(-1)
+            - internal_reduced_from_state(q_new)
             + assembly.reduce_vector(last_contact.force)
             - centripetal_reduced_from_state(q_new, v_new)
         )
@@ -2974,7 +3047,7 @@ def solve_sfc_source_drive_pair(
         "hht_alpha": float(hht_alpha),
         "contact_mode": "source_penalty",
         "penalty_solver": "source_reduced_rp_modified_newton",
-        "material_linearization": "reference_linear",
+        "material_linearization": "finite_stvk_visual" if internal_kinematics == "finite_stvk_visual" else "reference_linear",
         "tet4_mass_kind": str(tet4_mass_kind),
         "source_gear1_angular_velocity_z_rad_per_s": float(gear1_angular_velocity_z),
         "source_gear2_torque_z": float(gear2_torque_z),

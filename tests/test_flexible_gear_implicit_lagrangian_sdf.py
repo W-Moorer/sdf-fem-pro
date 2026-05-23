@@ -24,6 +24,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_centripetal_acceleration,
     _source_drive_centripetal_reduced_response,
     _source_drive_corotated_visual_state_and_internal,
+    _source_drive_finite_visual_jacobian,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
     solve_sfc_cropped_pair,
@@ -646,6 +647,55 @@ def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None
     q[assembly.hub_slice(0).start + 5] = 1.7
 
     np.testing.assert_allclose(np.asarray(elastic @ q).reshape((-1, 3)), 0.0, atol=1.0e-14)
+
+
+def test_source_drive_finite_visual_jacobian_matches_finite_difference() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.2, 0.3, 0.4],
+        ],
+        dtype=float,
+    )
+    hub = RigidHubMPC(np.asarray([0, 1, 2, 3], dtype=np.int64), X, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(X, [hub], include_free_nodes=False)
+    q = np.zeros(assembly.n_reduced_dofs, dtype=float)
+    q[assembly.hub_slice(0).start + 0] = 0.03
+    q[assembly.hub_slice(0).start + 1] = -0.02
+    q[assembly.hub_slice(0).start + 5] = 0.73
+
+    def visual_positions(value: np.ndarray) -> np.ndarray:
+        x_raw = X + assembly.expand_displacements(value)
+        return _source_drive_corotated_positions_and_elastic_displacement(
+            model=MechanicsModel.from_tet4_mesh(
+                X,
+                np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+                E=1.0e3,
+                nu=0.25,
+                density=1.0,
+            ),
+            x_raw=x_raw,
+            body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+            body_reference_points=(np.zeros(3), np.zeros(3)),
+            body_rotation_z=(float(value[assembly.hub_slice(0).start + 5]), 0.0),
+        )[0]
+
+    jacobian = _source_drive_finite_visual_jacobian(
+        assembly=assembly,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(float(q[assembly.hub_slice(0).start + 5]), 0.0),
+    )
+    eps = 1.0e-7
+    for column in range(assembly.n_reduced_dofs):
+        perturb = np.zeros_like(q)
+        perturb[column] = eps
+        fd = (visual_positions(q + perturb) - visual_positions(q - perturb)).reshape(-1) / (2.0 * eps)
+        actual = np.asarray(jacobian[:, column].todense()).reshape(-1)
+        np.testing.assert_allclose(actual, fd, rtol=5.0e-7, atol=5.0e-8)
 
 
 def test_source_drive_centripetal_acceleration_points_inward() -> None:

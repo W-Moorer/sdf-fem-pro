@@ -993,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-internal-kinematics",
-        choices=("linearized_mpc", "corotated_rp"),
+        choices=("linearized_mpc", "corotated_rp", "finite_stvk_visual"),
         default="linearized_mpc",
         help="Internal elastic residual map for source-drive large RP rotations.",
     )
