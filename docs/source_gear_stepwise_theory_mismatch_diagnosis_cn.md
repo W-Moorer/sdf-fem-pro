@@ -552,3 +552,60 @@ python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
 3. 当前最合理的短程验收路径应从 `secondary_average + closest_feature` 更新为 `secondary_average + secondary_line`。
 4. footprint clipping 仍保留为局部覆盖平面/Q4 接触的必要修正，但它不是齿轮曲面误差的主修复路径。
 5. 下一步应在更长时间窗口和更多场景上验证该同口径结论，并继续区分求解曲线误差和 Abaqus `CPRESS` 输出平滑误差；当前结果只证明短程位移/应力/应变曲线过线，不能宣称所有长程/所有接触压力云图已完全对齐。
+
+## 本轮新增：secondary-line 短程对齐 gate
+
+为避免把一次手工读取的 CSV 误当成正式验收，本轮新增轻量 gate：
+
+- `validation/check_source_gear_secondary_line_alignment.py`
+- `tests/test_source_gear_secondary_line_alignment_gate.py`
+
+该 gate 不运行 Abaqus，也不运行 SFC；它只读取已经生成的误差 CSV 和 summary CSV，检查两类条件：
+
+1. 末帧位移、p95 node-averaged von Mises、p95 node-averaged equivalent elastic strain 的相对误差均低于阈值；
+2. 求解设置确实是当前理论对齐路径：
+   - `source_contact_projection = secondary_line`
+   - `source_contact_direction = secondary_average`
+   - `source_contact_averaging = slave_node_region`
+   - `sfc_dt = 1e-5`
+
+受影响测试：
+
+```text
+pytest -q tests/test_source_gear_secondary_line_alignment_gate.py
+```
+
+结果：
+
+```text
+2 passed
+```
+
+实际 gate 命令：
+
+```text
+python validation/check_source_gear_secondary_line_alignment.py \
+  --errors-csv results/source_gear_secondary_line_dt1e5_probe_0002/sfc_vs_abaqus_vtk_metric_errors.csv \
+  --summary-csv results/source_gear_secondary_line_dt1e5_probe_0002/full_gear_lagrangian_sdf_summary.csv \
+  --out-dir results/source_gear_secondary_line_dt1e5_probe_0002
+```
+
+输出：
+
+- `results/source_gear_secondary_line_dt1e5_probe_0002/source_gear_secondary_line_alignment_gate.csv`
+- `results/source_gear_secondary_line_dt1e5_probe_0002/source_gear_secondary_line_alignment_gate_summary.csv`
+- `results/source_gear_secondary_line_dt1e5_probe_0002/source_gear_secondary_line_alignment_gate.md`
+
+gate 结果：
+
+| check | value | threshold | passed |
+| --- | ---: | ---: | --- |
+| final max displacement relative error | `2.589%` | `10%` | yes |
+| final p95 node-averaged von Mises relative error | `4.243%` | `10%` | yes |
+| final p95 node-averaged equivalent elastic strain relative error | `4.243%` | `10%` | yes |
+| contact projection | `secondary_line` | `secondary_line` | yes |
+| contact direction | `secondary_average` | `secondary_average` | yes |
+| contact averaging | `slave_node_region` | `slave_node_region` | yes |
+| SFC dt | `1e-5` | `1e-5` | yes |
+
+这一步把当前短程 full-patch 齿轮对齐从“结果目录中的一次观察”提升为可复验 gate。它仍然只覆盖 `0.0002 s` 短程窗口；长窗口中已有诊断显示 `0~2 ms` 的应力/等效应变会再次偏离，因此总目标尚未完成。下一层仍需继续修 contact release / pressure distribution / stress recovery，以让更长窗口也通过同类 gate。
