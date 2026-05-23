@@ -233,7 +233,10 @@ class LagrangianSDFSurfaceContactGeometry:
     patch_cell_size: float | None = None
     compiled_batch_projection: bool = False
     clip_to_master_footprint: bool = False
+    secondary_tracking_rings: int = 2
     _oracle: LagrangianSDFContactOracle = field(init=False, repr=False)
+    _secondary_face_cache: np.ndarray | None = field(default=None, init=False, repr=False)
+    _master_face_tracking_neighborhoods: tuple[np.ndarray, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         faces = np.asarray(self.slave_faces, dtype=np.int64)
@@ -248,14 +251,82 @@ class LagrangianSDFSurfaceContactGeometry:
             raise ValueError("pressure_stiffness must be positive")
         if self.quadrature not in {"centroid", "tri3"}:
             raise ValueError("quadrature must be 'centroid' or 'tri3'")
+        if int(self.secondary_tracking_rings) < 0:
+            raise ValueError("secondary_tracking_rings must be non-negative")
         self.slave_faces = faces
         self.master_reference_nodes = master_nodes
+        self._master_face_tracking_neighborhoods = _triangle_face_neighborhoods(
+            self.master_material.boundary_faces,
+            rings=int(self.secondary_tracking_rings),
+        )
         self._oracle = LagrangianSDFContactOracle(
             self.master_material,
             master_nodes.copy(),
             search_radius=self.search_radius,
             patch_cell_size=self.patch_cell_size,
         )
+
+    def clear_secondary_contact_tracking(self) -> None:
+        """Clear secondary-surface contact tracking hints."""
+
+        self._secondary_face_cache = None
+
+    def _secondary_cache_size(self) -> int:
+        return int(self.slave_faces.shape[0]) * (3 if self.quadrature == "tri3" else 1)
+
+    def _ensure_secondary_face_cache(self) -> np.ndarray:
+        size = self._secondary_cache_size()
+        if self._secondary_face_cache is None or self._secondary_face_cache.shape != (size,):
+            self._secondary_face_cache = np.full(size, -1, dtype=np.int64)
+        return self._secondary_face_cache
+
+    def _secondary_cache_index_for_key(self, cache_key: object) -> int | None:
+        if not isinstance(cache_key, tuple) or len(cache_key) < 3:
+            return None
+        if cache_key[1] != "secondary":
+            return None
+        face_id = int(cache_key[0])
+        qp = int(cache_key[2])
+        n_quadrature = 3 if self.quadrature == "tri3" else 1
+        index = face_id * n_quadrature + qp
+        if 0 <= index < self._secondary_cache_size():
+            return int(index)
+        return None
+
+    def _merge_secondary_tracking_candidates(
+        self,
+        candidate_lists,
+        cache_indices: np.ndarray,
+    ) -> list[list[int]]:
+        cache = self._ensure_secondary_face_cache()
+        merged: list[list[int]] = []
+        n_faces = len(self._master_face_tracking_neighborhoods)
+        for raw, cache_index in zip(candidate_lists, np.asarray(cache_indices, dtype=np.int64).reshape(-1), strict=True):
+            values: list[int] = []
+            seen: set[int] = set()
+            for face_id in raw:
+                fid = int(face_id)
+                if 0 <= fid < n_faces and fid not in seen:
+                    values.append(fid)
+                    seen.add(fid)
+                if 0 <= fid < n_faces:
+                    for neighbor in self._master_face_tracking_neighborhoods[fid]:
+                        nid = int(neighbor)
+                        if nid not in seen:
+                            values.append(nid)
+                            seen.add(nid)
+            if not values:
+                merged.append(values)
+                continue
+            tracked = int(cache[int(cache_index)]) if 0 <= int(cache_index) < cache.shape[0] else -1
+            if 0 <= tracked < n_faces:
+                for face_id in self._master_face_tracking_neighborhoods[tracked]:
+                    fid = int(face_id)
+                    if fid not in seen:
+                        values.append(fid)
+                        seen.add(fid)
+            merged.append(values)
+        return merged
 
     def samples(self, x_current: np.ndarray):
         if bool(self.clip_to_master_footprint):
@@ -513,8 +584,13 @@ class LagrangianSDFSurfaceContactGeometry:
             candidate_ids = np.asarray(master_tree.query_ball_point(x, candidate_radius, return_sorted=False), dtype=np.int64)
         else:
             candidate_ids = np.arange(master_faces.shape[0], dtype=np.int64)
+        cache_index = self._secondary_cache_index_for_key(cache_key)
+        if cache_index is not None:
+            merged = self._merge_secondary_tracking_candidates([candidate_ids], np.asarray([cache_index], dtype=np.int64))
+            candidate_ids = np.asarray(merged[0], dtype=np.int64)
         best: dict[str, np.ndarray | float] | None = None
         best_abs_gap = np.inf
+        best_face_id = -1
         for face_id in candidate_ids.reshape(-1):
             nodes = master_faces[int(face_id)]
             master_tri = master_x[nodes]
@@ -543,6 +619,7 @@ class LagrangianSDFSurfaceContactGeometry:
                     "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
                     "master_weights": np.clip(bary, 0.0, 1.0),
                 }
+                best_face_id = int(face_id)
         if best is not None:
             # A secondary-normal line hit is only a valid contact constraint when
             # the physical closest-feature clearance is also closed.  Otherwise a
@@ -561,8 +638,12 @@ class LagrangianSDFSurfaceContactGeometry:
             total = float(np.sum(weights))
             if total > 0.0:
                 best["master_weights"] = weights / total
+            if cache_index is not None and best_face_id >= 0:
+                self._ensure_secondary_face_cache()[int(cache_index)] = int(best_face_id)
             return best
         query = self._oracle.query(x, cache_key=cache_key)
+        if cache_index is not None and int(query.face_id) >= 0:
+            self._ensure_secondary_face_cache()[int(cache_index)] = int(query.face_id)
         normal = -ns if float(query.normal @ ns) < 0.0 else ns
         return {
             "gap": float(query.gap),
@@ -630,8 +711,11 @@ class LagrangianSDFSurfaceContactGeometry:
         if np.any(~normal_keep):
             sample_normals[~normal_keep] = np.repeat(kept_normals, n_quadrature, axis=0)[~normal_keep]
         areas = (kept_areas[:, None] * weight_scale[None, :]).reshape(-1)
+        kept_face_indices = np.flatnonzero(keep)
+        cache_indices = (kept_face_indices[:, None] * n_quadrature + np.arange(n_quadrature, dtype=np.int64)[None, :]).reshape(-1)
         candidate_radius = float(self.search_radius) + float(master_max_radius) + 1.0e-14
         raw_candidates = master_tree.query_ball_point(point_array, candidate_radius, return_sorted=False)
+        raw_candidates = self._merge_secondary_tracking_candidates(raw_candidates, cache_indices)
         point_keep = np.fromiter((len(ids) > 0 for ids in raw_candidates), dtype=bool, count=len(raw_candidates))
         if not np.any(point_keep):
             return _empty_sample_arrays()
@@ -640,6 +724,7 @@ class LagrangianSDFSurfaceContactGeometry:
         sample_weights = sample_weights[point_keep]
         sample_normals = sample_normals[point_keep]
         areas = areas[point_keep]
+        cache_indices = cache_indices[point_keep]
         kept_candidates = [raw_candidates[int(index)] for index in np.flatnonzero(point_keep)]
         candidate_offsets, candidate_face_ids = _flatten_candidate_lists(kept_candidates)
         gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_indexed_faces_secondary_normal(
@@ -657,6 +742,7 @@ class LagrangianSDFSurfaceContactGeometry:
         valid = (face_ids >= 0) & np.isfinite(gaps)
         if not np.any(valid):
             return _empty_sample_arrays()
+        valid_cache_indices = cache_indices[valid]
         sample_nodes = sample_nodes[valid]
         sample_weights = sample_weights[valid]
         areas = areas[valid]
@@ -664,6 +750,8 @@ class LagrangianSDFSurfaceContactGeometry:
         normals = np.asarray(normals, dtype=float)[valid]
         master_bary = np.asarray(master_bary, dtype=float)[valid]
         face_ids = face_ids[valid]
+        cache = self._ensure_secondary_face_cache()
+        cache[valid_cache_indices] = face_ids
         master_nodes = self.master_material.boundary_faces[face_ids] + int(self.master_node_offset)
         return {
             "sample_node_ids": np.asarray(sample_nodes, dtype=np.int64),
@@ -1316,6 +1404,43 @@ def _surface_nodal_normals(x_current: np.ndarray, faces: np.ndarray) -> np.ndarr
     active = lengths > 1.0e-30
     normals[active] /= lengths[active, None]
     return normals
+
+
+def _triangle_face_neighborhoods(faces: np.ndarray, *, rings: int) -> tuple[np.ndarray, ...]:
+    """Return edge-adjacent face neighborhoods for contact tracking."""
+
+    F = np.asarray(faces, dtype=np.int64)
+    if F.ndim != 2 or F.shape[1] != 3:
+        raise ValueError("faces must have shape (n_faces, 3)")
+    if int(rings) < 0:
+        raise ValueError("rings must be non-negative")
+    edge_to_faces: dict[tuple[int, int], list[int]] = {}
+    for face_id, face in enumerate(F):
+        nodes = [int(v) for v in face]
+        for a, b in ((nodes[0], nodes[1]), (nodes[1], nodes[2]), (nodes[2], nodes[0])):
+            key = (a, b) if a <= b else (b, a)
+            edge_to_faces.setdefault(key, []).append(int(face_id))
+    adjacency: list[set[int]] = [set() for _ in range(F.shape[0])]
+    for face_ids in edge_to_faces.values():
+        if len(face_ids) < 2:
+            continue
+        for face_id in face_ids:
+            adjacency[int(face_id)].update(int(other) for other in face_ids if int(other) != int(face_id))
+    neighborhoods: list[np.ndarray] = []
+    for face_id in range(F.shape[0]):
+        seen = {int(face_id)}
+        frontier = {int(face_id)}
+        for _ring in range(int(rings)):
+            next_frontier: set[int] = set()
+            for current in frontier:
+                next_frontier.update(adjacency[int(current)])
+            next_frontier.difference_update(seen)
+            if not next_frontier:
+                break
+            seen.update(next_frontier)
+            frontier = next_frontier
+        neighborhoods.append(np.asarray(sorted(seen), dtype=np.int64))
+    return tuple(neighborhoods)
 
 
 def _triangle_barycentric_unclipped(point: np.ndarray, tri: np.ndarray) -> np.ndarray | None:

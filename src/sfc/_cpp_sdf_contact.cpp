@@ -981,15 +981,16 @@ py::tuple closest_points_indexed_faces_secondary_normal(
             }
         }
         double fallback_gap = std::numeric_limits<double>::infinity();
-        bool fallback_valid = fallback_face != -1 && fallback_best_dist2 <= fallback_dist2;
-        if (fallback_valid) {
+        const bool fallback_found = fallback_face != -1;
+        const bool fallback_valid_for_output = fallback_found && fallback_best_dist2 <= fallback_dist2;
+        if (fallback_found) {
             const double fallback_dist = std::sqrt(fallback_best_dist2);
             const double fallback_plane =
                 (px - fallback_px) * fallback_nx + (py - fallback_py) * fallback_ny + (pz - fallback_pz) * fallback_nz;
             fallback_gap = fallback_plane < 0.0 ? -fallback_dist : fallback_dist;
         }
         const bool line_overcloses_open_closest_feature =
-            found_line && best_gap < -1.0e-14 && fallback_valid && fallback_gap > 1.0e-14;
+            found_line && best_gap < -1.0e-14 && fallback_found && fallback_gap > 1.0e-14;
 
         if (found_line && !line_overcloses_open_closest_feature) {
             const double total = best_w0 + best_w1 + best_w2;
@@ -1012,7 +1013,7 @@ py::tuple closest_points_indexed_faces_secondary_normal(
             continue;
         }
 
-        if (!fallback_valid) {
+        if (!fallback_valid_for_output) {
             g(ip) = std::numeric_limits<double>::infinity();
             n(ip, 0) = 0.0;
             n(ip, 1) = 0.0;

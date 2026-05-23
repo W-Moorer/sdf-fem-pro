@@ -82,6 +82,25 @@ SFC 当前在每个接触查询中从大 contact patch 里重新搜索任意 mas
 
 但 0.00020--0.00032 s 中段 p95 stress 仍有 30%--52% 偏差。Abaqus contact field 显示该时间段 CPRESS/active nodes 继续升高，而固定 tracking tube 的 SFC 过早降低接触压力。因此下一步不是再放大全局半径，而是实现 contact patch tracking / adjacency migration：只允许约束沿相邻 master patch 滑移迁移，避免远处齿面跳转，同时不因固定小半径丢失真实滑移接触。
 
+### 已推进：局部邻接迁移与释放守门
+
+进一步实现了 master-face edge-adjacency tracking。每个 secondary quadrature row 维护上一步命中的 master face；当前候选集由当前 contact tube 命中的面片、这些面片的邻接 ring、以及仍处于当前 tube 内的 tracked face 邻域构成。若当前 tube 没有候选，则不再仅凭旧 cache 维持接触，从而避免释放阶段旧齿面“粘住”。
+
+几何级 Abaqus-frame 扫描显示：
+
+- 0.00002--0.00020 s，SFC max pressure 与 Abaqus CPRESS 峰值基本同量级；
+- 0.00030 s，SFC 几何 max pressure 约 1.02e7，Abaqus 为 9.33e6，说明局部迁移能补回固定窄 tube 的中段欠接触；
+- 0.00036--0.00040 s，仍存在少量 tracked 局部高压，说明还需要 Abaqus-style contact status/release convergence。
+
+完整 0.0004 s SFC 求解显示：
+
+- final displacement relative error = 2.31%；
+- final global p95 von Mises relative error = 6.51%；
+- final max node-averaged von Mises relative error = 6.82%；
+- 但 0.00020--0.00030 s 仍为欠接触，0.00034--0.00038 s 仍为释放滞后，p95 stress 最大误差约 64.47%。
+
+因此当前进展证明：候选面片远跳问题已经基本定位并被限制，但最终曲线小于 10% 还需要实现 contact status convergence / release criterion，使 active set 的建立和释放与 Abaqus/Standard 接触元素一致。
+
 1. 实现 Abaqus-style contact element 初始化：
    - 为每个 slave surface constraint region 建立初始 master patch / 初始 clearance；
    - 初始帧不因原始几何 overclosure 自动产生 CPRESS；
