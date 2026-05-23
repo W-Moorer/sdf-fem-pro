@@ -164,6 +164,41 @@ p95_equivalent_elastic_strain_nodeavg
 - `0.0002 s` 处仍有约 40% 应力/应变误差，且 active node 数量不同。这进一步支持“下一步应修 contact constraint region / active status，而不是调材料或接触刚度”的判断。
 - 该修正只改变诊断和输出口径，不改变求解物理，也不降低接触精度。
 
+## 本轮 constraint-region 接触修正
+
+当前 `slave_node` / `slave_face` 聚合以前采用：
+
+```text
+g_region = mean(g_l)
+p_region = k max(-g_region, 0)
+```
+
+这会让同一个 surface-to-surface constraint region 内的正间隙样本抵消负间隙样本。对于线性 pressure-overclosure law，更一致的离散应保持正穿透量面积积分：
+
+```text
+penetration_region = mean(max(-g_l, 0))
+g_region = -penetration_region
+```
+
+若 region 内没有任何穿透样本，则继续使用 signed mean clearance。active region 的法向也改成按 `area * penetration` 加权；open region 仍用面积加权。这是通用的线性罚接触面积积分修正，不改变 SDF 查询、不调接触刚度、不降低几何精度。
+
+短程验证：
+
+`results/source_gear_penalty_contact_positive_region_smoke_0004`
+
+| time (s) | max displacement rel. error | p95 nodeavg von Mises rel. error | p95 nodeavg equiv. strain rel. error | active nodes SFC/Abaqus |
+|---:|---:|---:|---:|---:|
+| 0.0002 | 0.391% | 39.646% | 39.646% | 336 / 466 |
+| 0.0004 | 3.655% | 1.803% | 1.803% | 65 / 44 |
+
+对比上一轮 nodeavg-only 结果，该修正小幅改善了 `0.0002 s` 的 active count 和应力误差，并略微改善 `0.0004 s` 的应力/应变误差；但 early active status 仍未对齐。
+
+同时测试了一个 HHT 初始外载假设：
+
+`results/source_gear_penalty_contact_hht_step_load_smoke_0004`
+
+该假设把初始 HHT history balance 改为包含 step-start CLOAD。结果反而使位移误差恶化到 `4.619% / 5.852%`，因此已撤回，不进入主线。
+
 ## 下一步理论对齐优先级
 
 ### 第一优先级：不要使用 centripetal residual 作为默认

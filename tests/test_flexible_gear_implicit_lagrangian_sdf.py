@@ -160,7 +160,7 @@ def test_slave_face_contact_averaging_combines_tri3_samples_without_tuning() -> 
     assert len(aggregated) == 1
     merged = aggregated[0]
     assert merged.area == pytest.approx(6.0)
-    assert merged.gap == pytest.approx((-0.30 + 0.0 + 0.15) / 3.0)
+    assert merged.gap == pytest.approx(-0.30 / 3.0)
     assert np.sum(merged.shape_weights) == pytest.approx(1.0)
     assert np.sum(merged.master_shape_weights) == pytest.approx(1.0)
     assert merged.node_ids.tolist() == [0, 1, 2]
@@ -591,6 +591,33 @@ def test_slave_node_averaging_uses_tributary_area() -> None:
         (0.0, 1.0, 0.0),
         (0.0, 0.0, 1.0),
     }
+
+
+def test_contact_averaging_preserves_positive_overclosure_integral() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([1.0, 0.0, 0.0], dtype=float),
+            gap=-0.4,
+            normal=np.asarray([1.0, 0.0, 0.0], dtype=float),
+            area=1.0,
+            stiffness=10.0,
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.0, 1.0, 0.0], dtype=float),
+            gap=0.2,
+            normal=np.asarray([0.0, 1.0, 0.0], dtype=float),
+            area=3.0,
+            stiffness=10.0,
+        ),
+    ]
+
+    merged = _aggregate_contact_samples(samples, "slave_face")[0]
+
+    assert merged.area == pytest.approx(4.0)
+    assert merged.gap == pytest.approx(-0.1)
+    np.testing.assert_allclose(merged.normal, [1.0, 0.0, 0.0], atol=1.0e-14)
 
 
 def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None:

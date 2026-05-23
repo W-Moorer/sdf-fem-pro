@@ -195,7 +195,17 @@ def _combined_shape_weights(
 
 
 def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSample:
-    """Area-average contact samples into one surface-to-surface constraint."""
+    """Area-average contact samples into one surface-to-surface constraint.
+
+    For a linear pressure-overclosure law, aggregation must preserve the
+    positive overclosure integral over the constraint region.  Averaging signed
+    gaps first and then applying ``max(-g, 0)`` would let separated portions of
+    a region cancel penetrating portions, changing both contact status and
+    integrated penalty force.  The equivalent aggregated gap therefore stores
+    ``-mean(max(-g_l, 0))`` whenever any sub-sample is overclosed; otherwise it
+    stores the signed area-averaged clearance.  Normals use the same pressure
+    weights in active regions, falling back to area weights for open regions.
+    """
 
     if not samples:
         raise ValueError("samples must not be empty")
@@ -207,8 +217,16 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     else:
         group_weights = areas / total_area
     gaps = np.asarray([float(sample.gap) for sample in samples], dtype=float)
+    penetrations = np.maximum(-gaps, 0.0)
+    penetration_integral = float(areas @ penetrations)
+    if penetration_integral > 0.0:
+        constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
+        normal_weights = areas * penetrations / penetration_integral
+    else:
+        constraint_gap = float(group_weights @ gaps)
+        normal_weights = group_weights
     normal = np.sum(
-        np.asarray([group_weights[idx] * np.asarray(sample.normal, dtype=float) for idx, sample in enumerate(samples)], dtype=float),
+        np.asarray([normal_weights[idx] * np.asarray(sample.normal, dtype=float) for idx, sample in enumerate(samples)], dtype=float),
         axis=0,
     )
     normal_norm = float(np.linalg.norm(normal))
@@ -234,7 +252,7 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     return ContactSample(
         node_ids=slave_nodes,
         shape_weights=slave_weights,
-        gap=float(group_weights @ gaps),
+        gap=float(constraint_gap),
         normal=normal,
         area=float(total_area),
         stiffness=float(samples[0].stiffness),
