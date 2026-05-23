@@ -1161,9 +1161,14 @@ def _write_sfc_tet4_vtk_frame(
         von_mises = _von_mises_local(stress)
     strain_norm = np.linalg.norm(strain, axis=(1, 2))
     equivalent_strain = _equivalent_elastic_strain_from_mises(von_mises, young=model.E, poisson=model.nu)
-    von_mises_nodeavg = _node_average_cell_scalar(von_mises, elements, points.shape[0])
-    strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, points.shape[0])
-    equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, points.shape[0])
+    stress_nodeavg = _node_average_cell_tensor(stress, elements, points.shape[0])
+    strain_nodeavg = _node_average_cell_tensor(strain, elements, points.shape[0])
+    von_mises_nodeavg = _von_mises_local(stress_nodeavg)
+    strain_norm_nodeavg = np.linalg.norm(strain_nodeavg, axis=(1, 2))
+    equivalent_strain_nodeavg = _equivalent_elastic_strain_from_mises(von_mises_nodeavg, young=model.E, poisson=model.nu)
+    von_mises_scalaravg = _node_average_cell_scalar(von_mises, elements, points.shape[0])
+    strain_norm_scalaravg = _node_average_cell_scalar(strain_norm, elements, points.shape[0])
+    equivalent_strain_scalaravg = _node_average_cell_scalar(equivalent_strain, elements, points.shape[0])
     contact_diag = contact_node_diagnostics or _empty_contact_node_diagnostics(points.shape[0])
     contact_fields = dict(contact_diag.get("fields", {}))
     contact_metrics = dict(contact_diag.get("metrics", {}))
@@ -1209,6 +1214,9 @@ def _write_sfc_tet4_vtk_frame(
             ("von_mises_nodeavg", von_mises_nodeavg),
             ("strain_norm_nodeavg", strain_norm_nodeavg),
             ("equivalent_elastic_strain_nodeavg", equivalent_strain_nodeavg),
+            ("von_mises_scalaravg", von_mises_scalaravg),
+            ("strain_norm_scalaravg", strain_norm_scalaravg),
+            ("equivalent_elastic_strain_scalaravg", equivalent_strain_scalaravg),
         ):
             handle.write(f"SCALARS {name} float 1\n")
             handle.write("LOOKUP_TABLE default\n")
@@ -1260,6 +1268,19 @@ def _write_sfc_tet4_vtk_frame(
         "mean_strain_norm_nodeavg": float(np.mean(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
         "mean_equivalent_elastic_strain_nodeavg": float(np.mean(equivalent_strain_nodeavg))
         if equivalent_strain_nodeavg.size
+        else 0.0,
+        "max_von_mises_scalaravg": float(np.max(von_mises_scalaravg)) if von_mises_scalaravg.size else 0.0,
+        "max_strain_norm_scalaravg": float(np.max(strain_norm_scalaravg)) if strain_norm_scalaravg.size else 0.0,
+        "max_equivalent_elastic_strain_scalaravg": float(np.max(equivalent_strain_scalaravg))
+        if equivalent_strain_scalaravg.size
+        else 0.0,
+        "p95_von_mises_scalaravg": _percentile_or_zero(von_mises_scalaravg, 95.0),
+        "p95_strain_norm_scalaravg": _percentile_or_zero(strain_norm_scalaravg, 95.0),
+        "p95_equivalent_elastic_strain_scalaravg": _percentile_or_zero(equivalent_strain_scalaravg, 95.0),
+        "mean_von_mises_scalaravg": float(np.mean(von_mises_scalaravg)) if von_mises_scalaravg.size else 0.0,
+        "mean_strain_norm_scalaravg": float(np.mean(strain_norm_scalaravg)) if strain_norm_scalaravg.size else 0.0,
+        "mean_equivalent_elastic_strain_scalaravg": float(np.mean(equivalent_strain_scalaravg))
+        if equivalent_strain_scalaravg.size
         else 0.0,
     }
     row.update(object_metric_columns)
@@ -1317,13 +1338,36 @@ def _node_average_cell_scalar(cell_values: np.ndarray, cells: np.ndarray, node_c
     return out
 
 
-def _node_averaged_internal_metric_row(model: MechanicsModel, internal: Any) -> Row:
-    """Return SFC metrics using the same node-averaged scalar convention as VTK manifests.
+def _node_average_cell_tensor(cell_values: np.ndarray, cells: np.ndarray, node_count: int) -> np.ndarray:
+    """Return incident-cell averaged nodal tensors.
 
-    The Abaqus VTK exporter records node-averaged stress/strain scalars in its
-    manifest.  History rows should expose the same quantities so curve
-    comparisons do not silently mix element-level SFC percentiles with
-    node-averaged Abaqus percentiles.
+    Abaqus-style nodal stress invariants are tensor averages followed by the
+    invariant calculation.  This helper keeps SFC VTK/history metrics on that
+    same nonlinear output-measure convention while leaving the solver state
+    unchanged.
+    """
+
+    values = np.asarray(cell_values, dtype=float)
+    conn = np.asarray(cells, dtype=np.int64)
+    out = np.zeros((int(node_count), 3, 3), dtype=float)
+    counts = np.zeros(int(node_count), dtype=float)
+    if values.shape != (conn.shape[0], 3, 3):
+        return out
+    flat_conn = conn.reshape(-1)
+    repeated = np.repeat(values, conn.shape[1], axis=0)
+    np.add.at(out, flat_conn, repeated)
+    np.add.at(counts, flat_conn, 1.0)
+    mask = counts > 0.0
+    out[mask] /= counts[mask, None, None]
+    return out
+
+
+def _node_averaged_internal_metric_row(model: MechanicsModel, internal: Any) -> Row:
+    """Return SFC metrics using Abaqus-style node-averaged tensor invariants.
+
+    The primary ``*_nodeavg`` metrics are tensor-component averages followed by
+    invariant evaluation.  ``*_scalaravg`` diagnostics retain the old
+    scalar-average convention for audits only.
     """
 
     elements = np.asarray(model.elements, dtype=np.int64)
@@ -1335,9 +1379,14 @@ def _node_averaged_internal_metric_row(model: MechanicsModel, internal: Any) -> 
         von_mises = _von_mises_local(stress)
     strain_norm = np.linalg.norm(strain, axis=(1, 2))
     equivalent_strain = _equivalent_elastic_strain_from_mises(von_mises, young=model.E, poisson=model.nu)
-    von_mises_nodeavg = _node_average_cell_scalar(von_mises, elements, node_count)
-    strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, node_count)
-    equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, node_count)
+    stress_nodeavg = _node_average_cell_tensor(stress, elements, node_count)
+    strain_nodeavg = _node_average_cell_tensor(strain, elements, node_count)
+    von_mises_nodeavg = _von_mises_local(stress_nodeavg)
+    strain_norm_nodeavg = np.linalg.norm(strain_nodeavg, axis=(1, 2))
+    equivalent_strain_nodeavg = _equivalent_elastic_strain_from_mises(von_mises_nodeavg, young=model.E, poisson=model.nu)
+    von_mises_scalaravg = _node_average_cell_scalar(von_mises, elements, node_count)
+    strain_norm_scalaravg = _node_average_cell_scalar(strain_norm, elements, node_count)
+    equivalent_strain_scalaravg = _node_average_cell_scalar(equivalent_strain, elements, node_count)
     return {
         "max_von_mises_nodeavg": float(np.max(von_mises_nodeavg)) if von_mises_nodeavg.size else 0.0,
         "max_strain_norm_nodeavg": float(np.max(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
@@ -1351,6 +1400,19 @@ def _node_averaged_internal_metric_row(model: MechanicsModel, internal: Any) -> 
         "mean_strain_norm_nodeavg": float(np.mean(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
         "mean_equivalent_elastic_strain_nodeavg": float(np.mean(equivalent_strain_nodeavg))
         if equivalent_strain_nodeavg.size
+        else 0.0,
+        "max_von_mises_scalaravg": float(np.max(von_mises_scalaravg)) if von_mises_scalaravg.size else 0.0,
+        "p95_von_mises_scalaravg": _percentile_or_zero(von_mises_scalaravg, 95.0),
+        "mean_von_mises_scalaravg": float(np.mean(von_mises_scalaravg)) if von_mises_scalaravg.size else 0.0,
+        "max_strain_norm_scalaravg": float(np.max(strain_norm_scalaravg)) if strain_norm_scalaravg.size else 0.0,
+        "p95_strain_norm_scalaravg": _percentile_or_zero(strain_norm_scalaravg, 95.0),
+        "mean_strain_norm_scalaravg": float(np.mean(strain_norm_scalaravg)) if strain_norm_scalaravg.size else 0.0,
+        "max_equivalent_elastic_strain_scalaravg": float(np.max(equivalent_strain_scalaravg))
+        if equivalent_strain_scalaravg.size
+        else 0.0,
+        "p95_equivalent_elastic_strain_scalaravg": _percentile_or_zero(equivalent_strain_scalaravg, 95.0),
+        "mean_equivalent_elastic_strain_scalaravg": float(np.mean(equivalent_strain_scalaravg))
+        if equivalent_strain_scalaravg.size
         else 0.0,
     }
 
@@ -2571,8 +2633,8 @@ def solve_sfc_source_drive_pair(
     assembly = build_rigid_hub_reduced_assembly(X, [hub1, hub2], include_free_nodes=True)
     T = assembly.transformation.tocsr()
     contact_pair_order = str(source_contact_pair_order).lower()
-    if contact_pair_order not in {"gear2_slave", "gear1_slave"}:
-        raise ValueError("source_contact_pair_order must be 'gear2_slave' or 'gear1_slave'")
+    if contact_pair_order not in {"gear2_slave", "gear1_slave", "symmetric_two_pass"}:
+        raise ValueError("source_contact_pair_order must be 'gear2_slave', 'gear1_slave', or 'symmetric_two_pass'")
     contact_search_radius = (
         _default_contact_search_radius(pair, target_overclosure=1.0e-5)
         if source_contact_search_radius is None
@@ -2580,32 +2642,40 @@ def solve_sfc_source_drive_pair(
     )
     if contact_search_radius < 0.0:
         raise ValueError("source_contact_search_radius must be non-negative")
-    if contact_pair_order == "gear2_slave":
-        master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
-        contact = LagrangianSDFSurfaceContactGeometry(
-            pair.gear2.contact_faces,
-            master,
-            pair.gear1.nodes,
-            pressure_stiffness=pressure_stiffness,
-            slave_node_offset=n1,
-            master_node_offset=0,
-            quadrature="tri3",
-            search_radius=contact_search_radius,
-            compiled_batch_projection=True,
-        )
-    else:
+    def make_contact(order: str, stiffness: float) -> LagrangianSDFSurfaceContactGeometry:
+        if order == "gear2_slave":
+            master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
+            return LagrangianSDFSurfaceContactGeometry(
+                pair.gear2.contact_faces,
+                master,
+                pair.gear1.nodes,
+                pressure_stiffness=stiffness,
+                slave_node_offset=n1,
+                master_node_offset=0,
+                quadrature="tri3",
+                search_radius=contact_search_radius,
+                compiled_batch_projection=True,
+            )
         master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
-        contact = LagrangianSDFSurfaceContactGeometry(
+        return LagrangianSDFSurfaceContactGeometry(
             pair.gear1.contact_faces,
             master,
             pair.gear2.nodes,
-            pressure_stiffness=pressure_stiffness,
+            pressure_stiffness=stiffness,
             slave_node_offset=0,
             master_node_offset=n1,
             quadrature="tri3",
             search_radius=contact_search_radius,
             compiled_batch_projection=True,
         )
+
+    if contact_pair_order == "symmetric_two_pass":
+        contact_geometries = (
+            make_contact("gear2_slave", 0.5 * float(pressure_stiffness)),
+            make_contact("gear1_slave", 0.5 * float(pressure_stiffness)),
+        )
+    else:
+        contact_geometries = (make_contact(contact_pair_order, float(pressure_stiffness)),)
     contact_averaging = str(source_contact_averaging).lower()
     if contact_averaging not in {"none", "slave_face", "slave_node", "slave_node_point", "surface_patch"}:
         raise ValueError(
@@ -2615,8 +2685,8 @@ def solve_sfc_source_drive_pair(
     if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
         raise ValueError("source_contact_kinematics must be 'linearized_mpc' or 'finite_rp_corotated'")
     contact_normal_filter = str(source_contact_normal_filter).lower()
-    if contact_normal_filter not in {"none", "opposing"}:
-        raise ValueError("source_contact_normal_filter must be 'none' or 'opposing'")
+    if contact_normal_filter not in {"none", "opposing", "opposing_search"}:
+        raise ValueError("source_contact_normal_filter must be 'none', 'opposing', or 'opposing_search'")
     internal_kinematics = str(source_internal_kinematics).lower()
     if internal_kinematics not in {"linearized_mpc", "corotated_rp", "finite_stvk_visual"}:
         raise ValueError(
@@ -2899,6 +2969,33 @@ def solve_sfc_source_drive_pair(
     base_lu_cache: list[Any] = [None]
     start = time.perf_counter()
     base_preconditioner_lu: Any | None = None
+
+    def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
+        if len(contact_geometries) != 1 or contact_averaging != "none" or contact_normal_filter != "none":
+            return None
+        return contact_geometries[0].sample_arrays(x_contact)
+
+    def source_samples(x_contact: np.ndarray) -> list[Any]:
+        collected: list[Any] = []
+        use_compatible_query = contact_normal_filter == "opposing_search" and contact_averaging != "slave_node_point"
+        for geometry in contact_geometries:
+            if use_compatible_query:
+                collected.extend(list(geometry.normal_compatible_samples(x_contact)))
+            elif contact_averaging == "slave_node_point":
+                collected.extend(list(geometry.nodal_samples(x_contact)))
+            else:
+                collected.extend(list(geometry.samples(x_contact)))
+        if contact_normal_filter == "opposing" and not use_compatible_query:
+            collected = _filter_contact_samples_by_normal_compatibility(
+                collected,
+                x_contact,
+                mode=contact_normal_filter,
+            )
+        if contact_averaging != "none":
+            aggregate_mode = "slave_node" if contact_averaging == "slave_node_point" else contact_averaging
+            collected = _aggregate_contact_samples(collected, aggregate_mode)
+        return collected
+
     for step in range(start_step + 1, steps + 1):
         t = step * float(dt)
         fixed, values = _source_drive_fixed_reduced_dofs(assembly, time_value=t, omega_z=gear1_angular_velocity_z)
@@ -2925,22 +3022,9 @@ def solve_sfc_source_drive_pair(
             x_guess = model.X + assembly.expand_displacements(q_guess)
             x_contact = contact_positions_from_reduced(q_guess)
             t_section = time.perf_counter()
-            sample_arrays = None if (contact_averaging != "none" or contact_normal_filter != "none") else contact.sample_arrays(x_contact)
+            sample_arrays = source_sample_arrays(x_contact)
             if sample_arrays is None:
-                samples = (
-                    list(contact.nodal_samples(x_contact))
-                    if contact_averaging == "slave_node_point"
-                    else list(contact.samples(x_contact))
-                )
-                if contact_normal_filter != "none":
-                    samples = _filter_contact_samples_by_normal_compatibility(
-                        samples,
-                        x_contact,
-                        mode=contact_normal_filter,
-                    )
-                if contact_averaging != "none":
-                    aggregate_mode = "slave_node" if contact_averaging == "slave_node_point" else contact_averaging
-                    samples = _aggregate_contact_samples(samples, aggregate_mode)
+                samples = source_samples(x_contact)
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
                 last_samples = samples
                 last_sample_arrays = None
@@ -3007,7 +3091,7 @@ def solve_sfc_source_drive_pair(
                 if correction_free is None:
                     source_direct_fallback_count += 1
                     if sample_arrays is not None:
-                        samples = list(contact.samples(x_guess))
+                        samples = source_samples(x_contact)
                     correction_free = _solve_reduced_penalty_low_rank_correction(
                         base_matrix_free=current_base_free,
                         base_lu_cache=base_lu_cache if rotating_inertia == "none" else [None],
@@ -3045,26 +3129,9 @@ def solve_sfc_source_drive_pair(
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         if not contact_matches_q_guess:
             accepted_contact_x = contact_positions_from_reduced(q_new)
-            accepted_arrays = (
-                None
-                if (contact_averaging != "none" or contact_normal_filter != "none")
-                else contact.sample_arrays(accepted_contact_x)
-            )
+            accepted_arrays = source_sample_arrays(accepted_contact_x)
             if accepted_arrays is None:
-                accepted_samples = (
-                    list(contact.nodal_samples(accepted_contact_x))
-                    if contact_averaging == "slave_node_point"
-                    else list(contact.samples(accepted_contact_x))
-                )
-                if contact_normal_filter != "none":
-                    accepted_samples = _filter_contact_samples_by_normal_compatibility(
-                        accepted_samples,
-                        accepted_contact_x,
-                        mode=contact_normal_filter,
-                    )
-                if contact_averaging != "none":
-                    aggregate_mode = "slave_node" if contact_averaging == "slave_node_point" else contact_averaging
-                    accepted_samples = _aggregate_contact_samples(accepted_samples, aggregate_mode)
+                accepted_samples = source_samples(accepted_contact_x)
                 last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
                 last_samples = accepted_samples
                 last_sample_arrays = None

@@ -3,12 +3,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from validation.abaqus_odb_to_vtk import (
     _contact_point_scalar_arrays,
+    _node_averaged_tensor_invariants,
+    _node_average_cell_symmetric6,
     _select_frame_indices,
     _tensor_from_symmetric6,
     _von_mises_from_symmetric6,
@@ -74,6 +78,29 @@ def test_abaqus_tensor_helpers_use_symmetric_3d_order() -> None:
 
     assert tensor == ((1.0, 4.0, 5.0), (4.0, 2.0, 6.0), (5.0, 6.0, 3.0))
     assert _von_mises_from_symmetric6((1.0, 1.0, 1.0, 0.0, 0.0, 0.0)) == 0.0
+
+
+def test_abaqus_nodeavg_invariants_average_tensor_components_first() -> None:
+    cells = [[0, 1, 2, 3], [1, 4, 2, 5]]
+    stress = [(10.0, 0.0, 0.0, 0.0, 0.0, 0.0), (0.0, 10.0, 0.0, 0.0, 0.0, 0.0)]
+    strain = [(1.0, 0.0, 0.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0, 0.0, 0.0)]
+
+    averaged = _node_average_cell_symmetric6(stress, cells, node_count=6)
+    nodeavg_vm, _nodeavg_strain, _nodeavg_eq, scalaravg_vm, _scalaravg_strain, _scalaravg_eq = (
+        _node_averaged_tensor_invariants(
+            stress=stress,
+            strain=strain,
+            cells=cells,
+            node_count=6,
+            young=100.0,
+            poisson=0.25,
+        )
+    )
+
+    assert averaged[1] == (5.0, 5.0, 0.0, 0.0, 0.0, 0.0)
+    assert nodeavg_vm[1] == pytest.approx(_von_mises_from_symmetric6((5.0, 5.0, 0.0, 0.0, 0.0, 0.0)))
+    assert scalaravg_vm[1] == pytest.approx(10.0)
+    assert nodeavg_vm[1] < scalaravg_vm[1]
 
 
 def test_odb_frame_selection_supports_stride_and_time_window() -> None:

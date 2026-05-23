@@ -21,6 +21,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _default_contact_search_radius,
     _filter_contact_samples_by_normal_compatibility,
     _node_average_cell_scalar,
+    _node_average_cell_tensor,
     _surface_edge_length_percentile,
     _source_drive_corotated_elastic_matrix,
     _source_drive_corotated_positions_and_elastic_displacement,
@@ -65,6 +66,22 @@ def test_node_average_cell_scalar_matches_incident_cell_average() -> None:
     assert averaged[4] == pytest.approx(5.0)
     assert averaged[5] == pytest.approx((5.0 + 11.0) / 2.0)
     assert averaged[6] == pytest.approx(11.0)
+
+
+def test_node_average_cell_tensor_averages_components_before_invariant() -> None:
+    cells = np.asarray([[0, 1, 2, 3], [1, 4, 2, 5]], dtype=np.int64)
+    tensors = np.zeros((2, 3, 3), dtype=float)
+    tensors[0, 0, 0] = 10.0
+    tensors[1, 1, 1] = 10.0
+
+    averaged = _node_average_cell_tensor(tensors, cells, node_count=6)
+
+    np.testing.assert_allclose(averaged[0], tensors[0])
+    assert averaged[1, 0, 0] == pytest.approx(5.0)
+    assert averaged[1, 1, 1] == pytest.approx(5.0)
+    assert averaged[2, 0, 0] == pytest.approx(5.0)
+    assert averaged[2, 1, 1] == pytest.approx(5.0)
+    np.testing.assert_allclose(averaged[4], tensors[1])
 
 
 def test_default_contact_search_radius_uses_surface_feature_size() -> None:
@@ -692,6 +709,48 @@ def test_lagrangian_surface_contact_nodal_samples_use_slave_corner_gaps() -> Non
     assert sum(float(sample.area) for sample in samples) == pytest.approx(
         0.5 * float(np.linalg.norm(np.cross(slave_nodes[1] - slave_nodes[0], slave_nodes[2] - slave_nodes[0])))
     )
+
+
+def test_normal_compatible_samples_choose_nearest_opposing_candidate() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.1],
+            [0.0, 1.0, -0.1],
+            [1.0, 0.0, -0.1],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.01],
+            [1.0, 0.0, 0.01],
+            [0.0, 1.0, 0.01],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, faces),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=0.2,
+        compiled_batch_projection=False,
+    )
+
+    regular = list(contact.samples(np.vstack([master_nodes, slave_nodes])))[0]
+    compatible = list(contact.normal_compatible_samples(np.vstack([master_nodes, slave_nodes])))[0]
+
+    assert regular.master_node_ids.tolist() == [0, 1, 2]
+    assert compatible.master_node_ids.tolist() == [3, 4, 5]
+    assert regular.gap == pytest.approx(0.01)
+    assert compatible.gap == pytest.approx(-0.11)
 
 
 def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None:

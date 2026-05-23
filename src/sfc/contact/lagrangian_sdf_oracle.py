@@ -330,6 +330,99 @@ class LagrangianSDFContactOracle:
             self._barycentric_cache[cache_key] = best.barycentric.copy()
         return best
 
+    def query_normal_compatible(
+        self,
+        point: np.ndarray,
+        slave_normal: np.ndarray,
+        x_current: np.ndarray | None = None,
+        *,
+        cache_key: Hashable | None = None,
+        dot_threshold: float = 0.0,
+    ) -> LagrangianSDFQueryResult:
+        """Evaluate the closest patch among normal-compatible candidates.
+
+        Surface-to-surface contact should not first pick the globally closest
+        triangle and then discard it when its normal is incompatible with the
+        slave side; that removes valid nearby constraints.  Instead, the narrow
+        phase searches the same candidate set and selects the nearest candidate
+        whose master normal faces the slave normal.  If no compatible candidate
+        exists, the exact closest candidate is returned as a conservative
+        fallback so the query remains well-defined.
+        """
+
+        if x_current is not None:
+            self.refit(x_current)
+        x = _as_point(point, "point")
+        slave = np.asarray(slave_normal, dtype=float).reshape(3)
+        slave_norm = float(np.linalg.norm(slave))
+        if slave_norm <= 0.0:
+            return self.query(x, cache_key=cache_key)
+        slave /= slave_norm
+        cached_face_id = self._patch_cache.get(cache_key) if self.cache_enabled and cache_key is not None else None
+        cached_bary = self._barycentric_cache.get(cache_key) if self.cache_enabled and cache_key is not None else None
+        candidates = self.bvh.candidates(
+            x,
+            search_radius=self.search_radius,
+            cached_face_id=cached_face_id,
+        )
+        if candidates.size:
+            candidate_bounds = self.bvh.aabb_distance_squared_for_ids(x, candidates)
+            order = np.argsort(candidate_bounds, kind="stable")
+            candidates = candidates[order]
+            candidate_bounds = candidate_bounds[order]
+        else:
+            candidate_bounds = np.empty(0, dtype=float)
+        if candidates.size:
+            triangles = self.x_current[self.material.boundary_faces[candidates]]
+            normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+            normal_norms = np.linalg.norm(normals, axis=1)
+            valid = normal_norms > 0.0
+            dots = np.full(candidates.shape[0], np.inf, dtype=float)
+            dots[valid] = (normals[valid] / normal_norms[valid, None]) @ slave
+            compatible = dots <= float(dot_threshold)
+            if np.any(compatible):
+                candidates = candidates[compatible]
+                candidate_bounds = candidate_bounds[compatible]
+            else:
+                return self.query(x, cache_key=cache_key)
+        best_compatible: LagrangianSDFQueryResult | None = None
+        best_compatible_dist2 = np.inf
+        best_compatible_abs_gap = np.inf
+        for candidate_id, bound2 in zip(candidates, candidate_bounds, strict=True):
+            if best_compatible is not None and float(bound2) > best_compatible_dist2 + 1.0e-15:
+                break
+            initial = cached_bary if cached_face_id == int(candidate_id) and cached_bary is not None else None
+            if self.deformation_map is None:
+                result = self._query_patch(
+                    x,
+                    int(candidate_id),
+                    initial_barycentric=initial,
+                    used_cached_patch=cached_face_id == int(candidate_id),
+                    candidate_count=int(candidates.size),
+                )
+            else:
+                result = self._query_kkt(
+                    x,
+                    int(candidate_id),
+                    initial_barycentric=initial,
+                    used_cached_patch=cached_face_id == int(candidate_id),
+                    candidate_count=int(candidates.size),
+                )
+            dist2 = float(np.dot(x - result.closest_point, x - result.closest_point))
+            abs_gap = abs(float(result.gap))
+            if dist2 < best_compatible_dist2 or (
+                np.isclose(dist2, best_compatible_dist2) and abs_gap < best_compatible_abs_gap
+            ):
+                best_compatible = result
+                best_compatible_dist2 = dist2
+                best_compatible_abs_gap = abs_gap
+        if best_compatible is None:
+            raise RuntimeError("no material-SDF patch candidates were available")
+        if self.cache_enabled and cache_key is not None:
+            self._patch_cache[cache_key] = int(best_compatible.face_id)
+            self._barycentric_cache[cache_key] = best_compatible.barycentric.copy()
+        return best_compatible
+
     def _query_patch(
         self,
         point: np.ndarray,

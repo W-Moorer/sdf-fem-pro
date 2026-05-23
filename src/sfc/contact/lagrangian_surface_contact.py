@@ -282,6 +282,50 @@ class LagrangianSDFSurfaceContactGeometry:
                     master_shape_weights=query.master_weights.copy(),
                 )
 
+    def normal_compatible_samples(self, x_current: np.ndarray, *, dot_threshold: float = 0.0):
+        """Yield samples whose closest feature is selected from opposing faces.
+
+        This is different from post-filtering samples after a closest-feature
+        query.  The query itself searches the candidate set for the nearest
+        master face compatible with the current slave face normal, which is the
+        surface-to-surface contact semantics needed to avoid dropping valid
+        constraints on curved faceted surfaces.
+        """
+
+        X, _master_x, master_tree, master_max_radius, barycentric, weight_scale = self._prepare_sampling(x_current)
+        master_start = int(self.master_node_offset)
+        for face_id, face in enumerate(self.slave_faces):
+            global_face = face + int(self.slave_node_offset)
+            tri = X[global_face]
+            area = _triangle_area(tri)
+            if area <= 0.0:
+                continue
+            if master_tree is not None and _slave_face_outside_master_tube(tri, master_tree, master_max_radius, float(self.search_radius)):
+                continue
+            slave_normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            slave_norm = float(np.linalg.norm(slave_normal))
+            if slave_norm <= 0.0:
+                continue
+            slave_normal /= slave_norm
+            for qp, (weights, scale) in enumerate(zip(barycentric, weight_scale, strict=True)):
+                point = weights @ tri
+                query = self._oracle.query_normal_compatible(
+                    point,
+                    slave_normal,
+                    cache_key=(int(face_id), "compatible", int(qp)),
+                    dot_threshold=float(dot_threshold),
+                )
+                yield ContactSample(
+                    node_ids=global_face.copy(),
+                    shape_weights=weights.copy(),
+                    gap=float(query.gap),
+                    normal=query.normal.copy(),
+                    area=float(area * scale),
+                    stiffness=float(self.pressure_stiffness),
+                    master_node_ids=query.master_node_ids.astype(np.int64) + master_start,
+                    master_shape_weights=query.master_weights.copy(),
+                )
+
     def nodal_samples(self, x_current: np.ndarray):
         """Yield slave-corner contact samples with tributary face areas.
 

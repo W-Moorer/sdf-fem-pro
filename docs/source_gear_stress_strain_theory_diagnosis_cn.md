@@ -310,3 +310,108 @@ delta W_c = integral_A k < -g >_+ N delta x dA
 pytest -q tests/test_flexible_gear_implicit_lagrangian_sdf.py -k "contact_averaging or default_contact_search_radius or nodal_samples or finite_kinematic_inertia or source_drive"
 python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py --source commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp --out-dir results/source_gear_auto_radius_pressure_weight_probe_0002 --drive-mode source_inp --contact-mode penalty --hht-alpha -0.414214 --tet4-mass-kind consistent --active-faces-per-body 0 --active-patch-radius-factor 1.0 --duration 0.0002 --dt 0.00001 --pressure-stiffness 5e9 --history-frame-stride 20 --write-sfc-vtk --vtk-frame-stride 20 --vtk-scalars-only --abaqus-vtk-manifest results/source_gear_abaqus_penalty_full_stride2_match_step_0030/abaqus_vtk/abaqus_manifest.csv --source-contact-averaging slave_node --source-contact-kinematics finite_rp_corotated --source-contact-normal-filter opposing --source-contact-pair-order gear2_slave --source-internal-kinematics corotated_rp --source-stress-postprocess linear_corotated --source-rotating-inertia finite_kinematic
 ```
+
+## 本轮追加：Abaqus-style tensor-node averaging
+
+Abaqus 文档对 Mises 等派生量的语义是：先在节点处对张量分量做外推/平均，再计算不变量。旧导出器和 SFC manifest 使用的是：
+
+```text
+cell von Mises -> nodal scalar average
+```
+
+这不是等价操作。本轮已将 Abaqus VTK 导出器和 SFC VTK/history 的主字段改为：
+
+```text
+cell stress/strain tensor -> nodal tensor average -> von Mises / strain invariant
+```
+
+同时保留旧口径为诊断字段：
+
+```text
+von_mises_scalaravg
+strain_norm_scalaravg
+equivalent_elastic_strain_scalaravg
+```
+
+重导出的 Abaqus manifest：
+
+```text
+results/source_gear_abaqus_tensor_nodeavg_0002/abaqus_vtk/abaqus_manifest.csv
+```
+
+对应 SFC 短程结果：
+
+```text
+results/source_gear_tensor_nodeavg_probe_0002
+```
+
+`0.0002 s` 结果：
+
+| metric | previous scalar-nodeavg | tensor-nodeavg |
+|---|---:|---:|
+| full p95 VM rel. error | `16.731%` | `16.573%` |
+| full mean VM rel. error | `8.183%` | `8.343%` |
+| full max VM rel. error | `4.798%` | `5.308%` |
+| object 1 p95 VM rel. error | `26.278%` | `27.361%` |
+| object 2 p95 VM rel. error | `10.532%` | `10.577%` |
+
+结论：输出语义修复是必要的，但它不是当前剩余 p95 应力误差的主因。mean stress 已经低于 10%，剩余问题主要集中在 object 1 的局部 p95 应力。
+
+## 本轮追加：normal-compatible closest-feature search 诊断
+
+当前 `opposing` normal filter 的旧逻辑是：
+
+```text
+1. 找全局最近 master face；
+2. 若 master normal 与 slave normal 不相对，则丢弃该 sample。
+```
+
+这在理论上不等价于 Abaqus surface-to-surface 搜索。更一致的逻辑应是：
+
+```text
+在候选面集合中选择最近的 normal-compatible master feature。
+```
+
+本轮新增：
+
+```text
+LagrangianSDFContactOracle.query_normal_compatible(...)
+LagrangianSDFSurfaceContactGeometry.normal_compatible_samples(...)
+--source-contact-normal-filter opposing_search
+```
+
+单元测试证明该路径能在“最近面法向错误、较远面法向正确”的场景中选择正确的 opposing candidate，而不是直接丢弃 sample。
+
+但在完整齿轮全表面 `0.0002 s` 上，该 Python 诊断路径两次运行均超过 `30 min` 未完成。原因是它绕开了当前 C++ batch projection，变成逐样本 Python oracle 查询。为避免破坏正式 runner，`opposing` 仍保留为当前 C++ batch + 后验过滤路径；`opposing_search` 作为理论诊断选项保留。
+
+结论：下一层若要真正降低 object 1 p95 应力误差，应实现 C++ fused normal-compatible candidate projection kernel，而不是在 Python 层使用 `opposing_search`。
+
+## 本轮追加：symmetric two-pass 诊断
+
+为判断主面侧应力偏低是否来自单向 secondary/main 接触分配，本轮新增可选：
+
+```text
+--source-contact-pair-order symmetric_two_pass
+```
+
+其含义是两个方向各建一套 Lagrangian-SDF 接触约束，每个方向使用 `0.5 k`，避免总罚刚度翻倍。这是诊断路径，不是当前默认理论对齐路径。
+
+`0.0002 s` 结果：
+
+| metric | one-pass | symmetric two-pass |
+|---|---:|---:|
+| full p95 VM rel. error | `16.573%` | `20.282%` |
+| full mean VM rel. error | `8.343%` | `10.050%` |
+| object 1 p95 VM rel. error | `27.361%` | `28.960%` |
+| object 2 p95 VM rel. error | `10.577%` | `18.247%` |
+
+结论：当前 Abaqus 对齐不应改成 symmetric two-pass。剩余误差更可能来自 Abaqus surface-to-surface 的 constraint region / pressure smoothing / compatible feature search，而不是单纯需要双向罚接触。
+
+## 本轮验证命令
+
+```text
+pytest -q tests/test_abaqus_sphere_cantilever_export.py tests/test_flexible_gear_implicit_lagrangian_sdf.py -k "abaqus_nodeavg or node_average or compatible_samples or contact_averaging or default_contact_search_radius or nodal_samples or source_drive"
+abaqus python validation/abaqus_odb_to_vtk.py --odb results/source_gear_abaqus_penalty_full_stride2_match_step_0030/abaqus_run/gear_contact_source_penalty.odb --out-dir results/source_gear_abaqus_tensor_nodeavg_0002/abaqus_vtk --stem abaqus --time-start 0 --time-end 0.0002 --frame-stride 1 --young 2.05e11 --poisson 0.28 --scalars-only
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py --source commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp --out-dir results/source_gear_tensor_nodeavg_probe_0002 --drive-mode source_inp --contact-mode penalty --hht-alpha -0.414214 --tet4-mass-kind consistent --active-faces-per-body 0 --active-patch-radius-factor 1.0 --duration 0.0002 --dt 0.00001 --pressure-stiffness 5e9 --history-frame-stride 20 --write-sfc-vtk --vtk-frame-stride 20 --vtk-scalars-only --abaqus-vtk-manifest results/source_gear_abaqus_tensor_nodeavg_0002/abaqus_vtk/abaqus_manifest.csv --source-contact-averaging slave_node --source-contact-kinematics finite_rp_corotated --source-contact-normal-filter opposing --source-contact-pair-order gear2_slave --source-internal-kinematics corotated_rp --source-stress-postprocess linear_corotated --source-rotating-inertia finite_kinematic
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py --source commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp --out-dir results/source_gear_tensor_nodeavg_twopass_probe_0002 --drive-mode source_inp --contact-mode penalty --hht-alpha -0.414214 --tet4-mass-kind consistent --active-faces-per-body 0 --active-patch-radius-factor 1.0 --duration 0.0002 --dt 0.00001 --pressure-stiffness 5e9 --history-frame-stride 20 --write-sfc-vtk --vtk-frame-stride 20 --vtk-scalars-only --abaqus-vtk-manifest results/source_gear_abaqus_tensor_nodeavg_0002/abaqus_vtk/abaqus_manifest.csv --source-contact-averaging slave_node --source-contact-kinematics finite_rp_corotated --source-contact-normal-filter opposing --source-contact-pair-order symmetric_two_pass --source-internal-kinematics corotated_rp --source-stress-postprocess linear_corotated --source-rotating-inertia finite_kinematic
+```

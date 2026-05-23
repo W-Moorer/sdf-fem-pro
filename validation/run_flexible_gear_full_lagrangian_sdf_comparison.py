@@ -993,13 +993,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-contact-normal-filter",
-        choices=("none", "opposing"),
+        choices=("none", "opposing", "opposing_search"),
         default="none",
         help="Optional source-drive master/slave normal compatibility filter.",
     )
     parser.add_argument(
         "--source-contact-pair-order",
-        choices=("gear2_slave", "gear1_slave"),
+        choices=("gear2_slave", "gear1_slave", "symmetric_two_pass"),
         default="gear2_slave",
         help="Source-drive contact pair orientation diagnostic.",
     )

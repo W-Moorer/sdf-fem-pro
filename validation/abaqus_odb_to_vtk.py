@@ -345,9 +345,21 @@ def _write_vtk_frame(
     von_mises = [_von_mises_from_symmetric6(value) for value in stress]
     strain_norm = [_tensor_norm_from_symmetric6(value) for value in strain]
     equivalent_strain = [_equivalent_elastic_strain_from_mises(value, young=young, poisson=poisson) for value in von_mises]
-    von_mises_nodeavg = _node_average_cell_scalar(von_mises, cells, len(points))
-    strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, cells, len(points))
-    equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, cells, len(points))
+    (
+        von_mises_nodeavg,
+        strain_norm_nodeavg,
+        equivalent_strain_nodeavg,
+        von_mises_scalaravg,
+        strain_norm_scalaravg,
+        equivalent_strain_scalaravg,
+    ) = _node_averaged_tensor_invariants(
+        stress=stress,
+        strain=strain,
+        cells=cells,
+        node_count=len(points),
+        young=young,
+        poisson=poisson,
+    )
     with path.open("w", encoding="ascii", newline="\n") as handle:
         handle.write("# vtk DataFile Version 3.0\n")
         handle.write(title + "\n")
@@ -377,6 +389,9 @@ def _write_vtk_frame(
             ("von_mises_nodeavg", von_mises_nodeavg),
             ("logarithmic_strain_norm_nodeavg", strain_norm_nodeavg),
             ("equivalent_elastic_strain_nodeavg", equivalent_strain_nodeavg),
+            ("von_mises_scalaravg", von_mises_scalaravg),
+            ("logarithmic_strain_norm_scalaravg", strain_norm_scalaravg),
+            ("equivalent_elastic_strain_scalaravg", equivalent_strain_scalaravg),
         ):
             handle.write(f"SCALARS {name} float 1\n")
             handle.write("LOOKUP_TABLE default\n")
@@ -432,6 +447,70 @@ def _node_average_cell_scalar(cell_values: list[float], cells: list[list[int]], 
         if count:
             out[index] /= float(count)
     return out
+
+
+def _node_average_cell_symmetric6(
+    cell_values: list[tuple[float, ...]],
+    cells: list[list[int]],
+    node_count: int,
+) -> list[tuple[float, float, float, float, float, float]]:
+    """Return incident-cell averaged nodal symmetric tensor components.
+
+    Abaqus reports stress/strain invariants such as Mises after tensor output
+    has been extrapolated/averaged at nodes.  Averaging scalar invariants first
+    is a different nonlinear operation.  This helper keeps the manifest and VTK
+    comparison fields aligned with the tensor-then-invariant convention.
+    """
+
+    out = [[0.0] * 6 for _ in range(int(node_count))]
+    counts = [0] * int(node_count)
+    if len(cell_values) != len(cells):
+        return [tuple(values) for values in out]  # type: ignore[return-value]
+    for value, cell in zip(cell_values, cells):
+        components = [float(component) for component in tuple(value)[:6]]
+        if len(components) < 6:
+            components.extend([0.0] * (6 - len(components)))
+        for node in cell:
+            idx = int(node)
+            for component_id, component in enumerate(components):
+                out[idx][component_id] += component
+            counts[idx] += 1
+    for index, count in enumerate(counts):
+        if count:
+            inv = 1.0 / float(count)
+            out[index] = [component * inv for component in out[index]]
+    return [tuple(values) for values in out]  # type: ignore[return-value]
+
+
+def _node_averaged_tensor_invariants(
+    *,
+    stress: list[tuple[float, ...]],
+    strain: list[tuple[float, ...]],
+    cells: list[list[int]],
+    node_count: int,
+    young: float | None,
+    poisson: float | None,
+) -> tuple[list[float], list[float], list[float], list[float], list[float], list[float]]:
+    """Return node-averaged invariants and scalar-average diagnostics."""
+
+    von_mises = [_von_mises_from_symmetric6(value) for value in stress]
+    strain_norm = [_tensor_norm_from_symmetric6(value) for value in strain]
+    equivalent_strain = [_equivalent_elastic_strain_from_mises(value, young=young, poisson=poisson) for value in von_mises]
+    stress_nodeavg = _node_average_cell_symmetric6(stress, cells, node_count)
+    strain_nodeavg = _node_average_cell_symmetric6(strain, cells, node_count)
+    von_mises_nodeavg = [_von_mises_from_symmetric6(value) for value in stress_nodeavg]
+    strain_norm_nodeavg = [_tensor_norm_from_symmetric6(value) for value in strain_nodeavg]
+    equivalent_strain_nodeavg = [
+        _equivalent_elastic_strain_from_mises(value, young=young, poisson=poisson) for value in von_mises_nodeavg
+    ]
+    return (
+        von_mises_nodeavg,
+        strain_norm_nodeavg,
+        equivalent_strain_nodeavg,
+        _node_average_cell_scalar(von_mises, cells, node_count),
+        _node_average_cell_scalar(strain_norm, cells, node_count),
+        _node_average_cell_scalar(equivalent_strain, cells, node_count),
+    )
 
 
 def _percentile_or_zero(values: list[float], percentile: float) -> float:
@@ -603,9 +682,21 @@ def export_odb_to_vtk(
             equivalent_strain_values = [
                 _equivalent_elastic_strain_from_mises(value, young=young, poisson=poisson) for value in von_mises_values
             ]
-            von_mises_nodeavg = _node_average_cell_scalar(von_mises_values, cells, len(points))
-            strain_norm_nodeavg = _node_average_cell_scalar(strain_norm_values, cells, len(points))
-            equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain_values, cells, len(points))
+            (
+                von_mises_nodeavg,
+                strain_norm_nodeavg,
+                equivalent_strain_nodeavg,
+                von_mises_scalaravg,
+                strain_norm_scalaravg,
+                equivalent_strain_scalaravg,
+            ) = _node_averaged_tensor_invariants(
+                stress=stress,
+                strain=strain,
+                cells=cells,
+                node_count=len(points),
+                young=young,
+                poisson=poisson,
+            )
             object_metrics = _object_manifest_metrics(
                 object_ids=object_ids,
                 cells=cells,
@@ -652,6 +743,12 @@ def export_odb_to_vtk(
                 "mean_von_mises_nodeavg": _mean_or_zero(von_mises_nodeavg),
                 "mean_le_norm_nodeavg": _mean_or_zero(strain_norm_nodeavg),
                 "mean_equivalent_elastic_strain_nodeavg": _mean_or_zero(equivalent_strain_nodeavg),
+                "max_von_mises_scalaravg": max(von_mises_scalaravg, default=0.0),
+                "max_le_norm_scalaravg": max(strain_norm_scalaravg, default=0.0),
+                "max_equivalent_elastic_strain_scalaravg": max(equivalent_strain_scalaravg, default=0.0),
+                "p95_von_mises_scalaravg": _percentile_or_zero(von_mises_scalaravg, 95.0),
+                "p95_le_norm_scalaravg": _percentile_or_zero(strain_norm_scalaravg, 95.0),
+                "p95_equivalent_elastic_strain_scalaravg": _percentile_or_zero(equivalent_strain_scalaravg, 95.0),
             }
             manifest_row.update(_assembly_rp_manifest_metrics(frame))
             manifest_row.update(object_metrics)
