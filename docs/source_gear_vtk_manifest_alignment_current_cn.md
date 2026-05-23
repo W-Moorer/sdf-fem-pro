@@ -1003,3 +1003,89 @@ python validation\run_source_gear_vtk_regional_alignment.py `
 | max contact pressure | `4.001781e6` | `9.23529375e5` |
 
 这一步把问题进一步定位为：SFC 当前在后段保留了更大的 active 接触区域和更高局部罚压力，而 Abaqus active 区域快速收缩。论文最终若要使用该齿轮长窗口作为强对比，需要继续对齐 Abaqus 的 surface-to-surface penalty pressure distribution、active/release status 和接触面积积分口径；否则该窗口只能作为“当前诊断阶段结果”，不能作为最终精度 claim。
+
+## 更新：同口径分窗推进到 `0.5~1.0 ms`
+
+为避免重复导出已有 `0~0.5 ms` 数据，本轮使用分窗方式推进。Abaqus 侧从已有 ODB 中导出 `0.5~1.0 ms` 的 contact-field VTK；SFC 侧从 `0.5 ms` checkpoint 续跑到 `1.0 ms`。两边仍保持同一源 deck 驱动、同一 `dt=1e-5 s`、同一线性罚函数接触、隔帧 VTK 输出。
+
+Abaqus 分窗导出：
+
+```powershell
+abaqus python validation\abaqus_odb_to_vtk.py `
+  --odb results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_run\gear_contact_source_penalty.odb `
+  --out-dir results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_0005_0010 `
+  --stem abaqus `
+  --frame-stride 1 `
+  --time-start 0.0005 `
+  --time-end 0.0010 `
+  --young 2.05e11 `
+  --poisson 0.28 `
+  --scalars-only
+```
+
+SFC 续跑：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --duration 0.0010 `
+  --dt 0.00001 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --source-checkpoint results\source_gear_penalty_contact_incremental_check_sfc\source_drive_checkpoint.npz `
+  --resume-source-checkpoint `
+  --source-checkpoint-stride 20 `
+  --out-dir results\source_gear_penalty_contact_incremental_check_sfc
+```
+
+分窗序列对比：
+
+```powershell
+python validation\run_source_gear_vtk_regional_alignment.py `
+  --sfc-manifest results\source_gear_penalty_contact_incremental_check_sfc\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_0005_0010\abaqus_manifest.csv `
+  --time-tolerance 1e-9 `
+  --out-dir results\source_gear_penalty_contact_0005_0010_sequence_alignment
+```
+
+输出：
+
+- `results/source_gear_abaqus_penalty_full_stride2_match_step_0020/abaqus_vtk_contact_0005_0010/abaqus.pvd`
+- `results/source_gear_penalty_contact_incremental_check_sfc/sfc_vtk/sfc.pvd`
+- `results/source_gear_penalty_contact_0005_0010_sequence_alignment/source_gear_regional_vtk_errors.csv`
+- `results/source_gear_penalty_contact_0005_0010_sequence_alignment/source_gear_regional_p95_error_curves.png`
+- `results/source_gear_penalty_contact_0005_0010_sequence_alignment/source_gear_regional_p95_metric_curves.png`
+- `results/source_gear_penalty_contact_0005_0010_sequence_alignment/source_gear_regional_vtk_alignment_summary.md`
+
+该分窗实际配对 25 帧，Abaqus 最后一帧为约 `0.98 ms`。
+
+最新配对帧约 `0.98 ms`：
+
+| 区域 | 指标 | 节点数 | p95 相对误差 | max 相对误差 |
+| --- | --- | ---: | ---: | ---: |
+| full | displacement magnitude | 38884 | 3.992% | 3.992% |
+| full | von Mises nodeavg | 38884 | 19.084% | 0.551% |
+| full | equivalent elastic strain nodeavg | 38884 | 19.084% | 0.551% |
+| Abaqus active | displacement magnitude | 0 | 0 | 0 |
+| Abaqus active | von Mises nodeavg | 0 | 0 | 0 |
+| Abaqus active | equivalent elastic strain nodeavg | 0 | 0 | 0 |
+
+`0.5~1.0 ms` 分窗的最大 full-field p95 误差：
+
+| 指标 | 发生时间 | 最大 p95 相对误差 |
+| --- | ---: | ---: |
+| displacement magnitude | `0.5 ms` | 4.820% |
+| von Mises nodeavg | `0.64 ms` | 47.416% |
+| equivalent elastic strain nodeavg | `0.64 ms` | 47.416% |
+
+接触状态显示出更明确的口径差异：Abaqus 在 `0.94~0.98 ms` 的导出帧中 active contact nodes 已经为 `0`，而 SFC 在相同阶段仍有约 `384~492` 个 active nodes，且 max contact pressure 仍在 `3.6e6~4.1e6` 量级。这解释了为什么位移曲线仍较接近，但 stress/equivalent-strain 曲线存在阶段性差异：SFC 的罚接触释放比 Abaqus 更晚，或 active/contact pressure 分布更宽。
+
+实际量值曲线 `source_gear_regional_p95_metric_curves.png` 更清楚：位移曲线持续贴近；Abaqus 的 p95 von Mises 和 p95 equivalent strain 出现两个尖峰，而 SFC 曲线更平滑。这部分结果目前适合作为算法诊断证据，不适合作为最终“齿轮长窗口应力完全等价”claim。后续应继续修 contact release/active status 和 pressure distribution，再推进到更长窗口。
