@@ -440,6 +440,8 @@ class LagrangianSDFSurfaceContactGeometry:
         X, master_x, master_tree, master_max_radius, barycentric, weight_scale = self._prepare_sampling(x_current)
         master_faces = self.master_material.boundary_faces
         master_start = int(self.master_node_offset)
+        global_slave_faces = self.slave_faces + int(self.slave_node_offset)
+        slave_node_normals = _surface_nodal_normals(X, global_slave_faces)
         for face_id, face in enumerate(self.slave_faces):
             global_face = face + int(self.slave_node_offset)
             tri = X[global_face]
@@ -455,9 +457,15 @@ class LagrangianSDFSurfaceContactGeometry:
             slave_normal /= slave_norm
             for qp, (weights, scale) in enumerate(zip(barycentric, weight_scale, strict=True)):
                 point = weights @ tri
+                averaged_normal = weights @ slave_node_normals[global_face]
+                averaged_norm = float(np.linalg.norm(averaged_normal))
+                if averaged_norm > 1.0e-30:
+                    query_normal = averaged_normal / averaged_norm
+                else:
+                    query_normal = slave_normal
                 payload = self._secondary_projection_query(
                     point,
-                    slave_normal,
+                    query_normal,
                     master_x,
                     master_faces,
                     master_tree,
@@ -536,6 +544,19 @@ class LagrangianSDFSurfaceContactGeometry:
                     "master_weights": np.clip(bary, 0.0, 1.0),
                 }
         if best is not None:
+            # A secondary-normal line hit is only a valid contact constraint when
+            # the physical closest-feature clearance is also closed.  Otherwise a
+            # normal ray can intersect a remote, back-facing facet and create a
+            # compressive penalty over an actually open nearest surface region.
+            if float(best["gap"]) < -1.0e-14:
+                query = self._oracle.query(x, cache_key=cache_key)
+                if float(query.gap) > 1.0e-14:
+                    return {
+                        "gap": float(query.gap),
+                        "normal": query.normal,
+                        "master_node_ids": query.master_node_ids,
+                        "master_weights": query.master_weights,
+                    }
             weights = np.asarray(best["master_weights"], dtype=float)
             total = float(np.sum(weights))
             if total > 0.0:
@@ -597,11 +618,17 @@ class LagrangianSDFSurfaceContactGeometry:
         kept_triangles = triangles[keep]
         kept_areas = face_areas[keep]
         kept_normals = face_normals[keep]
+        slave_node_normals = _surface_nodal_normals(X, global_faces)
         n_quadrature = barycentric.shape[0]
         point_array = np.einsum("qa,fad->fqd", barycentric, kept_triangles).reshape((-1, 3))
         sample_nodes = np.repeat(kept_faces, n_quadrature, axis=0)
         sample_weights = np.tile(barycentric, (kept_faces.shape[0], 1))
-        sample_normals = np.repeat(kept_normals, n_quadrature, axis=0)
+        sample_normals = np.einsum("qa,fad->fqd", barycentric, slave_node_normals[kept_faces]).reshape((-1, 3))
+        sample_normal_norms = np.linalg.norm(sample_normals, axis=1)
+        normal_keep = sample_normal_norms > 1.0e-30
+        sample_normals[normal_keep] /= sample_normal_norms[normal_keep, None]
+        if np.any(~normal_keep):
+            sample_normals[~normal_keep] = np.repeat(kept_normals, n_quadrature, axis=0)[~normal_keep]
         areas = (kept_areas[:, None] * weight_scale[None, :]).reshape(-1)
         candidate_radius = float(self.search_radius) + float(master_max_radius) + 1.0e-14
         raw_candidates = master_tree.query_ball_point(point_array, candidate_radius, return_sorted=False)
@@ -1267,6 +1294,28 @@ def _triangle_area(tri: np.ndarray) -> float:
     if T.shape != (3, 3):
         raise ValueError("tri must have shape (3, 3)")
     return 0.5 * float(np.linalg.norm(np.cross(T[1] - T[0], T[2] - T[0])))
+
+
+def _surface_nodal_normals(x_current: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Return area-weighted nodal normals for an oriented triangular surface."""
+
+    X = np.asarray(x_current, dtype=float)
+    F = np.asarray(faces, dtype=np.int64)
+    if X.ndim != 2 or X.shape[1] != 3:
+        raise ValueError("x_current must have shape (n_nodes, 3)")
+    if F.ndim != 2 or F.shape[1] != 3:
+        raise ValueError("faces must have shape (n_faces, 3)")
+    normals = np.zeros_like(X, dtype=float)
+    if F.size == 0:
+        return normals
+    tri = X[F]
+    area_vectors = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    for local in range(3):
+        np.add.at(normals, F[:, local], area_vectors)
+    lengths = np.linalg.norm(normals, axis=1)
+    active = lengths > 1.0e-30
+    normals[active] /= lengths[active, None]
+    return normals
 
 
 def _triangle_barycentric_unclipped(point: np.ndarray, tri: np.ndarray) -> np.ndarray | None:

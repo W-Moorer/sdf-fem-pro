@@ -944,27 +944,6 @@ py::tuple closest_points_indexed_faces_secondary_normal(
             eval_line_candidate(static_cast<py::ssize_t>(candidate_ids(ptr)));
         }
 
-        if (found_line) {
-            const double total = best_w0 + best_w1 + best_w2;
-            if (total > 1.0e-30) {
-                best_w0 /= total;
-                best_w1 /= total;
-                best_w2 /= total;
-            }
-            g(ip) = best_gap;
-            n(ip, 0) = cnx;
-            n(ip, 1) = cny;
-            n(ip, 2) = cnz;
-            fid(ip) = best_face;
-            w(ip, 0) = best_w0;
-            w(ip, 1) = best_w1;
-            w(ip, 2) = best_w2;
-            cp(ip, 0) = best_px;
-            cp(ip, 1) = best_py;
-            cp(ip, 2) = best_pz;
-            continue;
-        }
-
         double fallback_best_dist2 = std::numeric_limits<double>::infinity();
         std::int64_t fallback_face = -1;
         double fallback_px = px, fallback_py = py, fallback_pz = pz;
@@ -1001,7 +980,39 @@ py::tuple closest_points_indexed_faces_secondary_normal(
                 fallback_nz = proj.nz;
             }
         }
-        if (fallback_face == -1 || fallback_best_dist2 > fallback_dist2) {
+        double fallback_gap = std::numeric_limits<double>::infinity();
+        bool fallback_valid = fallback_face != -1 && fallback_best_dist2 <= fallback_dist2;
+        if (fallback_valid) {
+            const double fallback_dist = std::sqrt(fallback_best_dist2);
+            const double fallback_plane =
+                (px - fallback_px) * fallback_nx + (py - fallback_py) * fallback_ny + (pz - fallback_pz) * fallback_nz;
+            fallback_gap = fallback_plane < 0.0 ? -fallback_dist : fallback_dist;
+        }
+        const bool line_overcloses_open_closest_feature =
+            found_line && best_gap < -1.0e-14 && fallback_valid && fallback_gap > 1.0e-14;
+
+        if (found_line && !line_overcloses_open_closest_feature) {
+            const double total = best_w0 + best_w1 + best_w2;
+            if (total > 1.0e-30) {
+                best_w0 /= total;
+                best_w1 /= total;
+                best_w2 /= total;
+            }
+            g(ip) = best_gap;
+            n(ip, 0) = cnx;
+            n(ip, 1) = cny;
+            n(ip, 2) = cnz;
+            fid(ip) = best_face;
+            w(ip, 0) = best_w0;
+            w(ip, 1) = best_w1;
+            w(ip, 2) = best_w2;
+            cp(ip, 0) = best_px;
+            cp(ip, 1) = best_py;
+            cp(ip, 2) = best_pz;
+            continue;
+        }
+
+        if (!fallback_valid) {
             g(ip) = std::numeric_limits<double>::infinity();
             n(ip, 0) = 0.0;
             n(ip, 1) = 0.0;
@@ -1015,10 +1026,6 @@ py::tuple closest_points_indexed_faces_secondary_normal(
             cp(ip, 2) = pz;
             continue;
         }
-        const double fallback_dist = std::sqrt(fallback_best_dist2);
-        const double fallback_plane =
-            (px - fallback_px) * fallback_nx + (py - fallback_py) * fallback_ny + (pz - fallback_pz) * fallback_nz;
-        const double fallback_gap = fallback_plane < 0.0 ? -fallback_dist : fallback_dist;
         const bool fallback_opposes_secondary = fallback_nx * snx + fallback_ny * sny + fallback_nz * snz < 0.0;
         g(ip) = fallback_gap;
         n(ip, 0) = fallback_opposes_secondary ? cnx : snx;

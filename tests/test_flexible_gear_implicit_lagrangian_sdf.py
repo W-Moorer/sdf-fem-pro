@@ -687,6 +687,43 @@ def test_secondary_normal_projection_samples_use_line_intersection_gap() -> None
     assert np.sum(sample.master_shape_weights) == pytest.approx(1.0)
 
 
+def test_secondary_normal_projection_does_not_overclose_open_closest_feature() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+            [1.0, 0.0, -0.05],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.15, 0.15, -0.1],
+            [0.15, 0.25, -0.1],
+            [0.25, 0.15, -0.1],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=False,
+    )
+
+    sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
+
+    assert sample.gap > 0.0
+
+
 def test_secondary_normal_projection_sample_arrays_match_scalar_when_cpp_available() -> None:
     if not _cpp_projection.secondary_normal_indexed_faces_available():
         pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
@@ -727,6 +764,47 @@ def test_secondary_normal_projection_sample_arrays_match_scalar_when_cpp_availab
     assert arrays["gaps"][0] == pytest.approx(scalar.gap)
     np.testing.assert_allclose(arrays["normals"][0], scalar.normal)
     np.testing.assert_allclose(arrays["master_weights"][0], scalar.master_shape_weights)
+
+
+def test_secondary_normal_projection_sample_arrays_do_not_overclose_open_closest_feature() -> None:
+    if not _cpp_projection.secondary_normal_indexed_faces_available():
+        pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+            [1.0, 0.0, -0.05],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.15, 0.15, -0.1],
+            [0.15, 0.25, -0.1],
+            [0.25, 0.15, -0.1],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=True,
+    )
+
+    arrays = contact.secondary_normal_projection_sample_arrays(np.vstack([master_nodes, slave_nodes]))
+
+    assert arrays is not None
+    assert arrays["gaps"].shape == (1,)
+    assert arrays["gaps"][0] > 0.0
 
 
 def test_contact_samples_from_arrays_preserves_payload() -> None:
