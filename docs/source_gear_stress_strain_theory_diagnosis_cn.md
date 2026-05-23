@@ -209,3 +209,104 @@ pytest -q tests/test_flexible_gear_implicit_lagrangian_sdf.py -k "finite_kinemat
 10 passed, 24 deselected
 5 passed, 31 deselected
 ```
+
+## 本轮逐项定位与通用修复
+
+本轮继续定位 `gear_contact.inp` 齿轮工况中 SFC 与 Abaqus 的应力/应变差异。诊断结论如下。
+
+### 1. 已确认的主因之一：contact broad phase 搜索半径过窄
+
+旧默认搜索半径只依赖初始法向间隙：
+
+```text
+max(2.5 * (initial_gap + 1e-5), 1e-4)
+```
+
+对于当前齿轮接触，初始最近间隙约为 `2.2915e-5 m`，旧半径被压到 `1.0e-4 m`。但齿面三角面片的 95% 边长约为 `1.108e-3 m`，局部最近特征在切向上可相隔一个面片尺度。旧半径会在 broad phase 中排除真实最近特征候选，导致后续 Lagrangian-SDF 最近点投影虽然精确，但候选集合已经不完整。
+
+修复：
+
+```text
+search_radius = max(
+    2.5 * normal_gap_envelope,
+    2.5 * surface_edge_length_p95,
+    1e-4
+)
+```
+
+该半径只用于候选裁剪，不改变最终 gap、normal、closest-feature payload 或接触 Jacobian 精度。
+
+短程 `0.0002 s` 诊断结果：
+
+| case | search radius | active nodes | min gap | p95 VM nodeavg error | mean VM nodeavg error |
+|---|---:|---:|---:|---:|---:|
+| old default | `1.0e-4` | `336` | `-8.108e-4` | `39.620%` | 未作为主指标 |
+| manual radius probe | `3.0e-3` | `536` | `-1.197e-3` | `16.813%` | `8.233%` |
+| new automatic radius | `2.771e-3` | `536` | `-1.197e-3` | `16.813%` | `8.233%` |
+
+因此第一个明确问题是：**误差不是 SDF 查询精度造成，而是候选搜索管半径理论口径过窄，提前裁掉了真实最近特征。**
+
+### 2. 已修复的虚功一致性问题：active 约束区形函数权重
+
+旧的 surface constraint aggregation 在 active 区域中：
+
+- gap 使用 `area * penetration` 等效；
+- normal 使用 `area * penetration` 权重；
+- 但 slave/master 形函数权重仍使用纯面积权重。
+
+这会让总法向力近似正确，但节点力分布和力矩不严格等价于：
+
+```text
+delta W_c = integral_A k < -g >_+ N delta x dA
+```
+
+修复后：
+
+- 接触未激活时仍用面积权重；
+- 接触激活时 slave/master shape weights 均使用 `area * penetration` 权重；
+- 因此聚合约束的节点力分布与原始积分点罚函数虚功一致。
+
+短程结果：
+
+| case | p95 VM nodeavg error | mean VM nodeavg error | max VM nodeavg error |
+|---|---:|---:|---:|
+| auto radius + old area shape weights | `16.813%` | `8.233%` | `4.798%` |
+| auto radius + pressure-weighted shape weights | `16.731%` | `8.183%` | `4.798%` |
+
+该修复不是主要误差源，但它是正确的通用理论修复，应保留。
+
+### 3. 已排除的方向
+
+下列探针没有解释剩余误差：
+
+| probe | 结论 |
+|---|---|
+| slave-node point overclosure | active nodes 降低，p95 VM 未改善 |
+| master/slave pair order reversed | p95 VM 基本不变 |
+| search radius 从 `0.003` 加到 `0.006` | 结果不变，说明候选域已覆盖 |
+| 去掉 normal compatibility filter | p95 VM 可接近 `12%`，但产生过大非物理穿透/压力，不能作为修复 |
+| finite StVK visual stress postprocess | p95 VM 从 `16.7%` 变为约 `18.0%`，不是当前主因 |
+
+### 4. 当前剩余误差定位
+
+自动候选半径和虚功一致权重修复后，`0.0002 s` 指标为：
+
+| metric | value |
+|---|---:|
+| max displacement rel. error | `0.751%` |
+| p95 VM nodeavg rel. error | `16.731%` |
+| mean VM nodeavg rel. error | `8.183%` |
+| max VM nodeavg rel. error | `4.798%` |
+| object 1 p95 VM rel. error | `26.278%` |
+| object 2 p95 VM rel. error | `10.532%` |
+| RP2 rotation rel. error | `0.739%` |
+| RP2 angular velocity rel. error | `1.446%` |
+
+剩余误差主要集中在 object 1 的 p95 应力，而 displacement、RP 运动、mean stress 和 max stress 已经较接近。下一层应继续对齐 Abaqus surface-to-surface contact 的 constraint region / pressure smoothing / stress output 语义，而不是再调接触刚度、阻尼或 SDF 查询。
+
+### 5. 本轮验证命令
+
+```text
+pytest -q tests/test_flexible_gear_implicit_lagrangian_sdf.py -k "contact_averaging or default_contact_search_radius or nodal_samples or finite_kinematic_inertia or source_drive"
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py --source commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp --out-dir results/source_gear_auto_radius_pressure_weight_probe_0002 --drive-mode source_inp --contact-mode penalty --hht-alpha -0.414214 --tet4-mass-kind consistent --active-faces-per-body 0 --active-patch-radius-factor 1.0 --duration 0.0002 --dt 0.00001 --pressure-stiffness 5e9 --history-frame-stride 20 --write-sfc-vtk --vtk-frame-stride 20 --vtk-scalars-only --abaqus-vtk-manifest results/source_gear_abaqus_penalty_full_stride2_match_step_0030/abaqus_vtk/abaqus_manifest.csv --source-contact-averaging slave_node --source-contact-kinematics finite_rp_corotated --source-contact-normal-filter opposing --source-contact-pair-order gear2_slave --source-internal-kinematics corotated_rp --source-stress-postprocess linear_corotated --source-rotating-inertia finite_kinematic
+```

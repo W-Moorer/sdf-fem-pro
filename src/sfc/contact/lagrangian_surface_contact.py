@@ -282,6 +282,166 @@ class LagrangianSDFSurfaceContactGeometry:
                     master_shape_weights=query.master_weights.copy(),
                 )
 
+    def nodal_samples(self, x_current: np.ndarray):
+        """Yield slave-corner contact samples with tributary face areas.
+
+        Abaqus surface-to-surface output reports secondary-node overclosure and
+        pressure fields.  For linear triangular surface facets, a theory-based
+        secondary-node constraint region can be represented by evaluating the
+        closest-feature gap at each slave face corner and assigning one third
+        of the incident face area to that corner.  Adjacent face-corner samples
+        can then be grouped by slave node without reducing the geometric query
+        accuracy.
+        """
+
+        arrays = self.nodal_sample_arrays(x_current)
+        if arrays is not None:
+            for idx in range(arrays["gaps"].shape[0]):
+                yield ContactSample(
+                    node_ids=arrays["sample_node_ids"][idx].copy(),
+                    shape_weights=arrays["sample_weights"][idx].copy(),
+                    gap=float(arrays["gaps"][idx]),
+                    normal=arrays["normals"][idx].copy(),
+                    area=float(arrays["areas"][idx]),
+                    stiffness=float(self.pressure_stiffness),
+                    master_node_ids=arrays["master_node_ids"][idx].copy(),
+                    master_shape_weights=arrays["master_weights"][idx].copy(),
+                )
+            return
+
+        X, _master_x, master_tree, master_max_radius, _barycentric, _weight_scale = self._prepare_sampling(x_current)
+        master_start = int(self.master_node_offset)
+        for face_id, face in enumerate(self.slave_faces):
+            global_face = face + int(self.slave_node_offset)
+            tri = X[global_face]
+            area = _triangle_area(tri)
+            if area <= 0.0:
+                continue
+            if master_tree is not None and _slave_face_outside_master_tube(tri, master_tree, master_max_radius, float(self.search_radius)):
+                continue
+            tributary = float(area / 3.0)
+            for local, node in enumerate(global_face):
+                point = X[int(node)]
+                query = self._oracle.query(point, cache_key=(int(face_id), "node", int(local)))
+                weights = np.zeros(3, dtype=float)
+                weights[int(local)] = 1.0
+                yield ContactSample(
+                    node_ids=global_face.copy(),
+                    shape_weights=weights,
+                    gap=float(query.gap),
+                    normal=query.normal.copy(),
+                    area=tributary,
+                    stiffness=float(self.pressure_stiffness),
+                    master_node_ids=query.master_node_ids.astype(np.int64) + master_start,
+                    master_shape_weights=query.master_weights.copy(),
+                )
+
+    def nodal_sample_arrays(self, x_current: np.ndarray) -> dict[str, np.ndarray] | None:
+        """Return batched slave-corner sample arrays when the compiled backend is available."""
+
+        if not (bool(self.compiled_batch_projection) and _cpp_projection_available() and _cpp_closest_points_all_faces is not None):
+            return None
+        use_indexed_projection = (
+            _cpp_closest_points_indexed_faces is not None
+            and _cpp_indexed_faces_available()
+            and self.search_radius is not None
+        )
+        needs_oracle_bvh = _cpp_closest_points_padded_aabb is not None and not use_indexed_projection
+        X, master_x, master_tree, master_max_radius, _barycentric, _weight_scale = self._prepare_sampling(
+            x_current,
+            refit_oracle=needs_oracle_bvh,
+        )
+        global_faces = self.slave_faces + int(self.slave_node_offset)
+        triangles = X[global_faces]
+        cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        face_areas = 0.5 * np.linalg.norm(cross, axis=1)
+        keep = face_areas > 0.0
+        if master_tree is not None and np.any(keep):
+            slave_centroids = np.mean(triangles, axis=1)
+            slave_radii = np.max(np.linalg.norm(triangles - slave_centroids[:, None, :], axis=2), axis=1)
+            nearest = np.asarray(master_tree.query(slave_centroids, k=1)[0], dtype=float)
+            tube_radius = float(self.search_radius) + slave_radii + float(master_max_radius)
+            keep &= nearest <= tube_radius + 1.0e-14
+        if not np.any(keep):
+            return {
+                "sample_node_ids": np.empty((0, 3), dtype=np.int64),
+                "sample_weights": np.empty((0, 3), dtype=float),
+                "gaps": np.empty(0, dtype=float),
+                "normals": np.empty((0, 3), dtype=float),
+                "areas": np.empty(0, dtype=float),
+                "master_node_ids": np.empty((0, 3), dtype=np.int64),
+                "master_weights": np.empty((0, 3), dtype=float),
+            }
+        kept_faces = global_faces[keep]
+        kept_triangles = triangles[keep]
+        kept_areas = face_areas[keep]
+        point_array = kept_triangles.reshape((-1, 3))
+        sample_nodes = np.repeat(kept_faces, 3, axis=0)
+        sample_weights = np.tile(np.eye(3, dtype=float), (kept_faces.shape[0], 1))
+        areas = np.repeat(kept_areas / 3.0, 3)
+        candidate_offsets = None
+        candidate_face_ids = None
+        if master_tree is not None and point_array.size:
+            candidate_radius = float(self.search_radius) + float(master_max_radius) + 1.0e-14
+            if use_indexed_projection:
+                raw_candidates = master_tree.query_ball_point(point_array, candidate_radius, return_sorted=False)
+                point_keep = np.fromiter((len(ids) > 0 for ids in raw_candidates), dtype=bool, count=len(raw_candidates))
+            else:
+                point_nearest = np.asarray(master_tree.query(point_array, k=1)[0], dtype=float)
+                point_keep = point_nearest <= candidate_radius
+            if not np.any(point_keep):
+                return {
+                    "sample_node_ids": np.empty((0, 3), dtype=np.int64),
+                    "sample_weights": np.empty((0, 3), dtype=float),
+                    "gaps": np.empty(0, dtype=float),
+                    "normals": np.empty((0, 3), dtype=float),
+                    "areas": np.empty(0, dtype=float),
+                    "master_node_ids": np.empty((0, 3), dtype=np.int64),
+                    "master_weights": np.empty((0, 3), dtype=float),
+                }
+            point_array = point_array[point_keep]
+            sample_nodes = sample_nodes[point_keep]
+            sample_weights = sample_weights[point_keep]
+            areas = areas[point_keep]
+            if use_indexed_projection:
+                kept_candidates = [raw_candidates[int(index)] for index in np.flatnonzero(point_keep)]
+                candidate_offsets, candidate_face_ids = _flatten_candidate_lists(kept_candidates)
+        if candidate_offsets is not None and candidate_face_ids is not None and _cpp_closest_points_indexed_faces is not None:
+            gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_indexed_faces(
+                point_array,
+                master_x,
+                self.master_material.boundary_faces,
+                candidate_offsets,
+                candidate_face_ids,
+                float(self.search_radius) if self.search_radius is not None else 0.0,
+            )
+        elif _cpp_closest_points_padded_aabb is not None:
+            bvh = self._oracle.bvh
+            gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_padded_aabb(
+                point_array,
+                master_x,
+                self.master_material.boundary_faces,
+                bvh.cell_aabb_min,
+                bvh.cell_aabb_max,
+                float(self.search_radius) if self.search_radius is not None else 0.0,
+            )
+        else:
+            gaps, normals, face_ids, master_bary, _closest = _cpp_closest_points_all_faces(
+                point_array,
+                master_x,
+                self.master_material.boundary_faces,
+            )
+        master_nodes = self.master_material.boundary_faces[np.asarray(face_ids, dtype=np.int64)] + int(self.master_node_offset)
+        return {
+            "sample_node_ids": np.asarray(sample_nodes, dtype=np.int64),
+            "sample_weights": np.asarray(sample_weights, dtype=float),
+            "gaps": np.asarray(gaps, dtype=float),
+            "normals": np.asarray(normals, dtype=float),
+            "areas": np.asarray(areas, dtype=float),
+            "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
+            "master_weights": np.asarray(master_bary, dtype=float),
+        }
+
     def sample_arrays(self, x_current: np.ndarray) -> dict[str, np.ndarray] | None:
         """Return batched sample arrays for compiled closest-feature queries."""
 

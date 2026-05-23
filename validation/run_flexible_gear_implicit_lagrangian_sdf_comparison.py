@@ -222,9 +222,11 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     if penetration_integral > 0.0:
         constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
         normal_weights = areas * penetrations / penetration_integral
+        kinematic_weights = normal_weights
     else:
         constraint_gap = float(group_weights @ gaps)
         normal_weights = group_weights
+        kinematic_weights = group_weights
     normal = np.sum(
         np.asarray([normal_weights[idx] * np.asarray(sample.normal, dtype=float) for idx, sample in enumerate(samples)], dtype=float),
         axis=0,
@@ -237,7 +239,7 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     slave_nodes, slave_weights = _combined_shape_weights(
         [np.asarray(sample.node_ids, dtype=np.int64) for sample in samples],
         [np.asarray(sample.shape_weights, dtype=float) for sample in samples],
-        group_weights,
+        kinematic_weights,
     )
     master_node_rows: list[np.ndarray] = []
     master_weight_rows: list[np.ndarray] = []
@@ -248,7 +250,7 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     master_nodes: np.ndarray | None = None
     master_weights: np.ndarray | None = None
     if len(master_node_rows) == len(samples):
-        master_nodes, master_weights = _combined_shape_weights(master_node_rows, master_weight_rows, group_weights)
+        master_nodes, master_weights = _combined_shape_weights(master_node_rows, master_weight_rows, kinematic_weights)
     return ContactSample(
         node_ids=slave_nodes,
         shape_weights=slave_weights,
@@ -1392,6 +1394,47 @@ def _triangle_normals(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return normals
 
 
+def _surface_edge_length_percentile(nodes: np.ndarray, faces: np.ndarray, percentile: float = 95.0) -> float:
+    """Return a robust contact-surface feature length from triangular faces."""
+
+    points = np.asarray(nodes, dtype=float)
+    tri = np.asarray(faces, dtype=np.int64)
+    if tri.size == 0:
+        return 0.0
+    if tri.ndim != 2 or tri.shape[1] != 3:
+        raise ValueError("faces must have shape (n_faces, 3)")
+    edges = np.concatenate(
+        [
+            np.linalg.norm(points[tri[:, 1]] - points[tri[:, 0]], axis=1),
+            np.linalg.norm(points[tri[:, 2]] - points[tri[:, 1]], axis=1),
+            np.linalg.norm(points[tri[:, 0]] - points[tri[:, 2]], axis=1),
+        ]
+    )
+    edges = edges[np.isfinite(edges) & (edges > 0.0)]
+    return float(np.percentile(edges, float(percentile))) if edges.size else 0.0
+
+
+def _default_contact_search_radius(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:
+    """Return a conservative closest-feature broad-phase radius.
+
+    The search radius is a candidate-pruning parameter only.  It must not be
+    tied solely to the initial normal gap: curved tooth surfaces can have a
+    very small closest-point gap while the relevant master facets are separated
+    tangentially by roughly one surface feature length.  Using the larger of
+    the normal gap envelope and a robust surface feature size prevents the
+    broad phase from excluding the true closest-feature candidates without
+    changing the final projection accuracy.
+    """
+
+    normal_envelope = 2.5 * max(float(pair.initial_patch_gap) + float(target_overclosure), 0.0)
+    feature_length = max(
+        _surface_edge_length_percentile(pair.gear1.nodes, pair.gear1.contact_faces),
+        _surface_edge_length_percentile(pair.gear2.nodes, pair.gear2.contact_faces),
+    )
+    feature_envelope = 2.5 * feature_length
+    return max(normal_envelope, feature_envelope, 1.0e-4)
+
+
 def _orient_faces_toward(nodes: np.ndarray, faces: np.ndarray, direction: np.ndarray) -> np.ndarray:
     out = np.asarray(faces, dtype=np.int64).copy()
     normals = _triangle_normals(nodes, out)
@@ -2074,7 +2117,7 @@ def _solve_sfc_cropped_pair_penalty_modified_newton(
         slave_node_offset=0,
         master_node_offset=n1,
         quadrature="tri3",
-        search_radius=max(2.5 * (pair.initial_patch_gap + target_overclosure), 1.0e-4),
+        search_radius=_default_contact_search_radius(pair, target_overclosure=target_overclosure),
     )
     fixed0, values0 = _fixed_conditions_for_pair(pair, closure=0.0, rotation_z=0.0)
     state, previous = initial_state_dirichlet(model, contact, gravity=0.0, fixed_dofs=fixed0, fixed_values=values0)
@@ -2503,6 +2546,8 @@ def solve_sfc_source_drive_pair(
     source_contact_averaging: str = "none",
     source_contact_kinematics: str = "linearized_mpc",
     source_contact_normal_filter: str = "none",
+    source_contact_pair_order: str = "gear2_slave",
+    source_contact_search_radius: float | None = None,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
     source_checkpoint_path: Path | None = None,
@@ -2525,21 +2570,47 @@ def solve_sfc_source_drive_pair(
     hub2 = RigidHubMPC(pair.gear2.support_nodes + n1, X, pair.gear2.rp)
     assembly = build_rigid_hub_reduced_assembly(X, [hub1, hub2], include_free_nodes=True)
     T = assembly.transformation.tocsr()
-    master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
-    contact = LagrangianSDFSurfaceContactGeometry(
-        pair.gear2.contact_faces,
-        master,
-        pair.gear1.nodes,
-        pressure_stiffness=pressure_stiffness,
-        slave_node_offset=n1,
-        master_node_offset=0,
-        quadrature="tri3",
-        search_radius=max(2.5 * (pair.initial_patch_gap + 1.0e-5), 1.0e-4),
-        compiled_batch_projection=True,
+    contact_pair_order = str(source_contact_pair_order).lower()
+    if contact_pair_order not in {"gear2_slave", "gear1_slave"}:
+        raise ValueError("source_contact_pair_order must be 'gear2_slave' or 'gear1_slave'")
+    contact_search_radius = (
+        _default_contact_search_radius(pair, target_overclosure=1.0e-5)
+        if source_contact_search_radius is None
+        else float(source_contact_search_radius)
     )
+    if contact_search_radius < 0.0:
+        raise ValueError("source_contact_search_radius must be non-negative")
+    if contact_pair_order == "gear2_slave":
+        master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
+        contact = LagrangianSDFSurfaceContactGeometry(
+            pair.gear2.contact_faces,
+            master,
+            pair.gear1.nodes,
+            pressure_stiffness=pressure_stiffness,
+            slave_node_offset=n1,
+            master_node_offset=0,
+            quadrature="tri3",
+            search_radius=contact_search_radius,
+            compiled_batch_projection=True,
+        )
+    else:
+        master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
+        contact = LagrangianSDFSurfaceContactGeometry(
+            pair.gear1.contact_faces,
+            master,
+            pair.gear2.nodes,
+            pressure_stiffness=pressure_stiffness,
+            slave_node_offset=0,
+            master_node_offset=n1,
+            quadrature="tri3",
+            search_radius=contact_search_radius,
+            compiled_batch_projection=True,
+        )
     contact_averaging = str(source_contact_averaging).lower()
-    if contact_averaging not in {"none", "slave_face", "slave_node", "surface_patch"}:
-        raise ValueError("source_contact_averaging must be 'none', 'slave_face', 'slave_node', or 'surface_patch'")
+    if contact_averaging not in {"none", "slave_face", "slave_node", "slave_node_point", "surface_patch"}:
+        raise ValueError(
+            "source_contact_averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_point', or 'surface_patch'"
+        )
     contact_kinematics = str(source_contact_kinematics).lower()
     if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
         raise ValueError("source_contact_kinematics must be 'linearized_mpc' or 'finite_rp_corotated'")
@@ -2856,7 +2927,11 @@ def solve_sfc_source_drive_pair(
             t_section = time.perf_counter()
             sample_arrays = None if (contact_averaging != "none" or contact_normal_filter != "none") else contact.sample_arrays(x_contact)
             if sample_arrays is None:
-                samples = list(contact.samples(x_contact))
+                samples = (
+                    list(contact.nodal_samples(x_contact))
+                    if contact_averaging == "slave_node_point"
+                    else list(contact.samples(x_contact))
+                )
                 if contact_normal_filter != "none":
                     samples = _filter_contact_samples_by_normal_compatibility(
                         samples,
@@ -2864,7 +2939,8 @@ def solve_sfc_source_drive_pair(
                         mode=contact_normal_filter,
                     )
                 if contact_averaging != "none":
-                    samples = _aggregate_contact_samples(samples, contact_averaging)
+                    aggregate_mode = "slave_node" if contact_averaging == "slave_node_point" else contact_averaging
+                    samples = _aggregate_contact_samples(samples, aggregate_mode)
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
                 last_samples = samples
                 last_sample_arrays = None
@@ -2975,7 +3051,11 @@ def solve_sfc_source_drive_pair(
                 else contact.sample_arrays(accepted_contact_x)
             )
             if accepted_arrays is None:
-                accepted_samples = list(contact.samples(accepted_contact_x))
+                accepted_samples = (
+                    list(contact.nodal_samples(accepted_contact_x))
+                    if contact_averaging == "slave_node_point"
+                    else list(contact.samples(accepted_contact_x))
+                )
                 if contact_normal_filter != "none":
                     accepted_samples = _filter_contact_samples_by_normal_compatibility(
                         accepted_samples,
@@ -2983,7 +3063,8 @@ def solve_sfc_source_drive_pair(
                         mode=contact_normal_filter,
                     )
                 if contact_averaging != "none":
-                    accepted_samples = _aggregate_contact_samples(accepted_samples, contact_averaging)
+                    aggregate_mode = "slave_node" if contact_averaging == "slave_node_point" else contact_averaging
+                    accepted_samples = _aggregate_contact_samples(accepted_samples, aggregate_mode)
                 last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
                 last_samples = accepted_samples
                 last_sample_arrays = None
@@ -3139,6 +3220,8 @@ def solve_sfc_source_drive_pair(
         "source_contact_averaging": contact_averaging,
         "source_contact_kinematics": contact_kinematics,
         "source_contact_normal_filter": contact_normal_filter,
+        "source_contact_pair_order": contact_pair_order,
+        "source_contact_search_radius": float(contact_search_radius),
         "source_internal_kinematics": internal_kinematics,
         "source_rotating_inertia": rotating_inertia,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
@@ -3232,7 +3315,7 @@ def solve_sfc_cropped_pair(
         slave_node_offset=0,
         master_node_offset=n1,
         quadrature="tri3",
-        search_radius=max(2.5 * (pair.initial_patch_gap + target_overclosure), 1.0e-4),
+        search_radius=_default_contact_search_radius(pair, target_overclosure=target_overclosure),
     )
     fixed0, values0 = _fixed_conditions_for_pair(pair, closure=0.0, rotation_z=0.0)
     state, previous = initial_state_dirichlet(model, contact, gravity=0.0, fixed_dofs=fixed0, fixed_values=values0)
@@ -3328,7 +3411,7 @@ def _cropped_pair_model_and_contact(
         slave_node_offset=0,
         master_node_offset=n1,
         quadrature="tri3",
-        search_radius=max(2.5 * (pair.initial_patch_gap + target_overclosure), 1.0e-4),
+        search_radius=_default_contact_search_radius(pair, target_overclosure=target_overclosure),
     )
     return model, contact
 

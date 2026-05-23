@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -17,8 +18,10 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _aggregate_contact_samples,
     _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
+    _default_contact_search_radius,
     _filter_contact_samples_by_normal_compatibility,
     _node_average_cell_scalar,
+    _surface_edge_length_percentile,
     _source_drive_corotated_elastic_matrix,
     _source_drive_corotated_positions_and_elastic_displacement,
     _source_drive_centripetal_acceleration,
@@ -33,8 +36,10 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     solve_sfc_source_drive_pair,
 )
 from sfc.contact.hard_contact import hard_contact_gap_jacobian_from_samples
+from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry
 from sfc.fem.calculix_aligned import ContactSample, MechanicsModel, MechanicsState, assemble_contact_response, stvk_internal_response
 from sfc.fem.rp_mpc import RigidHubMPC, build_rigid_hub_reduced_assembly
+from sfc.sdf.material_sdf import MaterialSDF
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
     compare_animation_manifests,
@@ -60,6 +65,30 @@ def test_node_average_cell_scalar_matches_incident_cell_average() -> None:
     assert averaged[4] == pytest.approx(5.0)
     assert averaged[5] == pytest.approx((5.0 + 11.0) / 2.0)
     assert averaged[6] == pytest.approx(11.0)
+
+
+def test_default_contact_search_radius_uses_surface_feature_size() -> None:
+    nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    pair = SimpleNamespace(
+        initial_patch_gap=1.0e-8,
+        gear1=SimpleNamespace(nodes=nodes, contact_faces=faces),
+        gear2=SimpleNamespace(nodes=nodes.copy(), contact_faces=faces.copy()),
+    )
+
+    feature = _surface_edge_length_percentile(nodes, faces)
+    radius = _default_contact_search_radius(pair, target_overclosure=0.0)
+
+    assert feature > 0.0
+    assert radius == pytest.approx(2.5 * feature)
+    assert radius > 1.0
 
 
 def test_source_force_only_contact_response_matches_full_force_response() -> None:
@@ -165,6 +194,8 @@ def test_slave_face_contact_averaging_combines_tri3_samples_without_tuning() -> 
     assert merged.gap == pytest.approx(-0.30 / 3.0)
     assert np.sum(merged.shape_weights) == pytest.approx(1.0)
     assert np.sum(merged.master_shape_weights) == pytest.approx(1.0)
+    np.testing.assert_allclose(merged.shape_weights, [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0])
+    np.testing.assert_allclose(merged.master_shape_weights, [1.0, 0.0, 0.0])
     assert merged.node_ids.tolist() == [0, 1, 2]
     assert merged.master_node_ids.tolist() == [4, 5, 6]
 
@@ -576,6 +607,7 @@ def test_slave_face_averaging_groups_by_nodes_after_filtering() -> None:
     assert len(aggregated) == 1
     assert aggregated[0].area == pytest.approx(0.5)
     assert aggregated[0].gap == pytest.approx((-1.0e-3 * 0.2 - 2.0e-3 * 0.3) / 0.5)
+    np.testing.assert_allclose(aggregated[0].shape_weights, [0.125, 0.5, 0.375])
 
 
 def test_slave_node_averaging_uses_tributary_area() -> None:
@@ -624,6 +656,42 @@ def test_contact_averaging_preserves_positive_overclosure_integral() -> None:
     assert merged.area == pytest.approx(4.0)
     assert merged.gap == pytest.approx(-0.1)
     np.testing.assert_allclose(merged.normal, [1.0, 0.0, 0.0], atol=1.0e-14)
+
+
+def test_lagrangian_surface_contact_nodal_samples_use_slave_corner_gaps() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.30],
+            [1.0, 0.0, -0.10],
+            [0.0, 1.0, 0.20],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=3,
+        master_node_offset=0,
+        compiled_batch_projection=False,
+    )
+    samples = list(contact.nodal_samples(np.vstack([master_nodes, slave_nodes])))
+
+    assert len(samples) == 3
+    np.testing.assert_allclose([sample.gap for sample in samples], [-0.30, -0.10, 0.20], atol=1.0e-12)
+    assert [int(np.asarray(sample.node_ids)[int(np.argmax(sample.shape_weights))]) for sample in samples] == [3, 4, 5]
+    assert sum(float(sample.area) for sample in samples) == pytest.approx(
+        0.5 * float(np.linalg.norm(np.cross(slave_nodes[1] - slave_nodes[0], slave_nodes[2] - slave_nodes[0])))
+    )
 
 
 def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None:
