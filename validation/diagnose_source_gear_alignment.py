@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 Row = dict[str, Any]
 
@@ -46,6 +48,21 @@ def _as_float(value: object, default: float = 0.0) -> float:
 
 def _rel_error(a: float, b: float) -> float:
     return abs(float(a) - float(b)) / max(abs(float(b)), 1.0e-30)
+
+
+def equivalent_rotation_angle_near(value: float, reference: float) -> float:
+    """Return the ``2*pi``-equivalent angle nearest to ``reference``.
+
+    Abaqus finite-rotation ``UR`` output can change branches for large rotations,
+    while the SFC reduced coordinate is an accumulated angular displacement.  A
+    direct raw subtraction can therefore report a false multi-turn error.  This
+    helper preserves the physical rotation but chooses the branch comparable to
+    the reference output.
+    """
+
+    period = 2.0 * np.pi
+    turns = round((float(value) - float(reference)) / period)
+    return float(value) - float(turns) * period
 
 
 def _first_float(row: Row, *columns: str) -> float:
@@ -121,6 +138,8 @@ def build_diagnostic_rows(
         rp1_abaqus_rotation = _first_float(abaqus, "rp1_rotation_z_rad", "rp1_rotation_z")
         rp2_sfc_rotation = _first_float(sfc, "rp2_rotation_z_rad", "rp2_rotation_z")
         rp2_abaqus_rotation = _first_float(abaqus, "rp2_rotation_z_rad", "rp2_rotation_z")
+        rp1_sfc_rotation_equiv = equivalent_rotation_angle_near(rp1_sfc_rotation, rp1_abaqus_rotation)
+        rp2_sfc_rotation_equiv = equivalent_rotation_angle_near(rp2_sfc_rotation, rp2_abaqus_rotation)
         rp1_sfc_velocity = _first_float(sfc, "rp1_angular_velocity_z_rad_per_s", "rp1_angular_velocity_z")
         rp1_abaqus_velocity = _first_float(abaqus, "rp1_angular_velocity_z_rad_per_s", "rp1_angular_velocity_z")
         rp2_sfc_velocity = _first_float(sfc, "rp2_angular_velocity_z_rad_per_s", "rp2_angular_velocity_z")
@@ -182,11 +201,17 @@ def build_diagnostic_rows(
                 if abaqus_pressure_p95 != 0.0
                 else float(sfc_pressure_p95 != 0.0),
                 "sfc_rp1_rotation_z_rad": float(rp1_sfc_rotation),
+                "sfc_rp1_rotation_z_rad_equivalent_to_abaqus": float(rp1_sfc_rotation_equiv),
                 "abaqus_rp1_rotation_z_rad": float(rp1_abaqus_rotation),
                 "rp1_rotation_z_rel_error": _rel_error(rp1_sfc_rotation, rp1_abaqus_rotation),
+                "rp1_rotation_z_equivalent_abs_error": abs(rp1_sfc_rotation_equiv - rp1_abaqus_rotation),
+                "rp1_rotation_z_equivalent_rel_error": _rel_error(rp1_sfc_rotation_equiv, rp1_abaqus_rotation),
                 "sfc_rp2_rotation_z_rad": float(rp2_sfc_rotation),
+                "sfc_rp2_rotation_z_rad_equivalent_to_abaqus": float(rp2_sfc_rotation_equiv),
                 "abaqus_rp2_rotation_z_rad": float(rp2_abaqus_rotation),
                 "rp2_rotation_z_rel_error": _rel_error(rp2_sfc_rotation, rp2_abaqus_rotation),
+                "rp2_rotation_z_equivalent_abs_error": abs(rp2_sfc_rotation_equiv - rp2_abaqus_rotation),
+                "rp2_rotation_z_equivalent_rel_error": _rel_error(rp2_sfc_rotation_equiv, rp2_abaqus_rotation),
                 "sfc_rp1_angular_velocity_z_rad_per_s": float(rp1_sfc_velocity),
                 "abaqus_rp1_angular_velocity_z_rad_per_s": float(rp1_abaqus_velocity),
                 "rp1_angular_velocity_z_rel_error": _rel_error(rp1_sfc_velocity, rp1_abaqus_velocity),
@@ -215,6 +240,7 @@ def summarize_diagnostics(rows: list[Row]) -> Row:
     worst_stress = _max_row(rows, "full_von_mises_p95_rel_error")
     worst_active = _max_row(rows, "active_union_von_mises_p95_rel_error")
     worst_rp2_rotation = _max_row(rows, "rp2_rotation_z_rel_error")
+    worst_rp2_rotation_equiv = _max_row(rows, "rp2_rotation_z_equivalent_abs_error")
     worst_pressure = _max_row(rows, "p95_contact_pressure_rel_error")
     latest_displacement_ok = _as_float(latest.get("full_displacement_p95_rel_error")) <= 0.10
     latest_stress_ok = _as_float(latest.get("full_von_mises_p95_rel_error")) <= 0.10
@@ -232,6 +258,8 @@ def summarize_diagnostics(rows: list[Row]) -> Row:
         "latest_sfc_active_contact_nodes": int(latest.get("sfc_active_contact_nodes", 0) or 0),
         "latest_abaqus_active_contact_nodes": int(latest.get("abaqus_active_contact_nodes", 0) or 0),
         "latest_rp2_rotation_z_rel_error": _as_float(latest.get("rp2_rotation_z_rel_error")),
+        "latest_rp2_rotation_z_equivalent_abs_error": _as_float(latest.get("rp2_rotation_z_equivalent_abs_error")),
+        "latest_rp2_rotation_z_equivalent_rel_error": _as_float(latest.get("rp2_rotation_z_equivalent_rel_error")),
         "latest_rp2_angular_velocity_z_rel_error": _as_float(latest.get("rp2_angular_velocity_z_rel_error")),
         "worst_full_von_mises_p95_rel_error": _as_float(worst_stress.get("full_von_mises_p95_rel_error")),
         "worst_full_von_mises_time": _as_float(worst_stress.get("time")),
@@ -241,6 +269,10 @@ def summarize_diagnostics(rows: list[Row]) -> Row:
         "worst_active_union_von_mises_time": _as_float(worst_active.get("time")),
         "worst_rp2_rotation_z_rel_error": _as_float(worst_rp2_rotation.get("rp2_rotation_z_rel_error")),
         "worst_rp2_rotation_z_error_time": _as_float(worst_rp2_rotation.get("time")),
+        "worst_rp2_rotation_z_equivalent_abs_error": _as_float(
+            worst_rp2_rotation_equiv.get("rp2_rotation_z_equivalent_abs_error")
+        ),
+        "worst_rp2_rotation_z_equivalent_abs_error_time": _as_float(worst_rp2_rotation_equiv.get("time")),
         "worst_p95_contact_pressure_rel_error": _as_float(worst_pressure.get("p95_contact_pressure_rel_error")),
         "worst_p95_contact_pressure_error_time": _as_float(worst_pressure.get("time")),
         "latest_displacement_pass_10pct": int(latest_displacement_ok),
@@ -265,6 +297,8 @@ def write_summary(path: Path, summary: Row, rows: list[Row], *, csv_path: Path) 
         f"- full strain-norm p95 rel. error: `{100.0 * _as_float(latest.get('full_strain_norm_p95_rel_error')):.3f}%`",
         f"- active contact nodes: SFC `{int(latest.get('sfc_active_contact_nodes', 0) or 0)}`, Abaqus `{int(latest.get('abaqus_active_contact_nodes', 0) or 0)}`",
         f"- RP2 rotation rel. error: `{100.0 * _as_float(latest.get('rp2_rotation_z_rel_error')):.3f}%`",
+        f"- RP2 equivalent-branch rotation abs. error: `{_as_float(latest.get('rp2_rotation_z_equivalent_abs_error')):.6g} rad`",
+        f"- RP2 equivalent-branch rotation rel. error: `{100.0 * _as_float(latest.get('rp2_rotation_z_equivalent_rel_error')):.3f}%`",
         f"- RP2 angular velocity rel. error: `{100.0 * _as_float(latest.get('rp2_angular_velocity_z_rel_error')):.3f}%`",
         "",
         "## Worst Errors",
@@ -272,6 +306,7 @@ def write_summary(path: Path, summary: Row, rows: list[Row], *, csv_path: Path) 
         f"- worst full von Mises p95 rel. error: `{100.0 * _as_float(summary.get('worst_full_von_mises_p95_rel_error')):.3f}%` at `{_as_float(summary.get('worst_full_von_mises_time')):.12g} s`",
         f"- worst active-union von Mises p95 rel. error: `{100.0 * _as_float(summary.get('worst_active_union_von_mises_p95_rel_error')):.3f}%` at `{_as_float(summary.get('worst_active_union_von_mises_time')):.12g} s`",
         f"- worst RP2 rotation rel. error: `{100.0 * _as_float(summary.get('worst_rp2_rotation_z_rel_error')):.3f}%` at `{_as_float(summary.get('worst_rp2_rotation_z_error_time')):.12g} s`",
+        f"- worst RP2 equivalent-branch rotation abs. error: `{_as_float(summary.get('worst_rp2_rotation_z_equivalent_abs_error')):.6g} rad` at `{_as_float(summary.get('worst_rp2_rotation_z_equivalent_abs_error_time')):.12g} s`",
         f"- worst p95 contact-pressure rel. error: `{100.0 * _as_float(summary.get('worst_p95_contact_pressure_rel_error')):.3f}%` at `{_as_float(summary.get('worst_p95_contact_pressure_error_time')):.12g} s`",
         "",
         "## Diagnosis",
@@ -287,9 +322,9 @@ def write_summary(path: Path, summary: Row, rows: list[Row], *, csv_path: Path) 
         lines.append(
             "- 末帧 active contact 节点数不一致，说明 contact status/release 与 pressure history 尚未对齐；这会直接改变后续应力波和齿根应力趋势。"
         )
-    if _as_float(latest.get("rp2_rotation_z_rel_error")) > 0.10:
+    if _as_float(latest.get("rp2_rotation_z_equivalent_rel_error")) > 0.10:
         lines.append(
-            "- 受转矩驱动的 RP2 转角误差超过 10%，需要优先检查 Abaqus *MPC, BEAM 的有限转动/等效虚功反力口径，而不是调接触刚度。"
+            "- 按有限转动等效分支折返后，受转矩驱动的 RP2 转角误差仍超过 10%；需要优先检查 Abaqus *MPC, BEAM 的有限转动/等效虚功反力口径，而不是调接触刚度。"
         )
     if not lines[-1].startswith("-"):
         lines.append("- 当前未发现单一主导项，建议继续查看逐帧 CSV。")

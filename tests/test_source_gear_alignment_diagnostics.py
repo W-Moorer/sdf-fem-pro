@@ -4,13 +4,24 @@ import csv
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from validation.diagnose_source_gear_alignment import build_diagnostic_rows, run_diagnostics, summarize_diagnostics
+from validation.diagnose_source_gear_alignment import (
+    build_diagnostic_rows,
+    equivalent_rotation_angle_near,
+    run_diagnostics,
+    summarize_diagnostics,
+)
+
+
+def test_equivalent_rotation_angle_near_matches_abaqus_finite_rotation_branch() -> None:
+    assert equivalent_rotation_angle_near(9.2, 2.5) == pytest.approx(9.2 - 2.0 * np.pi)
+    assert equivalent_rotation_angle_near(4.0, 3.9) == pytest.approx(4.0)
 
 
 def _write_manifest_pair(tmp_path: Path) -> tuple[Path, Path]:
@@ -68,6 +79,7 @@ def test_build_diagnostic_rows_combines_rp_contact_and_field_errors(tmp_path: Pa
     assert final["full_von_mises_p95_rel_error"] == pytest.approx(0.184)
     assert final["full_strain_norm_p95_rel_error"] == pytest.approx(0.098)
     assert final["rp2_rotation_z_rel_error"] == pytest.approx(abs(9.2 - 2.5) / 2.5)
+    assert final["rp2_rotation_z_equivalent_abs_error"] == pytest.approx(abs(9.2 - 2.0 * np.pi - 2.5))
     assert final["p95_contact_pressure_rel_error"] == pytest.approx(1.0)
 
 

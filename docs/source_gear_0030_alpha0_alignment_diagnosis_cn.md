@@ -50,6 +50,7 @@ python validation\diagnose_source_gear_alignment.py `
 | max contact pressure | `0` | `5.660279e5` | `100%` |
 | RP1 rotation z | `0.15708 rad` | `0.1570799947 rad` | `3.39e-6%` |
 | RP2 rotation z | `9.197807 rad` | `2.575642 rad` | `257.107%` |
+| RP2 equivalent-branch rotation z | `2.914622 rad` | `2.575642 rad` | `13.161%` |
 | RP2 angular velocity z | `6156.638 rad/s` | `5771.216 rad/s` | `6.678%` |
 
 ## 最大误差位置
@@ -59,6 +60,7 @@ python validation\diagnose_source_gear_alignment.py `
 | full von Mises p95 | `742.299%` | `0.00042 s` |
 | active-union von Mises p95 | `2225.597%` | `0.00042 s` |
 | RP2 rotation z | `211404.929%` | `0.00252 s` |
+| RP2 equivalent-branch rotation z | `0.338980 rad` absolute error | `0.003 s` |
 | p95 contact pressure | `100%` | `2.0e-5 s` |
 
 ## 结论
@@ -69,9 +71,13 @@ RP 角速度强约束，整体位移 p95 很容易被驱动条件拉到低误差
 
 当前失败点已经收敛到两类：
 
-1. **RP2 转矩驱动响应不一致。**
-   RP1 角速度对齐，但 RP2 转角在末帧差异达到 `257.107%`。这说明需要优先
-   检查 Abaqus `*MPC, BEAM` 的有限转动、转动惯量、约束反力和等效虚功口径。
+1. **RP2 转矩驱动响应仍有差异，但 raw 转角误差不能直接解释。**
+   RP1 角速度对齐。RP2 raw 转角在末帧看似差异达到 `257.107%`，但这是因为
+   Abaqus `nlgeom=YES` 下 `UR` 是有限转动输出，会在大转角时改变 `2π` 分支；
+   SFC manifest 记录的是累计 reduced 角位移。把 SFC 转角折返到最接近 Abaqus
+   `UR` 的等效分支后，末帧 RP2 转角误差为 `0.338980 rad`，相对误差
+   `13.161%`。因此 RP2 动力学仍需对齐，但不能再把 raw `257%` 当成真实物理误差。
+   下一步应检查 Abaqus `*MPC, BEAM` 的有限转动、转动惯量、约束反力和等效虚功口径。
 
 2. **接触状态和压力历史不一致。**
    末帧 SFC active contact nodes 为 `0`，Abaqus 为 `88`；SFC 最大接触压力为
