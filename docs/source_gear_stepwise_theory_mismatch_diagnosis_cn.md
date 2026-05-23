@@ -488,3 +488,67 @@ python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
 2. master 侧需要在该 region 的投影范围内形成唯一等效主面 support，而不是逐候选面片重复累加；
 3. 求解用的 RF/虚功等价与输出用的 CPRESS 节点平滑必须分开对齐；
 4. 齿轮验收仍以 `source_gear_tensoravg_slave_node_region_secondary_probe_0002` 一类 full-patch 窗口为主，因为 128-face patch 位移误差过大，不能代表最终精度。
+
+## 本轮关键复核：secondary-line 必须在相同步长口径下比较
+
+之前的 C++ `secondary_line` 诊断使用了 `dt=1e-4`、2 个增量，因此它与当前最优 full-patch 窗口 `dt=1e-5`、20 个增量并不是同口径比较。该设置曾显示 p95 应力低于 10%，但位移误差约 29%，不能作为理论结论。
+
+本轮按相同 Abaqus/SFC 时间离散口径重新运行：
+
+```text
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
+  --out-dir results/source_gear_secondary_line_dt1e5_probe_0002 \
+  --active-faces-per-body 11560 \
+  --duration 0.0002 \
+  --dt 0.00001 \
+  --drive-mode source_inp \
+  --pressure-stiffness 5.0e9 \
+  --contact-mode penalty \
+  --history-frame-stride 20 \
+  --write-sfc-vtk \
+  --vtk-frame-stride 20 \
+  --vtk-scalars-only \
+  --source-stress-postprocess linear_corotated \
+  --source-contact-averaging slave_node_region \
+  --source-contact-kinematics finite_rp_corotated \
+  --source-contact-normal-filter opposing \
+  --source-contact-direction secondary_average \
+  --source-contact-projection secondary_line \
+  --source-contact-pair-order gear2_slave \
+  --source-internal-kinematics corotated_rp \
+  --source-rotating-inertia finite_kinematic \
+  --abaqus-vtk-manifest results/source_gear_abaqus_penalty_tensor_nodeavg_0002/abaqus_vtk/abaqus_manifest.csv
+```
+
+同口径结果：
+
+| metric | relative error |
+| --- | ---: |
+| max displacement magnitude | `2.589%` |
+| p95 node-averaged von Mises | `4.243%` |
+| p95 node-averaged equivalent elastic strain | `4.243%` |
+
+关键场量：
+
+| field | SFC | Abaqus |
+| --- | ---: | ---: |
+| max displacement magnitude | `9.477863e-4` | `9.238693e-4` |
+| p95 node-averaged von Mises | `7.038737e6` | `7.350606e6` |
+| p95 node-averaged equivalent elastic strain | `2.929946e-5` | `3.059765e-5` |
+
+接触诊断：
+
+| quantity | value |
+| --- | ---: |
+| SFC wall time | `298.927 s` |
+| final active contact samples | `285` |
+| final normal force | `370.535` |
+| final min gap | `-1.308073e-3` |
+
+结论：
+
+1. 对当前 `0.0002 s` full-patch 齿轮短程窗口，Abaqus 理论更一致的 `secondary_average + secondary_line + slave_node_region` 在同一步长口径下已经使位移、应力、应变三个主验收曲线全部进入 `<10%`。
+2. 之前把 `secondary_line` 判为不可接受，主要混入了不同时间步长造成的积分误差；这不是接触理论本身失败。
+3. 当前最合理的短程验收路径应从 `secondary_average + closest_feature` 更新为 `secondary_average + secondary_line`。
+4. footprint clipping 仍保留为局部覆盖平面/Q4 接触的必要修正，但它不是齿轮曲面误差的主修复路径。
+5. 下一步应在更长时间窗口和更多场景上验证该同口径结论，并继续区分求解曲线误差和 Abaqus `CPRESS` 输出平滑误差；当前结果只证明短程位移/应力/应变曲线过线，不能宣称所有长程/所有接触压力云图已完全对齐。
