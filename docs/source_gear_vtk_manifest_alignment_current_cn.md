@@ -909,3 +909,97 @@ python validation\run_source_gear_vtk_regional_alignment.py `
 `0~2e-4 s` 过程中，full-field 位移 p95 误差始终保持在约 `1.4%` 以内，说明源 deck 驱动、弧度制角速度、时间步长和整体运动对齐仍然成立。但 von Mises / equivalent elastic strain 从 `1.6e-4 s` 后开始快速偏离，到 `2e-4 s` 达到约 `39.7%`。接触状态也开始出现差异：末帧 SFC active contact nodes 为 `381`，Abaqus active contact nodes 为 `466`；SFC max contact pressure 为 `3.925976e6`，Abaqus max contact pressure 为 `5.8205955e6`。这进一步定位了后续误差来源：需要优先对齐 penalty contact pressure distribution、active/release status 和接触面积积分口径，而不是继续修改驱动或时间步长。
 
 曲线图已改为 ms 横轴并限制刻度数量，避免角标/刻度遮挡曲线；图例保持在图外，适合后续放入论文草图。
+
+## 更新：同口径序列推进到 `5e-4 s`
+
+已继续将同口径 contact-field 序列推进到 `5e-4 s`。Abaqus 侧仍复用已有 ODB 进行 VTK 后处理，不重新运行求解；SFC 侧从 `2e-4 s` checkpoint 续跑到 `5e-4 s`。两边均使用同一源 `gear_contact.inp` 的 RP/MPC、角速度、力矩、材料、网格和边界条件，只将接触统一为线性罚函数并使用当前 SFC 积分/接触实现。
+
+Abaqus 导出命令：
+
+```powershell
+abaqus python validation\abaqus_odb_to_vtk.py `
+  --odb results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_run\gear_contact_source_penalty.odb `
+  --out-dir results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_0005 `
+  --stem abaqus `
+  --frame-stride 1 `
+  --time-start 0.0 `
+  --time-end 0.0005 `
+  --young 2.05e11 `
+  --poisson 0.28 `
+  --scalars-only
+```
+
+SFC 续跑命令：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --duration 0.0005 `
+  --dt 0.00001 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --source-checkpoint results\source_gear_penalty_contact_incremental_check_sfc\source_drive_checkpoint.npz `
+  --resume-source-checkpoint `
+  --source-checkpoint-stride 20 `
+  --out-dir results\source_gear_penalty_contact_incremental_check_sfc
+```
+
+序列对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_regional_alignment.py `
+  --sfc-manifest results\source_gear_penalty_contact_incremental_check_sfc\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_0005\abaqus_manifest.csv `
+  --time-tolerance 1e-9 `
+  --out-dir results\source_gear_penalty_contact_0005_sequence_alignment
+```
+
+输出：
+
+- `results/source_gear_abaqus_penalty_full_stride2_match_step_0020/abaqus_vtk_contact_0005/abaqus.pvd`
+- `results/source_gear_penalty_contact_incremental_check_sfc/sfc_vtk/sfc.pvd`
+- `results/source_gear_penalty_contact_0005_sequence_alignment/source_gear_regional_vtk_errors.csv`
+- `results/source_gear_penalty_contact_0005_sequence_alignment/source_gear_regional_p95_error_curves.png`
+- `results/source_gear_penalty_contact_0005_sequence_alignment/source_gear_regional_p95_metric_curves.png`
+- `results/source_gear_penalty_contact_0005_sequence_alignment/source_gear_regional_vtk_alignment_summary.md`
+
+注意：Abaqus 当前 ODB 在 `0~5e-4 s` 时间窗内实际输出到 `4.8e-4 s`，因此序列对比自动配到 25 帧；SFC 额外的 `5e-4 s` 帧保留在 VTK/PVD 中，但不强行与缺失的 Abaqus 帧比较。
+
+`4.8e-4 s` 最新配对帧区域化误差：
+
+| 区域 | 指标 | 节点数 | p95 相对误差 | max 相对误差 |
+| --- | --- | ---: | ---: | ---: |
+| full | displacement magnitude | 38884 | 4.820% | 4.821% |
+| full | von Mises nodeavg | 38884 | 0.478% | 2.447% |
+| full | equivalent elastic strain nodeavg | 38884 | 0.478% | 2.447% |
+| Abaqus active | displacement magnitude | 97 | 4.817% | 4.817% |
+| Abaqus active | von Mises nodeavg | 97 | 647.604% | 639.283% |
+| Abaqus active | equivalent elastic strain nodeavg | 97 | 647.604% | 639.283% |
+
+`0~4.8e-4 s` 过程中的最大 full-field p95 误差：
+
+| 指标 | 发生时间 | 最大 p95 相对误差 |
+| --- | ---: | ---: |
+| displacement magnitude | `4.8e-4 s` | 4.820% |
+| von Mises nodeavg | `3.0e-4 s` | 50.533% |
+| equivalent elastic strain nodeavg | `3.0e-4 s` | 50.533% |
+
+新增实际量值曲线图 `source_gear_regional_p95_metric_curves.png`，直接绘制 SFC 与 Abaqus 的 full-field p95 displacement、p95 von Mises 和 p95 equivalent strain。该图比误差曲线更适合论文展示：位移曲线基本贴合；von Mises / equivalent strain 在 `0.18~0.30 ms` 区间出现明显分叉，随后又重新接近。这说明运动学和整体位移仍然对齐，但中间接触压力/active set 演化导致应力能量分配存在阶段性差异。
+
+`4.8e-4 s` 附近的接触状态：
+
+| 项目 | SFC | Abaqus |
+| --- | ---: | ---: |
+| latest paired time | `4.8e-4 s` | `4.799999878741801e-4 s` |
+| active contact nodes | 445 | 97 |
+| max contact pressure | `4.001781e6` | `9.23529375e5` |
+
+这一步把问题进一步定位为：SFC 当前在后段保留了更大的 active 接触区域和更高局部罚压力，而 Abaqus active 区域快速收缩。论文最终若要使用该齿轮长窗口作为强对比，需要继续对齐 Abaqus 的 surface-to-surface penalty pressure distribution、active/release status 和接触面积积分口径；否则该窗口只能作为“当前诊断阶段结果”，不能作为最终精度 claim。

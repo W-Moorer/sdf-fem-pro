@@ -338,6 +338,67 @@ def _write_curve_plot(path: Path, rows: list[Row]) -> Path | None:
     return path
 
 
+def _write_metric_curve_plot(path: Path, rows: list[Row]) -> Path | None:
+    """Write full-field SFC/Abaqus p95 metric curves."""
+
+    try:
+        import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    metrics = (
+        ("displacement_magnitude", "p95 displacement"),
+        ("von_mises_nodeavg", "p95 von Mises"),
+        ("equivalent_elastic_strain_nodeavg", "p95 equiv. strain"),
+    )
+    full_rows = [row for row in rows if str(row["region"]) == "full"]
+    max_time = max((float(row["sfc_time"]) for row in full_rows), default=0.0)
+    if 0.0 < max_time <= 1.0e-3:
+        time_scale = 1.0e3
+        time_label = "time (ms)"
+    else:
+        time_scale = 1.0
+        time_label = "time (s)"
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "axes.titlesize": 10,
+            "axes.labelsize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "legend.fontsize": 7,
+        }
+    )
+    fig, axes = plt.subplots(1, len(metrics), figsize=(8.0, 2.7))
+    for axis, (metric, title) in zip(axes, metrics):
+        series = [row for row in full_rows if str(row["metric"]) == metric]
+        series.sort(key=lambda row: float(row["sfc_time"]))
+        if not series:
+            continue
+        x_values = [time_scale * float(row["sfc_time"]) for row in series]
+        axis.plot(x_values, [float(row["sfc_p95"]) for row in series], marker="o", linewidth=1.35, markersize=3.0, label="SFC")
+        axis.plot(
+            x_values,
+            [float(row["abaqus_p95"]) for row in series],
+            marker="s",
+            linewidth=1.25,
+            markersize=2.8,
+            linestyle="--",
+            label="Abaqus",
+        )
+        axis.set_title(title)
+        axis.set_xlabel(time_label)
+        axis.xaxis.set_major_locator(plt.MaxNLocator(5))
+        axis.grid(True, alpha=0.28)
+    axes[0].set_ylabel("p95 value")
+    axes[-1].legend(loc="best", frameon=False)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+    return path
+
+
 def _latest_rows(rows: list[Row]) -> list[Row]:
     if not rows:
         return []
@@ -355,7 +416,14 @@ def _max_p95_rows(rows: list[Row]) -> list[Row]:
     return list(selected.values())
 
 
-def _write_summary(path: Path, rows: list[Row], *, csv_path: Path, curve_path: Path | None = None) -> None:
+def _write_summary(
+    path: Path,
+    rows: list[Row],
+    *,
+    csv_path: Path,
+    curve_path: Path | None = None,
+    metric_curve_path: Path | None = None,
+) -> None:
     final_rows = [row for row in _latest_rows(rows) if row["region"] in {"full", "abaqus_active"}]
     max_rows = [row for row in _max_p95_rows(rows) if row["region"] in {"full", "abaqus_active"}]
     lines = [
@@ -366,6 +434,7 @@ def _write_summary(path: Path, rows: list[Row], *, csv_path: Path, curve_path: P
         "",
         f"- CSV: `{csv_path.name}`",
         f"- p95 error curves: `{curve_path.name}`" if curve_path is not None else "- p95 error curves: not generated",
+        f"- p95 metric curves: `{metric_curve_path.name}`" if metric_curve_path is not None else "- p95 metric curves: not generated",
         f"- paired frames: `{len(set(str(row.get('pair_index', 0)) for row in rows))}`",
         "",
         "## Latest Paired Frame",
@@ -454,12 +523,15 @@ def main(argv: list[str] | None = None) -> int:
     csv_path = out_dir / "source_gear_regional_vtk_errors.csv"
     summary_path = out_dir / "source_gear_regional_vtk_alignment_summary.md"
     curve_path = _write_curve_plot(out_dir / "source_gear_regional_p95_error_curves.png", rows)
+    metric_curve_path = _write_metric_curve_plot(out_dir / "source_gear_regional_p95_metric_curves.png", rows)
     _write_csv(csv_path, rows)
-    _write_summary(summary_path, rows, csv_path=csv_path, curve_path=curve_path)
+    _write_summary(summary_path, rows, csv_path=csv_path, curve_path=curve_path, metric_curve_path=metric_curve_path)
     print(f"CSV: {csv_path}")
     print(f"Summary: {summary_path}")
     if curve_path is not None:
         print(f"Curves: {curve_path}")
+    if metric_curve_path is not None:
+        print(f"Metric curves: {metric_curve_path}")
     return 0
 
 
