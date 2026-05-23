@@ -280,6 +280,13 @@ def _write_curve_plot(path: Path, rows: list[Row]) -> Path | None:
         "equivalent_elastic_strain_nodeavg",
     )
     regions = ("full", "abaqus_active")
+    max_time = max((float(row["sfc_time"]) for row in rows), default=0.0)
+    if 0.0 < max_time <= 1.0e-3:
+        time_scale = 1.0e3
+        time_label = "time (ms)"
+    else:
+        time_scale = 1.0
+        time_label = "time (s)"
     plt.rcParams.update(
         {
             "font.family": "serif",
@@ -307,7 +314,7 @@ def _write_curve_plot(path: Path, rows: list[Row]) -> Path | None:
             if not series:
                 continue
             (line,) = axis.plot(
-                [float(row["sfc_time"]) for row in series],
+                [time_scale * float(row["sfc_time"]) for row in series],
                 [100.0 * float(row["p95_rel_error"]) for row in series],
                 marker="o",
                 linewidth=1.4,
@@ -319,7 +326,8 @@ def _write_curve_plot(path: Path, rows: list[Row]) -> Path | None:
                 legend_handles.append(line)
                 legend_labels.append(label)
         axis.set_title(region.replace("_", " "))
-        axis.set_xlabel("time (s)")
+        axis.set_xlabel(time_label)
+        axis.xaxis.set_major_locator(plt.MaxNLocator(5))
         axis.grid(True, alpha=0.28)
     axes[0].set_ylabel("p95 relative error (%)")
     fig.legend(legend_handles, legend_labels, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.02))
