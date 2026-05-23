@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,8 +12,10 @@ if str(ROOT) not in sys.path:
 
 from validation.run_flexible_gear_explicit_sdf_comparison import (
     DEFAULT_SOURCE,
+    GearMesh,
     build_explicit_input_text,
     parse_gear_input,
+    _faces_from_surface_entries,
 )
 
 
@@ -38,6 +41,40 @@ def test_parse_flexible_gear_input_extracts_contact_and_hub_data() -> None:
     assert model.dynamic_min_dt == pytest.approx(1.0e-10)
     assert model.dynamic_max_dt == pytest.approx(5.0e-5)
     assert model.contact_pressure_overclosure == "HARD"
+
+
+def test_c3d4_surface_entries_use_abaqus_face_node_order() -> None:
+    mesh = GearMesh(
+        nodes=np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        node_labels=np.asarray([1, 2, 3, 4], dtype=np.int64),
+        label_to_index={1: 0, 2: 1, 3: 2, 4: 3},
+        elements=np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        element_labels=np.asarray([10], dtype=np.int64),
+        element_label_to_index={10: 0},
+    )
+
+    faces = _faces_from_surface_entries(mesh, ((10, "S1"), (10, "S2"), (10, "S3"), (10, "S4")))
+
+    np.testing.assert_array_equal(
+        faces,
+        np.asarray(
+            [
+                [0, 1, 2],
+                [0, 3, 1],
+                [1, 3, 2],
+                [2, 3, 0],
+            ],
+            dtype=np.int64,
+        ),
+    )
 
 
 def test_compact_explicit_deck_uses_penalty_linear_contact() -> None:

@@ -40,6 +40,7 @@ from sfc.contact.hard_contact import hard_contact_gap_jacobian_from_samples
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry
 from sfc.fem.calculix_aligned import ContactSample, MechanicsModel, MechanicsState, assemble_contact_response, stvk_internal_response
 from sfc.fem.rp_mpc import RigidHubMPC, build_rigid_hub_reduced_assembly
+from sfc.sdf import _cpp_projection
 from sfc.sdf.material_sdf import MaterialSDF
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
@@ -751,6 +752,86 @@ def test_normal_compatible_samples_choose_nearest_opposing_candidate() -> None:
     assert compatible.master_node_ids.tolist() == [3, 4, 5]
     assert regular.gap == pytest.approx(0.01)
     assert compatible.gap == pytest.approx(-0.11)
+
+
+def test_normal_compatible_sample_arrays_match_sample_payload_when_cpp_available() -> None:
+    if not _cpp_projection.normal_compatible_indexed_faces_available():
+        pytest.skip("C++ normal-compatible indexed projection backend is unavailable")
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.1],
+            [0.0, 1.0, -0.1],
+            [1.0, 0.0, -0.1],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.01],
+            [1.0, 0.0, 0.01],
+            [0.0, 1.0, 0.01],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=0.2,
+        compiled_batch_projection=True,
+    )
+
+    arrays = contact.normal_compatible_sample_arrays(np.vstack([master_nodes, slave_nodes]))
+
+    assert arrays is not None
+    assert arrays["gaps"].shape == (1,)
+    assert arrays["master_node_ids"].tolist() == [[3, 4, 5]]
+    assert arrays["gaps"][0] == pytest.approx(-0.11)
+
+
+def test_normal_compatible_sample_arrays_drop_incompatible_cpp_candidates() -> None:
+    if not _cpp_projection.normal_compatible_indexed_faces_available():
+        pytest.skip("C++ normal-compatible indexed projection backend is unavailable")
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.01],
+            [1.0, 0.0, 0.01],
+            [0.0, 1.0, 0.01],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=0.2,
+        compiled_batch_projection=True,
+    )
+
+    arrays = contact.normal_compatible_sample_arrays(np.vstack([master_nodes, slave_nodes]))
+
+    assert arrays is not None
+    assert arrays["gaps"].shape == (0,)
+    assert arrays["master_node_ids"].shape == (0, 3)
 
 
 def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None:

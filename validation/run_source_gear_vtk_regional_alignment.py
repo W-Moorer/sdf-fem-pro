@@ -33,6 +33,11 @@ CONTACT_FIELDS = (
     "contact_penetration_nodeavg",
     "contact_active_node",
 )
+CONTACT_FIELD_PAIRS = (
+    ("contact_pressure_nodeavg", "contact_pressure_nodeavg", "contact_pressure_nodeavg"),
+    ("contact_penetration_nodeavg", "contact_penetration_nodeavg", "contact_penetration_nodeavg"),
+    ("contact_active_node", "contact_active_node", "contact_active_node"),
+)
 REQUIRED_POINT_SCALARS = tuple(sorted({name for pair in FIELD_PAIRS for name in pair[:2]} | set(CONTACT_FIELDS)))
 
 
@@ -118,6 +123,34 @@ def _percentile(values: np.ndarray, percentile: float) -> float:
     return float(np.percentile(values.astype(float), float(percentile)))
 
 
+def _rmse_rel(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    diff = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    denom = float(np.sqrt(np.mean(np.asarray(b, dtype=float) ** 2)))
+    return float(np.sqrt(np.mean(diff ** 2)) / max(denom, 1.0e-30))
+
+
+def _correlation(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size < 2 or b.size < 2:
+        return 0.0
+    aa = np.asarray(a, dtype=float)
+    bb = np.asarray(b, dtype=float)
+    aa = aa - float(np.mean(aa))
+    bb = bb - float(np.mean(bb))
+    denom = float(np.linalg.norm(aa) * np.linalg.norm(bb))
+    return float(np.dot(aa, bb) / denom) if denom > 0.0 else 0.0
+
+
+def _jaccard(a: np.ndarray, b: np.ndarray) -> float:
+    aa = np.asarray(a, dtype=bool)
+    bb = np.asarray(b, dtype=bool)
+    union = int(np.count_nonzero(aa | bb))
+    if union == 0:
+        return 1.0
+    return float(np.count_nonzero(aa & bb) / union)
+
+
 def _region_rows(
     *,
     sfc: VTKPointScalars,
@@ -178,6 +211,51 @@ def _region_rows(
                     "abaqus_has_contact_field": int(any(name in abaqus.scalars for name in CONTACT_FIELDS)),
                     "sfc_active_node_count": int(np.count_nonzero(sfc_active)),
                     "abaqus_active_node_count": int(np.count_nonzero(abaqus_active)),
+                    "field_rmse_rel": _rmse_rel(sfc_region, abaqus_region),
+                    "field_correlation": _correlation(sfc_region, abaqus_region),
+                    "active_jaccard": _jaccard(sfc_active, abaqus_active),
+                }
+            )
+        for sfc_name, abaqus_name, metric_name in CONTACT_FIELD_PAIRS:
+            sfc_values = sfc.scalars.get(sfc_name)
+            abaqus_values = abaqus.scalars.get(abaqus_name)
+            if sfc_values is None or abaqus_values is None:
+                continue
+            sfc_region = sfc_values[mask]
+            abaqus_region = abaqus_values[mask]
+            diff = np.abs(sfc_region - abaqus_region)
+            sfc_p95 = _percentile(sfc_region, 95.0)
+            abaqus_p95 = _percentile(abaqus_region, 95.0)
+            sfc_max = float(np.max(sfc_region)) if sfc_region.size else 0.0
+            abaqus_max = float(np.max(abaqus_region)) if abaqus_region.size else 0.0
+            denom_p95 = max(abs(abaqus_p95), 1.0e-30)
+            denom_max = max(abs(abaqus_max), 1.0e-30)
+            rows.append(
+                {
+                    "sfc_vtk": str(sfc_vtk),
+                    "abaqus_vtk": str(abaqus_vtk),
+                    "sfc_time": float(sfc_time),
+                    "abaqus_time": float(abaqus_time),
+                    "time_difference": float(sfc_time) - float(abaqus_time),
+                    "region": region_name,
+                    "sample_count": sample_count,
+                    "metric": metric_name,
+                    "sfc_max": sfc_max,
+                    "abaqus_max": abaqus_max,
+                    "max_rel_error": abs(sfc_max - abaqus_max) / denom_max,
+                    "sfc_p95": sfc_p95,
+                    "abaqus_p95": abaqus_p95,
+                    "p95_rel_error": abs(sfc_p95 - abaqus_p95) / denom_p95,
+                    "mean_abs_error": float(np.mean(diff)) if diff.size else 0.0,
+                    "p95_abs_error": _percentile(diff, 95.0),
+                    "max_abs_error": float(np.max(diff)) if diff.size else 0.0,
+                    "sfc_has_contact_field": int(any(name in sfc.scalars for name in CONTACT_FIELDS)),
+                    "abaqus_has_contact_field": int(any(name in abaqus.scalars for name in CONTACT_FIELDS)),
+                    "sfc_active_node_count": int(np.count_nonzero(sfc_active)),
+                    "abaqus_active_node_count": int(np.count_nonzero(abaqus_active)),
+                    "field_rmse_rel": _rmse_rel(sfc_region, abaqus_region),
+                    "field_correlation": _correlation(sfc_region, abaqus_region),
+                    "active_jaccard": _jaccard(sfc_active, abaqus_active),
                 }
             )
     return rows
@@ -278,6 +356,7 @@ def _write_curve_plot(path: Path, rows: list[Row]) -> Path | None:
         "displacement_magnitude",
         "von_mises_nodeavg",
         "equivalent_elastic_strain_nodeavg",
+        "contact_pressure_nodeavg",
     )
     regions = ("full", "abaqus_active")
     max_time = max((float(row["sfc_time"]) for row in rows), default=0.0)
@@ -349,6 +428,7 @@ def _write_metric_curve_plot(path: Path, rows: list[Row]) -> Path | None:
         ("displacement_magnitude", "p95 displacement"),
         ("von_mises_nodeavg", "p95 von Mises"),
         ("equivalent_elastic_strain_nodeavg", "p95 equiv. strain"),
+        ("contact_pressure_nodeavg", "p95 contact pressure"),
     )
     full_rows = [row for row in rows if str(row["region"]) == "full"]
     max_time = max((float(row["sfc_time"]) for row in full_rows), default=0.0)

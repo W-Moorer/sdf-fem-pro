@@ -206,9 +206,9 @@ def _surface_entries_from_elsets(elsets: dict[str, list[int]], prefix: str) -> t
 def _faces_from_surface_entries(mesh: GearMesh, entries: tuple[tuple[int, str], ...]) -> np.ndarray:
     side_nodes = {
         "S1": (0, 1, 2),
-        "S2": (0, 1, 3),
-        "S3": (1, 2, 3),
-        "S4": (0, 2, 3),
+        "S2": (0, 3, 1),
+        "S3": (1, 3, 2),
+        "S4": (2, 3, 0),
     }
     faces: list[np.ndarray] = []
     for element_label, side in entries:
@@ -230,9 +230,9 @@ def _faces_from_elsets(mesh: GearMesh, elsets: dict[str, list[int]], prefix: str
 def _entry_centroid(mesh: GearMesh, element_label: int, side: str) -> np.ndarray:
     side_nodes = {
         "S1": (0, 1, 2),
-        "S2": (0, 1, 3),
-        "S3": (1, 2, 3),
-        "S4": (0, 2, 3),
+        "S2": (0, 3, 1),
+        "S3": (1, 3, 2),
+        "S4": (2, 3, 0),
     }
     element = mesh.elements[mesh.element_label_to_index[int(element_label)]]
     return mesh.nodes[element[np.asarray(side_nodes[side], dtype=np.int64)]].mean(axis=0)

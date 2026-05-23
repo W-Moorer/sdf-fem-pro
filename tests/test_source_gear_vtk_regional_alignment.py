@@ -88,6 +88,9 @@ def test_compare_vtk_pair_reports_active_region_errors(tmp_path: Path) -> None:
     assert active_stress["abaqus_active_node_count"] == 1
     assert active_stress["sfc_active_node_count"] == 0
     assert active_stress["time_difference"] == pytest.approx(0.1)
+    pressure = by_region_metric[("full", "contact_pressure_nodeavg")]
+    assert pressure["field_rmse_rel"] == pytest.approx(1.0)
+    assert pressure["active_jaccard"] == pytest.approx(0.0)
 
 
 def test_compare_vtk_manifests_pairs_frames_by_time(tmp_path: Path) -> None:
@@ -117,6 +120,6 @@ def test_compare_vtk_manifests_pairs_frames_by_time(tmp_path: Path) -> None:
         time_tolerance=1.0e-9,
     )
 
-    assert len(rows) == 2 * 4 * 4
+    assert len(rows) == 2 * 4 * 7
     assert {row["pair_index"] for row in rows} == {0, 1}
     assert max(abs(float(row["time_difference"])) for row in rows) < 1.0e-9
