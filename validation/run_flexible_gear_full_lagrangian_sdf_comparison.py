@@ -999,9 +999,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-rotating-inertia",
-        choices=("none", "centripetal"),
+        choices=("none", "centripetal", "finite_kinematic"),
         default="none",
-        help="Optional finite-RP centripetal inertia residual for source-drive dynamics.",
+        help="Optional finite-RP inertia residual for source-drive dynamics.",
     )
     parser.add_argument(
         "--source-checkpoint",

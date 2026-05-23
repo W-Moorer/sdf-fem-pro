@@ -24,6 +24,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_centripetal_acceleration,
     _source_drive_centripetal_reduced_response,
     _source_drive_corotated_visual_state_and_internal,
+    _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -696,6 +697,96 @@ def test_source_drive_finite_visual_jacobian_matches_finite_difference() -> None
         fd = (visual_positions(q + perturb) - visual_positions(q - perturb)).reshape(-1) / (2.0 * eps)
         actual = np.asarray(jacobian[:, column].todense()).reshape(-1)
         np.testing.assert_allclose(actual, fd, rtol=5.0e-7, atol=5.0e-8)
+
+
+def test_source_drive_finite_kinematic_inertia_reduces_to_linear_mass_at_zero_rotation() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=2.0, mass_kind="consistent")
+    hub = RigidHubMPC(np.asarray([0, 1, 2, 3], dtype=np.int64), X, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(X, [hub], include_free_nodes=False)
+    acceleration = np.linspace(0.1, 0.6, assembly.n_reduced_dofs)
+
+    reduced, mass_tangent = _source_drive_finite_kinematic_inertia_response(
+        assembly=assembly,
+        mass_matrix=model.mass_matrix,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(0.0, 0.0),
+        body_angular_velocity_z=(0.0, 0.0),
+        reduced_acceleration=acceleration,
+    )
+    expected_mass = assembly.reduce_matrix(model.mass_matrix).tocsr()
+
+    np.testing.assert_allclose(reduced, np.asarray(expected_mass @ acceleration).reshape(-1), rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(mass_tangent.toarray(), expected_mass.toarray(), rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_source_drive_finite_kinematic_inertia_mass_tangent_matches_acceleration_fd() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0],
+            [0.0, 1.2, 0.0],
+            [0.1, 0.2, 0.9],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=2.0, mass_kind="consistent")
+    hub = RigidHubMPC(np.asarray([0, 1, 2, 3], dtype=np.int64), X, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(X, [hub], include_free_nodes=False)
+    acceleration = np.linspace(-0.2, 0.35, assembly.n_reduced_dofs)
+    theta = 0.61
+    omega = 7.5
+    reduced, mass_tangent = _source_drive_finite_kinematic_inertia_response(
+        assembly=assembly,
+        mass_matrix=model.mass_matrix,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta, 0.0),
+        body_angular_velocity_z=(omega, 0.0),
+        reduced_acceleration=acceleration,
+    )
+    eps = 1.0e-7
+    for column in range(assembly.n_reduced_dofs):
+        perturb = np.zeros_like(acceleration)
+        perturb[column] = eps
+        plus, _ = _source_drive_finite_kinematic_inertia_response(
+            assembly=assembly,
+            mass_matrix=model.mass_matrix,
+            reference_nodes=X,
+            body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+            body_reference_points=(np.zeros(3), np.zeros(3)),
+            body_rotation_z=(theta, 0.0),
+            body_angular_velocity_z=(omega, 0.0),
+            reduced_acceleration=acceleration + perturb,
+            include_mass_tangent=False,
+        )
+        minus, _ = _source_drive_finite_kinematic_inertia_response(
+            assembly=assembly,
+            mass_matrix=model.mass_matrix,
+            reference_nodes=X,
+            body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+            body_reference_points=(np.zeros(3), np.zeros(3)),
+            body_rotation_z=(theta, 0.0),
+            body_angular_velocity_z=(omega, 0.0),
+            reduced_acceleration=acceleration - perturb,
+            include_mass_tangent=False,
+        )
+        fd = (plus - minus) / (2.0 * eps)
+        np.testing.assert_allclose(fd, np.asarray(mass_tangent[:, column].todense()).reshape(-1), rtol=1.0e-7, atol=1.0e-8)
+    assert float(np.linalg.norm(reduced)) > 0.0
 
 
 def test_source_drive_centripetal_acceleration_points_inward() -> None:

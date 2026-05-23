@@ -99,6 +99,62 @@ results/source_gear_finite_stvk_internal_smoke_0004
 
 结论：不能把有限变形 StVK 内力直接接入残差而继续使用固定线性切线。这会形成不一致的非线性动力学求解，不能作为正式对齐路径。
 
+## 有限运动学惯性短程试验
+
+本轮新增有限运动学惯性诊断路径：
+
+```text
+--source-rotating-inertia finite_kinematic
+```
+
+对应 reduced inertia 形式为：
+
+```text
+J(q)^T M [J(q) qddot + Jdot(q, qdot) qdot]
+```
+
+并返回 `J(q)^T M J(q)` 作为 Newmark 加速度项的质量切线。该路径不改变接触刚度、不改变材料参数，也不是针对单个曲线调参。
+
+短程试验目录：
+
+```text
+results/source_gear_finite_kinematic_inertia_smoke_0004
+```
+
+设置：
+
+- source: `gear_contact.inp`
+- duration: `0.0004 s`
+- dt: `1e-5 s`
+- contact: linear penalty, stiffness `5e9`
+- HHT alpha: `-0.414214`
+- contact kinematics: `finite_rp_corotated`
+- contact averaging: `slave_node`
+- contact normal filter: `opposing`
+- internal kinematics: `corotated_rp`
+- rotating inertia: `finite_kinematic`
+
+关键结果：
+
+| time | max displacement error | p95 VM nodeavg error | p95 equivalent strain nodeavg error | active nodes SFC/Abaqus |
+|---:|---:|---:|---:|---:|
+| 0.0002 | 0.391% | 39.620% | 39.620% | 336 / 466 |
+| 0.0004 | 3.655% | 5.014% | 5.014% | 65 / 44 |
+
+结论：
+
+- 有限运动学惯性在 `0.0004 s` 把 p95 应力/应变维持在 `<=10%` 验收范围内；
+- 但 `0.0002 s` 的接触建立阶段仍约 `39.6%`，且 SFC active nodes 和最大穿透仍低于 Abaqus；
+- 因此早期误差不是应力后处理造成，也不是仅靠有限惯性可以解决，下一层应对齐 Abaqus surface-to-surface constraint region / active status 口径。
+
+法向过滤探针：
+
+```text
+results/source_gear_finite_kinematic_no_normal_filter_probe_0002
+```
+
+去掉 `opposing` 法向过滤后，`0.0002 s` active nodes 从 `336` 提高到 `415`，更接近 Abaqus 的 `466`，但 p95 stress 误差仍约 `40.10%`。这说明单纯放宽法向过滤不能解决应力误差，真正缺口仍是接触约束区域和压力/穿透场的定义。
+
 ## 当前理论差异定位
 
 最主要差异不是 SDF 查询，而是有限转动动力学：
@@ -107,7 +163,7 @@ results/source_gear_finite_stvk_internal_smoke_0004
 2. Abaqus `nlgeom=YES + *MPC, BEAM` 下，RP 有限转动、转矩驱动、HHT 更新和惯性项耦合，会产生旋转惯性/约束传递相关的应力增长；
 3. SFC 当前质量矩阵仍主要是线性 reduced mass `T.T M T`，没有完整使用有限运动学下的 `J(q).T M J(q)`；
 4. 当前额外 centripetal residual 是诊断路径，曾导致 RP2 速度发散，说明仅补一个离心项而不同步有限运动学质量、HHT history 和一致切线是不正确的；
-5. 应力/应变差异后半段由动力学路径主导，接触 active mismatch 会影响局部压力和短时波动，但不能解释最终 80% 级的应力低估。
+5. 应力/应变差异后半段由动力学路径主导，接触 active mismatch 会影响局部压力和短时波动；有限运动学惯性修正后，后半段短程误差已能进入 10% 内，但接触建立初期仍需继续对齐 constraint region。
 
 ## 下一步正确修复方向
 
@@ -144,10 +200,12 @@ J^T K_int J
 ```text
 python validation/analyze_source_gear_checkpoint_stress_modes.py --source commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp --checkpoint results/source_gear_penalty_contact_history_only_0030/source_checkpoint.npz --abaqus-manifest results/source_gear_abaqus_penalty_full_stride2_match_step_0030/abaqus_vtk/abaqus_manifest.csv --out-dir results/source_gear_checkpoint_stress_modes --duration 0.003
 pytest -q tests/test_flexible_gear_implicit_lagrangian_sdf.py -k "finite_visual_jacobian or corotated or source_drive or checkpoint or centripetal"
+pytest -q tests/test_flexible_gear_implicit_lagrangian_sdf.py -k "finite_kinematic_inertia or finite_visual_jacobian or centripetal"
 ```
 
 测试结果：
 
 ```text
 10 passed, 24 deselected
+5 passed, 31 deselected
 ```

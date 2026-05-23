@@ -967,6 +967,56 @@ def _source_drive_finite_visual_jacobian(
     return visual.tocsr()
 
 
+def _source_drive_finite_kinematic_inertia_response(
+    *,
+    assembly: Any,
+    mass_matrix: Any,
+    reference_nodes: np.ndarray,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+    body_rotation_z: tuple[float, float],
+    body_angular_velocity_z: tuple[float, float],
+    reduced_acceleration: np.ndarray,
+    include_mass_tangent: bool = True,
+) -> tuple[np.ndarray, csr_matrix]:
+    """Return finite-kinematic RP-MPC inertia by reduced virtual work.
+
+    For a nonlinear RP map ``x = x(q)``, the inertial virtual work is
+
+    ``dq.T J(q).T M [J(q) qddot + Jdot(q, qdot) qdot]``.
+
+    The source-gear map is nonlinear only in each body's z-rotation, so the
+    ``Jdot qdot`` term is the finite-rotation radial acceleration already used
+    by the centripetal diagnostic.  The returned tangent is the acceleration
+    part ``J.T M J``.  It is intentionally only the mass contribution; callers
+    scale it by the Newmark ``c0`` factor.
+    """
+
+    jacobian = _source_drive_finite_visual_jacobian(
+        assembly=assembly,
+        reference_nodes=reference_nodes,
+        body_node_slices=body_node_slices,
+        body_reference_points=body_reference_points,
+        body_rotation_z=body_rotation_z,
+    ).tocsr()
+    acc_red = np.asarray(reduced_acceleration, dtype=float).reshape(-1)
+    nodal_acc = np.asarray(jacobian @ acc_red, dtype=float).reshape((-1, 3))
+    nodal_acc += _source_drive_centripetal_acceleration(
+        reference_nodes=reference_nodes,
+        body_node_slices=body_node_slices,
+        body_reference_points=body_reference_points,
+        body_rotation_z=body_rotation_z,
+        body_angular_velocity_z=body_angular_velocity_z,
+    )
+    full_inertia = np.asarray(mass_matrix @ nodal_acc.reshape(-1), dtype=float).reshape(-1)
+    reduced = np.asarray(jacobian.T @ full_inertia, dtype=float).reshape(-1)
+    if not bool(include_mass_tangent):
+        empty = csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
+        return reduced, empty
+    mass_tangent = (jacobian.T @ mass_matrix @ jacobian).tocsr()
+    return reduced, mass_tangent
+
+
 def _source_drive_centripetal_acceleration(
     *,
     reference_nodes: np.ndarray,
@@ -2502,8 +2552,8 @@ def solve_sfc_source_drive_pair(
             "source_internal_kinematics must be 'linearized_mpc', 'corotated_rp', or 'finite_stvk_visual'"
         )
     rotating_inertia = str(source_rotating_inertia).lower()
-    if rotating_inertia not in {"none", "centripetal"}:
-        raise ValueError("source_rotating_inertia must be 'none' or 'centripetal'")
+    if rotating_inertia not in {"none", "centripetal", "finite_kinematic"}:
+        raise ValueError("source_rotating_inertia must be 'none', 'centripetal', or 'finite_kinematic'")
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
     steps = max(1, int(round(float(duration) / float(dt))))
@@ -2623,6 +2673,9 @@ def solve_sfc_source_drive_pair(
         if rotating_inertia == "none":
             empty = csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
             return np.zeros(assembly.n_reduced_dofs, dtype=float), empty
+        if rotating_inertia == "finite_kinematic":
+            empty = csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
+            return np.zeros(assembly.n_reduced_dofs, dtype=float), empty
         sensitivity = gamma * float(dt) * c0
         return _source_drive_centripetal_reduced_response(
             assembly=assembly,
@@ -2640,6 +2693,32 @@ def solve_sfc_source_drive_pair(
             ),
             velocity_sensitivity_z=(float(sensitivity), float(sensitivity)),
             include_tangent=True,
+        )
+
+    def inertia_reduced_and_mass_for_iteration(
+        q_reduced: np.ndarray,
+        v_reduced: np.ndarray,
+        a_reduced: np.ndarray,
+    ) -> tuple[np.ndarray, csr_matrix]:
+        if rotating_inertia != "finite_kinematic":
+            empty = csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
+            return np.asarray(M_red @ a_reduced, dtype=float).reshape(-1), empty
+        return _source_drive_finite_kinematic_inertia_response(
+            assembly=assembly,
+            mass_matrix=model.mass_matrix,
+            reference_nodes=model.X,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=(
+                float(q_reduced[assembly.hub_slice(0).start + 5]),
+                float(q_reduced[hub2_slice.start + 5]),
+            ),
+            body_angular_velocity_z=(
+                float(v_reduced[assembly.hub_slice(0).start + 5]),
+                float(v_reduced[hub2_slice.start + 5]),
+            ),
+            reduced_acceleration=a_reduced,
+            include_mass_tangent=True,
         )
 
     vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
@@ -2801,8 +2880,9 @@ def solve_sfc_source_drive_pair(
             a_guess = c0 * (q_guess - q_pred)
             iteration_velocity = v_pred + gamma * float(dt) * a_guess
             centripetal_red, centripetal_tangent = centripetal_reduced_and_tangent_for_iteration(q_guess, iteration_velocity)
+            inertia_red, inertia_mass = inertia_reduced_and_mass_for_iteration(q_guess, iteration_velocity, a_guess)
             residual = (
-                np.asarray(M_red @ a_guess, dtype=float).reshape(-1)
+                inertia_red
                 + scale * centripetal_red
                 - scale * rhs_balance
                 + float(hht_alpha) * previous
@@ -2814,8 +2894,14 @@ def solve_sfc_source_drive_pair(
             if free.size:
                 cg_stats: dict[str, Any] = {}
                 current_base_free = base_free
+                current_base_lu = base_preconditioner_lu
+                if rotating_inertia == "finite_kinematic" and free.size:
+                    current_base = (inertia_mass * c0 + K_solve * scale).tocsr()
+                    current_base_free = current_base[free[:, None], free].tocsr()
+                    current_base_lu = None
                 if rotating_inertia != "none" and base_free is not None:
-                    current_base_free = (base_free + scale * centripetal_tangent[free[:, None], free]).tocsr()
+                    if rotating_inertia == "centripetal":
+                        current_base_free = (base_free + scale * centripetal_tangent[free[:, None], free]).tocsr()
                 if sample_arrays is None:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction(
                         base_matrix_free=current_base_free,
@@ -2827,7 +2913,7 @@ def solve_sfc_source_drive_pair(
                         equilibrium_scale=scale,
                         tolerance=float(tolerance),
                         stats=cg_stats,
-                        base_lu=base_preconditioner_lu,
+                        base_lu=current_base_lu,
                     )
                 else:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction_from_arrays(
@@ -2840,7 +2926,7 @@ def solve_sfc_source_drive_pair(
                         pressure_stiffness=pressure_stiffness,
                         tolerance=float(tolerance),
                         stats=cg_stats,
-                        base_lu=base_preconditioner_lu,
+                        base_lu=current_base_lu,
                     )
                 if correction_free is None:
                     source_direct_fallback_count += 1
@@ -2868,7 +2954,7 @@ def solve_sfc_source_drive_pair(
             balance_scale = max(
                 1.0,
                 float(np.linalg.norm(rhs_balance[free])) if free.size else 1.0,
-                float(np.linalg.norm(np.asarray(M_red @ a_guess, dtype=float).reshape(-1)[free])) if free.size else 1.0,
+                float(np.linalg.norm(inertia_red[free])) if free.size else 1.0,
             )
             correction_converged = correction_norm <= float(tolerance) * correction_scale
             residual_converged = residual_norm <= max(float(tolerance) * balance_scale, 1.0e-10)
@@ -2905,12 +2991,9 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
                 last_sample_arrays = accepted_arrays
                 last_samples = None
-        previous = (
-            external
-            - internal_reduced_from_state(q_new)
-            + assembly.reduce_vector(last_contact.force)
-            - centripetal_reduced_from_state(q_new, v_new)
-        )
+        previous = external - internal_reduced_from_state(q_new) + assembly.reduce_vector(last_contact.force)
+        if rotating_inertia == "centripetal":
+            previous = previous - centripetal_reduced_from_state(q_new, v_new)
         history_due = (step % history_stride == 0) or (step == steps)
         vtk_due = vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps)
         output_state: MechanicsState | None = None
