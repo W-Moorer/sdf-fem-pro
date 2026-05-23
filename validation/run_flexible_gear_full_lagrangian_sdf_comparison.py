@@ -569,6 +569,9 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- linear solver: {summary.get('linear_solver', 'sparse')}",
         f"- contact mode: {summary.get('contact_mode', '')}",
         f"- source contact averaging: {summary.get('source_contact_averaging', '')}",
+        f"- source contact kinematics: {summary.get('source_contact_kinematics', '')}",
+        f"- source contact normal filter: {summary.get('source_contact_normal_filter', '')}",
+        f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- penalty solver: {summary.get('penalty_solver', '')}",
         f"- material linearization: {summary.get('material_linearization', '')}",
         f"- RP reaction definition: {summary.get('rp_reaction_definition', '')}",
@@ -723,6 +726,9 @@ def run_full_gear(
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
     source_contact_averaging: str = "none",
+    source_contact_kinematics: str = "linearized_mpc",
+    source_contact_normal_filter: str = "none",
+    source_internal_kinematics: str = "linearized_mpc",
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -768,6 +774,9 @@ def run_full_gear(
             vtk_include_tensors=bool(vtk_include_tensors),
             source_stress_postprocess=str(source_stress_postprocess),
             source_contact_averaging=str(source_contact_averaging),
+            source_contact_kinematics=str(source_contact_kinematics),
+            source_contact_normal_filter=str(source_contact_normal_filter),
+            source_internal_kinematics=str(source_internal_kinematics),
             source_checkpoint_path=source_checkpoint_path,
             resume_source_checkpoint=bool(resume_source_checkpoint),
             source_checkpoint_stride=int(source_checkpoint_stride),
@@ -961,6 +970,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
     )
     parser.add_argument(
+        "--source-contact-kinematics",
+        choices=("linearized_mpc", "finite_rp_corotated"),
+        default="linearized_mpc",
+        help="Kinematic map used to evaluate source-drive contact geometry.",
+    )
+    parser.add_argument(
+        "--source-contact-normal-filter",
+        choices=("none", "opposing"),
+        default="none",
+        help="Optional source-drive master/slave normal compatibility filter.",
+    )
+    parser.add_argument(
+        "--source-internal-kinematics",
+        choices=("linearized_mpc", "corotated_rp"),
+        default="linearized_mpc",
+        help="Internal elastic residual map for source-drive large RP rotations.",
+    )
+    parser.add_argument(
         "--source-checkpoint",
         type=Path,
         default=None,
@@ -1005,6 +1032,9 @@ def main(argv: list[str] | None = None) -> int:
         vtk_include_tensors=not bool(args.vtk_scalars_only),
         source_stress_postprocess=str(args.source_stress_postprocess),
         source_contact_averaging=str(args.source_contact_averaging),
+        source_contact_kinematics=str(args.source_contact_kinematics),
+        source_contact_normal_filter=str(args.source_contact_normal_filter),
+        source_internal_kinematics=str(args.source_internal_kinematics),
         source_checkpoint_path=args.source_checkpoint,
         resume_source_checkpoint=bool(args.resume_source_checkpoint),
         source_checkpoint_stride=int(args.source_checkpoint_stride),

@@ -17,7 +17,10 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _aggregate_contact_samples,
     _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
+    _filter_contact_samples_by_normal_compatibility,
     _node_average_cell_scalar,
+    _source_drive_corotated_elastic_matrix,
+    _source_drive_corotated_positions_and_elastic_displacement,
     _source_drive_corotated_visual_state_and_internal,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -479,6 +482,116 @@ def test_source_drive_corotated_visual_postprocess_removes_rigid_rotation_stress
     expected_node1 = np.asarray([np.cos(theta), np.sin(theta), 0.0], dtype=float)
     np.testing.assert_allclose(visual_state.x[1], expected_node1, atol=1.0e-14)
     assert float(np.max(internal.von_mises)) <= 1.0e-10
+
+
+def test_source_drive_corotated_contact_positions_use_finite_rp_rotation() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=1.0)
+    theta = 1.9
+    x_small = X + np.cross(np.asarray([[0.0, 0.0, theta]], dtype=float), X)
+
+    x_contact, u_elastic = _source_drive_corotated_positions_and_elastic_displacement(
+        model=model,
+        x_raw=x_small,
+        body_node_slices=(slice(0, 4), slice(4, 4)),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta, 0.0),
+    )
+
+    np.testing.assert_allclose(u_elastic, 0.0, atol=1.0e-14)
+    np.testing.assert_allclose(x_contact[1], [np.cos(theta), np.sin(theta), 0.0], atol=1.0e-14)
+
+
+def test_contact_normal_compatibility_filter_keeps_opposing_surfaces() -> None:
+    x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    sample = ContactSample(
+        node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+        shape_weights=np.asarray([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]),
+        gap=-1.0e-3,
+        normal=np.asarray([0.0, 0.0, -1.0]),
+        area=1.0,
+        stiffness=1.0,
+    )
+    same_side = ContactSample(
+        node_ids=sample.node_ids,
+        shape_weights=sample.shape_weights,
+        gap=-1.0e-3,
+        normal=np.asarray([0.0, 0.0, 1.0]),
+        area=1.0,
+        stiffness=1.0,
+    )
+
+    filtered = _filter_contact_samples_by_normal_compatibility([sample, same_side], x, mode="opposing")
+
+    assert len(filtered) == 1
+    assert filtered[0] is sample
+
+
+def test_slave_face_averaging_groups_by_nodes_after_filtering() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.5, 0.5, 0.0]),
+            gap=-1.0e-3,
+            normal=np.asarray([0.0, 0.0, 1.0]),
+            area=0.2,
+            stiffness=10.0,
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.0, 0.5, 0.5]),
+            gap=-2.0e-3,
+            normal=np.asarray([0.0, 0.0, 1.0]),
+            area=0.3,
+            stiffness=10.0,
+        ),
+    ]
+
+    aggregated = _aggregate_contact_samples(samples, "slave_face")
+
+    assert len(aggregated) == 1
+    assert aggregated[0].area == pytest.approx(0.5)
+    assert aggregated[0].gap == pytest.approx((-1.0e-3 * 0.2 - 2.0e-3 * 0.3) / 0.5)
+
+
+def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.2, 0.3, 0.4],
+        ],
+        dtype=float,
+    )
+    hub = RigidHubMPC(np.asarray([0, 1, 2, 3], dtype=np.int64), X, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(X, [hub], include_free_nodes=False)
+    elastic = _source_drive_corotated_elastic_matrix(
+        assembly=assembly,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+    )
+    q = np.zeros(assembly.n_reduced_dofs, dtype=float)
+    q[assembly.hub_slice(0).start + 5] = 1.7
+
+    np.testing.assert_allclose(np.asarray(elastic @ q).reshape((-1, 3)), 0.0, atol=1.0e-14)
 
 
 def test_source_drive_visual_postprocess_is_objective_for_large_rotation() -> None:

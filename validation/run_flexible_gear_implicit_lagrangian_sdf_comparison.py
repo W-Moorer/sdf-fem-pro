@@ -252,14 +252,62 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
     if averaging == "none" or not samples:
         return samples
     if averaging == "slave_face":
-        if len(samples) < 3 or len(samples) % 3 != 0:
-            return samples
-        return [
-            _aggregate_contact_sample_group(samples[start : start + 3])
-            for start in range(0, len(samples), 3)
-        ]
+        groups: dict[tuple[int, ...], list[ContactSample]] = {}
+        order: list[tuple[int, ...]] = []
+        for sample in samples:
+            key = tuple(int(v) for v in np.asarray(sample.node_ids, dtype=np.int64).reshape(-1))
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(sample)
+        return [_aggregate_contact_sample_group(groups[key]) for key in order]
     groups = _sample_connected_components(samples)
     return [_aggregate_contact_sample_group([samples[int(index)] for index in group]) for group in groups]
+
+
+def _filter_contact_samples_by_normal_compatibility(
+    samples: list[ContactSample],
+    x_current: np.ndarray,
+    *,
+    mode: str,
+    dot_threshold: float = 0.0,
+) -> list[ContactSample]:
+    """Filter contact samples by master/slave surface normal compatibility.
+
+    Abaqus-style surface-to-surface normal contact constrains opposing surface
+    sides.  On a curved gear flank, the closest Euclidean triangle can be a
+    side/back facet whose normal is not facing the slave facet; accepting such a
+    sample creates artificial overclosure without changing the SDF query itself.
+    The default ``opposing`` mode keeps samples with
+    ``n_master dot n_slave <= 0``.  This is a candidate-compatibility test only:
+    the retained samples still use the same closest-feature gap and normal.
+    """
+
+    label = str(mode).lower()
+    if label == "none":
+        return samples
+    if label not in {"opposing"}:
+        raise ValueError("normal compatibility mode must be 'none' or 'opposing'")
+    X = np.asarray(x_current, dtype=float)
+    filtered: list[ContactSample] = []
+    for sample in samples:
+        nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        if nodes.size < 3 or np.any(nodes < 0) or int(nodes.max()) >= X.shape[0]:
+            continue
+        tri = X[nodes[:3]]
+        slave_normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+        slave_norm = float(np.linalg.norm(slave_normal))
+        if slave_norm <= 0.0:
+            continue
+        slave_normal /= slave_norm
+        master_normal = np.asarray(sample.normal, dtype=float).reshape(3)
+        master_norm = float(np.linalg.norm(master_normal))
+        if master_norm <= 0.0:
+            continue
+        master_normal /= master_norm
+        if float(master_normal @ slave_normal) <= float(dot_threshold):
+            filtered.append(sample)
+    return filtered
 
 
 def _empty_contact_node_diagnostics(n_nodes: int) -> dict[str, Any]:
@@ -612,10 +660,56 @@ def _source_drive_corotated_visual_state_and_internal(
     alters the contact solve.
     """
 
+    x_visual, u_elastic = _source_drive_corotated_positions_and_elastic_displacement(
+        model=model,
+        x_raw=state.x,
+        body_node_slices=body_node_slices,
+        body_reference_points=body_reference_points,
+        body_rotation_z=body_rotation_z,
+    )
+    visual_state = MechanicsState(
+        x_visual,
+        np.asarray(state.v, dtype=float).copy(),
+        np.asarray(state.a, dtype=float).copy(),
+        time=float(state.time),
+    )
+    mode = str(stress_postprocess).lower()
+    if mode in {"linear_corotated", "corotated_body_elastic_residual", "linear"}:
+        internal = _linear_reference_internal_response(model, np.asarray(model.X, dtype=float) + u_elastic, reference_tangent)
+    elif mode in {"finite_stvk_visual", "stvk_visual"}:
+        internal = stvk_internal_response(model, visual_state.x, assemble_tangent=False)
+    else:
+        raise ValueError("stress_postprocess must be 'linear_corotated' or 'finite_stvk_visual'")
+    return visual_state, internal
+
+
+def _source_drive_corotated_positions_and_elastic_displacement(
+    *,
+    model: MechanicsModel,
+    x_raw: np.ndarray,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+    body_rotation_z: tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite-RP-rotation positions and elastic residual displacements.
+
+    The source gear deck uses Abaqus ``nlgeom=YES`` with BEAM-MPC RP rotations
+    in radians.  The global source-drive solver still stores the RP rotations
+    as reduced coordinates, so a large accumulated RP angle must not be used as
+    a small-rotation displacement when evaluating contact geometry or visual
+    stress fields.  This helper removes the small-rotation rigid component from
+    each body, applies the finite z-rotation, and keeps the residual elastic
+    displacement unchanged.  It changes only the kinematic map used by callers;
+    final contact gaps are still computed by the Lagrangian-SDF closest-feature
+    oracle on the resulting current surface.
+    """
+
     X = np.asarray(model.X, dtype=float)
-    x_raw = np.asarray(state.x, dtype=float)
-    u_raw = x_raw - X
-    x_visual = x_raw.copy()
+    x_raw_array = np.asarray(x_raw, dtype=float)
+    if x_raw_array.shape != X.shape:
+        raise ValueError("x_raw must have the same shape as model.X")
+    u_raw = x_raw_array - X
+    x_visual = x_raw_array.copy()
     u_elastic = u_raw.copy()
     theta_vectors = (
         np.asarray([0.0, 0.0, float(body_rotation_z[0])], dtype=float),
@@ -632,20 +726,45 @@ def _source_drive_corotated_visual_state_and_internal(
         R = _rotation_z_matrix(float(theta_vec[2]))
         x_visual[ids] = reference_point[None, :] + lever @ R.T + elastic
         u_elastic[ids] = elastic
-    visual_state = MechanicsState(
-        x_visual,
-        np.asarray(state.v, dtype=float).copy(),
-        np.asarray(state.a, dtype=float).copy(),
-        time=float(state.time),
-    )
-    mode = str(stress_postprocess).lower()
-    if mode in {"linear_corotated", "corotated_body_elastic_residual", "linear"}:
-        internal = _linear_reference_internal_response(model, X + u_elastic, reference_tangent)
-    elif mode in {"finite_stvk_visual", "stvk_visual"}:
-        internal = stvk_internal_response(model, visual_state.x, assemble_tangent=False)
-    else:
-        raise ValueError("stress_postprocess must be 'linear_corotated' or 'finite_stvk_visual'")
-    return visual_state, internal
+    return x_visual, u_elastic
+
+
+def _source_drive_corotated_elastic_matrix(
+    *,
+    assembly: Any,
+    reference_nodes: np.ndarray,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+) -> csr_matrix:
+    """Return the reduced map from RP/free coordinates to elastic residuals.
+
+    The linear BEAM-MPC map ``T`` expands reduced coordinates to raw nodal
+    displacements.  For a source gear step with large RP z-rotations, the
+    elastic residual used by the corotated stress/contact path is
+
+    ``u_elastic = T q - theta_z (e_z x (X - X_RP))``
+
+    on every node of each body.  This sparse map is the tangent counterpart of
+    :func:`_source_drive_corotated_positions_and_elastic_displacement` and is
+    used only when explicitly requested by the source-drive runner.
+    """
+
+    nodes = np.asarray(reference_nodes, dtype=float)
+    elastic = assembly.transformation.tolil(copy=True)
+    for body_index, (node_slice, rp) in enumerate(zip(body_node_slices, body_reference_points, strict=True)):
+        ids = np.arange(node_slice.start or 0, node_slice.stop, dtype=np.int64)
+        if ids.size == 0:
+            continue
+        col = int(assembly.hub_slice(body_index).start + 5)
+        reference_point = np.asarray(rp, dtype=float).reshape(3)
+        lever = nodes[ids] - reference_point[None, :]
+        small_z = np.column_stack((-lever[:, 1], lever[:, 0], np.zeros(ids.size, dtype=float)))
+        for local, node in enumerate(ids):
+            for axis in range(3):
+                value = float(small_z[local, axis])
+                if value != 0.0:
+                    elastic[3 * int(node) + axis, col] = float(elastic[3 * int(node) + axis, col]) - value
+    return elastic.tocsr()
 
 
 def _write_sfc_tet4_vtk_frame(
@@ -1981,6 +2100,9 @@ def solve_sfc_source_drive_pair(
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
     source_contact_averaging: str = "none",
+    source_contact_kinematics: str = "linearized_mpc",
+    source_contact_normal_filter: str = "none",
+    source_internal_kinematics: str = "linearized_mpc",
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -2016,6 +2138,15 @@ def solve_sfc_source_drive_pair(
     contact_averaging = str(source_contact_averaging).lower()
     if contact_averaging not in {"none", "slave_face", "surface_patch"}:
         raise ValueError("source_contact_averaging must be 'none', 'slave_face', or 'surface_patch'")
+    contact_kinematics = str(source_contact_kinematics).lower()
+    if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
+        raise ValueError("source_contact_kinematics must be 'linearized_mpc' or 'finite_rp_corotated'")
+    contact_normal_filter = str(source_contact_normal_filter).lower()
+    if contact_normal_filter not in {"none", "opposing"}:
+        raise ValueError("source_contact_normal_filter must be 'none' or 'opposing'")
+    internal_kinematics = str(source_internal_kinematics).lower()
+    if internal_kinematics not in {"linearized_mpc", "corotated_rp"}:
+        raise ValueError("source_internal_kinematics must be 'linearized_mpc' or 'corotated_rp'")
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
     steps = max(1, int(round(float(duration) / float(dt))))
@@ -2061,6 +2192,30 @@ def solve_sfc_source_drive_pair(
     )
     body_node_slices = (slice(0, n1), slice(n1, X.shape[0]))
     body_reference_points = (np.asarray(pair.gear1.rp, dtype=float), np.asarray(pair.gear2.rp, dtype=float))
+    elastic_map = assembly.transformation
+    if internal_kinematics == "corotated_rp":
+        elastic_map = _source_drive_corotated_elastic_matrix(
+            assembly=assembly,
+            reference_nodes=model.X,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+        )
+
+    def contact_positions_from_reduced(q_reduced: np.ndarray) -> np.ndarray:
+        x_linear = model.X + assembly.expand_displacements(q_reduced)
+        if contact_kinematics == "linearized_mpc":
+            return x_linear
+        return _source_drive_corotated_positions_and_elastic_displacement(
+            model=model,
+            x_raw=x_linear,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=(
+                float(q_reduced[assembly.hub_slice(0).start + 5]),
+                float(q_reduced[hub2_slice.start + 5]),
+            ),
+        )[0]
+
     vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
     history_stride = max(1, int(history_frame_stride))
     vtk_dir = Path(vtk_out_dir) if vtk_out_dir is not None else None
@@ -2159,7 +2314,11 @@ def solve_sfc_source_drive_pair(
         vtk_manifest_rows.append(frame_row)
         vtk_datasets.append((0.0, frame_path))
     c0 = 1.0 / (beta * float(dt) * float(dt))
-    base_matrix = (M_red * c0 + K_red * scale).tocsr()
+    if internal_kinematics == "corotated_rp":
+        K_solve = (elastic_map.T @ K_full @ elastic_map).tocsr()
+    else:
+        K_solve = K_red
+    base_matrix = (M_red * c0 + K_solve * scale).tocsr()
     base_free = None
     base_lu_cache: list[Any] = [None]
     start = time.perf_counter()
@@ -2188,10 +2347,17 @@ def solve_sfc_source_drive_pair(
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
+            x_contact = contact_positions_from_reduced(q_guess)
             t_section = time.perf_counter()
-            sample_arrays = None if contact_averaging != "none" else contact.sample_arrays(x_guess)
+            sample_arrays = None if (contact_averaging != "none" or contact_normal_filter != "none") else contact.sample_arrays(x_contact)
             if sample_arrays is None:
-                samples = list(contact.samples(x_guess))
+                samples = list(contact.samples(x_contact))
+                if contact_normal_filter != "none":
+                    samples = _filter_contact_samples_by_normal_compatibility(
+                        samples,
+                        x_contact,
+                        mode=contact_normal_filter,
+                    )
                 if contact_averaging != "none":
                     samples = _aggregate_contact_samples(samples, contact_averaging)
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
@@ -2203,7 +2369,7 @@ def solve_sfc_source_drive_pair(
                 last_sample_arrays = sample_arrays
                 last_samples = None
             contact_matches_q_guess = True
-            internal_red = np.asarray(K_red @ q_guess, dtype=float).reshape(-1)
+            internal_red = np.asarray(K_solve @ q_guess, dtype=float).reshape(-1)
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
             a_guess = c0 * (q_guess - q_pred)
@@ -2271,9 +2437,20 @@ def solve_sfc_source_drive_pair(
         x_new = model.X + assembly.expand_displacements(q_new)
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         if not contact_matches_q_guess:
-            accepted_arrays = None if contact_averaging != "none" else contact.sample_arrays(state.x)
+            accepted_contact_x = contact_positions_from_reduced(q_new)
+            accepted_arrays = (
+                None
+                if (contact_averaging != "none" or contact_normal_filter != "none")
+                else contact.sample_arrays(accepted_contact_x)
+            )
             if accepted_arrays is None:
-                accepted_samples = list(contact.samples(state.x))
+                accepted_samples = list(contact.samples(accepted_contact_x))
+                if contact_normal_filter != "none":
+                    accepted_samples = _filter_contact_samples_by_normal_compatibility(
+                        accepted_samples,
+                        accepted_contact_x,
+                        mode=contact_normal_filter,
+                    )
                 if contact_averaging != "none":
                     accepted_samples = _aggregate_contact_samples(accepted_samples, contact_averaging)
                 last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
@@ -2283,7 +2460,7 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
                 last_sample_arrays = accepted_arrays
                 last_samples = None
-        previous = external - np.asarray(K_red @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
+        previous = external - np.asarray(K_solve @ q_new, dtype=float).reshape(-1) + assembly.reduce_vector(last_contact.force)
         history_due = (step % history_stride == 0) or (step == steps)
         vtk_due = vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps)
         output_state: MechanicsState | None = None
@@ -2427,6 +2604,9 @@ def solve_sfc_source_drive_pair(
         "source_rotation_unit": "radian",
         "source_stress_strain_postprocess": postprocess_label,
         "source_contact_averaging": contact_averaging,
+        "source_contact_kinematics": contact_kinematics,
+        "source_contact_normal_filter": contact_normal_filter,
+        "source_internal_kinematics": internal_kinematics,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
         "sfc_history_frame_stride": int(history_stride),
