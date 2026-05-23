@@ -22,6 +22,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_corotated_elastic_matrix,
     _source_drive_corotated_positions_and_elastic_displacement,
     _source_drive_centripetal_acceleration,
+    _source_drive_centripetal_reduced_response,
     _source_drive_corotated_visual_state_and_internal,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -571,6 +572,27 @@ def test_slave_face_averaging_groups_by_nodes_after_filtering() -> None:
     assert aggregated[0].gap == pytest.approx((-1.0e-3 * 0.2 - 2.0e-3 * 0.3) / 0.5)
 
 
+def test_slave_node_averaging_uses_tributary_area() -> None:
+    sample = ContactSample(
+        node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+        shape_weights=np.asarray([0.5, 0.3, 0.2]),
+        gap=-1.0e-3,
+        normal=np.asarray([0.0, 0.0, 1.0]),
+        area=2.0,
+        stiffness=10.0,
+    )
+
+    aggregated = _aggregate_contact_samples([sample], "slave_node")
+
+    assert len(aggregated) == 3
+    assert sum(float(item.area) for item in aggregated) == pytest.approx(2.0)
+    assert {tuple(np.asarray(item.shape_weights, dtype=float)) for item in aggregated} == {
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    }
+
+
 def test_source_drive_corotated_elastic_matrix_removes_body_z_rotation() -> None:
     X = np.asarray(
         [
@@ -616,6 +638,62 @@ def test_source_drive_centripetal_acceleration_points_inward() -> None:
     np.testing.assert_allclose(acc[0], [0.0, 0.0, 0.0], atol=1.0e-14)
     np.testing.assert_allclose(acc[1], [-32.0, 0.0, 0.0], atol=1.0e-14)
     np.testing.assert_allclose(acc[2], [0.0, -48.0, 0.0], atol=1.0e-14)
+
+
+def test_source_drive_centripetal_reduced_tangent_matches_finite_difference() -> None:
+    X = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+            [0.0, 1.1, 0.0],
+            [0.0, 0.0, 0.9],
+        ],
+        dtype=float,
+    )
+    elements = np.asarray([[0, 1, 2, 3]], dtype=np.int64)
+    model = MechanicsModel.from_tet4_mesh(X, elements, E=1.0e3, nu=0.25, density=2.0)
+    hub = RigidHubMPC(np.asarray([0, 1, 2, 3], dtype=np.int64), X, np.zeros(3))
+    assembly = build_rigid_hub_reduced_assembly(X, [hub], include_free_nodes=False)
+    theta = 0.37
+    omega = 8.0
+    domega_dtheta = 125.0
+    reduced, tangent = _source_drive_centripetal_reduced_response(
+        assembly=assembly,
+        mass_matrix=model.mass_matrix,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta, 0.0),
+        body_angular_velocity_z=(omega, 0.0),
+        velocity_sensitivity_z=(domega_dtheta, 0.0),
+        include_tangent=True,
+    )
+    eps = 1.0e-7
+    plus, _ = _source_drive_centripetal_reduced_response(
+        assembly=assembly,
+        mass_matrix=model.mass_matrix,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta + eps, 0.0),
+        body_angular_velocity_z=(omega + domega_dtheta * eps, 0.0),
+        include_tangent=False,
+    )
+    minus, _ = _source_drive_centripetal_reduced_response(
+        assembly=assembly,
+        mass_matrix=model.mass_matrix,
+        reference_nodes=X,
+        body_node_slices=(slice(0, X.shape[0]), slice(X.shape[0], X.shape[0])),
+        body_reference_points=(np.zeros(3), np.zeros(3)),
+        body_rotation_z=(theta - eps, 0.0),
+        body_angular_velocity_z=(omega - domega_dtheta * eps, 0.0),
+        include_tangent=False,
+    )
+    fd_column = (plus - minus) / (2.0 * eps)
+    tangent_column = np.asarray(tangent[:, assembly.hub_slice(0).start + 5].toarray()).reshape(-1)
+
+    assert np.linalg.norm(reduced) > 0.0
+    np.testing.assert_allclose(tangent_column, fd_column, rtol=1.0e-7, atol=1.0e-7)
 
 
 def test_source_drive_visual_postprocess_is_objective_for_large_rotation() -> None:

@@ -243,12 +243,49 @@ def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSamp
     )
 
 
+def _split_contact_sample_to_slave_nodes(sample: ContactSample) -> list[ContactSample]:
+    """Split one quadrature contact sample into slave-node tributary regions."""
+
+    nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+    weights = np.asarray(sample.shape_weights, dtype=float).reshape(-1)
+    if nodes.size != weights.size:
+        raise ValueError("sample node_ids and shape_weights must have the same length")
+    out: list[ContactSample] = []
+    for local, (node, weight) in enumerate(zip(nodes, weights, strict=True)):
+        tributary = float(sample.area) * max(float(weight), 0.0)
+        if tributary <= 0.0:
+            continue
+        shape = np.zeros_like(weights, dtype=float)
+        shape[int(local)] = 1.0
+        out.append(
+            ContactSample(
+                node_ids=nodes.copy(),
+                shape_weights=shape,
+                gap=float(sample.gap),
+                normal=np.asarray(sample.normal, dtype=float).copy(),
+                area=tributary,
+                stiffness=float(sample.stiffness),
+                master_node_ids=(
+                    None
+                    if sample.master_node_ids is None
+                    else np.asarray(sample.master_node_ids, dtype=np.int64).copy()
+                ),
+                master_shape_weights=(
+                    None
+                    if sample.master_shape_weights is None
+                    else np.asarray(sample.master_shape_weights, dtype=float).copy()
+                ),
+            )
+        )
+    return out
+
+
 def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[ContactSample]:
     """Aggregate contact samples using Abaqus-style surface constraint regions."""
 
     averaging = str(mode).lower()
-    if averaging not in {"none", "slave_face", "surface_patch"}:
-        raise ValueError("contact averaging must be 'none', 'slave_face', or 'surface_patch'")
+    if averaging not in {"none", "slave_face", "slave_node", "surface_patch"}:
+        raise ValueError("contact averaging must be 'none', 'slave_face', 'slave_node', or 'surface_patch'")
     if averaging == "none" or not samples:
         return samples
     if averaging == "slave_face":
@@ -260,6 +297,17 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
                 groups[key] = []
                 order.append(key)
             groups[key].append(sample)
+        return [_aggregate_contact_sample_group(groups[key]) for key in order]
+    if averaging == "slave_node":
+        groups: dict[int, list[ContactSample]] = {}
+        order: list[int] = []
+        for sample in samples:
+            for split in _split_contact_sample_to_slave_nodes(sample):
+                active_node = int(np.asarray(split.node_ids, dtype=np.int64)[np.argmax(split.shape_weights)])
+                if active_node not in groups:
+                    groups[active_node] = []
+                    order.append(active_node)
+                groups[active_node].append(split)
         return [_aggregate_contact_sample_group(groups[key]) for key in order]
     groups = _sample_connected_components(samples)
     return [_aggregate_contact_sample_group([samples[int(index)] for index in group]) for group in groups]
@@ -803,6 +851,79 @@ def _source_drive_centripetal_acceleration(
         omega = np.asarray([0.0, 0.0, float(omega_z)], dtype=float)
         acceleration[ids] = np.cross(omega[None, :], np.cross(omega[None, :], current_lever))
     return acceleration
+
+
+def _source_drive_centripetal_reduced_response(
+    *,
+    assembly: Any,
+    mass_matrix: Any,
+    reference_nodes: np.ndarray,
+    body_node_slices: tuple[slice, slice],
+    body_reference_points: tuple[np.ndarray, np.ndarray],
+    body_rotation_z: tuple[float, float],
+    body_angular_velocity_z: tuple[float, float],
+    velocity_sensitivity_z: tuple[float, float] = (0.0, 0.0),
+    include_tangent: bool = False,
+) -> tuple[np.ndarray, csr_matrix]:
+    """Return reduced centripetal inertia residual and optional tangent.
+
+    ``velocity_sensitivity_z`` contains ``d omega_z / d theta_z`` for each RP
+    rotation coordinate in the current Newton iteration.  In Newmark/HHT this is
+    ``gamma / (beta dt)`` for an unknown rotational displacement.  The tangent
+    is one-column-per-body because this diagnostic model only uses z-axis RP
+    rotations from the source gear deck.
+    """
+
+    acc = _source_drive_centripetal_acceleration(
+        reference_nodes=reference_nodes,
+        body_node_slices=body_node_slices,
+        body_reference_points=body_reference_points,
+        body_rotation_z=body_rotation_z,
+        body_angular_velocity_z=body_angular_velocity_z,
+    )
+    reduced = assembly.reduce_vector(mass_matrix @ acc.reshape(-1))
+    if not include_tangent:
+        return reduced, csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    X = np.asarray(reference_nodes, dtype=float)
+    for body_index, (node_slice, rp, theta, omega_z, domega_dtheta) in enumerate(
+        zip(
+            body_node_slices,
+            body_reference_points,
+            body_rotation_z,
+            body_angular_velocity_z,
+            velocity_sensitivity_z,
+            strict=True,
+        )
+    ):
+        ids = np.arange(node_slice.start or 0, node_slice.stop, dtype=np.int64)
+        if ids.size == 0:
+            continue
+        reference_point = np.asarray(rp, dtype=float).reshape(3)
+        lever = X[ids] - reference_point[None, :]
+        current_lever = lever @ _rotation_z_matrix(float(theta)).T
+        d_current_lever = np.column_stack((-current_lever[:, 1], current_lever[:, 0], np.zeros(ids.size, dtype=float)))
+        radial_lever = current_lever.copy()
+        radial_lever[:, 2] = 0.0
+        omega = float(omega_z)
+        sensitivity = float(domega_dtheta)
+        dacc = -2.0 * omega * sensitivity * radial_lever - omega * omega * d_current_lever
+        full = np.zeros_like(X)
+        full[ids] = dacc
+        column = assembly.reduce_vector(mass_matrix @ full.reshape(-1))
+        source_col = int(assembly.hub_slice(body_index).start + 5)
+        nonzero = np.flatnonzero(np.abs(column) > 0.0)
+        rows.extend(int(row) for row in nonzero)
+        cols.extend(source_col for _ in nonzero)
+        data.extend(float(column[int(row)]) for row in nonzero)
+    tangent = coo_matrix(
+        (data, (rows, cols)),
+        shape=(assembly.n_reduced_dofs, assembly.n_reduced_dofs),
+        dtype=float,
+    ).tocsr()
+    return reduced, tangent
 
 
 def _write_sfc_tet4_vtk_frame(
@@ -2175,8 +2296,8 @@ def solve_sfc_source_drive_pair(
         compiled_batch_projection=True,
     )
     contact_averaging = str(source_contact_averaging).lower()
-    if contact_averaging not in {"none", "slave_face", "surface_patch"}:
-        raise ValueError("source_contact_averaging must be 'none', 'slave_face', or 'surface_patch'")
+    if contact_averaging not in {"none", "slave_face", "slave_node", "surface_patch"}:
+        raise ValueError("source_contact_averaging must be 'none', 'slave_face', 'slave_node', or 'surface_patch'")
     contact_kinematics = str(source_contact_kinematics).lower()
     if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
         raise ValueError("source_contact_kinematics must be 'linearized_mpc' or 'finite_rp_corotated'")
@@ -2261,7 +2382,9 @@ def solve_sfc_source_drive_pair(
     def centripetal_reduced_from_state(q_reduced: np.ndarray, v_reduced: np.ndarray) -> np.ndarray:
         if rotating_inertia == "none":
             return np.zeros(assembly.n_reduced_dofs, dtype=float)
-        acc = _source_drive_centripetal_acceleration(
+        reduced, _tangent = _source_drive_centripetal_reduced_response(
+            assembly=assembly,
+            mass_matrix=model.mass_matrix,
             reference_nodes=model.X,
             body_node_slices=body_node_slices,
             body_reference_points=body_reference_points,
@@ -2273,8 +2396,32 @@ def solve_sfc_source_drive_pair(
                 float(v_reduced[assembly.hub_slice(0).start + 5]),
                 float(v_reduced[hub2_slice.start + 5]),
             ),
+            include_tangent=False,
         )
-        return assembly.reduce_vector(model.mass_matrix @ acc.reshape(-1))
+        return reduced
+
+    def centripetal_reduced_and_tangent_for_iteration(q_reduced: np.ndarray, v_reduced: np.ndarray) -> tuple[np.ndarray, csr_matrix]:
+        if rotating_inertia == "none":
+            empty = csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
+            return np.zeros(assembly.n_reduced_dofs, dtype=float), empty
+        sensitivity = gamma * float(dt) * c0
+        return _source_drive_centripetal_reduced_response(
+            assembly=assembly,
+            mass_matrix=model.mass_matrix,
+            reference_nodes=model.X,
+            body_node_slices=body_node_slices,
+            body_reference_points=body_reference_points,
+            body_rotation_z=(
+                float(q_reduced[assembly.hub_slice(0).start + 5]),
+                float(q_reduced[hub2_slice.start + 5]),
+            ),
+            body_angular_velocity_z=(
+                float(v_reduced[assembly.hub_slice(0).start + 5]),
+                float(v_reduced[hub2_slice.start + 5]),
+            ),
+            velocity_sensitivity_z=(float(sensitivity), float(sensitivity)),
+            include_tangent=True,
+        )
 
     vtk_enabled = vtk_out_dir is not None and int(vtk_frame_stride) > 0
     history_stride = max(1, int(history_frame_stride))
@@ -2433,7 +2580,8 @@ def solve_sfc_source_drive_pair(
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
             a_guess = c0 * (q_guess - q_pred)
-            centripetal_red = centripetal_reduced_from_state(q_guess, v_pred + gamma * float(dt) * a_guess)
+            iteration_velocity = v_pred + gamma * float(dt) * a_guess
+            centripetal_red, centripetal_tangent = centripetal_reduced_and_tangent_for_iteration(q_guess, iteration_velocity)
             residual = (
                 np.asarray(M_red @ a_guess, dtype=float).reshape(-1)
                 + scale * centripetal_red
@@ -2446,9 +2594,12 @@ def solve_sfc_source_drive_pair(
             correction_free = np.empty(0, dtype=float)
             if free.size:
                 cg_stats: dict[str, Any] = {}
+                current_base_free = base_free
+                if rotating_inertia != "none" and base_free is not None:
+                    current_base_free = (base_free + scale * centripetal_tangent[free[:, None], free]).tocsr()
                 if sample_arrays is None:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction(
-                        base_matrix_free=base_free,
+                        base_matrix_free=current_base_free,
                         residual_free=residual[free],
                         samples=samples,
                         transformation=T,
@@ -2461,7 +2612,7 @@ def solve_sfc_source_drive_pair(
                     )
                 else:
                     correction_free = _solve_reduced_penalty_sparse_cg_correction_from_arrays(
-                        base_matrix_free=base_free,
+                        base_matrix_free=current_base_free,
                         residual_free=residual[free],
                         sample_arrays=sample_arrays,
                         transformation=T,
@@ -2477,8 +2628,8 @@ def solve_sfc_source_drive_pair(
                     if sample_arrays is not None:
                         samples = list(contact.samples(x_guess))
                     correction_free = _solve_reduced_penalty_low_rank_correction(
-                        base_matrix_free=base_free,
-                        base_lu_cache=base_lu_cache,
+                        base_matrix_free=current_base_free,
+                        base_lu_cache=base_lu_cache if rotating_inertia == "none" else [None],
                         residual_free=residual[free],
                         samples=samples,
                         transformation=T,
