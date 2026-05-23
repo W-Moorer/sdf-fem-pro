@@ -1060,6 +1060,7 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
     master_node_offset: int = 0
     quadrature_order: int = 2
     search_radius: float | None = None
+    clip_to_master_footprint: bool = False
     _oracle: LagrangianQ4ClosestFeatureOracle = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -1099,6 +1100,9 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
         if master_stop > X.shape[0]:
             raise ValueError("master_node_offset places master nodes outside x_current")
         self._oracle.refit(X[master_start:master_stop])
+        if bool(self.clip_to_master_footprint):
+            yield from self._clipped_samples(X, master_start)
+            return
         points, weights = np.polynomial.legendre.leggauss(int(self.quadrature_order))
         for face_id, quad in enumerate(self.slave_quads):
             global_quad = quad + int(self.slave_node_offset)
@@ -1120,6 +1124,69 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
                         gap=float(payload.gap),
                         normal=payload.normal.copy(),
                         area=float(jac * float(weights[a]) * float(weights[b])),
+                        stiffness=float(self.pressure_stiffness),
+                        master_node_ids=payload.master_node_ids.astype(np.int64) + master_start,
+                        master_shape_weights=payload.master_weights.copy(),
+                    )
+
+    def _clipped_samples(self, X: np.ndarray, master_start: int):
+        """Yield samples integrated over the slave/master projected footprint.
+
+        Abaqus-style surface-to-surface contact should not integrate a whole
+        secondary face when only part of it has a valid projection onto a main
+        face.  This path clips each Q4 slave footprint against each Q4 master
+        footprint in the local master tangent plane and integrates over the
+        resulting convex polygon.  It is a geometric support correction, not a
+        penalty-stiffness tuning knob.
+        """
+
+        master_x = X[master_start : master_start + self.master_reference_nodes.shape[0]]
+        for slave_face_id, slave_quad in enumerate(self.slave_quads):
+            global_slave_quad = slave_quad + int(self.slave_node_offset)
+            slave_qx = X[global_slave_quad]
+            slave_plane = _quad_plane(slave_qx)
+            if slave_plane is None:
+                continue
+            slave_origin, slave_normal = slave_plane
+            for master_face_id, master_quad in enumerate(self.master_quads):
+                master_qx = master_x[master_quad]
+                basis = _quad_tangent_basis(master_qx)
+                if basis is None:
+                    continue
+                origin, e1, e2, master_normal = basis
+                normal_alignment = abs(float(slave_normal @ master_normal))
+                if normal_alignment <= 1.0e-12:
+                    continue
+                slave_polygon = _ensure_counterclockwise(_project_points_2d(slave_qx, origin, e1, e2))
+                master_polygon = _ensure_counterclockwise(_project_points_2d(master_qx, origin, e1, e2))
+                overlap = _convex_polygon_clip_2d(slave_polygon, master_polygon)
+                if overlap.shape[0] < 3:
+                    continue
+                overlap = _ensure_counterclockwise(overlap)
+                centroid = np.mean(overlap, axis=0)
+                for i in range(overlap.shape[0]):
+                    a = overlap[i]
+                    b = overlap[(i + 1) % overlap.shape[0]]
+                    tri_area_projected = abs(_triangle_area_2d(centroid, a, b))
+                    if tri_area_projected <= 1.0e-16:
+                        continue
+                    uv = (centroid + a + b) / 3.0
+                    plane_point = origin + uv[0] * e1 + uv[1] * e2
+                    line_distance = float(slave_normal @ (slave_origin - plane_point)) / float(slave_normal @ master_normal)
+                    point = plane_point + line_distance * master_normal
+                    xi_eta = _q4_natural_coordinates(point, slave_qx, clip=True)
+                    shape = _q4_shape_functions(float(xi_eta[0]), float(xi_eta[1]))
+                    payload = self._oracle._query_one(
+                        point,
+                        int(master_face_id),
+                        candidate_count=int(self.master_quads.shape[0]),
+                    )
+                    yield ContactSample(
+                        node_ids=global_slave_quad.copy(),
+                        shape_weights=shape.copy(),
+                        gap=float(payload.gap),
+                        normal=payload.normal.copy(),
+                        area=float(tri_area_projected / normal_alignment),
                         stiffness=float(self.pressure_stiffness),
                         master_node_ids=payload.master_node_ids.astype(np.int64) + master_start,
                         master_shape_weights=payload.master_weights.copy(),
@@ -1238,6 +1305,139 @@ def _q4_initial_natural_coordinates(point: np.ndarray, quad: np.ndarray) -> np.n
     A = np.column_stack((tangent_xi, tangent_eta))
     xi_eta, *_ = np.linalg.lstsq(A, np.asarray(point, dtype=float) - center, rcond=None)
     return np.clip(np.asarray(xi_eta, dtype=float), -1.0, 1.0)
+
+
+def _q4_natural_coordinates(point: np.ndarray, quad: np.ndarray, *, clip: bool) -> np.ndarray:
+    xi_eta = _q4_initial_natural_coordinates(point, quad)
+    for _ in range(12):
+        shape = _q4_shape_functions(float(xi_eta[0]), float(xi_eta[1]))
+        dshape = _q4_shape_derivatives(float(xi_eta[0]), float(xi_eta[1]))
+        residual = shape @ quad - np.asarray(point, dtype=float)
+        tangent_xi = dshape[:, 0] @ quad
+        tangent_eta = dshape[:, 1] @ quad
+        jac = np.asarray(
+            [
+                [float(tangent_xi @ tangent_xi), float(tangent_xi @ tangent_eta)],
+                [float(tangent_eta @ tangent_xi), float(tangent_eta @ tangent_eta)],
+            ],
+            dtype=float,
+        )
+        rhs = -np.asarray([float(tangent_xi @ residual), float(tangent_eta @ residual)], dtype=float)
+        try:
+            step = np.linalg.solve(jac, rhs)
+        except np.linalg.LinAlgError:
+            step, *_ = np.linalg.lstsq(jac, rhs, rcond=None)
+        xi_eta = xi_eta + step
+        if clip:
+            xi_eta = np.clip(xi_eta, -1.0, 1.0)
+        if float(np.linalg.norm(step)) <= 1.0e-12:
+            break
+    return np.asarray(xi_eta, dtype=float)
+
+
+def _quad_plane(quad: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    q = np.asarray(quad, dtype=float)
+    center = np.mean(q, axis=0)
+    normal = np.cross(q[1] - q[0], q[3] - q[0])
+    norm = float(np.linalg.norm(normal))
+    if norm <= 1.0e-30:
+        normal = np.cross(q[2] - q[1], q[0] - q[1])
+        norm = float(np.linalg.norm(normal))
+    if norm <= 1.0e-30:
+        return None
+    return center, normal / norm
+
+
+def _quad_tangent_basis(quad: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    plane = _quad_plane(quad)
+    if plane is None:
+        return None
+    origin, normal = plane
+    q = np.asarray(quad, dtype=float)
+    e1 = q[1] - q[0]
+    e1_norm = float(np.linalg.norm(e1))
+    if e1_norm <= 1.0e-30:
+        e1 = q[2] - q[3]
+        e1_norm = float(np.linalg.norm(e1))
+    if e1_norm <= 1.0e-30:
+        return None
+    e1 = e1 / e1_norm
+    e2 = np.cross(normal, e1)
+    e2_norm = float(np.linalg.norm(e2))
+    if e2_norm <= 1.0e-30:
+        return None
+    return origin, e1, e2 / e2_norm, normal
+
+
+def _project_points_2d(points: np.ndarray, origin: np.ndarray, e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+    p = np.asarray(points, dtype=float) - np.asarray(origin, dtype=float)
+    return np.column_stack((p @ np.asarray(e1, dtype=float), p @ np.asarray(e2, dtype=float)))
+
+
+def _polygon_signed_area_2d(poly: np.ndarray) -> float:
+    p = np.asarray(poly, dtype=float)
+    if p.shape[0] < 3:
+        return 0.0
+    x = p[:, 0]
+    y = p[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def _ensure_counterclockwise(poly: np.ndarray) -> np.ndarray:
+    p = np.asarray(poly, dtype=float)
+    if _polygon_signed_area_2d(p) < 0.0:
+        return p[::-1].copy()
+    return p.copy()
+
+
+def _triangle_area_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    ab = np.asarray(b, dtype=float) - np.asarray(a, dtype=float)
+    ac = np.asarray(c, dtype=float) - np.asarray(a, dtype=float)
+    return 0.5 * float(ab[0] * ac[1] - ab[1] * ac[0])
+
+
+def _convex_polygon_clip_2d(subject: np.ndarray, clip: np.ndarray, *, tol: float = 1.0e-12) -> np.ndarray:
+    output = [np.asarray(point, dtype=float) for point in np.asarray(subject, dtype=float)]
+    clip_poly = [np.asarray(point, dtype=float) for point in np.asarray(clip, dtype=float)]
+    if len(output) < 3 or len(clip_poly) < 3:
+        return np.empty((0, 2), dtype=float)
+
+    def inside(point: np.ndarray, edge_start: np.ndarray, edge_end: np.ndarray) -> bool:
+        edge = edge_end - edge_start
+        rel = point - edge_start
+        return bool(edge[0] * rel[1] - edge[1] * rel[0] >= -tol)
+
+    def intersection(p0: np.ndarray, p1: np.ndarray, edge_start: np.ndarray, edge_end: np.ndarray) -> np.ndarray:
+        direction = p1 - p0
+        edge = edge_end - edge_start
+        denom = direction[0] * edge[1] - direction[1] * edge[0]
+        if abs(float(denom)) <= tol:
+            return p1.copy()
+        delta = edge_start - p0
+        t = (delta[0] * edge[1] - delta[1] * edge[0]) / denom
+        return p0 + t * direction
+
+    for edge_index, edge_start in enumerate(clip_poly):
+        edge_end = clip_poly[(edge_index + 1) % len(clip_poly)]
+        input_poly = output
+        output = []
+        if not input_poly:
+            break
+        previous = input_poly[-1]
+        previous_inside = inside(previous, edge_start, edge_end)
+        for current in input_poly:
+            current_inside = inside(current, edge_start, edge_end)
+            if current_inside:
+                if not previous_inside:
+                    output.append(intersection(previous, current, edge_start, edge_end))
+                output.append(current)
+            elif previous_inside:
+                output.append(intersection(previous, current, edge_start, edge_end))
+            previous = current
+            previous_inside = current_inside
+    if len(output) < 3:
+        return np.empty((0, 2), dtype=float)
+    return np.asarray(output, dtype=float)
 
 
 def _as_point(value: np.ndarray, name: str) -> np.ndarray:

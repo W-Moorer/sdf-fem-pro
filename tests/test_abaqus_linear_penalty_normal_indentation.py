@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from validation.run_abaqus_linear_penalty_normal_indentation import (  # noqa: E402
     LinearPenaltyIndentationCase,
+    overlap_area,
     run_sfc,
     write_abaqus_deck,
 )
@@ -51,3 +52,41 @@ def test_sfc_linear_penalty_indentation_matches_pressure_force_law(tmp_path: Pat
     assert by_step[2]["penetration"] == pytest.approx(0.05)
     assert by_step[2]["cpress_mean"] == pytest.approx(5.0)
     assert by_step[2]["normal_force_magnitude"] == pytest.approx(20.0)
+
+
+def test_partial_overlap_case_reports_geometric_overlap_area() -> None:
+    case = LinearPenaltyIndentationCase(size=1.0, upper_size=0.5, upper_offset=(0.25, 0.25))
+
+    assert overlap_area(case) == pytest.approx(0.25)
+
+
+def test_partial_overlap_deck_offsets_upper_part_nodes(tmp_path: Path) -> None:
+    case = LinearPenaltyIndentationCase(size=1.0, upper_size=0.5, upper_offset=(0.25, 0.25))
+    path = tmp_path / "partial_overlap.inp"
+
+    write_abaqus_deck(case, path)
+
+    text = path.read_text(encoding="ascii")
+    assert "2.500000000000e-01, 2.500000000000e-01" in text
+    assert "7.500000000000e-01, 7.500000000000e-01" in text
+
+
+def test_sfc_partial_overlap_integrates_only_projected_contact_region(tmp_path: Path) -> None:
+    case = LinearPenaltyIndentationCase(
+        size=1.0,
+        upper_size=0.5,
+        upper_offset=(0.25, 0.25),
+        initial_gap=0.1,
+        pressure_stiffness=100.0,
+        closures=(0.15,),
+    )
+
+    path, _runtime = run_sfc(case, tmp_path / "sfc_partial.csv")
+
+    rows = np.genfromtxt(path, delimiter=",", names=True)
+    row = np.atleast_1d(rows)[0]
+    # penetration = 0.05, overlap area = 0.25, pressure = 5, force = 1.25.
+    assert row["penetration"] == pytest.approx(0.05)
+    assert row["overlap_area"] == pytest.approx(0.25)
+    assert row["cpress_mean"] == pytest.approx(5.0)
+    assert row["normal_force_magnitude"] == pytest.approx(1.25)

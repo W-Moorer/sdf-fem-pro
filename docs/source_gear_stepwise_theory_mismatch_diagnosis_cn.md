@@ -329,3 +329,77 @@ python validation/run_abaqus_linear_penalty_normal_indentation.py \
 1. SFC 的 Lagrangian-SDF Q4 payload penalty force 积分与 Abaqus `pressure-overclosure=LINEAR` 的局部 RF--penetration / CPRESS 口径已经完全一致。
 2. 因此齿轮短程窗口中剩余的 stress/strain/pressure 空间分布误差不应继续归因于线性 penalty 刚度单位或基本力积分公式。
 3. 下一步应把定位集中到复杂齿面上的 active constraint region 构造：Abaqus 在曲面齿面上的 secondary surface constraint region、pressure smoothing / status transition / 等效输出区域，与当前 SFC 的 `slave_node_region` 仍不完全等价。
+
+## 本轮新增修复：局部重叠 Q4 接触面积口径
+
+为了继续把误差源拆开，本轮把上方 master block 缩小为 `0.5 x 0.5`，并在 lower block 的 `1.0 x 1.0` 顶面中心偏置到 `(0.25, 0.25)`。这个工况仍然没有体变形、没有惯性、没有材料非线性，因此理论上法向合力只应来自几何重叠区域：
+
+```text
+F_n = k_p A_overlap max(closure - initial_gap, 0)
+```
+
+未修复前，SFC 的 Q4 surface-to-surface 接触对整张 slave face 积分，即使 slave quadrature point 的法向投影已经落在 master 面片外，也会通过 closest-feature edge clamp 得到负 gap 并产生压力。结果是：
+
+| closure | Abaqus force | SFC force before clipping | relative error |
+| ---: | ---: | ---: | ---: |
+| `0.025` | `6.25e6` | `2.50e7` | `300%` |
+| `0.030` | `1.25e7` | `5.00e7` | `300%` |
+
+这说明当前复杂齿面 stress/strain/pressure 空间误差的一个明确理论原因是：**SFC 的接触积分域曾经是整张 slave 面，而 Abaqus surface-to-surface enforcement 只在有效 slave/master constraint region 上产生约束。**
+
+本轮新增通用几何修复：
+
+- `src/sfc/contact/lagrangian_surface_contact.py`
+  - `LagrangianSDFQ4MasterSurfaceContactGeometry(..., clip_to_master_footprint=True)`
+  - 对每个 Q4 slave face 和 Q4 master face，在 master tangent plane 中做凸多边形 footprint clipping；
+  - 只在 slave/master 投影重叠区域生成 contact samples；
+  - sample area 从裁剪后的有效区域得到，而不是使用整张 slave face 面积；
+  - master payload 仍来自当前构型 Q4 closest-feature oracle，没有改罚刚度、没有改 SDF gap 精度。
+
+修复后局部重叠 benchmark：
+
+```text
+python validation/run_abaqus_linear_penalty_normal_indentation.py \
+  --out-dir results/linear_penalty_partial_overlap_clipped_abaqus \
+  --upper-size 0.5 \
+  --upper-offset-x 0.25 \
+  --upper-offset-y 0.25 \
+  --run-abaqus \
+  --timeout 300
+```
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| overlap area | `0.25` |
+| SFC wall time | `0.011655 s` |
+| Abaqus analysis wall time | `10.015048 s` |
+| Abaqus export wall time | `0.352849 s` |
+| max RF / normal-force relative error | `~1.0e-12%` |
+
+关键逐步结果：
+
+| closure | Abaqus force | SFC force after clipping | relative error |
+| ---: | ---: | ---: | ---: |
+| `0.025` | `6.25e6` | `6.25e6` | `1.0e-14` |
+| `0.030` | `1.25e7` | `1.25e7` | `8.9e-16` |
+
+全覆盖 benchmark 同时保持不变：
+
+| closure | expected force | SFC force after clipping |
+| ---: | ---: | ---: |
+| `0.025` | `2.5e7` | `2.5e7` |
+| `0.030` | `5.0e7` | `5.0e7` |
+
+剩余现象：
+
+- `CPRESS mean` 在局部重叠工况下仍与 SFC 的 `normal_force / overlap_area` 不一致；
+- 但 RF/合力、gap、penetration 已经对齐；
+- 因此这不是接触力积分错误，而是 Abaqus contact output 的节点/constraint-region smoothing 与 SFC 当前压力输出口径不同。
+
+下一层定位应继续沿 Abaqus 理论口径推进：
+
+1. 把 Q4 footprint clipping 接回齿轮/曲面工程算例；
+2. 区分“用于求解的接触合力/虚功”等价和“用于云图的 CPRESS 节点输出 smoothing”等价；
+3. 再单独对齐 Abaqus CPRESS / active status 的输出平均口径，避免把输出场 smoothing 误当成接触力学误差。

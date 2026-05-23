@@ -42,6 +42,8 @@ class LinearPenaltyIndentationCase:
     """Rigidly prescribed two-block normal indentation for LINEAR penalty law."""
 
     size: float = 1.0
+    upper_size: float | None = None
+    upper_offset: tuple[float, float] = (0.0, 0.0)
     height: float = 1.0
     initial_gap: float = 0.02
     pressure_stiffness: float = 5.0e9
@@ -87,11 +89,25 @@ def _block_nodes(*, z0: float, size: float, height: float) -> np.ndarray:
     )
 
 
+def _translated(nodes: np.ndarray, offset: tuple[float, float, float]) -> np.ndarray:
+    return np.asarray(nodes, dtype=float) + np.asarray(offset, dtype=float)
+
+
 def make_geometry(case: LinearPenaltyIndentationCase) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     lower = _block_nodes(z0=0.0, size=case.size, height=case.height)
-    upper = _block_nodes(z0=case.height + case.initial_gap, size=case.size, height=case.height)
+    upper_size = float(case.size if case.upper_size is None else case.upper_size)
+    upper = _block_nodes(z0=case.height + case.initial_gap, size=upper_size, height=case.height)
+    upper = _translated(upper, (float(case.upper_offset[0]), float(case.upper_offset[1]), 0.0))
     elements = np.asarray([[0, 1, 2, 3, 4, 5, 6, 7]], dtype=np.int64)
     return lower, upper, elements
+
+
+def overlap_area(case: LinearPenaltyIndentationCase) -> float:
+    upper_size = float(case.size if case.upper_size is None else case.upper_size)
+    ox, oy = float(case.upper_offset[0]), float(case.upper_offset[1])
+    x_overlap = max(0.0, min(float(case.size), ox + upper_size) - max(0.0, ox))
+    y_overlap = max(0.0, min(float(case.size), oy + upper_size) - max(0.0, oy))
+    return x_overlap * y_overlap
 
 
 def write_abaqus_deck(case: LinearPenaltyIndentationCase, path: Path) -> None:
@@ -313,7 +329,7 @@ def run_abaqus(case: LinearPenaltyIndentationCase, out_dir: Path, *, abaqus_comm
             str(metrics.resolve()),
             ",".join(f"{float(v):.17g}" for v in case.closures),
             f"{case.initial_gap:.17g}",
-            f"{case.size * case.size:.17g}",
+            f"{overlap_area(case):.17g}",
             f"{case.pressure_stiffness:.17g}",
         ],
         cwd=run_dir,
@@ -345,6 +361,7 @@ def run_sfc(case: LinearPenaltyIndentationCase, out_path: Path) -> tuple[Path, R
             master_node_offset=lower.shape[0],
             quadrature_order=int(case.quadrature_order),
             search_radius=max(float(case.height), float(case.initial_gap), float(closure)) + 1.0e-12,
+            clip_to_master_footprint=True,
         )
         samples = list(contact.samples(x_current))
         force = np.zeros((x_current.shape[0], 3), dtype=float)
@@ -373,7 +390,7 @@ def run_sfc(case: LinearPenaltyIndentationCase, out_path: Path) -> tuple[Path, R
         mean_gap = weighted_gap / max(area, 1.0e-30)
         penetration = max(-mean_gap, 0.0)
         expected_pressure = float(case.pressure_stiffness) * penetration
-        expected_force = expected_pressure * float(case.size * case.size)
+        expected_force = expected_pressure * overlap_area(case)
         rows.append(
             {
                 "step": int(step),
@@ -387,6 +404,7 @@ def run_sfc(case: LinearPenaltyIndentationCase, out_path: Path) -> tuple[Path, R
                 "cpress_mean": float(normal_force / max(area, 1.0e-30)),
                 "expected_pressure": float(expected_pressure),
                 "expected_force": float(expected_force),
+                "overlap_area": float(overlap_area(case)),
                 "active_constraints": int(active_count),
                 "constraints": int(len(samples)),
             }
@@ -437,7 +455,10 @@ def write_summary(path: Path, *, case: LinearPenaltyIndentationCase, sfc_runtime
         "",
         f"- pressure stiffness: `{case.pressure_stiffness:.6e}`",
         f"- initial gap: `{case.initial_gap:.6e}`",
-        f"- contact area: `{case.size * case.size:.6e}`",
+        f"- lower area: `{case.size * case.size:.6e}`",
+        f"- upper area: `{float(case.size if case.upper_size is None else case.upper_size) ** 2:.6e}`",
+        f"- overlap area: `{overlap_area(case):.6e}`",
+        f"- upper offset: `({float(case.upper_offset[0]):.6e}, {float(case.upper_offset[1]):.6e})`",
         f"- closures: `{', '.join(f'{float(v):.6e}' for v in case.closures)}`",
         f"- SFC wall time: `{float(sfc_runtime['analysis_wall_seconds']):.6f} s`",
     ]
@@ -453,7 +474,9 @@ def write_summary(path: Path, *, case: LinearPenaltyIndentationCase, sfc_runtime
                 "## Alignment",
                 "",
                 f"- max RF/normal-force relative error: `{100.0 * max(force_errors, default=0.0):.6f}%`",
-                f"- max CPRESS relative error: `{100.0 * max(pressure_errors, default=0.0):.6f}%`",
+                f"- max CPRESS output-mean relative difference: `{100.0 * max(pressure_errors, default=0.0):.6f}%`",
+                "",
+                "CPRESS is an Abaqus contact-output field and may include nodal or constraint-region averaging; RF is the primary equilibrium check for this calibration.",
             ]
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -468,12 +491,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pressure-stiffness", type=float, default=5.0e9)
     parser.add_argument("--initial-gap", type=float, default=0.02)
     parser.add_argument("--closures", type=str, default="0,0.01,0.02,0.025,0.03")
+    parser.add_argument("--upper-size", type=float, default=None)
+    parser.add_argument("--upper-offset-x", type=float, default=0.0)
+    parser.add_argument("--upper-offset-y", type=float, default=0.0)
     args = parser.parse_args(argv)
     closures = tuple(float(part) for part in str(args.closures).split(",") if part.strip())
     case = LinearPenaltyIndentationCase(
         pressure_stiffness=float(args.pressure_stiffness),
         initial_gap=float(args.initial_gap),
         closures=closures,
+        upper_size=args.upper_size,
+        upper_offset=(float(args.upper_offset_x), float(args.upper_offset_y)),
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     write_abaqus_deck(case, args.out_dir / "linear_penalty_normal_indentation.inp")
