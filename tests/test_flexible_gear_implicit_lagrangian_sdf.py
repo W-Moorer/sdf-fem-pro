@@ -20,6 +20,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _assemble_contact_response_force_only,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
+    _default_secondary_contact_tracking_radius,
     _filter_contact_samples_by_normal_compatibility,
     _node_average_cell_scalar,
     _node_average_cell_tensor,
@@ -109,6 +110,30 @@ def test_default_contact_search_radius_uses_surface_feature_size() -> None:
     assert feature > 0.0
     assert radius == pytest.approx(2.5 * feature)
     assert radius > 1.0
+
+
+def test_secondary_contact_tracking_radius_uses_clearance_tube_not_feature_size() -> None:
+    nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    faces = np.asarray([[0, 1, 2]], dtype=np.int64)
+    pair = SimpleNamespace(
+        initial_patch_gap=2.0e-5,
+        gear1=SimpleNamespace(nodes=nodes, contact_faces=faces),
+        gear2=SimpleNamespace(nodes=nodes.copy(), contact_faces=faces.copy()),
+    )
+
+    closest_radius = _default_contact_search_radius(pair, target_overclosure=1.0e-5)
+    tracking_radius = _default_secondary_contact_tracking_radius(pair, target_overclosure=1.0e-5)
+
+    assert closest_radius > 1.0
+    assert tracking_radius == pytest.approx(1.0e-4)
+    assert tracking_radius < closest_radius
 
 
 def test_source_force_only_contact_response_matches_full_force_response() -> None:

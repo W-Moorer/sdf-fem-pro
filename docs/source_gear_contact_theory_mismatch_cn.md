@@ -68,6 +68,20 @@ SFC 当前在每个接触查询中从大 contact patch 里重新搜索任意 mas
 
 ## 下一步通用修复顺序
 
+### 已推进：secondary contact tracking tube
+
+`secondary_average + secondary_line` 路径已经从 closest-feature 的保守 feature-size radius 分离出来。closest-feature SDF 查询仍使用 surface feature size 保护精确最近特征；Abaqus-style secondary surface contact 使用 initial-clearance / overclosure tolerance 定义的 contact tracking tube。
+
+0.0004 s 窗口验证中，显式使用 1.0e-4 tracking tube 后：
+
+- final displacement relative error = 3.36%；
+- final global p95 von Mises relative error = 6.23%；
+- final global p95 equivalent strain relative error = 6.23%；
+- final max node-averaged von Mises relative error = 7.72%；
+- final min gap 从毫米级过闭合降至约 -1.23e-4。
+
+但 0.00020--0.00032 s 中段 p95 stress 仍有 30%--52% 偏差。Abaqus contact field 显示该时间段 CPRESS/active nodes 继续升高，而固定 tracking tube 的 SFC 过早降低接触压力。因此下一步不是再放大全局半径，而是实现 contact patch tracking / adjacency migration：只允许约束沿相邻 master patch 滑移迁移，避免远处齿面跳转，同时不因固定小半径丢失真实滑移接触。
+
 1. 实现 Abaqus-style contact element 初始化：
    - 为每个 slave surface constraint region 建立初始 master patch / 初始 clearance；
    - 初始帧不因原始几何 overclosure 自动产生 CPRESS；
