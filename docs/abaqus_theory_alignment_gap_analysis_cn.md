@@ -199,6 +199,57 @@ g_region = -penetration_region
 
 该假设把初始 HHT history balance 改为包含 step-start CLOAD。结果反而使位移误差恶化到 `4.619% / 5.852%`，因此已撤回，不进入主线。
 
+## 本轮 split diagnostics 和残差收敛排查
+
+新增 SFC contact diagnostics，将原先合并的 contact fields 拆成：
+
+```text
+contact_*_nodeavg              # total: slave + master
+contact_slave_*_nodeavg        # slave side only
+contact_master_*_nodeavg       # master side only
+```
+
+对应新增 history/manifest 指标包括：
+
+```text
+active_contact_slave_node_count
+active_contact_master_node_count
+min_contact_slave_gap_node
+min_contact_master_gap_node
+p95_contact_slave_pressure_nodeavg
+p95_contact_master_pressure_nodeavg
+```
+
+短程验证：
+
+`results/source_gear_penalty_contact_split_diagnostics_smoke_0004`
+
+| time (s) | Abaqus active | SFC total | SFC slave | SFC master | Abaqus min gap | SFC min gap | p95 nodeavg stress error |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.0002 | 466 | 336 | 173 | 163 | -1.670e-3 | -8.11e-4 | 39.646% |
+| 0.0004 | 44 | 65 | 32 | 33 | -9.73e-5 | -1.11e-4 | 1.803% |
+
+结论：
+
+- `0.0002 s` 的差异不是 total/slave/master 统计混淆导致；SFC 两侧 active 都偏少，且最小 gap 约为 Abaqus 的一半。
+- `0.0004 s` 的 gap 和应力已基本对齐，说明问题集中在接触建立初期。
+
+还将 source-drive 接触迭代从“只看位移修正量”改成“位移修正量 + 力残差”双准则，以接近 Abaqus 非线性迭代收敛思想。
+
+短程验证：
+
+`results/source_gear_penalty_contact_residual_convergence_smoke_0004`
+
+| time (s) | iterations | residual norm | p95 nodeavg stress error |
+|---:|---:|---:|---:|
+| 0.0002 | 4 | 2.34e-8 | 39.646% |
+| 0.0004 | 4 | 2.99e-8 | 1.803% |
+
+结论：
+
+- 残差收敛已显著改善，但 early stress 误差没有变化。
+- 因此 `0.0002 s` 误差不是 Newton 提前停止造成的，下一步应继续对齐 Abaqus contact status/COPEN/CPRESS 的 surface region 定义或接触建立阶段的输出语义。
+
 ## 下一步理论对齐优先级
 
 ### 第一优先级：不要使用 centripetal residual 作为默认

@@ -387,9 +387,13 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "linear_corotated" in text
     assert "radian" in text
     assert "active_contact_node_count" in text
+    assert "active_contact_slave_node_count" in text
+    assert "active_contact_master_node_count" in text
     assert "max_contact_pressure_nodeavg" in text
     vtk_text = (vtk_dir / "sfc_0001.vtk").read_text(encoding="ascii")
     assert "SCALARS contact_pressure_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_slave_pressure_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_master_pressure_nodeavg float 1" in vtk_text
     assert "SCALARS contact_penetration_nodeavg float 1" in vtk_text
     assert "SCALARS contact_gap_min_node float 1" in vtk_text
 

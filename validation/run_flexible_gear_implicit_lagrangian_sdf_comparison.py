@@ -395,7 +395,76 @@ def _empty_contact_node_diagnostics(n_nodes: int) -> dict[str, Any]:
         "max_contact_penetration_nodeavg": 0.0,
         "min_contact_gap_node": 0.0,
     }
+    for role in ("slave", "master"):
+        fields.update(
+            {
+                f"contact_{role}_pressure_nodeavg": np.zeros(count, dtype=float),
+                f"contact_{role}_penetration_nodeavg": np.zeros(count, dtype=float),
+                f"contact_{role}_active_node": np.zeros(count, dtype=float),
+                f"contact_{role}_gap_min_node": np.zeros(count, dtype=float),
+                f"contact_{role}_sample_area_weight": np.zeros(count, dtype=float),
+            }
+        )
+        metrics.update(
+            {
+                f"active_contact_{role}_node_count": 0,
+                f"max_contact_{role}_pressure_nodeavg": 0.0,
+                f"p95_contact_{role}_pressure_nodeavg": 0.0,
+                f"mean_active_contact_{role}_pressure_nodeavg": 0.0,
+                f"max_contact_{role}_penetration_nodeavg": 0.0,
+                f"min_contact_{role}_gap_node": 0.0,
+            }
+        )
     return {"fields": fields, "metrics": metrics}
+
+
+def _prefixed_contact_node_diagnostics(diagnostics: dict[str, Any], role: str) -> dict[str, Any]:
+    """Rename total contact diagnostic fields/metrics for one contact side."""
+
+    label = str(role)
+    fields_in = dict(diagnostics.get("fields", {}))
+    metrics_in = dict(diagnostics.get("metrics", {}))
+    field_map = {
+        "contact_pressure_nodeavg": f"contact_{label}_pressure_nodeavg",
+        "contact_penetration_nodeavg": f"contact_{label}_penetration_nodeavg",
+        "contact_active_node": f"contact_{label}_active_node",
+        "contact_gap_min_node": f"contact_{label}_gap_min_node",
+        "contact_sample_area_weight": f"contact_{label}_sample_area_weight",
+    }
+    metric_map = {
+        "active_contact_node_count": f"active_contact_{label}_node_count",
+        "max_contact_pressure_nodeavg": f"max_contact_{label}_pressure_nodeavg",
+        "p95_contact_pressure_nodeavg": f"p95_contact_{label}_pressure_nodeavg",
+        "mean_active_contact_pressure_nodeavg": f"mean_active_contact_{label}_pressure_nodeavg",
+        "max_contact_penetration_nodeavg": f"max_contact_{label}_penetration_nodeavg",
+        "min_contact_gap_node": f"min_contact_{label}_gap_node",
+    }
+    return {
+        "fields": {new: fields_in[old] for old, new in field_map.items() if old in fields_in},
+        "metrics": {new: metrics_in[old] for old, new in metric_map.items() if old in metrics_in},
+    }
+
+
+def _new_contact_accumulators(n_nodes: int) -> dict[str, np.ndarray]:
+    count = int(n_nodes)
+    return {
+        "weighted_pressure": np.zeros(count, dtype=float),
+        "weighted_penetration": np.zeros(count, dtype=float),
+        "area_weight": np.zeros(count, dtype=float),
+        "active_hit": np.zeros(count, dtype=float),
+        "gap_min": np.full(count, np.inf, dtype=float),
+    }
+
+
+def _finalize_contact_accumulators(accumulators: dict[str, np.ndarray], n_nodes: int) -> dict[str, Any]:
+    return _finalize_contact_node_diagnostics(
+        n_nodes=int(n_nodes),
+        weighted_pressure=accumulators["weighted_pressure"],
+        weighted_penetration=accumulators["weighted_penetration"],
+        area_weight=accumulators["area_weight"],
+        active_hit=accumulators["active_hit"],
+        gap_min=accumulators["gap_min"],
+    )
 
 
 def _finalize_contact_node_diagnostics(
@@ -495,47 +564,52 @@ def _contact_node_diagnostics_from_arrays(
     penetrations = np.maximum(-gaps, 0.0)
     pressures = float(stiffness) * penetrations
     active = penetrations > 0.0
-    weighted_pressure = np.zeros(count, dtype=float)
-    weighted_penetration = np.zeros(count, dtype=float)
-    area_weight = np.zeros(count, dtype=float)
-    active_hit = np.zeros(count, dtype=float)
-    gap_min = np.full(count, np.inf, dtype=float)
+    total = _new_contact_accumulators(count)
+    slave = _new_contact_accumulators(count)
+    master = _new_contact_accumulators(count)
+    sample_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    sample_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
     _accumulate_contact_nodes(
-        nodes=np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64),
-        weights=np.asarray(sample_arrays["sample_weights"], dtype=float),
+        nodes=sample_nodes,
+        weights=sample_weights,
         gaps=gaps,
         pressures=pressures,
         penetrations=penetrations,
         areas=areas,
         active=active,
-        weighted_pressure=weighted_pressure,
-        weighted_penetration=weighted_penetration,
-        area_weight=area_weight,
-        active_hit=active_hit,
-        gap_min=gap_min,
+        **slave,
     )
     _accumulate_contact_nodes(
-        nodes=np.asarray(sample_arrays["master_node_ids"], dtype=np.int64),
-        weights=np.asarray(sample_arrays["master_weights"], dtype=float),
+        nodes=master_nodes,
+        weights=master_weights,
         gaps=gaps,
         pressures=pressures,
         penetrations=penetrations,
         areas=areas,
         active=active,
-        weighted_pressure=weighted_pressure,
-        weighted_penetration=weighted_penetration,
-        area_weight=area_weight,
-        active_hit=active_hit,
-        gap_min=gap_min,
+        **master,
     )
-    return _finalize_contact_node_diagnostics(
-        n_nodes=count,
-        weighted_pressure=weighted_pressure,
-        weighted_penetration=weighted_penetration,
-        area_weight=area_weight,
-        active_hit=active_hit,
-        gap_min=gap_min,
-    )
+    for nodes, weights in ((sample_nodes, sample_weights), (master_nodes, master_weights)):
+        _accumulate_contact_nodes(
+            nodes=nodes,
+            weights=weights,
+            gaps=gaps,
+            pressures=pressures,
+            penetrations=penetrations,
+            areas=areas,
+            active=active,
+            **total,
+        )
+    diagnostics = _finalize_contact_accumulators(total, count)
+    slave_diag = _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(slave, count), "slave")
+    master_diag = _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(master, count), "master")
+    diagnostics["fields"].update(slave_diag["fields"])
+    diagnostics["fields"].update(master_diag["fields"])
+    diagnostics["metrics"].update(slave_diag["metrics"])
+    diagnostics["metrics"].update(master_diag["metrics"])
+    return diagnostics
 
 
 def _contact_node_diagnostics_from_samples(samples: Iterable[Any] | None, n_nodes: int) -> dict[str, Any]:
@@ -545,56 +619,70 @@ def _contact_node_diagnostics_from_samples(samples: Iterable[Any] | None, n_node
     sample_list = list(samples or [])
     if not sample_list:
         return _empty_contact_node_diagnostics(count)
-    weighted_pressure = np.zeros(count, dtype=float)
-    weighted_penetration = np.zeros(count, dtype=float)
-    area_weight = np.zeros(count, dtype=float)
-    active_hit = np.zeros(count, dtype=float)
-    gap_min = np.full(count, np.inf, dtype=float)
+    total = _new_contact_accumulators(count)
+    slave = _new_contact_accumulators(count)
+    master = _new_contact_accumulators(count)
     for sample in sample_list:
         gap = float(sample.gap)
         penetration = max(-gap, 0.0)
         pressure = float(sample.stiffness) * penetration
         area = float(sample.area)
         active = penetration > 0.0
+        slave_nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape((1, -1))
+        slave_weights = np.asarray(sample.shape_weights, dtype=float).reshape((1, -1))
         _accumulate_contact_nodes(
-            nodes=np.asarray(sample.node_ids, dtype=np.int64).reshape((1, -1)),
-            weights=np.asarray(sample.shape_weights, dtype=float).reshape((1, -1)),
+            nodes=slave_nodes,
+            weights=slave_weights,
             gaps=np.asarray([gap], dtype=float),
             pressures=np.asarray([pressure], dtype=float),
             penetrations=np.asarray([penetration], dtype=float),
             areas=np.asarray([area], dtype=float),
             active=np.asarray([active], dtype=bool),
-            weighted_pressure=weighted_pressure,
-            weighted_penetration=weighted_penetration,
-            area_weight=area_weight,
-            active_hit=active_hit,
-            gap_min=gap_min,
+            **slave,
+        )
+        _accumulate_contact_nodes(
+            nodes=slave_nodes,
+            weights=slave_weights,
+            gaps=np.asarray([gap], dtype=float),
+            pressures=np.asarray([pressure], dtype=float),
+            penetrations=np.asarray([penetration], dtype=float),
+            areas=np.asarray([area], dtype=float),
+            active=np.asarray([active], dtype=bool),
+            **total,
         )
         master_ids = getattr(sample, "master_node_ids", None)
         master_weights = getattr(sample, "master_shape_weights", None)
         if master_ids is not None and master_weights is not None:
+            master_nodes = np.asarray(master_ids, dtype=np.int64).reshape((1, -1))
+            master_shape = np.asarray(master_weights, dtype=float).reshape((1, -1))
             _accumulate_contact_nodes(
-                nodes=np.asarray(master_ids, dtype=np.int64).reshape((1, -1)),
-                weights=np.asarray(master_weights, dtype=float).reshape((1, -1)),
+                nodes=master_nodes,
+                weights=master_shape,
                 gaps=np.asarray([gap], dtype=float),
                 pressures=np.asarray([pressure], dtype=float),
                 penetrations=np.asarray([penetration], dtype=float),
                 areas=np.asarray([area], dtype=float),
                 active=np.asarray([active], dtype=bool),
-                weighted_pressure=weighted_pressure,
-                weighted_penetration=weighted_penetration,
-                area_weight=area_weight,
-                active_hit=active_hit,
-                gap_min=gap_min,
+                **master,
             )
-    return _finalize_contact_node_diagnostics(
-        n_nodes=count,
-        weighted_pressure=weighted_pressure,
-        weighted_penetration=weighted_penetration,
-        area_weight=area_weight,
-        active_hit=active_hit,
-        gap_min=gap_min,
-    )
+            _accumulate_contact_nodes(
+                nodes=master_nodes,
+                weights=master_shape,
+                gaps=np.asarray([gap], dtype=float),
+                pressures=np.asarray([pressure], dtype=float),
+                penetrations=np.asarray([penetration], dtype=float),
+                areas=np.asarray([area], dtype=float),
+                active=np.asarray([active], dtype=bool),
+                **total,
+            )
+    diagnostics = _finalize_contact_accumulators(total, count)
+    slave_diag = _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(slave, count), "slave")
+    master_diag = _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(master, count), "master")
+    diagnostics["fields"].update(slave_diag["fields"])
+    diagnostics["fields"].update(master_diag["fields"])
+    diagnostics["metrics"].update(slave_diag["metrics"])
+    diagnostics["metrics"].update(master_diag["metrics"])
+    return diagnostics
 
 
 @dataclass(frozen=True, slots=True)
@@ -2702,7 +2790,16 @@ def solve_sfc_source_drive_pair(
                         source_sparse_cg_base_lu_preconditioner += 1
             timing_linear += time.perf_counter() - t_section
             iteration_count = iteration
-            if float(np.linalg.norm(correction_free)) <= float(tolerance) * max(1.0, float(np.linalg.norm(q_guess[free])) if free.size else 1.0):
+            correction_norm = float(np.linalg.norm(correction_free))
+            correction_scale = max(1.0, float(np.linalg.norm(q_guess[free])) if free.size else 1.0)
+            balance_scale = max(
+                1.0,
+                float(np.linalg.norm(rhs_balance[free])) if free.size else 1.0,
+                float(np.linalg.norm(np.asarray(M_red @ a_guess, dtype=float).reshape(-1)[free])) if free.size else 1.0,
+            )
+            correction_converged = correction_norm <= float(tolerance) * correction_scale
+            residual_converged = residual_norm <= max(float(tolerance) * balance_scale, 1.0e-10)
+            if correction_converged and residual_converged:
                 break
             q_guess[free] += correction_free
             contact_matches_q_guess = False
