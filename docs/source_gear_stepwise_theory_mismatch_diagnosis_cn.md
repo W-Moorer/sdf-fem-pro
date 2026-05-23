@@ -275,3 +275,57 @@ python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
 4. 剩余误差更可能来自 Abaqus 内部 contact pressure smoothing / constraint enforcement stiffness / active status transition 的组合口径，而不是简单的 signed gap averaging 或候选筛选。
 
 下一层不应接受这些“全场 p95 过线但 active 区错误”的模式。应继续定位 Abaqus penalty enforcement 的等效接触刚度和区域压力平滑：用一个最小法向压入 benchmark 先对齐 RF--penetration 曲线，再把该 enforcement 口径接回齿轮工况。
+
+## 最小 LINEAR penalty 法向压入 benchmark
+
+本轮新增：
+
+- `validation/run_abaqus_linear_penalty_normal_indentation.py`
+- `tests/test_abaqus_linear_penalty_normal_indentation.py`
+
+该 benchmark 用两个 C3D8 block 只定义接触面：
+
+1. 下块所有节点固定；
+2. 上块所有节点做刚性法向位移；
+3. 接触使用 Abaqus `*Surface Behavior, pressure-overclosure=LINEAR`；
+4. 因为两块体都不发生体变形，所以理论关系应为
+
+```text
+F_n = k_p A max(closure - initial_gap, 0)
+```
+
+运行命令：
+
+```text
+python validation/run_abaqus_linear_penalty_normal_indentation.py \
+  --out-dir results/linear_penalty_normal_indentation_abaqus \
+  --run-abaqus \
+  --timeout 300
+```
+
+结果：
+
+| 指标 | 数值 |
+| --- | ---: |
+| pressure stiffness | `5.0e9` |
+| initial gap | `0.02` |
+| contact area | `1.0` |
+| closures | `0, 0.01, 0.02, 0.025, 0.03` |
+| SFC wall time | `0.010497 s` |
+| Abaqus analysis wall time | `10.363180 s` |
+| Abaqus export wall time | `0.396958 s` |
+| max RF / normal-force relative error | `0.000000%` |
+| max CPRESS relative error | `0.000000%` |
+
+关键逐步结果：
+
+| closure | penetration | Abaqus force | SFC force | Abaqus CPRESS | SFC CPRESS |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `0.025` | `0.005` | `2.5e7` | `2.5e7` | `2.5e7` | `2.5e7` |
+| `0.030` | `0.010` | `5.0e7` | `5.0e7` | `5.0e7` | `5.0e7` |
+
+结论：
+
+1. SFC 的 Lagrangian-SDF Q4 payload penalty force 积分与 Abaqus `pressure-overclosure=LINEAR` 的局部 RF--penetration / CPRESS 口径已经完全一致。
+2. 因此齿轮短程窗口中剩余的 stress/strain/pressure 空间分布误差不应继续归因于线性 penalty 刚度单位或基本力积分公式。
+3. 下一步应把定位集中到复杂齿面上的 active constraint region 构造：Abaqus 在曲面齿面上的 secondary surface constraint region、pressure smoothing / status transition / 等效输出区域，与当前 SFC 的 `slave_node_region` 仍不完全等价。
