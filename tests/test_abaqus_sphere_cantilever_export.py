@@ -7,7 +7,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from validation.abaqus_odb_to_vtk import _select_frame_indices, _tensor_from_symmetric6, _von_mises_from_symmetric6
+from validation.abaqus_odb_to_vtk import (
+    _contact_point_scalar_arrays,
+    _select_frame_indices,
+    _tensor_from_symmetric6,
+    _von_mises_from_symmetric6,
+)
 from validation.run_abaqus_sphere_cantilever_explicit import (
     DEFAULT_OUT_DIR,
     ModelConfig,
@@ -80,6 +85,41 @@ def test_odb_frame_selection_supports_stride_and_time_window() -> None:
 
     assert _select_frame_indices(frames, frame_stride=2, time_end=5.0e-5) == [0, 2, 4]
     assert _select_frame_indices(frames, frame_stride=2, time_start=2.0e-5, time_end=8.0e-5) == [2, 4, 6, 8]
+
+
+def test_contact_output_aliases_map_to_vtk_point_scalars() -> None:
+    class Instance:
+        name = "GEAR1-1"
+
+    class Value:
+        def __init__(self, node_label: int, data) -> None:  # noqa: ANN001
+            self.instance = Instance()
+            self.nodeLabel = node_label
+            self.data = data
+
+    class Field:
+        def __init__(self, values: list[Value]) -> None:
+            self.values = values
+
+    class Frame:
+        fieldOutputs = {
+            "CSTRESS": Field([Value(10, (3.0, 0.0, 0.0)), Value(20, (7.0, 0.0, 0.0))]),
+            "CDISP": Field([Value(10, (-0.2, 0.0, 0.0)), Value(20, (-3.4028234663852886e38, 0.0, 0.0))]),
+            "CSTATUS": Field([Value(10, 1.0), Value(20, 0.0)]),
+        }
+
+    arrays, metrics = _contact_point_scalar_arrays(Frame(), {("GEAR1-1", 10): 0, ("GEAR1-1", 20): 1})
+
+    assert arrays["contact_pressure_nodeavg"] == [3.0, 7.0]
+    assert arrays["contact_opening_node"] == [-0.2, 0.0]
+    assert arrays["contact_penetration_nodeavg"] == [0.2, 0.0]
+    assert arrays["contact_status_node"] == [1.0, 0.0]
+    assert arrays["contact_active_node"] == [1.0, 0.0]
+    assert metrics["contact_output_available"] == 1
+    assert metrics["contact_pressure_source"] == "CSTRESS"
+    assert metrics["contact_opening_source"] == "CDISP"
+    assert metrics["active_contact_node_count"] == 1
+    assert metrics["max_contact_penetration_nodeavg"] == 0.2
 
 
 def test_parse_abaqus_reported_wallclock_seconds(tmp_path: Path) -> None:

@@ -107,6 +107,115 @@ def _node_vector_field(frame, field_name: str) -> dict[tuple[str, int], tuple[fl
     return values
 
 
+def _scalar_component(data: object, component_index: int = 0) -> float | None:
+    """Return one scalar component from an Abaqus field value payload."""
+
+    if isinstance(data, (float, int)):
+        scalar = float(data) if component_index == 0 else None
+        if scalar is None or not math.isfinite(scalar) or abs(scalar) > 1.0e30:
+            return None
+        return scalar
+    try:
+        scalar = float(data[component_index])  # type: ignore[index]
+    except (IndexError, TypeError, ValueError):
+        return None
+    if not math.isfinite(scalar) or abs(scalar) > 1.0e30:
+        return None
+    return scalar
+
+
+def _node_scalar_field(frame, field_name: str, *, component_index: int = 0) -> dict[tuple[str, int], float]:  # noqa: ANN001
+    """Return a nodal scalar field keyed by instance name and node label."""
+
+    if field_name not in frame.fieldOutputs:
+        return {}
+    values: dict[tuple[str, int], float] = {}
+    for value in frame.fieldOutputs[field_name].values:
+        if not hasattr(value, "nodeLabel") or value.nodeLabel is None:
+            continue
+        if getattr(value, "instance", None) is None:
+            continue
+        scalar = _scalar_component(getattr(value, "data", None), component_index)
+        if scalar is None:
+            continue
+        values[(value.instance.name, int(value.nodeLabel))] = scalar
+    return values
+
+
+def _node_scalar_field_from_aliases(
+    frame,  # noqa: ANN001
+    aliases: tuple[tuple[str, int], ...],
+) -> tuple[dict[tuple[str, int], float], str]:
+    """Return the first available nodal scalar field from Abaqus contact aliases."""
+
+    for field_name, component_index in aliases:
+        values = _node_scalar_field(frame, field_name, component_index=component_index)
+        if values:
+            return values, field_name
+    return {}, ""
+
+
+def _point_scalar_values(point_index: dict[tuple[str, int], int], values: dict[tuple[str, int], float]) -> list[float]:
+    """Return scalar values ordered by exported VTK point index."""
+
+    out = [0.0] * len(point_index)
+    for key, index in point_index.items():
+        out[int(index)] = float(values.get(key, 0.0))
+    return out
+
+
+def _contact_point_scalar_arrays(
+    frame,  # noqa: ANN001
+    point_index: dict[tuple[str, int], int],
+) -> tuple[dict[str, list[float]], dict[str, str | int | float]]:
+    """Return Abaqus contact point scalars and manifest metrics when available.
+
+    Abaqus ODBs may expose contact pressure/opening either as direct scalar
+    fields (``CPRESS``/``COPEN``/``CSTATUS``) or as first components of the
+    broader ``CSTRESS``/``CDISP`` contact outputs.  This validation exporter
+    supports both forms and records availability explicitly so a missing contact
+    output is not confused with zero contact.
+    """
+
+    pressure_by_node, pressure_source = _node_scalar_field_from_aliases(frame, (("CPRESS", 0), ("CSTRESS", 0)))
+    opening_by_node, opening_source = _node_scalar_field_from_aliases(frame, (("COPEN", 0), ("CDISP", 0)))
+    status_by_node, status_source = _node_scalar_field_from_aliases(frame, (("CSTATUS", 0),))
+
+    pressure = _point_scalar_values(point_index, pressure_by_node)
+    opening = _point_scalar_values(point_index, opening_by_node)
+    penetration = [max(0.0, -float(value)) for value in opening]
+    if status_by_node:
+        status = _point_scalar_values(point_index, status_by_node)
+    else:
+        status = [1.0 if float(p) > 0.0 or float(d) > 0.0 else 0.0 for p, d in zip(pressure, penetration)]
+    active_indices = [index for index, value in enumerate(status) if float(value) > 0.5]
+    active_pressures = [float(pressure[index]) for index in active_indices]
+
+    arrays = {
+        "contact_pressure_nodeavg": pressure,
+        "contact_opening_node": opening,
+        "contact_penetration_nodeavg": penetration,
+        "contact_status_node": status,
+        "contact_active_node": status,
+    }
+    metrics: dict[str, str | int | float] = {
+        "contact_output_available": int(bool(pressure_by_node or opening_by_node or status_by_node)),
+        "contact_pressure_source": pressure_source,
+        "contact_opening_source": opening_source,
+        "contact_status_source": status_source,
+        "contact_pressure_value_count": len(pressure_by_node),
+        "contact_opening_value_count": len(opening_by_node),
+        "contact_status_value_count": len(status_by_node),
+        "active_contact_node_count": len(active_indices),
+        "max_contact_pressure_nodeavg": max(pressure, default=0.0),
+        "p95_contact_pressure_nodeavg": _percentile_or_zero(pressure, 95.0),
+        "mean_active_contact_pressure_nodeavg": _mean_or_zero(active_pressures),
+        "max_contact_penetration_nodeavg": max(penetration, default=0.0),
+        "min_contact_gap_node": min(opening, default=0.0),
+    }
+    return arrays, metrics
+
+
 def _assembly_node_vector_field(frame, field_name: str) -> dict[int, tuple[float, float, float]]:  # noqa: ANN001
     """Return root-assembly nodal vectors keyed by assembly node label.
 
@@ -213,6 +322,7 @@ def _write_vtk_frame(
     velocity: list[tuple[float, float, float]],
     stress: list[tuple[float, ...]],
     strain: list[tuple[float, ...]],
+    point_scalars: dict[str, list[float]] | None = None,
     young: float | None = None,
     poisson: float | None = None,
     include_tensors: bool = True,
@@ -254,6 +364,13 @@ def _write_vtk_frame(
             ("logarithmic_strain_norm_nodeavg", strain_norm_nodeavg),
             ("equivalent_elastic_strain_nodeavg", equivalent_strain_nodeavg),
         ):
+            handle.write(f"SCALARS {name} float 1\n")
+            handle.write("LOOKUP_TABLE default\n")
+            for value in values:
+                handle.write(f"{float(value):.9e}\n")
+        for name, values in (point_scalars or {}).items():
+            if len(values) != len(points):
+                continue
             handle.write(f"SCALARS {name} float 1\n")
             handle.write("LOOKUP_TABLE default\n")
             for value in values:
@@ -482,6 +599,7 @@ def export_odb_to_vtk(
                 von_mises_nodeavg=von_mises_nodeavg,
                 equivalent_strain_nodeavg=equivalent_strain_nodeavg,
             )
+            contact_scalars, contact_metrics = _contact_point_scalar_arrays(frame, point_index)
             frame_path = out_dir / f"{stem}_{frame_index:04d}.vtk"
             _write_vtk_frame(
                 frame_path,
@@ -494,6 +612,7 @@ def export_odb_to_vtk(
                 velocity=velocity,
                 stress=stress,
                 strain=strain,
+                point_scalars=contact_scalars,
                 young=young,
                 poisson=poisson,
                 include_tensors=include_tensors,
@@ -522,6 +641,7 @@ def export_odb_to_vtk(
             }
             manifest_row.update(_assembly_rp_manifest_metrics(frame))
             manifest_row.update(object_metrics)
+            manifest_row.update(contact_metrics)
             manifest_rows.append(manifest_row)
 
         pvd_path = out_dir / f"{stem}.pvd"

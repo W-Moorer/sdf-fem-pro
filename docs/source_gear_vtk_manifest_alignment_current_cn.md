@@ -602,3 +602,66 @@ python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
 | p95 node-averaged von Mises | 4.367104e6 |
 
 这说明后续不需要再依赖 aggregate `active_contact_samples` 猜测接触状态，可以直接在 ParaView 中查看 SFC 的接触压力/激活云图。`results/source_gear_penalty_full_stride2_match_step/source_drive_checkpoint.npz` 已更新到 step 202；后续可继续向 `0.05 s` 推进，或者先提取 Abaqus 的相同 contact status/pressure 参考量，再按 contact-active 区域、near-contact 区域和全场区域分别比较 stress/strain。
+
+## 更新：Abaqus penalty 接触场导出诊断
+
+已补充 Abaqus ODB 到 VTK 的接触场导出支持。导出器现在会优先读取 `CPRESS`、`COPEN`、`CSTATUS`，并兼容 Abaqus 可能使用的 `CSTRESS`、`CDISP` 组合输出形式。Abaqus 对未定义接触开闭量会写入接近 `-3.4e38` 的哨兵值；导出器会过滤这类非物理哨兵值，避免把“未定义接触输出”误认为巨大穿透。
+
+新增 Abaqus VTK point-data 字段：
+
+- `contact_pressure_nodeavg`
+- `contact_opening_node`
+- `contact_penetration_nodeavg`
+- `contact_status_node`
+- `contact_active_node`
+
+新增 Abaqus manifest 字段：
+
+- `contact_output_available`
+- `contact_pressure_source`
+- `contact_opening_source`
+- `contact_status_source`
+- `contact_pressure_value_count`
+- `contact_opening_value_count`
+- `contact_status_value_count`
+- `active_contact_node_count`
+- `max_contact_pressure_nodeavg`
+- `p95_contact_pressure_nodeavg`
+- `mean_active_contact_pressure_nodeavg`
+- `max_contact_penetration_nodeavg`
+- `min_contact_gap_node`
+
+使用已有 `2.0e-3 s` Abaqus ODB 只导出末帧进行验证，没有重新运行 Abaqus 求解：
+
+```powershell
+abaqus python validation\abaqus_odb_to_vtk.py `
+  --odb results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_run\gear_contact_source_penalty.odb `
+  --out-dir results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_check `
+  --stem abaqus_contact_check `
+  --frame-stride 1 `
+  --time-start 0.001999 `
+  --time-end 0.002001 `
+  --young 2.05e11 `
+  --poisson 0.28 `
+  --scalars-only
+```
+
+验证输出：
+
+| 项目 | 数值 |
+| --- | ---: |
+| Abaqus contact-check VTK | `results/source_gear_abaqus_penalty_full_stride2_match_step_0020/abaqus_vtk_contact_check/abaqus_contact_check_0000.vtk` |
+| Abaqus contact-check manifest | `results/source_gear_abaqus_penalty_full_stride2_match_step_0020/abaqus_vtk_contact_check/abaqus_contact_check_manifest.csv` |
+| time | `0.0020000000949949026` |
+| contact_output_available | 1 |
+| contact_pressure_source | `CPRESS` |
+| contact_opening_source | `COPEN` |
+| contact_pressure_value_count | 12716 |
+| contact_opening_value_count | 209 |
+| active_contact_node_count | 251 |
+| max_contact_pressure_nodeavg | `7.7778825e5` |
+| mean_active_contact_pressure_nodeavg | `3.445386552846232e5` |
+| max_contact_penetration_nodeavg | `1.6066397074609995e-4` |
+| min_contact_gap_node | `-1.6066397074609995e-4` |
+
+这一步把 Abaqus 与 SFC 的接触诊断口径补齐到同一类 VTK/manifest 字段。接下来可以将误差拆成三类区域比较：contact-active 区域、near-contact 区域和全场区域；这样能判断当前 stress/strain 差异是来自接触释放/压力分布，还是来自 stress recovery 与节点平均口径。
