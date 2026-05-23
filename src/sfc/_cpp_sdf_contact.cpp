@@ -298,6 +298,49 @@ Projection project_point_triangle(
     return out;
 }
 
+bool triangle_barycentric_unclipped(
+    double px,
+    double py,
+    double pz,
+    double ax,
+    double ay,
+    double az,
+    double bx,
+    double by,
+    double bz,
+    double cx,
+    double cy,
+    double cz,
+    double* w0,
+    double* w1,
+    double* w2
+) {
+    const double v0x = bx - ax;
+    const double v0y = by - ay;
+    const double v0z = bz - az;
+    const double v1x = cx - ax;
+    const double v1y = cy - ay;
+    const double v1z = cz - az;
+    const double v2x = px - ax;
+    const double v2y = py - ay;
+    const double v2z = pz - az;
+    const double d00 = v0x * v0x + v0y * v0y + v0z * v0z;
+    const double d01 = v0x * v1x + v0y * v1y + v0z * v1z;
+    const double d11 = v1x * v1x + v1y * v1y + v1z * v1z;
+    const double d20 = v2x * v0x + v2y * v0y + v2z * v0z;
+    const double d21 = v2x * v1x + v2y * v1y + v2z * v1z;
+    const double denom = d00 * d11 - d01 * d01;
+    if (std::abs(denom) <= 1.0e-30) {
+        return false;
+    }
+    const double v = (d11 * d20 - d01 * d21) / denom;
+    const double w = (d00 * d21 - d01 * d20) / denom;
+    *w0 = 1.0 - v - w;
+    *w1 = v;
+    *w2 = w;
+    return true;
+}
+
 void store_best_projection(
     py::ssize_t ip,
     double px,
@@ -746,6 +789,248 @@ py::tuple closest_points_indexed_faces_normal_compatible(
             best_w0, best_w1, best_w2, best_nx, best_ny, best_nz,
             g, n, fid, w, cp
         );
+    }
+    return py::make_tuple(gaps, normals, face_ids, barycentric, closest);
+}
+
+py::tuple closest_points_indexed_faces_secondary_normal(
+    py::array_t<double, py::array::c_style | py::array::forcecast> points,
+    py::array_t<double, py::array::c_style | py::array::forcecast> slave_normals,
+    py::array_t<double, py::array::c_style | py::array::forcecast> x_current,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> boundary_faces,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_offsets,
+    py::array_t<std::int64_t, py::array::c_style | py::array::forcecast> candidate_face_ids,
+    double fallback_distance,
+    double dot_threshold
+) {
+    const auto P = points.unchecked<2>();
+    const auto SN = slave_normals.unchecked<2>();
+    const auto X = x_current.unchecked<2>();
+    const auto faces = boundary_faces.unchecked<2>();
+    const auto offsets = candidate_offsets.unchecked<1>();
+    const auto candidate_ids = candidate_face_ids.unchecked<1>();
+    const py::ssize_t n_points = P.shape(0);
+    const py::ssize_t n_faces = faces.shape(0);
+    const py::ssize_t n_offsets = offsets.shape(0);
+    const py::ssize_t n_candidates = candidate_ids.shape(0);
+    if (SN.shape(0) != n_points || SN.shape(1) != 3) {
+        throw std::runtime_error("slave_normals must have shape (n_points, 3)");
+    }
+    if (n_offsets != n_points + 1) {
+        throw std::runtime_error("candidate_offsets must have n_points + 1 entries");
+    }
+
+    py::array_t<double> gaps({n_points});
+    py::array_t<double> normals({n_points, py::ssize_t(3)});
+    py::array_t<std::int64_t> face_ids({n_points});
+    py::array_t<double> barycentric({n_points, py::ssize_t(3)});
+    py::array_t<double> closest({n_points, py::ssize_t(3)});
+    auto g = gaps.mutable_unchecked<1>();
+    auto n = normals.mutable_unchecked<2>();
+    auto fid = face_ids.mutable_unchecked<1>();
+    auto w = barycentric.mutable_unchecked<2>();
+    auto cp = closest.mutable_unchecked<2>();
+
+    const double fallback_dist2 = fallback_distance * fallback_distance;
+    const double inside_tol = 1.0e-10;
+    for (py::ssize_t ip = 0; ip < n_points; ++ip) {
+        const py::ssize_t start = static_cast<py::ssize_t>(offsets(ip));
+        const py::ssize_t stop = static_cast<py::ssize_t>(offsets(ip + 1));
+        if (start < 0 || stop < start || stop > n_candidates) {
+            throw std::runtime_error("candidate offsets are not monotone or exceed candidate_face_ids");
+        }
+        const double px = P(ip, 0);
+        const double py = P(ip, 1);
+        const double pz = P(ip, 2);
+        double snx = SN(ip, 0);
+        double sny = SN(ip, 1);
+        double snz = SN(ip, 2);
+        const double sn_norm = std::sqrt(snx * snx + sny * sny + snz * snz);
+        if (sn_norm <= 1.0e-30) {
+            g(ip) = std::numeric_limits<double>::infinity();
+            n(ip, 0) = 0.0;
+            n(ip, 1) = 0.0;
+            n(ip, 2) = 0.0;
+            fid(ip) = -1;
+            w(ip, 0) = 0.0;
+            w(ip, 1) = 0.0;
+            w(ip, 2) = 0.0;
+            cp(ip, 0) = px;
+            cp(ip, 1) = py;
+            cp(ip, 2) = pz;
+            continue;
+        }
+        snx /= sn_norm;
+        sny /= sn_norm;
+        snz /= sn_norm;
+        const double cnx = -snx;
+        const double cny = -sny;
+        const double cnz = -snz;
+
+        bool found_line = false;
+        double best_abs_gap = std::numeric_limits<double>::infinity();
+        double best_gap = 0.0;
+        std::int64_t best_face = -1;
+        double best_px = px, best_py = py, best_pz = pz;
+        double best_w0 = 0.0, best_w1 = 0.0, best_w2 = 0.0;
+
+        auto eval_line_candidate = [&](py::ssize_t jf) {
+            if (jf < 0 || jf >= n_faces) {
+                throw std::runtime_error("candidate face id is outside boundary_faces");
+            }
+            const auto ia = faces(jf, 0);
+            const auto ib = faces(jf, 1);
+            const auto ic = faces(jf, 2);
+            const double ax = X(ia, 0), ay = X(ia, 1), az = X(ia, 2);
+            const double bx = X(ib, 0), by = X(ib, 1), bz = X(ib, 2);
+            const double cx = X(ic, 0), cy = X(ic, 1), cz = X(ic, 2);
+            const double abx = bx - ax;
+            const double aby = by - ay;
+            const double abz = bz - az;
+            const double acx = cx - ax;
+            const double acy = cy - ay;
+            const double acz = cz - az;
+            double mnx = aby * acz - abz * acy;
+            double mny = abz * acx - abx * acz;
+            double mnz = abx * acy - aby * acx;
+            const double mn_norm = std::sqrt(mnx * mnx + mny * mny + mnz * mnz);
+            if (mn_norm <= 1.0e-30) {
+                return;
+            }
+            mnx /= mn_norm;
+            mny /= mn_norm;
+            mnz /= mn_norm;
+            if (mnx * snx + mny * sny + mnz * snz > dot_threshold) {
+                return;
+            }
+            const double projection = mnx * cnx + mny * cny + mnz * cnz;
+            if (projection <= 1.0e-12) {
+                return;
+            }
+            const double gap = (mnx * (px - ax) + mny * (py - ay) + mnz * (pz - az)) / projection;
+            const double qx = px - gap * cnx;
+            const double qy = py - gap * cny;
+            const double qz = pz - gap * cnz;
+            double tw0 = 0.0, tw1 = 0.0, tw2 = 0.0;
+            if (!triangle_barycentric_unclipped(
+                    qx, qy, qz,
+                    ax, ay, az,
+                    bx, by, bz,
+                    cx, cy, cz,
+                    &tw0, &tw1, &tw2
+                )) {
+                return;
+            }
+            if (tw0 < -inside_tol || tw1 < -inside_tol || tw2 < -inside_tol ||
+                tw0 > 1.0 + inside_tol || tw1 > 1.0 + inside_tol || tw2 > 1.0 + inside_tol) {
+                return;
+            }
+            const double abs_gap = std::abs(gap);
+            if (abs_gap < best_abs_gap) {
+                found_line = true;
+                best_abs_gap = abs_gap;
+                best_gap = gap;
+                best_face = static_cast<std::int64_t>(jf);
+                best_px = qx;
+                best_py = qy;
+                best_pz = qz;
+                best_w0 = std::max(0.0, std::min(1.0, tw0));
+                best_w1 = std::max(0.0, std::min(1.0, tw1));
+                best_w2 = std::max(0.0, std::min(1.0, tw2));
+            }
+        };
+
+        for (py::ssize_t ptr = start; ptr < stop; ++ptr) {
+            eval_line_candidate(static_cast<py::ssize_t>(candidate_ids(ptr)));
+        }
+
+        if (found_line) {
+            const double total = best_w0 + best_w1 + best_w2;
+            if (total > 1.0e-30) {
+                best_w0 /= total;
+                best_w1 /= total;
+                best_w2 /= total;
+            }
+            g(ip) = best_gap;
+            n(ip, 0) = cnx;
+            n(ip, 1) = cny;
+            n(ip, 2) = cnz;
+            fid(ip) = best_face;
+            w(ip, 0) = best_w0;
+            w(ip, 1) = best_w1;
+            w(ip, 2) = best_w2;
+            cp(ip, 0) = best_px;
+            cp(ip, 1) = best_py;
+            cp(ip, 2) = best_pz;
+            continue;
+        }
+
+        double fallback_best_dist2 = std::numeric_limits<double>::infinity();
+        std::int64_t fallback_face = -1;
+        double fallback_px = px, fallback_py = py, fallback_pz = pz;
+        double fallback_w0 = 0.0, fallback_w1 = 0.0, fallback_w2 = 0.0;
+        double fallback_nx = 0.0, fallback_ny = 0.0, fallback_nz = 0.0;
+        for (py::ssize_t ptr = start; ptr < stop; ++ptr) {
+            const py::ssize_t jf = static_cast<py::ssize_t>(candidate_ids(ptr));
+            if (jf < 0 || jf >= n_faces) {
+                throw std::runtime_error("candidate face id is outside boundary_faces");
+            }
+            const auto ia = faces(jf, 0);
+            const auto ib = faces(jf, 1);
+            const auto ic = faces(jf, 2);
+            const Projection proj = project_point_triangle(
+                px, py, pz,
+                X(ia, 0), X(ia, 1), X(ia, 2),
+                X(ib, 0), X(ib, 1), X(ib, 2),
+                X(ic, 0), X(ic, 1), X(ic, 2)
+            );
+            if (proj.nx == 0.0 && proj.ny == 0.0 && proj.nz == 0.0) {
+                continue;
+            }
+            if (proj.dist2 < fallback_best_dist2) {
+                fallback_best_dist2 = proj.dist2;
+                fallback_face = static_cast<std::int64_t>(jf);
+                fallback_px = proj.qx;
+                fallback_py = proj.qy;
+                fallback_pz = proj.qz;
+                fallback_w0 = proj.w0;
+                fallback_w1 = proj.w1;
+                fallback_w2 = proj.w2;
+                fallback_nx = proj.nx;
+                fallback_ny = proj.ny;
+                fallback_nz = proj.nz;
+            }
+        }
+        if (fallback_face == -1 || fallback_best_dist2 > fallback_dist2) {
+            g(ip) = std::numeric_limits<double>::infinity();
+            n(ip, 0) = 0.0;
+            n(ip, 1) = 0.0;
+            n(ip, 2) = 0.0;
+            fid(ip) = -1;
+            w(ip, 0) = 0.0;
+            w(ip, 1) = 0.0;
+            w(ip, 2) = 0.0;
+            cp(ip, 0) = px;
+            cp(ip, 1) = py;
+            cp(ip, 2) = pz;
+            continue;
+        }
+        const double fallback_dist = std::sqrt(fallback_best_dist2);
+        const double fallback_plane =
+            (px - fallback_px) * fallback_nx + (py - fallback_py) * fallback_ny + (pz - fallback_pz) * fallback_nz;
+        const double fallback_gap = fallback_plane < 0.0 ? -fallback_dist : fallback_dist;
+        const bool fallback_opposes_secondary = fallback_nx * snx + fallback_ny * sny + fallback_nz * snz < 0.0;
+        g(ip) = fallback_gap;
+        n(ip, 0) = fallback_opposes_secondary ? cnx : snx;
+        n(ip, 1) = fallback_opposes_secondary ? cny : sny;
+        n(ip, 2) = fallback_opposes_secondary ? cnz : snz;
+        fid(ip) = fallback_face;
+        w(ip, 0) = fallback_w0;
+        w(ip, 1) = fallback_w1;
+        w(ip, 2) = fallback_w2;
+        cp(ip, 0) = fallback_px;
+        cp(ip, 1) = fallback_py;
+        cp(ip, 2) = fallback_pz;
     }
     return py::make_tuple(gaps, normals, face_ids, barycentric, closest);
 }
@@ -1711,6 +1996,7 @@ PYBIND11_MODULE(_sfc_cpp, m) {
     m.def("closest_points_padded_aabb", &closest_points_padded_aabb);
     m.def("closest_points_indexed_faces", &closest_points_indexed_faces);
     m.def("closest_points_indexed_faces_normal_compatible", &closest_points_indexed_faces_normal_compatible);
+    m.def("closest_points_indexed_faces_secondary_normal", &closest_points_indexed_faces_secondary_normal);
     m.def("surface_penalty_response", &surface_penalty_response);
     m.def("contact_stiffness_matvec", &contact_stiffness_matvec);
     m.def("quadrilateral_master_penalty_response", &quadrilateral_master_penalty_response);

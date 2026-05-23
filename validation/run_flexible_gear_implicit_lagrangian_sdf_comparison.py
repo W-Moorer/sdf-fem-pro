@@ -172,6 +172,40 @@ def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_
     )
 
 
+def _contact_samples_from_arrays(sample_arrays: dict[str, np.ndarray], *, stiffness: float) -> list[ContactSample]:
+    """Convert batched contact arrays to ``ContactSample`` rows.
+
+    This keeps higher-level Abaqus-style averaging code shared between scalar
+    and compiled contact-query paths while avoiding Python per-candidate
+    projection loops.
+    """
+
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0:
+        return []
+    sample_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    sample_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    out: list[ContactSample] = []
+    for idx in range(gaps.size):
+        out.append(
+            ContactSample(
+                node_ids=np.asarray(sample_nodes[idx], dtype=np.int64).copy(),
+                shape_weights=np.asarray(sample_weights[idx], dtype=float).copy(),
+                gap=float(gaps[idx]),
+                normal=np.asarray(normals[idx], dtype=float).copy(),
+                area=float(areas[idx]),
+                stiffness=float(stiffness),
+                master_node_ids=np.asarray(master_nodes[idx], dtype=np.int64).copy(),
+                master_shape_weights=np.asarray(master_weights[idx], dtype=float).copy(),
+            )
+        )
+    return out
+
+
 def _combined_shape_weights(
     node_rows: list[np.ndarray],
     weight_rows: list[np.ndarray],
@@ -3119,6 +3153,11 @@ def solve_sfc_source_drive_pair(
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if len(contact_geometries) != 1 or contact_averaging != "none" or contact_normal_filter != "none":
             return None
+        if contact_direction == "secondary_average" and contact_projection == "secondary_line":
+            geometry = contact_geometries[0]
+            if hasattr(geometry, "secondary_normal_projection_sample_arrays"):
+                return geometry.secondary_normal_projection_sample_arrays(x_contact)
+            return None
         return contact_geometries[0].sample_arrays(x_contact)
 
     def source_samples(x_contact: np.ndarray) -> list[Any]:
@@ -3128,9 +3167,13 @@ def solve_sfc_source_drive_pair(
             if (
                 contact_direction == "secondary_average"
                 and contact_projection == "secondary_line"
-                and hasattr(geometry, "secondary_normal_projection_samples")
+                and hasattr(geometry, "secondary_normal_projection_sample_arrays")
             ):
-                collected.extend(list(geometry.secondary_normal_projection_samples(x_contact)))
+                arrays = geometry.secondary_normal_projection_sample_arrays(x_contact)
+                if arrays is not None:
+                    collected.extend(_contact_samples_from_arrays(arrays, stiffness=pressure_stiffness))
+                elif hasattr(geometry, "secondary_normal_projection_samples"):
+                    collected.extend(list(geometry.secondary_normal_projection_samples(x_contact)))
             elif use_compatible_query:
                 collected.extend(list(geometry.normal_compatible_samples(x_contact)))
             elif contact_averaging == "slave_node_point":

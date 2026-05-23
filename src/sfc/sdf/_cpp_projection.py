@@ -32,6 +32,12 @@ def normal_compatible_indexed_faces_available() -> bool:
     return _BACKEND is not None and hasattr(_BACKEND, "closest_points_indexed_faces_normal_compatible")
 
 
+def secondary_normal_indexed_faces_available() -> bool:
+    """Return whether the backend exposes secondary-normal indexed projection."""
+
+    return _BACKEND is not None and hasattr(_BACKEND, "closest_points_indexed_faces_secondary_normal")
+
+
 def _require_backend() -> None:
     if _BACKEND is None:
         raise RuntimeError("C++ projection backend is not available") from _IMPORT_ERROR
@@ -108,6 +114,31 @@ def closest_points_indexed_faces_normal_compatible(
 
     _require_backend()
     return _BACKEND.closest_points_indexed_faces_normal_compatible(
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(slave_normals, dtype=np.float64),
+        np.ascontiguousarray(x_current, dtype=np.float64),
+        np.ascontiguousarray(boundary_faces, dtype=np.int64),
+        np.ascontiguousarray(candidate_offsets, dtype=np.int64),
+        np.ascontiguousarray(candidate_face_ids, dtype=np.int64),
+        float(fallback_distance),
+        float(dot_threshold),
+    )
+
+
+def closest_points_indexed_faces_secondary_normal(
+    points: np.ndarray,
+    slave_normals: np.ndarray,
+    x_current: np.ndarray,
+    boundary_faces: np.ndarray,
+    candidate_offsets: np.ndarray,
+    candidate_face_ids: np.ndarray,
+    fallback_distance: float,
+    dot_threshold: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Project along secondary/slave normals onto indexed master candidates."""
+
+    _require_backend()
+    return _BACKEND.closest_points_indexed_faces_secondary_normal(
         np.ascontiguousarray(points, dtype=np.float64),
         np.ascontiguousarray(slave_normals, dtype=np.float64),
         np.ascontiguousarray(x_current, dtype=np.float64),

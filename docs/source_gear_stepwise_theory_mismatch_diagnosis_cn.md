@@ -200,3 +200,53 @@ Abaqus surface-to-surface contact 的接触方向来自 secondary surface constr
 4. 已实现 Python 版 `secondary_normal_projection_samples(...)` 并通过单元测试，但全齿轮 11,560 接触面短程运行超时；下一步需要把 secondary-line projection 下沉到 C++/candidate fused backend，避免 Python 候选循环成为瓶颈。
 
 因此当前可接受的阶段性修复是 `secondary_average + closest_feature`，它证明理论方向正确但仍未完成 `<10%` 总体验收。下一步应实现 C++ secondary-line projection，并继续以 pressure RMSE、pressure correlation、active-set Jaccard 和 active-region stress error 作为硬指标。
+
+## 本轮新增验证：C++ secondary-line projection 不是最终可接受解
+
+本轮已把 Python 参考版 `secondary_normal_projection_samples(...)` 下沉为 C++ indexed projection kernel：
+
+- C++ kernel：`closest_points_indexed_faces_secondary_normal(...)`
+- Python wrapper：`closest_points_indexed_faces_secondary_normal(...)`
+- field/contact 几何入口：`secondary_normal_projection_sample_arrays(...)`
+- source gear runner 入口：`--source-contact-projection secondary_line`
+
+短程齿轮窗口验证：
+
+```text
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
+  --out-dir results/source_gear_tensoravg_secondary_line_cpp_probe_0002 \
+  --active-faces-per-body 11560 \
+  --duration 0.0002 \
+  --dt 0.0001 \
+  --drive-mode source_inp \
+  --pressure-stiffness 5.0e9 \
+  --contact-mode penalty \
+  --history-frame-stride 1 \
+  --write-sfc-vtk \
+  --vtk-frame-stride 1 \
+  --source-stress-postprocess linear_corotated \
+  --source-contact-averaging slave_node_region \
+  --source-contact-kinematics finite_rp_corotated \
+  --source-contact-normal-filter opposing \
+  --source-contact-direction secondary_average \
+  --source-contact-projection secondary_line \
+  --source-contact-pair-order gear2_slave \
+  --source-internal-kinematics corotated_rp \
+  --source-rotating-inertia finite_kinematic \
+  --abaqus-vtk-manifest results/source_gear_abaqus_penalty_tensor_nodeavg_0002/abaqus_vtk/abaqus_manifest.csv
+```
+
+结果：
+
+| 设置 | SFC wall time | full displacement p95 error | full von Mises p95 error | active-union von Mises p95 error | pressure active-union RMSE | active-set Jaccard |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| secondary_average + secondary_line C++ | `71.095 s` | `29.343%` | `7.382%` | `37.407%` | `45.329%` | `0.808` |
+
+这个结果不能作为最终修复，原因是：
+
+1. C++ 下沉解决了 Python 超时问题，但没有解决理论误差。
+2. full-field von Mises p95 虽然降到 `<10%`，但 displacement p95 升到 `29.343%`。
+3. active-union von Mises p95 升到 `37.407%`，说明接触区应力趋势更差。
+4. pressure RMSE 仍在 `45%` 量级，说明压力空间分布仍未与 Abaqus 对齐。
+
+因此当前定位更加明确：误差不应继续通过改变 SDF 查询或 gap 投影来修；下一层应对齐 Abaqus surface-to-surface enforcement 的 constraint-region pressure/overclosure averaging、active status averaging 和等效面积权重。`secondary_line` 只能作为诊断和后续可选 projection kernel，不能作为验收路径。
