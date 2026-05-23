@@ -408,6 +408,88 @@ def test_lagrangian_sdf_quadrilateral_surface_contact_uses_q4_weights() -> None:
     assert all(sample.master_node_ids is not None for sample in samples)
 
 
+def test_lagrangian_sdf_triangle_contact_can_clip_to_master_footprint() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.05],
+            [1.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.0, 0.5, 0.0],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([slave_nodes, master_nodes])
+    material = MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64))
+    unclipped = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=3,
+        quadrature="tri3",
+        search_radius=1.0,
+    )
+    clipped = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=3,
+        quadrature="tri3",
+        search_radius=1.0,
+        clip_to_master_footprint=True,
+    )
+
+    unclipped_samples = list(unclipped.samples(x_current))
+    clipped_samples = list(clipped.samples(x_current))
+
+    assert sum(sample.area for sample in unclipped_samples) == pytest.approx(0.5)
+    assert sum(sample.area for sample in clipped_samples) == pytest.approx(0.125)
+    assert sum(sample.area * max(-sample.gap, 0.0) for sample in clipped_samples) == pytest.approx(0.00625)
+
+
+def test_lagrangian_sdf_triangle_footprint_clipping_uses_single_closest_owner() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.05],
+            [1.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.0, 0.5, 0.0],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([slave_nodes, master_nodes])
+    material = MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64))
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=3,
+        quadrature="tri3",
+        search_radius=1.0,
+        clip_to_master_footprint=True,
+    )
+
+    samples = list(contact.samples(x_current))
+
+    assert sum(sample.area for sample in samples) == pytest.approx(0.125)
+
+
 def test_lagrangian_q4_master_oracle_returns_q4_payload() -> None:
     master_nodes = np.asarray(
         [

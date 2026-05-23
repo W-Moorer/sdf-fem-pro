@@ -403,3 +403,88 @@ python validation/run_abaqus_linear_penalty_normal_indentation.py \
 1. 把 Q4 footprint clipping 接回齿轮/曲面工程算例；
 2. 区分“用于求解的接触合力/虚功”等价和“用于云图的 CPRESS 节点输出 smoothing”等价；
 3. 再单独对齐 Abaqus CPRESS / active status 的输出平均口径，避免把输出场 smoothing 误当成接触力学误差。
+
+## 本轮新增定位：三角齿面 footprint clipping 不是单独充分条件
+
+由于完整齿轮模型是 TET4，真实接触面是三角面而不是 Q4 面，本轮把同一思想推广到：
+
+- `LagrangianSDFSurfaceContactGeometry(..., clip_to_master_footprint=True)`
+- `validation/run_flexible_gear_full_lagrangian_sdf_comparison.py --source-contact-footprint-clipping`
+
+实现细节：
+
+1. 对每个 slave triangle 和候选 master triangle，在 master tangent plane 中做凸多边形重叠裁剪；
+2. 只在重叠区域上生成接触样本；
+3. 为避免曲面多面片重复计入，裁剪子区域只归属其 centroid 的 closest master face；
+4. 该路径默认关闭，只作为 Abaqus-style 有效约束区域诊断入口，不改变已有默认路径。
+
+新增单元测试确认：
+
+- 三角 slave 面裁剪后只积分 master footprint 面积；
+- 重复/重叠 master face 不会让同一区域被重复积分；
+- Q4 局部重叠线性罚函数工况仍保持 Abaqus RF 对齐。
+
+受影响测试：
+
+```text
+pytest -q tests/test_rp_mpc_and_lagrangian_surface_contact.py \
+          tests/test_abaqus_linear_penalty_normal_indentation.py
+```
+
+结果：
+
+```text
+28 passed
+```
+
+### 齿轮短程诊断结果
+
+小 patch 诊断命令：
+
+```text
+python validation/run_flexible_gear_full_lagrangian_sdf_comparison.py \
+  --out-dir results/source_gear_footprint_clip_owner_probe_0002 \
+  --active-faces-per-body 128 \
+  --duration 0.0002 \
+  --dt 0.0001 \
+  --drive-mode source_inp \
+  --pressure-stiffness 5.0e9 \
+  --contact-mode penalty \
+  --history-frame-stride 1 \
+  --write-sfc-vtk \
+  --vtk-frame-stride 1 \
+  --source-stress-postprocess linear_corotated \
+  --source-contact-averaging slave_node_region \
+  --source-contact-kinematics finite_rp_corotated \
+  --source-contact-normal-filter opposing \
+  --source-contact-direction secondary_average \
+  --source-contact-projection closest_feature \
+  --source-contact-pair-order gear2_slave \
+  --source-internal-kinematics corotated_rp \
+  --source-rotating-inertia finite_kinematic \
+  --source-contact-footprint-clipping \
+  --abaqus-vtk-manifest results/source_gear_abaqus_penalty_tensor_nodeavg_0002/abaqus_vtk/abaqus_manifest.csv
+```
+
+结果与同参数未裁剪路径基本一致：
+
+| setting | wall time | final active samples | final normal force | final p95 nodeavg von Mises | final p95 nodeavg stress error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| no footprint clipping, 128 faces | `55.980 s` | `3` | `0.213` | `6.4197e6` | `12.664%` |
+| closest-owner footprint clipping, 128 faces | `152.087 s` | `3` | `0.326` | `6.4197e6` | `12.664%` |
+
+这说明：简单 footprint 裁剪本身不能解释齿轮短程窗口的剩余误差。它能修正“局部覆盖平面接触”的理论错误，但对当前齿面工况，主要误差仍来自 Abaqus-style constraint-region 分配、active status transition 和压力输出/平滑口径，而不是单纯的 master footprint 面积。
+
+一个中间反例也很重要：如果不加 closest-owner 归属，直接把每个 slave triangle 与所有候选 master triangle 的裁剪区域累加，会造成重复接触积分，完整 patch 结果明显恶化：
+
+| setting | final normal force | displacement error | p95 nodeavg stress error |
+| --- | ---: | ---: | ---: |
+| naive per-master clipping, 11560 faces | `1536.10` | `13.798%` | `161.998%` |
+| previous secondary-average region path, 11560 faces | `321.59` | `0.347%` | `10.161%` |
+
+因此后续不能把 footprint clipping 当成最终解。下一层应实现的是更接近 Abaqus 的 **secondary constraint region ownership / active status averaging / CPRESS smoothing**：
+
+1. 一个 slave nodal region 或 surface patch 应只产生一个等效 contact constraint region；
+2. master 侧需要在该 region 的投影范围内形成唯一等效主面 support，而不是逐候选面片重复累加；
+3. 求解用的 RF/虚功等价与输出用的 CPRESS 节点平滑必须分开对齐；
+4. 齿轮验收仍以 `source_gear_tensoravg_slave_node_region_secondary_probe_0002` 一类 full-patch 窗口为主，因为 128-face patch 位移误差过大，不能代表最终精度。

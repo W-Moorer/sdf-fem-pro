@@ -575,6 +575,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source contact projection: {summary.get('source_contact_projection', '')}",
         f"- source contact pair order: {summary.get('source_contact_pair_order', '')}",
         f"- source contact search radius: {summary.get('source_contact_search_radius', '')}",
+        f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
         f"- penalty solver: {summary.get('penalty_solver', '')}",
@@ -740,6 +741,7 @@ def run_full_gear(
     source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
+    source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
     source_checkpoint_path: Path | None = None,
@@ -793,6 +795,7 @@ def run_full_gear(
             source_contact_projection=str(source_contact_projection),
             source_contact_pair_order=str(source_contact_pair_order),
             source_contact_search_radius=source_contact_search_radius,
+            source_contact_footprint_clipping=bool(source_contact_footprint_clipping),
             source_internal_kinematics=str(source_internal_kinematics),
             source_rotating_inertia=str(source_rotating_inertia),
             source_checkpoint_path=source_checkpoint_path,
@@ -1043,6 +1046,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional source-drive broad-phase radius; closest-feature projection still determines the final gap.",
     )
     parser.add_argument(
+        "--source-contact-footprint-clipping",
+        action="store_true",
+        help="Clip slave triangle contact support to the projected master footprint before pressure integration.",
+    )
+    parser.add_argument(
         "--source-internal-kinematics",
         choices=("linearized_mpc", "corotated_rp", "finite_stvk_visual"),
         default="linearized_mpc",
@@ -1105,6 +1113,7 @@ def main(argv: list[str] | None = None) -> int:
         source_contact_projection=str(args.source_contact_projection),
         source_contact_pair_order=str(args.source_contact_pair_order),
         source_contact_search_radius=args.source_contact_search_radius,
+        source_contact_footprint_clipping=bool(args.source_contact_footprint_clipping),
         source_internal_kinematics=str(args.source_internal_kinematics),
         source_rotating_inertia=str(args.source_rotating_inertia),
         source_checkpoint_path=args.source_checkpoint,

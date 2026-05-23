@@ -2825,6 +2825,7 @@ def solve_sfc_source_drive_pair(
     source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
+    source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
     source_checkpoint_path: Path | None = None,
@@ -2870,6 +2871,7 @@ def solve_sfc_source_drive_pair(
                 quadrature="tri3",
                 search_radius=contact_search_radius,
                 compiled_batch_projection=True,
+                clip_to_master_footprint=bool(source_contact_footprint_clipping),
             )
         master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
         return LagrangianSDFSurfaceContactGeometry(
@@ -2882,6 +2884,7 @@ def solve_sfc_source_drive_pair(
             quadrature="tri3",
             search_radius=contact_search_radius,
             compiled_batch_projection=True,
+            clip_to_master_footprint=bool(source_contact_footprint_clipping),
         )
 
     if contact_pair_order == "symmetric_two_pass":
@@ -3211,7 +3214,12 @@ def solve_sfc_source_drive_pair(
     base_preconditioner_lu: Any | None = None
 
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
-        if len(contact_geometries) != 1 or contact_averaging != "none" or contact_normal_filter != "none":
+        if (
+            len(contact_geometries) != 1
+            or contact_averaging != "none"
+            or contact_normal_filter != "none"
+            or bool(source_contact_footprint_clipping)
+        ):
             return None
         if contact_direction == "secondary_average" and contact_projection == "secondary_line":
             geometry = contact_geometries[0]
@@ -3560,6 +3568,7 @@ def solve_sfc_source_drive_pair(
         "source_contact_projection": contact_projection,
         "source_contact_pair_order": contact_pair_order,
         "source_contact_search_radius": float(contact_search_radius),
+        "source_contact_footprint_clipping": bool(source_contact_footprint_clipping),
         "source_internal_kinematics": internal_kinematics,
         "source_rotating_inertia": rotating_inertia,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",

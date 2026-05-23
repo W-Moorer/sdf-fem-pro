@@ -232,6 +232,7 @@ class LagrangianSDFSurfaceContactGeometry:
     search_radius: float | None = None
     patch_cell_size: float | None = None
     compiled_batch_projection: bool = False
+    clip_to_master_footprint: bool = False
     _oracle: LagrangianSDFContactOracle = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -257,6 +258,9 @@ class LagrangianSDFSurfaceContactGeometry:
         )
 
     def samples(self, x_current: np.ndarray):
+        if bool(self.clip_to_master_footprint):
+            yield from self._clipped_samples(x_current)
+            return
         arrays = self.sample_arrays(x_current)
         if arrays is not None:
             for idx in range(arrays["gaps"].shape[0]):
@@ -354,6 +358,73 @@ class LagrangianSDFSurfaceContactGeometry:
                     master_node_ids=query.master_node_ids.astype(np.int64) + master_start,
                     master_shape_weights=query.master_weights.copy(),
                 )
+
+    def _clipped_samples(self, x_current: np.ndarray):
+        X, master_x, master_tree, master_max_radius, _barycentric, _weight_scale = self._prepare_sampling(x_current)
+        master_faces = self.master_material.boundary_faces
+        master_start = int(self.master_node_offset)
+        for face_id, face in enumerate(self.slave_faces):
+            global_face = face + int(self.slave_node_offset)
+            tri = X[global_face]
+            slave_plane = _triangle_plane(tri)
+            if slave_plane is None:
+                continue
+            slave_origin, slave_normal = slave_plane
+            if master_tree is None:
+                candidate_ids = np.arange(master_faces.shape[0], dtype=np.int64)
+            else:
+                slave_centroid = np.mean(tri, axis=0)
+                slave_radius = float(np.max(np.linalg.norm(tri - slave_centroid, axis=1)))
+                radius = float(self.search_radius) + slave_radius + float(master_max_radius)
+                candidate_ids = np.asarray(master_tree.query_ball_point(slave_centroid, radius, return_sorted=False), dtype=np.int64)
+            for master_face_id in candidate_ids.reshape(-1):
+                master_nodes = master_faces[int(master_face_id)]
+                master_tri = master_x[master_nodes]
+                basis = _triangle_tangent_basis(master_tri)
+                if basis is None:
+                    continue
+                origin, e1, e2, master_normal = basis
+                normal_alignment = abs(float(slave_normal @ master_normal))
+                if normal_alignment <= 1.0e-12:
+                    continue
+                slave_polygon = _ensure_counterclockwise(_project_points_2d(tri, origin, e1, e2))
+                master_polygon = _ensure_counterclockwise(_project_points_2d(master_tri, origin, e1, e2))
+                overlap = _convex_polygon_clip_2d(slave_polygon, master_polygon)
+                if overlap.shape[0] < 3:
+                    continue
+                overlap = _ensure_counterclockwise(overlap)
+                centroid = np.mean(overlap, axis=0)
+                for i in range(overlap.shape[0]):
+                    a = overlap[i]
+                    b = overlap[(i + 1) % overlap.shape[0]]
+                    tri_area_projected = abs(_triangle_area_2d(centroid, a, b))
+                    if tri_area_projected <= 1.0e-16:
+                        continue
+                    uv = (centroid + a + b) / 3.0
+                    plane_point = origin + uv[0] * e1 + uv[1] * e2
+                    line_distance = float(slave_normal @ (slave_origin - plane_point)) / float(slave_normal @ master_normal)
+                    point = plane_point + line_distance * master_normal
+                    slave_weights = _triangle_barycentric_unclipped(point, tri)
+                    if slave_weights is None:
+                        continue
+                    slave_weights = np.clip(slave_weights, 0.0, 1.0)
+                    slave_total = float(np.sum(slave_weights))
+                    if slave_total <= 0.0:
+                        continue
+                    slave_weights = slave_weights / slave_total
+                    query = self._oracle.query(point)
+                    if int(query.face_id) != int(master_face_id):
+                        continue
+                    yield ContactSample(
+                        node_ids=global_face.copy(),
+                        shape_weights=slave_weights.copy(),
+                        gap=float(query.gap),
+                        normal=query.normal.copy(),
+                        area=float(tri_area_projected / normal_alignment),
+                        stiffness=float(self.pressure_stiffness),
+                        master_node_ids=query.master_node_ids.astype(np.int64) + master_start,
+                        master_shape_weights=query.master_weights.copy(),
+                    )
 
     def secondary_normal_projection_samples(self, x_current: np.ndarray, *, dot_threshold: float = 0.0):
         """Yield samples projected along the current secondary-surface normal.
@@ -1176,11 +1247,9 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
                     point = plane_point + line_distance * master_normal
                     xi_eta = _q4_natural_coordinates(point, slave_qx, clip=True)
                     shape = _q4_shape_functions(float(xi_eta[0]), float(xi_eta[1]))
-                    payload = self._oracle._query_one(
-                        point,
-                        int(master_face_id),
-                        candidate_count=int(self.master_quads.shape[0]),
-                    )
+                    payload = self._oracle.query(point)
+                    if int(payload.face_id) != int(master_face_id):
+                        continue
                     yield ContactSample(
                         node_ids=global_slave_quad.copy(),
                         shape_weights=shape.copy(),
@@ -1222,6 +1291,35 @@ def _triangle_barycentric_unclipped(point: np.ndarray, tri: np.ndarray) -> np.nd
     w = (d00 * d21 - d01 * d20) / denom
     u = 1.0 - v - w
     return np.asarray([u, v, w], dtype=float)
+
+
+def _triangle_plane(tri: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    T = np.asarray(tri, dtype=float)
+    if T.shape != (3, 3):
+        raise ValueError("tri must have shape (3, 3)")
+    normal = np.cross(T[1] - T[0], T[2] - T[0])
+    norm = float(np.linalg.norm(normal))
+    if norm <= 1.0e-30:
+        return None
+    return np.mean(T, axis=0), normal / norm
+
+
+def _triangle_tangent_basis(tri: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    plane = _triangle_plane(tri)
+    if plane is None:
+        return None
+    origin, normal = plane
+    T = np.asarray(tri, dtype=float)
+    e1 = T[1] - T[0]
+    e1_norm = float(np.linalg.norm(e1))
+    if e1_norm <= 1.0e-30:
+        return None
+    e1 = e1 / e1_norm
+    e2 = np.cross(normal, e1)
+    e2_norm = float(np.linalg.norm(e2))
+    if e2_norm <= 1.0e-30:
+        return None
+    return origin, e1, e2 / e2_norm, normal
 
 
 def _triangle_bounding_spheres(triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
