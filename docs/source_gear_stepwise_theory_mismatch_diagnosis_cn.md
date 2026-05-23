@@ -169,3 +169,34 @@ active-set Jaccard overlap:
 5. 诊断指标必须同时报告标量曲线和空间场指标：pressure RMSE、pressure correlation、active-set Jaccard、active-region stress RMSE。
 
 这属于理论口径对齐，不是针对齿轮算例调参；修复后应先重跑 `0.0002 s` 短程齿轮窗口，确认 pressure spatial metrics 改善，再进入长时程和效率对比。
+
+## 本轮新增定位：secondary surface normal 是主导理论差异
+
+Abaqus surface-to-surface contact 的接触方向来自 secondary surface constraint region 的平均法向，而不是简单使用 main/master surface 的 closest-feature normal。SFC 原先使用 master SDF normal 作为接触方向，这会让整体 RP/位移基本对齐，但局部接触压力方向和齿根应力分布偏离。
+
+新增通用选项：
+
+- `--source-contact-direction master`
+- `--source-contact-direction secondary_average`
+- `--source-contact-projection closest_feature`
+- `--source-contact-projection secondary_plane`
+- `--source-contact-projection secondary_line`
+
+其中 `secondary_average + closest_feature` 表示：候选和 gap 仍来自 closest-feature SDF，但接触力/Jacobian 方向改为 secondary surface 平均法向。这个不是调参，而是 Abaqus surface-to-surface 接触方向口径对齐。
+
+短程齿轮结果：
+
+| 设置 | full displacement p95 error | full von Mises p95 error | active-union von Mises p95 error | pressure active-union RMSE |
+| --- | ---: | ---: | ---: | ---: |
+| master normal + slave_node | `0.738%` | `16.573%` | `27.811%` | `49.515%` |
+| secondary_average + slave_node_region | `0.348%` | `10.161%` | `13.879%` | `49.173%` |
+| secondary_average + secondary_plane gap | `0.225%` | `8.528%` | `38.131%` | `110.612%` |
+
+结论：
+
+1. secondary surface normal 是当前最大有效修正，能把 full-field p95 von Mises 从 `16.573%` 降到 `10.161%`。
+2. 单纯把 master-normal gap 除以 `n_master dot n_secondary` 虽然让 full-field p95 低于 10%，但 pressure field 和 active-region stress 明显恶化，不能作为最终验收解。
+3. 真正更接近 Abaqus 的做法应是沿 secondary normal 做 main surface line projection：只有投影点落在 main triangle 内时才使用 secondary-direction gap，否则回退 closest-feature gap。
+4. 已实现 Python 版 `secondary_normal_projection_samples(...)` 并通过单元测试，但全齿轮 11,560 接触面短程运行超时；下一步需要把 secondary-line projection 下沉到 C++/candidate fused backend，避免 Python 候选循环成为瓶颈。
+
+因此当前可接受的阶段性修复是 `secondary_average + closest_feature`，它证明理论方向正确但仍未完成 `<10%` 总体验收。下一步应实现 C++ secondary-line projection，并继续以 pressure RMSE、pressure correlation、active-set Jaccard 和 active-region stress error 作为硬指标。

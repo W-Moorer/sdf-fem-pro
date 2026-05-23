@@ -22,6 +22,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _filter_contact_samples_by_normal_compatibility,
     _node_average_cell_scalar,
     _node_average_cell_tensor,
+    _replace_contact_normals_with_secondary_average,
     _surface_edge_length_percentile,
     _source_drive_corotated_elastic_matrix,
     _source_drive_corotated_positions_and_elastic_displacement,
@@ -600,6 +601,91 @@ def test_contact_normal_compatibility_filter_keeps_opposing_surfaces() -> None:
     assert filtered[0] is sample
 
 
+def test_secondary_average_contact_direction_aligns_slave_normal_to_master_sign() -> None:
+    x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    sample = ContactSample(
+        node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+        shape_weights=np.asarray([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]),
+        gap=-1.0e-3,
+        normal=np.asarray([0.0, 0.0, -1.0]),
+        area=1.0,
+        stiffness=1.0,
+    )
+
+    replaced = _replace_contact_normals_with_secondary_average([sample], x)
+
+    assert len(replaced) == 1
+    np.testing.assert_allclose(replaced[0].normal, [0.0, 0.0, -1.0])
+    assert replaced[0].gap == pytest.approx(sample.gap)
+
+
+def test_secondary_average_contact_direction_projects_master_gap() -> None:
+    x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, np.sqrt(0.5), np.sqrt(0.5)],
+        ],
+        dtype=float,
+    )
+    sample = ContactSample(
+        node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+        shape_weights=np.asarray([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]),
+        gap=-1.0e-3,
+        normal=np.asarray([0.0, 0.0, 1.0]),
+        area=1.0,
+        stiffness=1.0,
+    )
+
+    replaced = _replace_contact_normals_with_secondary_average([sample], x, project_gap_to_secondary_plane=True)
+
+    assert replaced[0].normal @ sample.normal > 0.0
+    assert replaced[0].gap == pytest.approx(sample.gap / np.sqrt(0.5))
+
+
+def test_secondary_normal_projection_samples_use_line_intersection_gap() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.1, 0.1, -0.2],
+            [0.9, 0.1, -0.2],
+            [0.1, 0.9, -0.2],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=False,
+    )
+
+    sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
+
+    assert sample.gap == pytest.approx(-0.2)
+    np.testing.assert_allclose(sample.normal, [0.0, 0.0, 1.0])
+    assert np.sum(sample.master_shape_weights) == pytest.approx(1.0)
+
+
 def test_slave_face_averaging_groups_by_nodes_after_filtering() -> None:
     samples = [
         ContactSample(
@@ -647,6 +733,27 @@ def test_slave_node_averaging_uses_tributary_area() -> None:
         (0.0, 1.0, 0.0),
         (0.0, 0.0, 1.0),
     }
+
+
+def test_slave_node_region_averaging_keeps_surface_shape_support() -> None:
+    sample = ContactSample(
+        node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+        shape_weights=np.asarray([0.5, 0.3, 0.2]),
+        gap=-1.0e-3,
+        normal=np.asarray([0.0, 0.0, 1.0]),
+        area=2.0,
+        stiffness=10.0,
+        master_node_ids=np.asarray([3, 4, 5], dtype=np.int64),
+        master_shape_weights=np.asarray([0.2, 0.5, 0.3]),
+    )
+
+    aggregated = _aggregate_contact_samples([sample], "slave_node_region")
+
+    assert len(aggregated) == 3
+    assert sum(float(item.area) for item in aggregated) == pytest.approx(2.0)
+    for item in aggregated:
+        np.testing.assert_allclose(item.shape_weights, sample.shape_weights)
+        np.testing.assert_allclose(item.master_shape_weights, sample.master_shape_weights)
 
 
 def test_contact_averaging_preserves_positive_overclosure_integral() -> None:

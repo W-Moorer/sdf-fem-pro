@@ -300,12 +300,62 @@ def _split_contact_sample_to_slave_nodes(sample: ContactSample) -> list[ContactS
     return out
 
 
+def _tribute_contact_sample_to_slave_node_regions(sample: ContactSample) -> list[tuple[int, ContactSample]]:
+    """Assign one sample to nodal constraint regions without collapsing shape support.
+
+    Abaqus surface-to-surface contact forms nodal constraint regions on the
+    slave side, but the virtual-work contribution of such a region is still
+    based on the surrounding surface interpolation.  This helper therefore uses
+    each slave shape function only as the tributary area selector; the retained
+    contact sample keeps the original slave shape weights.  Compared with the
+    legacy ``slave_node`` split, this avoids concentrating the full regional
+    pressure onto one slave node while preserving the same integrated pressure
+    overclosure law.
+    """
+
+    nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+    weights = np.asarray(sample.shape_weights, dtype=float).reshape(-1)
+    if nodes.size != weights.size:
+        raise ValueError("sample node_ids and shape_weights must have the same length")
+    out: list[tuple[int, ContactSample]] = []
+    for node, weight in zip(nodes, weights, strict=True):
+        tributary = float(sample.area) * max(float(weight), 0.0)
+        if tributary <= 0.0:
+            continue
+        out.append(
+            (
+                int(node),
+                ContactSample(
+                    node_ids=nodes.copy(),
+                    shape_weights=weights.copy(),
+                    gap=float(sample.gap),
+                    normal=np.asarray(sample.normal, dtype=float).copy(),
+                    area=tributary,
+                    stiffness=float(sample.stiffness),
+                    master_node_ids=(
+                        None
+                        if sample.master_node_ids is None
+                        else np.asarray(sample.master_node_ids, dtype=np.int64).copy()
+                    ),
+                    master_shape_weights=(
+                        None
+                        if sample.master_shape_weights is None
+                        else np.asarray(sample.master_shape_weights, dtype=float).copy()
+                    ),
+                ),
+            )
+        )
+    return out
+
+
 def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[ContactSample]:
     """Aggregate contact samples using Abaqus-style surface constraint regions."""
 
     averaging = str(mode).lower()
-    if averaging not in {"none", "slave_face", "slave_node", "surface_patch"}:
-        raise ValueError("contact averaging must be 'none', 'slave_face', 'slave_node', or 'surface_patch'")
+    if averaging not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
+        raise ValueError(
+            "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', or 'surface_patch'"
+        )
     if averaging == "none" or not samples:
         return samples
     if averaging == "slave_face":
@@ -328,6 +378,16 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
                     groups[active_node] = []
                     order.append(active_node)
                 groups[active_node].append(split)
+        return [_aggregate_contact_sample_group(groups[key]) for key in order]
+    if averaging == "slave_node_region":
+        groups: dict[int, list[ContactSample]] = {}
+        order: list[int] = []
+        for sample in samples:
+            for active_node, tributary_sample in _tribute_contact_sample_to_slave_node_regions(sample):
+                if active_node not in groups:
+                    groups[active_node] = []
+                    order.append(active_node)
+                groups[active_node].append(tributary_sample)
         return [_aggregate_contact_sample_group(groups[key]) for key in order]
     groups = _sample_connected_components(samples)
     return [_aggregate_contact_sample_group([samples[int(index)] for index in group]) for group in groups]
@@ -376,6 +436,81 @@ def _filter_contact_samples_by_normal_compatibility(
         if float(master_normal @ slave_normal) <= float(dot_threshold):
             filtered.append(sample)
     return filtered
+
+
+def _sample_secondary_normal(sample: ContactSample, x_current: np.ndarray) -> np.ndarray | None:
+    """Return the current slave-surface normal for one triangular sample."""
+
+    X = np.asarray(x_current, dtype=float)
+    nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+    if nodes.size < 3 or np.any(nodes < 0) or int(nodes.max()) >= X.shape[0]:
+        return None
+    tri = X[nodes[:3]]
+    normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+    norm = float(np.linalg.norm(normal))
+    if norm <= 0.0:
+        return None
+    normal = normal / norm
+    master_normal = np.asarray(sample.normal, dtype=float).reshape(3)
+    master_norm = float(np.linalg.norm(master_normal))
+    if master_norm > 0.0 and float(normal @ (master_normal / master_norm)) < 0.0:
+        normal = -normal
+    return normal
+
+
+def _replace_contact_normals_with_secondary_average(
+    samples: list[ContactSample],
+    x_current: np.ndarray,
+    *,
+    project_gap_to_secondary_plane: bool = False,
+) -> list[ContactSample]:
+    """Use secondary-surface normals for Abaqus-style surface-to-surface contact.
+
+    Abaqus/Standard defines the surface-to-surface contact direction from an
+    average normal of the secondary-surface region.  The SDF closest-feature
+    normal is still used for candidate selection and overclosure sign, but the
+    force/Jacobian direction should follow the secondary side when this mode is
+    requested.
+    """
+
+    replaced: list[ContactSample] = []
+    for sample in samples:
+        normal = _sample_secondary_normal(sample, x_current)
+        if normal is None:
+            replaced.append(sample)
+            continue
+        master_normal = np.asarray(sample.normal, dtype=float).reshape(3)
+        master_norm = float(np.linalg.norm(master_normal))
+        if bool(project_gap_to_secondary_plane) and master_norm > 0.0:
+            # The closest-feature SDF gap is measured along the master normal.
+            # Abaqus surface-to-surface constraints use the secondary-surface
+            # normal direction, so convert the local plane clearance to that
+            # direction by the normal projection factor.
+            projection = abs(float((master_normal / master_norm) @ normal))
+            gap = float(sample.gap) / max(projection, 1.0e-12)
+        else:
+            gap = float(sample.gap)
+        replaced.append(
+            ContactSample(
+                node_ids=np.asarray(sample.node_ids, dtype=np.int64).copy(),
+                shape_weights=np.asarray(sample.shape_weights, dtype=float).copy(),
+                gap=gap,
+                normal=normal,
+                area=float(sample.area),
+                stiffness=float(sample.stiffness),
+                master_node_ids=(
+                    None
+                    if sample.master_node_ids is None
+                    else np.asarray(sample.master_node_ids, dtype=np.int64).copy()
+                ),
+                master_shape_weights=(
+                    None
+                    if sample.master_shape_weights is None
+                    else np.asarray(sample.master_shape_weights, dtype=float).copy()
+                ),
+            )
+        )
+    return replaced
 
 
 def _empty_contact_node_diagnostics(n_nodes: int) -> dict[str, Any]:
@@ -2608,6 +2743,8 @@ def solve_sfc_source_drive_pair(
     source_contact_averaging: str = "none",
     source_contact_kinematics: str = "linearized_mpc",
     source_contact_normal_filter: str = "none",
+    source_contact_direction: str = "master",
+    source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
     source_internal_kinematics: str = "linearized_mpc",
@@ -2677,9 +2814,10 @@ def solve_sfc_source_drive_pair(
     else:
         contact_geometries = (make_contact(contact_pair_order, float(pressure_stiffness)),)
     contact_averaging = str(source_contact_averaging).lower()
-    if contact_averaging not in {"none", "slave_face", "slave_node", "slave_node_point", "surface_patch"}:
+    if contact_averaging not in {"none", "slave_face", "slave_node", "slave_node_region", "slave_node_point", "surface_patch"}:
         raise ValueError(
-            "source_contact_averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_point', or 'surface_patch'"
+            "source_contact_averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
+            "'slave_node_point', or 'surface_patch'"
         )
     contact_kinematics = str(source_contact_kinematics).lower()
     if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
@@ -2687,6 +2825,14 @@ def solve_sfc_source_drive_pair(
     contact_normal_filter = str(source_contact_normal_filter).lower()
     if contact_normal_filter not in {"none", "opposing", "opposing_search"}:
         raise ValueError("source_contact_normal_filter must be 'none', 'opposing', or 'opposing_search'")
+    contact_direction = str(source_contact_direction).lower()
+    if contact_direction not in {"master", "secondary_average"}:
+        raise ValueError("source_contact_direction must be 'master' or 'secondary_average'")
+    contact_projection = str(source_contact_projection).lower()
+    if contact_projection not in {"closest_feature", "secondary_plane", "secondary_line"}:
+        raise ValueError("source_contact_projection must be 'closest_feature', 'secondary_plane', or 'secondary_line'")
+    if contact_projection != "closest_feature" and contact_direction != "secondary_average":
+        raise ValueError("secondary contact projection modes require source_contact_direction='secondary_average'")
     internal_kinematics = str(source_internal_kinematics).lower()
     if internal_kinematics not in {"linearized_mpc", "corotated_rp", "finite_stvk_visual"}:
         raise ValueError(
@@ -2979,17 +3125,29 @@ def solve_sfc_source_drive_pair(
         collected: list[Any] = []
         use_compatible_query = contact_normal_filter == "opposing_search" and contact_averaging != "slave_node_point"
         for geometry in contact_geometries:
-            if use_compatible_query:
+            if (
+                contact_direction == "secondary_average"
+                and contact_projection == "secondary_line"
+                and hasattr(geometry, "secondary_normal_projection_samples")
+            ):
+                collected.extend(list(geometry.secondary_normal_projection_samples(x_contact)))
+            elif use_compatible_query:
                 collected.extend(list(geometry.normal_compatible_samples(x_contact)))
             elif contact_averaging == "slave_node_point":
                 collected.extend(list(geometry.nodal_samples(x_contact)))
             else:
                 collected.extend(list(geometry.samples(x_contact)))
-        if contact_normal_filter == "opposing" and not use_compatible_query:
+        if contact_normal_filter == "opposing" and not use_compatible_query and contact_direction != "secondary_average":
             collected = _filter_contact_samples_by_normal_compatibility(
                 collected,
                 x_contact,
                 mode=contact_normal_filter,
+            )
+        if contact_direction == "secondary_average" and contact_projection != "secondary_line":
+            collected = _replace_contact_normals_with_secondary_average(
+                collected,
+                x_contact,
+                project_gap_to_secondary_plane=contact_projection == "secondary_plane",
             )
         if contact_averaging != "none":
             aggregate_mode = "slave_node" if contact_averaging == "slave_node_point" else contact_averaging
@@ -3287,6 +3445,8 @@ def solve_sfc_source_drive_pair(
         "source_contact_averaging": contact_averaging,
         "source_contact_kinematics": contact_kinematics,
         "source_contact_normal_filter": contact_normal_filter,
+        "source_contact_direction": contact_direction,
+        "source_contact_projection": contact_projection,
         "source_contact_pair_order": contact_pair_order,
         "source_contact_search_radius": float(contact_search_radius),
         "source_internal_kinematics": internal_kinematics,

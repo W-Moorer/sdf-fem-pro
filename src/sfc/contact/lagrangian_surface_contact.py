@@ -349,6 +349,130 @@ class LagrangianSDFSurfaceContactGeometry:
                     master_shape_weights=query.master_weights.copy(),
                 )
 
+    def secondary_normal_projection_samples(self, x_current: np.ndarray, *, dot_threshold: float = 0.0):
+        """Yield samples projected along the current secondary-surface normal.
+
+        Abaqus surface-to-surface contact defines the contact direction from an
+        average normal of the secondary surface constraint region.  For a
+        faceted triangular surface this method projects each slave quadrature
+        point along its current face normal onto compatible master triangles.
+        If no valid normal projection lands inside a master triangle, it falls
+        back to the closest-feature payload so the broad-phase remains robust.
+        """
+
+        X, master_x, master_tree, master_max_radius, barycentric, weight_scale = self._prepare_sampling(x_current)
+        master_faces = self.master_material.boundary_faces
+        master_start = int(self.master_node_offset)
+        for face_id, face in enumerate(self.slave_faces):
+            global_face = face + int(self.slave_node_offset)
+            tri = X[global_face]
+            area = _triangle_area(tri)
+            if area <= 0.0:
+                continue
+            if master_tree is not None and _slave_face_outside_master_tube(tri, master_tree, master_max_radius, float(self.search_radius)):
+                continue
+            slave_normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            slave_norm = float(np.linalg.norm(slave_normal))
+            if slave_norm <= 0.0:
+                continue
+            slave_normal /= slave_norm
+            for qp, (weights, scale) in enumerate(zip(barycentric, weight_scale, strict=True)):
+                point = weights @ tri
+                payload = self._secondary_projection_query(
+                    point,
+                    slave_normal,
+                    master_x,
+                    master_faces,
+                    master_tree,
+                    master_max_radius,
+                    dot_threshold=float(dot_threshold),
+                    cache_key=(int(face_id), "secondary", int(qp)),
+                )
+                yield ContactSample(
+                    node_ids=global_face.copy(),
+                    shape_weights=weights.copy(),
+                    gap=float(payload["gap"]),
+                    normal=np.asarray(payload["normal"], dtype=float).copy(),
+                    area=float(area * scale),
+                    stiffness=float(self.pressure_stiffness),
+                    master_node_ids=np.asarray(payload["master_node_ids"], dtype=np.int64) + master_start,
+                    master_shape_weights=np.asarray(payload["master_weights"], dtype=float).copy(),
+                )
+
+    def _secondary_projection_query(
+        self,
+        point: np.ndarray,
+        slave_normal: np.ndarray,
+        master_x: np.ndarray,
+        master_faces: np.ndarray,
+        master_tree: cKDTree | None,
+        master_max_radius: float,
+        *,
+        dot_threshold: float,
+        cache_key: object,
+    ) -> dict[str, np.ndarray | float]:
+        x = np.asarray(point, dtype=float).reshape(3)
+        ns = np.asarray(slave_normal, dtype=float).reshape(3)
+        ns_norm = float(np.linalg.norm(ns))
+        if ns_norm <= 0.0:
+            query = self._oracle.query(x, cache_key=cache_key)
+            return {
+                "gap": float(query.gap),
+                "normal": query.normal,
+                "master_node_ids": query.master_node_ids,
+                "master_weights": query.master_weights,
+            }
+        ns = ns / ns_norm
+        if master_tree is not None:
+            candidate_radius = float(self.search_radius) + float(master_max_radius) + 1.0e-14
+            candidate_ids = np.asarray(master_tree.query_ball_point(x, candidate_radius, return_sorted=False), dtype=np.int64)
+        else:
+            candidate_ids = np.arange(master_faces.shape[0], dtype=np.int64)
+        best: dict[str, np.ndarray | float] | None = None
+        best_abs_gap = np.inf
+        for face_id in candidate_ids.reshape(-1):
+            nodes = master_faces[int(face_id)]
+            master_tri = master_x[nodes]
+            master_normal = np.cross(master_tri[1] - master_tri[0], master_tri[2] - master_tri[0])
+            master_norm = float(np.linalg.norm(master_normal))
+            if master_norm <= 0.0:
+                continue
+            master_normal /= master_norm
+            if float(master_normal @ ns) > float(dot_threshold):
+                continue
+            contact_normal = -ns
+            projection = float(master_normal @ contact_normal)
+            if projection <= 1.0e-12:
+                continue
+            gap = float(master_normal @ (x - master_tri[0]) / projection)
+            projected = x - gap * contact_normal
+            bary = _triangle_barycentric_unclipped(projected, master_tri)
+            if bary is None or np.min(bary) < -1.0e-10 or np.max(bary) > 1.0 + 1.0e-10:
+                continue
+            abs_gap = abs(gap)
+            if abs_gap < best_abs_gap:
+                best_abs_gap = abs_gap
+                best = {
+                    "gap": gap,
+                    "normal": contact_normal.copy(),
+                    "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
+                    "master_weights": np.clip(bary, 0.0, 1.0),
+                }
+        if best is not None:
+            weights = np.asarray(best["master_weights"], dtype=float)
+            total = float(np.sum(weights))
+            if total > 0.0:
+                best["master_weights"] = weights / total
+            return best
+        query = self._oracle.query(x, cache_key=cache_key)
+        normal = -ns if float(query.normal @ ns) < 0.0 else ns
+        return {
+            "gap": float(query.gap),
+            "normal": normal,
+            "master_node_ids": query.master_node_ids,
+            "master_weights": query.master_weights,
+        }
+
     def normal_compatible_sample_arrays(
         self,
         x_current: np.ndarray,
@@ -903,6 +1027,30 @@ def _triangle_area(tri: np.ndarray) -> float:
     if T.shape != (3, 3):
         raise ValueError("tri must have shape (3, 3)")
     return 0.5 * float(np.linalg.norm(np.cross(T[1] - T[0], T[2] - T[0])))
+
+
+def _triangle_barycentric_unclipped(point: np.ndarray, tri: np.ndarray) -> np.ndarray | None:
+    """Return barycentric coordinates of point in a triangle plane."""
+
+    p = np.asarray(point, dtype=float).reshape(3)
+    T = np.asarray(tri, dtype=float)
+    if T.shape != (3, 3):
+        raise ValueError("tri must have shape (3, 3)")
+    v0 = T[1] - T[0]
+    v1 = T[2] - T[0]
+    v2 = p - T[0]
+    d00 = float(v0 @ v0)
+    d01 = float(v0 @ v1)
+    d11 = float(v1 @ v1)
+    d20 = float(v2 @ v0)
+    d21 = float(v2 @ v1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) <= 1.0e-30:
+        return None
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    return np.asarray([u, v, w], dtype=float)
 
 
 def _triangle_bounding_spheres(triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

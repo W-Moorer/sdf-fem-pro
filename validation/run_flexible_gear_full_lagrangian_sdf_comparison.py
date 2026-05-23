@@ -571,6 +571,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source contact averaging: {summary.get('source_contact_averaging', '')}",
         f"- source contact kinematics: {summary.get('source_contact_kinematics', '')}",
         f"- source contact normal filter: {summary.get('source_contact_normal_filter', '')}",
+        f"- source contact direction: {summary.get('source_contact_direction', '')}",
+        f"- source contact projection: {summary.get('source_contact_projection', '')}",
         f"- source contact pair order: {summary.get('source_contact_pair_order', '')}",
         f"- source contact search radius: {summary.get('source_contact_search_radius', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
@@ -734,6 +736,8 @@ def run_full_gear(
     source_contact_averaging: str = "none",
     source_contact_kinematics: str = "linearized_mpc",
     source_contact_normal_filter: str = "none",
+    source_contact_direction: str = "master",
+    source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
     source_internal_kinematics: str = "linearized_mpc",
@@ -785,6 +789,8 @@ def run_full_gear(
             source_contact_averaging=str(source_contact_averaging),
             source_contact_kinematics=str(source_contact_kinematics),
             source_contact_normal_filter=str(source_contact_normal_filter),
+            source_contact_direction=str(source_contact_direction),
+            source_contact_projection=str(source_contact_projection),
             source_contact_pair_order=str(source_contact_pair_order),
             source_contact_search_radius=source_contact_search_radius,
             source_internal_kinematics=str(source_internal_kinematics),
@@ -981,7 +987,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-contact-averaging",
-        choices=("none", "slave_face", "slave_node", "slave_node_point", "surface_patch"),
+        choices=("none", "slave_face", "slave_node", "slave_node_region", "slave_node_point", "surface_patch"),
         default="none",
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
     )
@@ -996,6 +1002,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=("none", "opposing", "opposing_search"),
         default="none",
         help="Optional source-drive master/slave normal compatibility filter.",
+    )
+    parser.add_argument(
+        "--source-contact-direction",
+        choices=("master", "secondary_average"),
+        default="master",
+        help="Normal direction used by source-drive surface-to-surface contact constraints.",
+    )
+    parser.add_argument(
+        "--source-contact-projection",
+        choices=("closest_feature", "secondary_plane", "secondary_line"),
+        default="closest_feature",
+        help="Gap projection used with secondary-average contact direction.",
     )
     parser.add_argument(
         "--source-contact-pair-order",
@@ -1068,6 +1086,8 @@ def main(argv: list[str] | None = None) -> int:
         source_contact_averaging=str(args.source_contact_averaging),
         source_contact_kinematics=str(args.source_contact_kinematics),
         source_contact_normal_filter=str(args.source_contact_normal_filter),
+        source_contact_direction=str(args.source_contact_direction),
+        source_contact_projection=str(args.source_contact_projection),
         source_contact_pair_order=str(args.source_contact_pair_order),
         source_contact_search_radius=args.source_contact_search_radius,
         source_internal_kinematics=str(args.source_internal_kinematics),
