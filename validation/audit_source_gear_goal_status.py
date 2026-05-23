@@ -147,13 +147,42 @@ def summarize_alignment(path: Path) -> Row:
     return summary
 
 
+def parse_abaqus_sta_completed_time(path: Path) -> Row:
+    """Return the last completed Abaqus increment time from a ``.sta`` file."""
+
+    if not path.exists():
+        return {"path": str(path), "exists": 0, "completed_time": 0.0, "completed_increment": 0, "completed": 0}
+    completed_time = 0.0
+    completed_increment = 0
+    completed = 0
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if "THE ANALYSIS HAS COMPLETED SUCCESSFULLY" in line.upper():
+                completed = 1
+            parts = line.split()
+            if len(parts) >= 8 and parts[0].isdigit() and parts[1].isdigit():
+                try:
+                    completed_increment = int(parts[1])
+                    completed_time = float(parts[6])
+                except ValueError:
+                    continue
+    return {
+        "path": str(path),
+        "exists": 1,
+        "completed_time": float(completed_time),
+        "completed_increment": int(completed_increment),
+        "completed": int(completed),
+    }
+
+
 def _status(ok: bool) -> str:
     return "PASS" if ok else "MISSING"
 
 
-def build_audit_rows(deck: SourceDeckSettings, sfc: Row, abaqus: Row, alignment: Row) -> list[Row]:
+def build_audit_rows(deck: SourceDeckSettings, sfc: Row, abaqus: Row, alignment: Row, sta: Row | None = None) -> list[Row]:
     target_duration = deck.dynamic_total_time
     target_dt = deck.dynamic_initial_dt
+    sta = sta or {}
     rows: list[Row] = []
     rows.append(
         {
@@ -181,6 +210,16 @@ def build_audit_rows(deck: SourceDeckSettings, sfc: Row, abaqus: Row, alignment:
             "requirement": "abaqus_vtk_contact_frames_exist",
             "status": _status(int(abaqus.get("frame_count", 0)) > 0 and int(abaqus.get("has_contact_pressure", 0)) == 1),
             "evidence": f"frames={abaqus.get('frame_count')}, contact_pressure_field={abaqus.get('has_contact_pressure')}",
+        }
+    )
+    rows.append(
+        {
+            "requirement": "abaqus_reference_duration_matches_source",
+            "status": _status(_as_float(sta.get("completed_time")) >= target_duration - 1.0e-14),
+            "evidence": (
+                f"sta_completed_time={_as_float(sta.get('completed_time')):g}, "
+                f"target={target_duration:g}, increment={int(sta.get('completed_increment', 0) or 0)}"
+            ),
         }
     )
     rows.append(
@@ -223,6 +262,7 @@ def write_audit_report(
     sfc: Row,
     abaqus: Row,
     alignment: Row,
+    sta: Row,
     audit_rows: list[Row],
     out_dir: Path,
 ) -> dict[str, Path]:
@@ -252,6 +292,7 @@ def write_audit_report(
         "",
         f"- SFC frames: `{sfc.get('frame_count')}`, end time `{_as_float(sfc.get('end_time')):g}`, frame dt `{_as_float(sfc.get('median_frame_dt')):g}`",
         f"- Abaqus frames: `{abaqus.get('frame_count')}`, end time `{_as_float(abaqus.get('end_time')):g}`, frame dt `{_as_float(abaqus.get('median_frame_dt')):g}`",
+        f"- Abaqus STA completed time: `{_as_float(sta.get('completed_time')):g}`, completed increment `{int(sta.get('completed_increment', 0) or 0)}`",
         f"- Paired curve frames: `{alignment.get('paired_frame_count')}`, end time `{_as_float(alignment.get('end_time')):g}`",
         "",
         "## 当前最大 p95 误差",
@@ -288,15 +329,25 @@ def run_audit(
     inp: Path,
     sfc_manifest: Path,
     abaqus_manifest: Path,
+    abaqus_sta: Path,
     alignment_csv: Path,
     out_dir: Path,
 ) -> dict[str, Path]:
     deck = parse_source_deck(inp)
     sfc = summarize_manifest(sfc_manifest)
     abaqus = summarize_manifest(abaqus_manifest)
+    sta = parse_abaqus_sta_completed_time(abaqus_sta)
     alignment = summarize_alignment(alignment_csv)
-    audit_rows = build_audit_rows(deck, sfc, abaqus, alignment)
-    return write_audit_report(deck=deck, sfc=sfc, abaqus=abaqus, alignment=alignment, audit_rows=audit_rows, out_dir=out_dir)
+    audit_rows = build_audit_rows(deck, sfc, abaqus, alignment, sta)
+    return write_audit_report(
+        deck=deck,
+        sfc=sfc,
+        abaqus=abaqus,
+        alignment=alignment,
+        sta=sta,
+        audit_rows=audit_rows,
+        out_dir=out_dir,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -320,6 +371,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--abaqus-sta",
+        type=Path,
+        default=Path(
+            "results/source_gear_abaqus_penalty_full_stride2_match_step_0020/"
+            "abaqus_run/gear_contact_source_penalty.sta"
+        ),
+    )
+    parser.add_argument(
         "--alignment-csv",
         type=Path,
         default=Path(
@@ -333,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         inp=args.inp,
         sfc_manifest=args.sfc_manifest,
         abaqus_manifest=args.abaqus_manifest,
+        abaqus_sta=args.abaqus_sta,
         alignment_csv=args.alignment_csv,
         out_dir=args.out_dir,
     )

@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 from validation.audit_source_gear_goal_status import (  # noqa: E402
     build_audit_rows,
+    parse_abaqus_sta_completed_time,
     parse_source_deck,
     summarize_alignment,
     summarize_manifest,
@@ -81,10 +82,29 @@ def test_audit_rows_flag_partial_duration_and_large_stress_error(tmp_path: Path)
     sfc = summarize_manifest(manifest)
     abaqus = summarize_manifest(manifest)
     align = summarize_alignment(alignment)
+    sta = {"completed_time": 0.002, "completed_increment": 200}
 
-    rows = build_audit_rows(settings, sfc, abaqus, align)
+    rows = build_audit_rows(settings, sfc, abaqus, align, sta)
     status = {row["requirement"]: row["status"] for row in rows}
 
     assert status["source_drive_units_radian"] == "PASS"
+    assert status["abaqus_reference_duration_matches_source"] == "MISSING"
     assert status["full_source_duration_covered"] == "MISSING"
     assert status["stress_strain_alignment_currently_acceptable"] == "MISSING"
+
+
+def test_parse_abaqus_sta_completed_time_reads_last_increment(tmp_path: Path) -> None:
+    sta = tmp_path / "job.sta"
+    sta.write_text(
+        "   1   199   1     2     2     4  0.00199    0.00199    1.000e-05\n"
+        "   1   200   1     2     2     4  0.00200    0.00200    1.000e-05\n"
+        " THE ANALYSIS HAS COMPLETED SUCCESSFULLY\n",
+        encoding="utf-8",
+    )
+
+    row = parse_abaqus_sta_completed_time(sta)
+
+    assert row["exists"] == 1
+    assert row["completed"] == 1
+    assert row["completed_increment"] == 200
+    assert row["completed_time"] == 0.002
