@@ -665,3 +665,51 @@ abaqus python validation\abaqus_odb_to_vtk.py `
 | min_contact_gap_node | `-1.6066397074609995e-4` |
 
 这一步把 Abaqus 与 SFC 的接触诊断口径补齐到同一类 VTK/manifest 字段。接下来可以将误差拆成三类区域比较：contact-active 区域、near-contact 区域和全场区域；这样能判断当前 stress/strain 差异是来自接触释放/压力分布，还是来自 stress recovery 与节点平均口径。
+
+## 更新：区域化 VTK 场误差诊断
+
+已新增区域化 VTK 后处理脚本：
+
+```powershell
+python validation\run_source_gear_vtk_regional_alignment.py `
+  --sfc-vtk results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_0100.vtk `
+  --abaqus-vtk results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_check\abaqus_contact_check_0000.vtk `
+  --sfc-time 0.002000000000 `
+  --abaqus-time 0.0020000000949949026 `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0020_regional_alignment
+```
+
+该脚本只读取已经导出的 legacy VTK 文件，不读取 Abaqus ODB，也不重新运行 SFC 或 Abaqus。它会按区域输出位移、node-averaged von Mises、strain norm 和 equivalent elastic strain 的 p95/max 误差。目前支持：
+
+- `full`：全部节点；
+- `abaqus_active`：Abaqus contact pressure / penetration / active 字段标记的接触节点；
+- `sfc_active`：SFC contact 字段标记的接触节点；
+- `active_union`：两边 active 节点并集。
+
+同一时间 `2.0e-3 s` 的区域化输出：
+
+| 区域 | 指标 | 节点数 | p95 相对误差 | max 相对误差 |
+| --- | --- | ---: | ---: | ---: |
+| full | displacement magnitude | 38884 | 2.716% | 2.716% |
+| full | von Mises nodeavg | 38884 | 68.646% | 45.675% |
+| full | strain norm nodeavg | 38884 | 75.823% | 70.743% |
+| full | equivalent elastic strain nodeavg | 38884 | 68.646% | 45.675% |
+| Abaqus active | displacement magnitude | 251 | 2.716% | 2.716% |
+| Abaqus active | von Mises nodeavg | 251 | 76.635% | 74.845% |
+| Abaqus active | strain norm nodeavg | 251 | 85.173% | 84.262% |
+| Abaqus active | equivalent elastic strain nodeavg | 251 | 76.635% | 74.845% |
+
+区域化结果进一步说明：当前位移场已经对齐到低误差，但应力/应变差异主要集中在 Abaqus active contact 区域，并且明显高于全场位移误差。这支持后续优先排查 contact pressure distribution、contact release/status 和 stress recovery 口径，而不是再把问题归因到齿轮驱动角速度或时间步长。
+
+补充检查还使用 `2.02e-3 s` 的新 SFC contact VTK 帧与 `2.0e-3 s` Abaqus 末帧做了非最终字段可用性验证：
+
+```powershell
+python validation\run_source_gear_vtk_regional_alignment.py `
+  --sfc-vtk results\source_gear_penalty_full_stride2_match_step\sfc_vtk\sfc_0101.vtk `
+  --abaqus-vtk results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_check\abaqus_contact_check_0000.vtk `
+  --sfc-time 0.00202 `
+  --abaqus-time 0.0020000000949949026 `
+  --out-dir results\source_gear_penalty_full_stride2_match_step_0020_regional_alignment_sfc_contact_check
+```
+
+该检查仅用于确认两边 VTK 均可读取 contact 字段；由于时间相差约 `2e-5 s`，不作为最终误差证明。它显示 SFC contact fields present = 1、Abaqus contact fields present = 1，但 SFC active node count = 0、Abaqus active node count = 251。这与前面的诊断一致：当前主要差异是 SFC 在该窗口附近比 Abaqus penalty 更早释放接触或压力分布更弱。
