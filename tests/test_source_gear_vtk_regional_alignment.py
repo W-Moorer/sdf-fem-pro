@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from validation.run_source_gear_vtk_regional_alignment import compare_vtk_pair, read_vtk_point_scalars
+from validation.run_source_gear_vtk_regional_alignment import compare_vtk_manifests, compare_vtk_pair, read_vtk_point_scalars
 
 
 def _write_point_scalar_vtk(path: Path, *, pressure: tuple[float, float], active: tuple[float, float]) -> None:
@@ -88,3 +88,35 @@ def test_compare_vtk_pair_reports_active_region_errors(tmp_path: Path) -> None:
     assert active_stress["abaqus_active_node_count"] == 1
     assert active_stress["sfc_active_node_count"] == 0
     assert active_stress["time_difference"] == pytest.approx(0.1)
+
+
+def test_compare_vtk_manifests_pairs_frames_by_time(tmp_path: Path) -> None:
+    sfc_dir = tmp_path / "sfc"
+    abaqus_dir = tmp_path / "abaqus"
+    sfc_dir.mkdir()
+    abaqus_dir.mkdir()
+    for index, time_value in enumerate((0.0, 2.0e-5)):
+        _write_point_scalar_vtk(sfc_dir / f"sfc_{index:04d}.vtk", pressure=(0.0, float(index)), active=(0.0, float(index)))
+        _write_point_scalar_vtk(
+            abaqus_dir / f"abaqus_{index:04d}.vtk",
+            pressure=(0.0, 2.0 * float(index)),
+            active=(0.0, float(index)),
+        )
+    (sfc_dir / "sfc_manifest.csv").write_text(
+        "frame,time,vtk_file\n0,0.0,sfc_0000.vtk\n1,2e-05,sfc_0001.vtk\n",
+        encoding="utf-8",
+    )
+    (abaqus_dir / "abaqus_manifest.csv").write_text(
+        "frame,time,vtk_file\n0,0.0,abaqus_0000.vtk\n1,1.99999995e-05,abaqus_0001.vtk\n",
+        encoding="utf-8",
+    )
+
+    rows = compare_vtk_manifests(
+        sfc_manifest=sfc_dir / "sfc_manifest.csv",
+        abaqus_manifest=abaqus_dir / "abaqus_manifest.csv",
+        time_tolerance=1.0e-9,
+    )
+
+    assert len(rows) == 2 * 4 * 4
+    assert {row["pair_index"] for row in rows} == {0, 1}
+    assert max(abs(float(row["time_difference"])) for row in rows) < 1.0e-9

@@ -799,3 +799,38 @@ python validation\run_source_gear_vtk_regional_alignment.py `
 2. `strain_norm_nodeavg` 误差显著偏高，但 `equivalent_elastic_strain_nodeavg` 与 von Mises 同步低误差，说明当前 strain-norm 指标不是最可靠的跨软件口径。后续论文曲线应优先报告 displacement、von Mises 和 equivalent elastic strain；若继续报告 strain norm，需要明确 Abaqus `LE` 与 SFC strain recovery 的定义差异。
 
 同时，SFC 早期 contact pressure 峰值明显高于 Abaqus，但 stress/equivalent-strain 在 `4e-5 s` 仍对齐较好。这意味着后续中长窗口应继续追踪 contact pressure/active set 随时间演化，判断后期 stress 差异来自接触释放时序、压力分布积分口径，还是应力恢复口径。
+
+## 更新：区域化误差序列曲线
+
+`validation/run_source_gear_vtk_regional_alignment.py` 已从单帧对比扩展为 manifest 序列对比。新模式会按时间自动配对 SFC/Abaqus VTK 帧，并输出长格式误差 CSV 与 p95 相对误差曲线。该脚本仍然只读取已导出的 VTK/manifest，不读取 Abaqus ODB，也不重新运行求解器。
+
+短窗口序列对比命令：
+
+```powershell
+python validation\run_source_gear_vtk_regional_alignment.py `
+  --sfc-manifest results\source_gear_penalty_contact_incremental_check_sfc\sfc_vtk\sfc_manifest.csv `
+  --abaqus-manifest results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_incremental_check\abaqus_manifest.csv `
+  --time-tolerance 1e-9 `
+  --out-dir results\source_gear_penalty_contact_incremental_check_sequence_alignment
+```
+
+输出：
+
+- `results/source_gear_penalty_contact_incremental_check_sequence_alignment/source_gear_regional_vtk_errors.csv`
+- `results/source_gear_penalty_contact_incremental_check_sequence_alignment/source_gear_regional_vtk_alignment_summary.md`
+- `results/source_gear_penalty_contact_incremental_check_sequence_alignment/source_gear_regional_p95_error_curves.png`
+
+该曲线图使用线图而不是柱状图，并将图例放在图外，避免遮挡曲线。当前短窗口只有 3 个时间点，主要用于验证序列对比链路；后续长窗口分段导出后，同一工具可直接生成更完整的位移、应力、等效应变误差曲线。
+
+短窗口序列最大 p95 误差：
+
+| 区域 | 指标 | 发生时间 | p95 相对误差 |
+| --- | --- | ---: | ---: |
+| full | displacement magnitude | `2e-5` | 0.103% |
+| full | von Mises nodeavg | `4e-5` | 0.906% |
+| full | equivalent elastic strain nodeavg | `4e-5` | 0.906% |
+| Abaqus active | displacement magnitude | `2e-5` | 0.435% |
+| Abaqus active | von Mises nodeavg | `2e-5` | 62.094% |
+| Abaqus active | equivalent elastic strain nodeavg | `2e-5` | 62.094% |
+
+由于 `Abaqus active` 区域在 `2e-5 s` 只有 138 个节点，且接触刚建立，局部 active 区域的 p95 对节点集差异非常敏感；主文应优先使用 full-field 曲线与接触压力/active set 曲线共同解释，而不是单独用 active 区域 p95 作为精度结论。
