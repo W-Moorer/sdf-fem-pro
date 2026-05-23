@@ -713,3 +713,89 @@ python validation\run_source_gear_vtk_regional_alignment.py `
 ```
 
 该检查仅用于确认两边 VTK 均可读取 contact 字段；由于时间相差约 `2e-5 s`，不作为最终误差证明。它显示 SFC contact fields present = 1、Abaqus contact fields present = 1，但 SFC active node count = 0、Abaqus active node count = 251。这与前面的诊断一致：当前主要差异是 SFC 在该窗口附近比 Abaqus penalty 更早释放接触或压力分布更弱。
+
+## 更新：同口径短窗口 contact-field 序列
+
+为避免只看单个末帧，已开始把双方导出为带接触字段的同口径序列。直接重导出 Abaqus `0~2.0e-3 s` 的 101 帧 contact VTK 时，桌面任务在约 10 分钟后超时，但已有 40 帧落盘。为避免这种长导出中断后没有索引文件，`validation/abaqus_odb_to_vtk.py` 已改为每写完一帧就增量刷新 `*.pvd` 和 `*_manifest.csv`。这样后续即使分窗或中断，也可以直接使用已完成的帧。
+
+使用已有 Abaqus ODB 导出了一个小窗口 `0~4e-5 s`，不重新运行 Abaqus 求解：
+
+```powershell
+abaqus python validation\abaqus_odb_to_vtk.py `
+  --odb results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_run\gear_contact_source_penalty.odb `
+  --out-dir results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_incremental_check `
+  --stem abaqus `
+  --frame-stride 1 `
+  --time-start 0.0 `
+  --time-end 0.00004 `
+  --young 2.05e11 `
+  --poisson 0.28 `
+  --scalars-only
+```
+
+Abaqus contact-field 小窗口：
+
+| frame | time | active contact nodes | max contact pressure |
+| ---: | ---: | ---: | ---: |
+| 0 | `0` | 0 | 0 |
+| 1 | `1.999999949e-5` | 138 | `7.3608336e4` |
+| 2 | `3.999999899e-5` | 220 | `2.57393297e5` |
+
+随后用相同 `gear_contact.inp`、相同 `dt=1e-5 s`、相同线性罚函数接触，短程重跑 SFC 到 `4e-5 s`：
+
+```powershell
+python validation\run_flexible_gear_full_lagrangian_sdf_comparison.py `
+  --source commercial_software_comparison\abaqus_flexible_body_gear_contact\gear_contact.inp `
+  --drive-mode source_inp `
+  --contact-mode penalty `
+  --tet4-mass-kind consistent `
+  --active-faces-per-body 0 `
+  --active-patch-radius-factor 1.0 `
+  --duration 0.00004 `
+  --dt 0.00001 `
+  --pressure-stiffness 5e9 `
+  --write-sfc-vtk `
+  --vtk-frame-stride 2 `
+  --vtk-scalars-only `
+  --history-frame-stride 2 `
+  --source-checkpoint results\source_gear_penalty_contact_incremental_check_sfc\source_drive_checkpoint.npz `
+  --source-checkpoint-stride 20 `
+  --out-dir results\source_gear_penalty_contact_incremental_check_sfc
+```
+
+SFC contact-field 小窗口：
+
+| frame | time | active contact nodes | max contact pressure | min gap |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | `0` | 0 | 0 | 0 |
+| 1 | `2e-5` | 196 | `3.9311277e6` | `-7.8622713e-4` |
+| 2 | `4e-5` | 281 | `3.7241691e6` | `-7.4483485e-4` |
+
+同一时间 `4e-5 s` 的区域化误差：
+
+```powershell
+python validation\run_source_gear_vtk_regional_alignment.py `
+  --sfc-vtk results\source_gear_penalty_contact_incremental_check_sfc\sfc_vtk\sfc_0002.vtk `
+  --abaqus-vtk results\source_gear_abaqus_penalty_full_stride2_match_step_0020\abaqus_vtk_contact_incremental_check\abaqus_0002.vtk `
+  --sfc-time 0.00004 `
+  --abaqus-time 0.000039999998989515007 `
+  --out-dir results\source_gear_penalty_contact_incremental_check_regional_alignment
+```
+
+| 区域 | 指标 | 节点数 | p95 相对误差 | max 相对误差 |
+| --- | --- | ---: | ---: | ---: |
+| full | displacement magnitude | 38884 | 0.040% | 0.055% |
+| full | von Mises nodeavg | 38884 | 0.906% | 2.565% |
+| full | strain norm nodeavg | 38884 | 34.167% | 48.314% |
+| full | equivalent elastic strain nodeavg | 38884 | 0.906% | 2.565% |
+| active union | displacement magnitude | 285 | 0.088% | 0.090% |
+| active union | von Mises nodeavg | 285 | 1.400% | 1.350% |
+| active union | strain norm nodeavg | 285 | 40.167% | 37.932% |
+| active union | equivalent elastic strain nodeavg | 285 | 1.400% | 1.350% |
+
+这个短窗口给出两个重要结论：
+
+1. 在接触刚开始阶段，位移、von Mises 和 equivalent elastic strain 已经能与 Abaqus penalty 对齐到低误差；这说明驱动、时间步长、RP 角速度弧度制和整体动力学路径在早期窗口是对的。
+2. `strain_norm_nodeavg` 误差显著偏高，但 `equivalent_elastic_strain_nodeavg` 与 von Mises 同步低误差，说明当前 strain-norm 指标不是最可靠的跨软件口径。后续论文曲线应优先报告 displacement、von Mises 和 equivalent elastic strain；若继续报告 strain norm，需要明确 Abaqus `LE` 与 SFC strain recovery 的定义差异。
+
+同时，SFC 早期 contact pressure 峰值明显高于 Abaqus，但 stress/equivalent-strain 在 `4e-5 s` 仍对齐较好。这意味着后续中长窗口应继续追踪 contact pressure/active set 随时间演化，判断后期 stress 差异来自接触释放时序、压力分布积分口径，还是应力恢复口径。

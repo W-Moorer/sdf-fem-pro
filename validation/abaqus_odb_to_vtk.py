@@ -293,6 +293,20 @@ def _write_pvd(path: Path, datasets: list[tuple[float, Path]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
+def _write_manifest(path: Path, rows: list[dict[str, str | int | float]]) -> None:
+    """Write a CSV manifest for exported VTK frames."""
+
+    with path.open("w", encoding="ascii", newline="") as handle:
+        fieldnames: list[str] = []
+        for row in rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _object_id_from_instance(instance_name: str) -> int:
     """Return a stable visualization id from an Abaqus instance name."""
 
@@ -643,19 +657,15 @@ def export_odb_to_vtk(
             manifest_row.update(object_metrics)
             manifest_row.update(contact_metrics)
             manifest_rows.append(manifest_row)
+            # Keep long exports usable if Abaqus Python is interrupted or a
+            # desktop task times out while writing a large VTK sequence.
+            _write_pvd(out_dir / f"{stem}.pvd", datasets)
+            _write_manifest(out_dir / f"{stem}_manifest.csv", manifest_rows)
 
         pvd_path = out_dir / f"{stem}.pvd"
         _write_pvd(pvd_path, datasets)
         manifest_path = out_dir / f"{stem}_manifest.csv"
-        with manifest_path.open("w", encoding="ascii", newline="") as handle:
-            fieldnames: list[str] = []
-            for row in manifest_rows:
-                for key in row:
-                    if key not in fieldnames:
-                        fieldnames.append(key)
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(manifest_rows)
+        _write_manifest(manifest_path, manifest_rows)
         return {
             "pvd": pvd_path,
             "manifest": manifest_path,
