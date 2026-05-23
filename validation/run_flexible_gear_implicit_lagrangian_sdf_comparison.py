@@ -44,6 +44,7 @@ from sfc.contact.hard_contact import (  # noqa: E402
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
+    ContactSample,
     ContactResponse,
     InternalResponse,
     MechanicsModel,
@@ -169,6 +170,96 @@ def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_
         float(np.sum(lam[active])) if np.any(active) else 0.0,
         float(0.5 * float(stiffness) * np.sum(areas * penetration * penetration)),
     )
+
+
+def _combined_shape_weights(
+    node_rows: list[np.ndarray],
+    weight_rows: list[np.ndarray],
+    group_weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Combine sample shape-function weights over a constraint group."""
+
+    accum: dict[int, float] = {}
+    for nodes, weights, scale in zip(node_rows, weight_rows, group_weights, strict=True):
+        for node, weight in zip(np.asarray(nodes, dtype=np.int64).reshape(-1), np.asarray(weights, dtype=float).reshape(-1), strict=True):
+            key = int(node)
+            accum[key] = accum.get(key, 0.0) + float(scale) * float(weight)
+    if not accum:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=float)
+    ids = np.asarray(sorted(accum), dtype=np.int64)
+    weights = np.asarray([accum[int(node)] for node in ids], dtype=float)
+    total = float(np.sum(weights))
+    if total > 0.0:
+        weights /= total
+    return ids, weights
+
+
+def _aggregate_contact_sample_group(samples: list[ContactSample]) -> ContactSample:
+    """Area-average contact samples into one surface-to-surface constraint."""
+
+    if not samples:
+        raise ValueError("samples must not be empty")
+    areas = np.asarray([max(float(sample.area), 0.0) for sample in samples], dtype=float)
+    total_area = float(np.sum(areas))
+    if total_area <= 0.0:
+        group_weights = np.full(len(samples), 1.0 / float(len(samples)), dtype=float)
+        total_area = float(len(samples))
+    else:
+        group_weights = areas / total_area
+    gaps = np.asarray([float(sample.gap) for sample in samples], dtype=float)
+    normal = np.sum(
+        np.asarray([group_weights[idx] * np.asarray(sample.normal, dtype=float) for idx, sample in enumerate(samples)], dtype=float),
+        axis=0,
+    )
+    normal_norm = float(np.linalg.norm(normal))
+    if normal_norm <= 0.0:
+        normal = np.asarray(samples[0].normal, dtype=float).copy()
+        normal_norm = max(float(np.linalg.norm(normal)), 1.0e-30)
+    normal = normal / normal_norm
+    slave_nodes, slave_weights = _combined_shape_weights(
+        [np.asarray(sample.node_ids, dtype=np.int64) for sample in samples],
+        [np.asarray(sample.shape_weights, dtype=float) for sample in samples],
+        group_weights,
+    )
+    master_node_rows: list[np.ndarray] = []
+    master_weight_rows: list[np.ndarray] = []
+    for sample in samples:
+        if sample.master_node_ids is not None and sample.master_shape_weights is not None:
+            master_node_rows.append(np.asarray(sample.master_node_ids, dtype=np.int64))
+            master_weight_rows.append(np.asarray(sample.master_shape_weights, dtype=float))
+    master_nodes: np.ndarray | None = None
+    master_weights: np.ndarray | None = None
+    if len(master_node_rows) == len(samples):
+        master_nodes, master_weights = _combined_shape_weights(master_node_rows, master_weight_rows, group_weights)
+    return ContactSample(
+        node_ids=slave_nodes,
+        shape_weights=slave_weights,
+        gap=float(group_weights @ gaps),
+        normal=normal,
+        area=float(total_area),
+        stiffness=float(samples[0].stiffness),
+        master_node_ids=master_nodes,
+        master_shape_weights=master_weights,
+    )
+
+
+def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[ContactSample]:
+    """Aggregate contact samples using Abaqus-style surface constraint regions."""
+
+    averaging = str(mode).lower()
+    if averaging not in {"none", "slave_face", "surface_patch"}:
+        raise ValueError("contact averaging must be 'none', 'slave_face', or 'surface_patch'")
+    if averaging == "none" or not samples:
+        return samples
+    if averaging == "slave_face":
+        if len(samples) < 3 or len(samples) % 3 != 0:
+            return samples
+        return [
+            _aggregate_contact_sample_group(samples[start : start + 3])
+            for start in range(0, len(samples), 3)
+        ]
+    groups = _sample_connected_components(samples)
+    return [_aggregate_contact_sample_group([samples[int(index)] for index in group]) for group in groups]
 
 
 def _empty_contact_node_diagnostics(n_nodes: int) -> dict[str, Any]:
@@ -1889,6 +1980,7 @@ def solve_sfc_source_drive_pair(
     vtk_stem: str = "sfc",
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
+    source_contact_averaging: str = "none",
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -1921,6 +2013,9 @@ def solve_sfc_source_drive_pair(
         search_radius=max(2.5 * (pair.initial_patch_gap + 1.0e-5), 1.0e-4),
         compiled_batch_projection=True,
     )
+    contact_averaging = str(source_contact_averaging).lower()
+    if contact_averaging not in {"none", "slave_face", "surface_patch"}:
+        raise ValueError("source_contact_averaging must be 'none', 'slave_face', or 'surface_patch'")
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
     steps = max(1, int(round(float(duration) / float(dt))))
@@ -2094,9 +2189,11 @@ def solve_sfc_source_drive_pair(
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
             t_section = time.perf_counter()
-            sample_arrays = contact.sample_arrays(x_guess)
+            sample_arrays = None if contact_averaging != "none" else contact.sample_arrays(x_guess)
             if sample_arrays is None:
                 samples = list(contact.samples(x_guess))
+                if contact_averaging != "none":
+                    samples = _aggregate_contact_samples(samples, contact_averaging)
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
                 last_samples = samples
                 last_sample_arrays = None
@@ -2174,9 +2271,11 @@ def solve_sfc_source_drive_pair(
         x_new = model.X + assembly.expand_displacements(q_new)
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         if not contact_matches_q_guess:
-            accepted_arrays = contact.sample_arrays(state.x)
+            accepted_arrays = None if contact_averaging != "none" else contact.sample_arrays(state.x)
             if accepted_arrays is None:
                 accepted_samples = list(contact.samples(state.x))
+                if contact_averaging != "none":
+                    accepted_samples = _aggregate_contact_samples(accepted_samples, contact_averaging)
                 last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
                 last_samples = accepted_samples
                 last_sample_arrays = None
@@ -2327,6 +2426,7 @@ def solve_sfc_source_drive_pair(
         "source_gear2_torque_z": float(gear2_torque_z),
         "source_rotation_unit": "radian",
         "source_stress_strain_postprocess": postprocess_label,
+        "source_contact_averaging": contact_averaging,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
         "sfc_history_frame_stride": int(history_stride),

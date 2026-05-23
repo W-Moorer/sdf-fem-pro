@@ -100,3 +100,28 @@ RP 角速度强约束，整体位移 p95 很容易被驱动条件拉到低误差
 - combined latest gate: 未通过。
 
 当前结果还不能满足“应力/应变曲线误差小于等于 10%”的目标。
+
+## 新增 surface-to-surface 约束平均路径
+
+为避免继续调接触刚度，本轮新增了 source-drive penalty 的显式选项：
+
+```powershell
+--source-contact-averaging slave_face
+```
+
+该选项不改变 SDF closest-feature 查询，也不改变罚函数刚度；它只把同一个 TET4
+slave 三角面上的 3 个 `tri3` 采样点按面积合并成一个 slave-face 约束，作为
+Abaqus-style surface-to-surface constraint averaging 的通用近似。默认值仍为
+`none`，因此不会影响已有路径。
+
+真实源齿轮网格上的 2-step smoke 结果显示该方向是合理的：
+
+| 路径 | t | active contact samples | min gap | normal force | p95 von Mises |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| no averaging | `2e-5 s` | `276` | `-7.857767e-4` | `22.306268` | `9.213437e6` |
+| slave-face averaging | `2e-5 s` | `59` | `-7.469806e-4` | `14.405619` | `9.211585e6` |
+
+这说明当前早期接触过强的问题确实与“逐 Gauss 点独立罚函数”有关；slave-face
+constraint averaging 可以显著降低过大的 active 样本数和法向力。下一步需要用
+该通用路径重新跑到 `0.003 s`，再与 Abaqus penalty VTK 对比。如果 active/release
+时间线仍不能对齐，再继续处理 pressure smoothing 和 contact release 口径。

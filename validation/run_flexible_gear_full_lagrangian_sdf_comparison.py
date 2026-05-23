@@ -568,6 +568,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- support nodes: {summary['gear1_support_nodes']} / {summary['gear2_support_nodes']}",
         f"- linear solver: {summary.get('linear_solver', 'sparse')}",
         f"- contact mode: {summary.get('contact_mode', '')}",
+        f"- source contact averaging: {summary.get('source_contact_averaging', '')}",
         f"- penalty solver: {summary.get('penalty_solver', '')}",
         f"- material linearization: {summary.get('material_linearization', '')}",
         f"- RP reaction definition: {summary.get('rp_reaction_definition', '')}",
@@ -721,6 +722,7 @@ def run_full_gear(
     vtk_frame_stride: int = 1,
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
+    source_contact_averaging: str = "none",
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -765,6 +767,7 @@ def run_full_gear(
             vtk_stem="sfc",
             vtk_include_tensors=bool(vtk_include_tensors),
             source_stress_postprocess=str(source_stress_postprocess),
+            source_contact_averaging=str(source_contact_averaging),
             source_checkpoint_path=source_checkpoint_path,
             resume_source_checkpoint=bool(resume_source_checkpoint),
             source_checkpoint_stride=int(source_checkpoint_stride),
@@ -952,6 +955,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Source-drive SFC stress/strain output mode; does not alter the solve.",
     )
     parser.add_argument(
+        "--source-contact-averaging",
+        choices=("none", "slave_face", "surface_patch"),
+        default="none",
+        help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
+    )
+    parser.add_argument(
         "--source-checkpoint",
         type=Path,
         default=None,
@@ -995,6 +1004,7 @@ def main(argv: list[str] | None = None) -> int:
         vtk_frame_stride=int(args.vtk_frame_stride),
         vtk_include_tensors=not bool(args.vtk_scalars_only),
         source_stress_postprocess=str(args.source_stress_postprocess),
+        source_contact_averaging=str(args.source_contact_averaging),
         source_checkpoint_path=args.source_checkpoint,
         resume_source_checkpoint=bool(args.resume_source_checkpoint),
         source_checkpoint_stride=int(args.source_checkpoint_stride),

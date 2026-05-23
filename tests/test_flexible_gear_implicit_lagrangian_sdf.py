@@ -14,6 +14,7 @@ from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE,
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse,
     _active_reduced_gap_jacobian_sparse_from_arrays,
+    _aggregate_contact_samples,
     _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
     _node_average_cell_scalar,
@@ -113,6 +114,52 @@ def test_source_force_only_contact_response_matches_full_force_response() -> Non
     assert batched.energy == pytest.approx(full.energy)
     assert fast.tangent.nnz == 0
     assert batched.tangent.nnz == 0
+
+
+def test_slave_face_contact_averaging_combines_tri3_samples_without_tuning() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0], dtype=float),
+            gap=-0.30,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=2.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([1.0, 0.0, 0.0], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], dtype=float),
+            gap=0.00,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=2.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.0, 1.0, 0.0], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0], dtype=float),
+            gap=0.15,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=2.0,
+            stiffness=10.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.0, 0.0, 1.0], dtype=float),
+        ),
+    ]
+
+    aggregated = _aggregate_contact_samples(samples, "slave_face")
+
+    assert len(aggregated) == 1
+    merged = aggregated[0]
+    assert merged.area == pytest.approx(6.0)
+    assert merged.gap == pytest.approx((-0.30 + 0.0 + 0.15) / 3.0)
+    assert np.sum(merged.shape_weights) == pytest.approx(1.0)
+    assert np.sum(merged.master_shape_weights) == pytest.approx(1.0)
+    assert merged.node_ids.tolist() == [0, 1, 2]
+    assert merged.master_node_ids.tolist() == [4, 5, 6]
 
 
 def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
