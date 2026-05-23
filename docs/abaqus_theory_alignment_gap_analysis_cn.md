@@ -250,6 +250,55 @@ p95_contact_master_pressure_nodeavg
 - 残差收敛已显著改善，但 early stress 误差没有变化。
 - 因此 `0.0002 s` 误差不是 Newton 提前停止造成的，下一步应继续对齐 Abaqus contact status/COPEN/CPRESS 的 surface region 定义或接触建立阶段的输出语义。
 
+## 当前 0.003 s 全程结果
+
+为满足阶段目标，已使用当前 SFC source-drive 设置跑到 `0.003 s`：
+
+```text
+results/source_gear_penalty_contact_history_only_0030
+```
+
+运行设置：
+
+- source deck：`commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp`
+- drive：`source_inp`
+- contact：linear penalty，`pressure_stiffness = 5e9`
+- HHT：`alpha = -0.414214`
+- time step：`dt = 1e-5`
+- duration：`0.003 s`
+- contact averaging：`slave_node`
+- contact kinematics：`finite_rp_corotated`
+- internal kinematics：`corotated_rp`
+- rotating inertia diagnostic：`none`
+
+输出：
+
+- SFC history：`sfc_full_gear_lagrangian_sdf_history.csv`
+- 对齐误差：`sfc_vs_abaqus_history_nodeavg_errors.csv`
+- 曲线图：`sfc_vs_abaqus_history_nodeavg_curves.png`
+- 中断恢复：`source_checkpoint.npz`
+
+误差摘要：
+
+| metric | max rel. error | final rel. error | mean rel. error |
+|---|---:|---:|---:|
+| max displacement | 68.521% | 3.916% | 11.066% |
+| p95 nodeavg von Mises | 83.770% | 83.770% | 49.799% |
+| p95 nodeavg equivalent strain | 83.770% | 83.770% | 49.799% |
+
+结论：
+
+- 当前实现已经能完成 `0.003 s` 全程 history-only 求解，但应力/应变曲线未达 `<=10%` 验收。
+- 位移最终误差为 `3.916%`，说明整体 RP 驱动和最大位移量级不是主要问题。
+- 应力/应变最终误差为 `83.770%`，说明 SFC 仍严重低估 Abaqus 后半段齿轮 2 的应力增长。
+- 该误差不能再用输出统计口径、Newton 残差或 total/slave/master active 统计解释。更可能的理论缺口是：
+  1. Abaqus `*MPC, BEAM` 有限转动约束在 `nlgeom=YES` 下的应力传递口径；
+  2. 当前 SFC `corotated_rp` 参考线性刚度把大转动弹性应变剥离过多；
+  3. Abaqus 后半段 p95 stress 主要出现在 gear 2，而 SFC 的 source-drive 内部力仍使用 reference-linear/corotated 近似；
+  4. 接触压力虽然影响局部波动，但不是后半段 80% 级应力低估的唯一原因。
+
+因此下一步应转向有限转动 RP-MPC / `nlgeom=YES` 内部应力口径对齐，而不是继续只改 SDF 查询或 contact active 统计。
+
 ## 下一步理论对齐优先级
 
 ### 第一优先级：不要使用 centripetal residual 作为默认
