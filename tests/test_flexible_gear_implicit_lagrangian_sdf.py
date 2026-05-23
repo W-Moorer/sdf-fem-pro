@@ -971,6 +971,10 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert "contact_multiplier_sum" in history[-1]
     assert "p95_equivalent_elastic_strain" in history[-1]
     assert float(history[-1]["p95_equivalent_elastic_strain"]) >= 0.0
+    assert "p95_von_mises_nodeavg" in history[-1]
+    assert "p95_equivalent_elastic_strain_nodeavg" in history[-1]
+    assert float(history[-1]["p95_von_mises_nodeavg"]) >= 0.0
+    assert float(history[-1]["p95_equivalent_elastic_strain_nodeavg"]) >= 0.0
 
 
 def test_cropped_gear_hard_contact_supports_surface_patch_constraint_averaging() -> None:

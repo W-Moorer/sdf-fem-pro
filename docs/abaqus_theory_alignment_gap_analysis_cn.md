@@ -129,6 +129,41 @@ Abaqus 文档说明 Abaqus/Standard 可在积分点、单元质心、外推节�
   3. SFC stress/strain postprocess 不是 Abaqus 的 nodal averaged tensor-then-invariant 口径；
   4. `*MPC, BEAM` 反力/约束虚功输出口径仍需单独校验，但它不是当前应力尖峰的主因。
 
+## 本轮输出口径修正
+
+历史 CSV 以前主要报告单元级：
+
+```text
+p95_von_mises
+p95_equivalent_elastic_strain
+```
+
+而 Abaqus VTK manifest 使用 node-averaged 标量：
+
+```text
+p95_von_mises_nodeavg
+p95_equivalent_elastic_strain_nodeavg
+```
+
+这会让曲线对比混合不同统计口径。现在 SFC history row 和 summary 也输出 node-averaged 曲线指标，用于和 Abaqus manifest 对齐。
+
+短程验证：
+
+`results/source_gear_penalty_contact_history_nodeavg_smoke_0004`
+
+对比 `results/source_gear_abaqus_penalty_full_stride2_match_step_0030/abaqus_vtk/abaqus_manifest.csv`：
+
+| time (s) | max displacement rel. error | p95 nodeavg von Mises rel. error | p95 nodeavg equiv. strain rel. error | active nodes SFC/Abaqus |
+|---:|---:|---:|---:|---:|
+| 0.0002 | 0.452% | 39.798% | 39.798% | 324 / 466 |
+| 0.0004 | 3.721% | 1.930% | 1.930% | 44 / 44 |
+
+解释：
+
+- `0.0004 s` 处，在相同 node-averaged 口径下，应力/应变已经进入 2% 以内。
+- `0.0002 s` 处仍有约 40% 应力/应变误差，且 active node 数量不同。这进一步支持“下一步应修 contact constraint region / active status，而不是调材料或接触刚度”的判断。
+- 该修正只改变诊断和输出口径，不改变求解物理，也不降低接触精度。
+
 ## 下一步理论对齐优先级
 
 ### 第一优先级：不要使用 centripetal residual 作为默认

@@ -587,6 +587,9 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- final max displacement norm: {float(summary.get('final_max_displacement_norm', 0.0)):.6e}",
         f"- final p95 von Mises: {float(summary.get('final_p95_von_mises', 0.0)):.6e}",
         f"- final p95 equivalent elastic strain: {float(summary.get('final_p95_equivalent_elastic_strain', 0.0)):.6e}",
+        f"- final p95 node-averaged von Mises: {float(summary.get('final_p95_von_mises_nodeavg', 0.0)):.6e}",
+        "- final p95 node-averaged equivalent elastic strain: "
+        f"{float(summary.get('final_p95_equivalent_elastic_strain_nodeavg', 0.0)):.6e}",
         f"- final RP reaction norm: {float(summary.get('final_rp_force_norm', 0.0)):.6e}",
         f"- final min gap: {float(summary.get('final_min_gap', 0.0)):.6e}",
         f"- rotation rate about z: {float(summary.get('rotation_rate_z_rad_per_s', 0.0)):.6e} rad/s",
@@ -824,6 +827,10 @@ def run_full_gear(
         summary["final_max_displacement_norm"] = float(history[-1].get("max_displacement_norm", 0.0))
         summary["final_p95_von_mises"] = float(history[-1].get("p95_von_mises", 0.0))
         summary["final_p95_equivalent_elastic_strain"] = float(history[-1].get("p95_equivalent_elastic_strain", 0.0))
+        summary["final_p95_von_mises_nodeavg"] = float(history[-1].get("p95_von_mises_nodeavg", 0.0))
+        summary["final_p95_equivalent_elastic_strain_nodeavg"] = float(
+            history[-1].get("p95_equivalent_elastic_strain_nodeavg", 0.0)
+        )
     summary["active_patch_radius_factor"] = float(active_patch_radius_factor)
     summary["drive_mode"] = drive
     summary["sfc_match_source_step"] = bool(source_step_matched)

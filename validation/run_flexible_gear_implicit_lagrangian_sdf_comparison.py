@@ -1113,6 +1113,44 @@ def _node_average_cell_scalar(cell_values: np.ndarray, cells: np.ndarray, node_c
     return out
 
 
+def _node_averaged_internal_metric_row(model: MechanicsModel, internal: Any) -> Row:
+    """Return SFC metrics using the same node-averaged scalar convention as VTK manifests.
+
+    The Abaqus VTK exporter records node-averaged stress/strain scalars in its
+    manifest.  History rows should expose the same quantities so curve
+    comparisons do not silently mix element-level SFC percentiles with
+    node-averaged Abaqus percentiles.
+    """
+
+    elements = np.asarray(model.elements, dtype=np.int64)
+    node_count = int(np.asarray(model.X, dtype=float).shape[0])
+    stress = _tensor_field_or_zeros(internal.stress, elements.shape[0])
+    strain = _tensor_field_or_zeros(internal.strain, elements.shape[0])
+    von_mises = np.asarray(getattr(internal, "von_mises", np.empty(0, dtype=float)), dtype=float).reshape(-1)
+    if von_mises.shape != (elements.shape[0],):
+        von_mises = _von_mises_local(stress)
+    strain_norm = np.linalg.norm(strain, axis=(1, 2))
+    equivalent_strain = _equivalent_elastic_strain_from_mises(von_mises, young=model.E, poisson=model.nu)
+    von_mises_nodeavg = _node_average_cell_scalar(von_mises, elements, node_count)
+    strain_norm_nodeavg = _node_average_cell_scalar(strain_norm, elements, node_count)
+    equivalent_strain_nodeavg = _node_average_cell_scalar(equivalent_strain, elements, node_count)
+    return {
+        "max_von_mises_nodeavg": float(np.max(von_mises_nodeavg)) if von_mises_nodeavg.size else 0.0,
+        "max_strain_norm_nodeavg": float(np.max(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
+        "max_equivalent_elastic_strain_nodeavg": float(np.max(equivalent_strain_nodeavg))
+        if equivalent_strain_nodeavg.size
+        else 0.0,
+        "p95_von_mises_nodeavg": _percentile_or_zero(von_mises_nodeavg, 95.0),
+        "p95_strain_norm_nodeavg": _percentile_or_zero(strain_norm_nodeavg, 95.0),
+        "p95_equivalent_elastic_strain_nodeavg": _percentile_or_zero(equivalent_strain_nodeavg, 95.0),
+        "mean_von_mises_nodeavg": float(np.mean(von_mises_nodeavg)) if von_mises_nodeavg.size else 0.0,
+        "mean_strain_norm_nodeavg": float(np.mean(strain_norm_nodeavg)) if strain_norm_nodeavg.size else 0.0,
+        "mean_equivalent_elastic_strain_nodeavg": float(np.mean(equivalent_strain_nodeavg))
+        if equivalent_strain_nodeavg.size
+        else 0.0,
+    }
+
+
 def _tensor_field_or_zeros(values: np.ndarray, count: int) -> np.ndarray:
     array = np.asarray(values, dtype=float)
     if array.shape == (int(count), 3, 3):
@@ -1313,7 +1351,7 @@ def _penalty_history_row(
     strain_norm = np.linalg.norm(internal.strain, axis=(1, 2)) if internal.strain.size else np.empty(0, dtype=float)
     elastic_strain_norm = _elastic_strain_norm_from_stress(internal.stress, young=young, poisson=poisson)
     equivalent_elastic_strain = _equivalent_elastic_strain_from_mises(internal.von_mises, young=young, poisson=poisson)
-    return {
+    row = {
         "time": float(time_value),
         "closure": float(closure),
         "rotation_z": float(rotation),
@@ -1334,6 +1372,8 @@ def _penalty_history_row(
         "newton_residual_norm": float(residual_norm),
         "penalty_solver": str(solver),
     }
+    row.update(_node_averaged_internal_metric_row(model, internal))
+    return row
 
 
 def _solve_penalty_low_rank_correction(
@@ -3565,6 +3605,7 @@ def solve_sfc_cropped_pair_hard_contact(
         row.update({f"rp2_inertia_{key}": value for key, value in hub2_inertia_reaction.items()})
         row.update({f"rp1_contact_{key}": value for key, value in hub1_contact_reaction.items()})
         row.update({f"rp2_contact_{key}": value for key, value in hub2_contact_reaction.items()})
+        row.update(_node_averaged_internal_metric_row(model, internal))
         row["rp_reaction_definition"] = "static_physical_constraint_residual"
         row["rp_force_drive"] = float(hub1_static_reaction["rp_force_drive"])
         row["rp_force_norm"] = float(hub1_static_reaction["rp_force_norm"])
