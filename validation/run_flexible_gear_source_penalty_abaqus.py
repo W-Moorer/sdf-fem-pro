@@ -49,6 +49,7 @@ def run_source_penalty_abaqus(
     frame_stride: int,
     dt: float | None,
     duration: float | None,
+    require_source_timing: bool,
     abaqus_command: str | None,
     include_tensors: bool,
     sfc_manifest: Path | None = None,
@@ -68,6 +69,7 @@ def run_source_penalty_abaqus(
         frame_stride=frame_stride,
         dt=dt,
         duration=duration,
+        require_source_timing=bool(require_source_timing),
     )
     inp_path = run_dir / f"{job_name}.inp"
     for old in run_dir.glob(f"{job_name}.*"):
@@ -198,6 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--duration", type=float, default=None)
+    parser.add_argument(
+        "--require-source-timing",
+        action="store_true",
+        help="Reject dt/duration overrides that differ from the source *Dynamic row.",
+    )
     parser.add_argument("--abaqus-command", type=str, default=None)
     parser.add_argument("--sfc-manifest", type=Path, default=None)
     parser.add_argument("--scalars-only", action="store_true")
@@ -209,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         frame_stride=int(args.frame_stride),
         dt=args.dt,
         duration=args.duration,
+        require_source_timing=bool(args.require_source_timing),
         abaqus_command=args.abaqus_command,
         include_tensors=not bool(args.scalars_only),
         sfc_manifest=args.sfc_manifest,

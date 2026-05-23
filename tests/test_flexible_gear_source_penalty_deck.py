@@ -74,6 +74,53 @@ def test_prepare_source_penalty_deck_can_preserve_automatic_increment_bounds() -
     assert "1.000000000000e-05,1.000000000000e-04,1e-10,5e-05" in text
 
 
+def test_prepare_source_penalty_deck_can_require_source_timing() -> None:
+    source = "\n".join(
+        [
+            "*Surface Behavior, pressure-overclosure=HARD",
+            "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE",
+            "S2, S1",
+            "*Dynamic",
+            "1e-05,0.05,1e-10,5e-05",
+        ]
+    )
+
+    text = prepare_source_penalty_deck_text(
+        source,
+        pressure_stiffness=5.0e9,
+        frame_stride=2,
+        dt=1.0e-5,
+        duration=0.05,
+        require_source_timing=True,
+    )
+
+    assert "1.000000000000e-05,5.000000000000e-02,1.000000000000e-05,1.000000000000e-05" in text
+
+
+def test_prepare_source_penalty_deck_rejects_short_duration_when_source_timing_required() -> None:
+    source = "\n".join(
+        [
+            "*Surface Behavior, pressure-overclosure=HARD",
+            "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE",
+            "S2, S1",
+            "*Dynamic",
+            "1e-05,0.05,1e-10,5e-05",
+        ]
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="requested duration"):
+        prepare_source_penalty_deck_text(
+            source,
+            pressure_stiffness=5.0e9,
+            frame_stride=2,
+            dt=1.0e-5,
+            duration=0.002,
+            require_source_timing=True,
+        )
+
+
 def test_prepare_source_penalty_deck_replaces_existing_linear_data() -> None:
     source = "\n".join(
         [

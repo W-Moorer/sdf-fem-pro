@@ -89,6 +89,7 @@ python validation\run_flexible_gear_source_penalty_abaqus.py `
   --frame-stride 2 `
   --dt 0.00001 `
   --duration 0.05 `
+  --require-source-timing `
   --scalars-only
 ```
 

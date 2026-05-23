@@ -9,6 +9,7 @@ for an apples-to-apples SFC penalty-contact comparison.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -18,6 +19,16 @@ DEFAULT_SOURCE = (
     / "abaqus_flexible_body_gear_contact"
     / "gear_contact.inp"
 )
+
+
+@dataclass(frozen=True)
+class DynamicTiming:
+    """Abaqus ``*Dynamic`` timing row from the source deck."""
+
+    initial_dt: float
+    total_time: float
+    min_dt: float | None = None
+    max_dt: float | None = None
 
 
 def _keyword_name(line: str) -> str:
@@ -69,6 +80,45 @@ def _replace_dynamic_data(
     return ",".join(values)
 
 
+def extract_dynamic_timing_from_deck_text(text: str) -> DynamicTiming:
+    """Return the first Abaqus ``*Dynamic`` timing row in ``text``."""
+
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _keyword_name(line) != "*dynamic":
+            continue
+        probe = index + 1
+        while probe < len(lines):
+            stripped = lines[probe].strip()
+            if not stripped or stripped.startswith("**"):
+                probe += 1
+                continue
+            if stripped.startswith("*"):
+                break
+            values = [value.strip() for value in stripped.split(",") if value.strip()]
+            if len(values) < 2:
+                raise ValueError("*Dynamic data row must contain at least initial dt and total time")
+            min_dt = float(values[2]) if len(values) > 2 else None
+            max_dt = float(values[3]) if len(values) > 3 else None
+            return DynamicTiming(float(values[0]), float(values[1]), min_dt, max_dt)
+        break
+    raise ValueError("source deck does not contain a *Dynamic data row")
+
+
+def _assert_source_timing_requested(text: str, *, dt: float | None, duration: float | None) -> None:
+    timing = extract_dynamic_timing_from_deck_text(text)
+    requested_dt = timing.initial_dt if dt is None else float(dt)
+    requested_duration = timing.total_time if duration is None else float(duration)
+    if abs(requested_dt - timing.initial_dt) > max(1.0e-15, abs(timing.initial_dt) * 1.0e-12):
+        raise ValueError(
+            f"requested dt {requested_dt:g} does not match source *Dynamic initial dt {timing.initial_dt:g}"
+        )
+    if abs(requested_duration - timing.total_time) > max(1.0e-15, abs(timing.total_time) * 1.0e-12):
+        raise ValueError(
+            f"requested duration {requested_duration:g} does not match source *Dynamic total time {timing.total_time:g}"
+        )
+
+
 def prepare_source_penalty_deck_text(
     text: str,
     *,
@@ -78,12 +128,16 @@ def prepare_source_penalty_deck_text(
     duration: float | None = None,
     contact_pair_penalty_parameter: bool = False,
     fixed_increment: bool = True,
+    require_source_timing: bool = False,
 ) -> str:
     """Return source deck text converted to linear penalty contact.
 
     Only validation-facing Abaqus input is rewritten.  Meshes, node/element sets,
     MPCs, loads, and boundary conditions are left untouched.
     """
+
+    if bool(require_source_timing):
+        _assert_source_timing_requested(text, dt=dt, duration=duration)
 
     stride = max(1, int(frame_stride))
     lines = text.splitlines()
@@ -159,6 +213,7 @@ def write_source_penalty_deck(
     dt: float | None = None,
     duration: float | None = None,
     encoding: str = "cp936",
+    require_source_timing: bool = False,
 ) -> None:
     """Write a source-derived linear-penalty Abaqus deck."""
 
@@ -171,6 +226,7 @@ def write_source_penalty_deck(
         duration=duration,
         contact_pair_penalty_parameter=False,
         fixed_increment=True,
+        require_source_timing=bool(require_source_timing),
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(converted, encoding=encoding, errors="replace")
@@ -184,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--dt", type=float, default=None, help="Optional override for the Abaqus *Dynamic initial increment.")
     parser.add_argument("--duration", type=float, default=None, help="Optional override for the Abaqus *Dynamic total time.")
+    parser.add_argument(
+        "--require-source-timing",
+        action="store_true",
+        help="Reject dt/duration overrides that differ from the source *Dynamic row.",
+    )
     args = parser.parse_args(argv)
     write_source_penalty_deck(
         args.source,
@@ -192,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         frame_stride=int(args.frame_stride),
         dt=args.dt,
         duration=args.duration,
+        require_source_timing=bool(args.require_source_timing),
     )
     print(args.out)
     return 0
