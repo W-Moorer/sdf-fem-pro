@@ -85,7 +85,11 @@ previous accepted contact state
 
 因此，当时的剩余误差应定位为 **finite-sliding path-based surface-to-surface contact tracking、constraint participation factors 与 tracking tube 口径尚未完全对齐**，不是 SDF gap 查询本身的错误。
 
-本轮已经实现 path-based tracking 的第一层、participation 聚合、active-set stability 选项、closed-feature line gate 修正和局部 constraint-region tracking radius。当前已验证到 `0.00020 s`：位移、p95/max/mean 应力应变和接触压力指标均低于 10%。完整 `0.00040 s` 仍需用新实现重跑确认。
+本轮已经实现 path-based tracking 的第一层、participation 聚合、active-set stability 选项、closed-feature line gate 修正和局部 constraint-region tracking radius。当前已验证到 `0.00020 s`：位移、p95/max/mean 应力应变和接触压力指标均低于 10%。
+
+完整 `0.00040 s` 使用同一修复重跑后仍未通过：`results/source_gear_tracking_radius_fullpatch_00040/sfc_vs_abaqus_history_metric_errors.csv` 显示位移误差仍小于约 `0.98%`，但 `0.00032-0.00040 s` 释放阶段应力/应变误差重新超过 10%，峰值出现在 `0.00038 s`，p95 node-averaged von Mises / equivalent strain 误差约 `196.7%`。该阶段 Abaqus active contact node count 从 `42` 下降到近 `0`，而 SFC 仍保持约 `351` 个 active contact nodes 和非零高压力。因此当前剩余问题不是全局运动学、质量、HHT 步进或 SDF 距离精度，而是 **释放阶段 Abaqus contact status / tracking region / pressure-overclosure enforcement 口径尚未对齐**。
+
+补充验证：启用 `--source-secondary-path-tracking` 并限制历史锚点邻域的试探实现没有改善后段释放误差，反而使后段 p95 应力误差更高，说明不能简单靠“固定历史锚点”修复；下一步应对齐 Abaqus 的 contact status 更新、open/close 判据、constraint region averaging 和 pressure-overclosure enforcement，而不是继续调 search radius 或强行保留锚点。
 
 后续补充实现：
 
@@ -107,17 +111,20 @@ previous accepted contact state
    - 已完成第一层：face/barycentric anchor tracking。
    - 已完成第二层：线性罚函数样本组的 participation factors 和 active-set stability gate。
    - 已完成第三层：participation factors 的数组级 batch 聚合，避免 source-drive 接触对齐路径退回 Python 对象装配。
-   - 剩余：完成齿轮 0.00020/0.00032/0.00040 s 分阶段验收，并根据误差决定是否需要 C++ fused participation/tangent。
-2. 每个 slave constraint 保存上一接受步的 anchor/main face、自然坐标、参与节点和状态。
-3. 在当前增量内沿 slave constraint center 的路径更新 anchor，而不是只做当前构型瞬时投影。
-4. 将 constraint participation factors 用于 master-side force/Jacobian 分配。
-5. 用 Abaqus `CPRESS/COPEN/RF/U/S/LE` 逐步验收：
-   - 先 0.00020 s；
-   - 再 0.00032 s；
-   - 最后完整 0.00040 s。
+   - 当前状态：0.00020 s 已通过；0.00032/0.00040 s 释放阶段未通过。
+2. 对齐 Abaqus contact status 更新语义：
+   - closed constraint 只在当前 constraint region 内保持；
+   - open/released constraint 不能继续用远处全局 closest feature 生成压力；
+   - re-capture 必须走 Abaqus-style finite-sliding tracking region，而不是任意全局候选。
+3. 将 Abaqus `COPEN/CPRESS/CSTATUS` 的输出语义映射到 SFC 的 gap/pressure/active diagnostics，先让 contact-status 曲线对齐，再比较应力云图。
+4. 用 Abaqus `CPRESS/COPEN/RF/U/S/LE` 继续分阶段验收：
+   - 0.00020 s 已通过；
+   - 0.00032 s 释放前后；
+   - 0.00040 s 完整释放窗口。
 
 ## 本轮验证
 
-- 相关测试：`pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py -k "array_participation or participation or active_signature or secondary_path_tracking or secondary_normal_projection or secondary_line_distance_limit or source_drive"`
-- 结果：`24 passed, 38 deselected`。
-- full gear 最短 smoke 对比在 240 s 限时内未完成，原因是当前路径触发 full gear finite-StVK tangent 和大规模接触诊断；它不作为精度验收证据。
+- 相关测试：`pytest -q tests\test_flexible_gear_implicit_lagrangian_sdf.py -k "secondary_contact_tracking_radius or secondary_normal_projection or secondary_line_distance_limit or history_to_abaqus or array_participation or participation or active_signature or secondary_path_tracking or source_drive"`
+- 结果：`26 passed, 37 deselected`。
+- `results/source_gear_tracking_radius_fullpatch_00020/`：0.00020 s 位移、应力、应变、接触压力均进入 10%。
+- `results/source_gear_tracking_radius_fullpatch_00040/`：完整时间窗释放阶段仍未进入 10%，保留为当前剩余问题证据。
