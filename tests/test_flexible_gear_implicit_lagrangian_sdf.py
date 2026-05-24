@@ -16,6 +16,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse,
     _active_reduced_gap_jacobian_sparse_from_arrays,
     _aggregate_contact_samples,
+    _aggregate_contact_sample_arrays,
     _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
     _contact_active_signature_from_arrays,
@@ -281,6 +282,32 @@ def test_linear_penalty_participation_preserves_force_and_energy() -> None:
     assert reduced.energy == pytest.approx(distributed.energy)
     np.testing.assert_allclose(reduced.force.sum(axis=0), distributed.force.sum(axis=0), atol=1.0e-12)
     assert aggregated[0].area < sum(sample.area for sample in samples)
+
+
+def test_array_participation_matches_object_participation() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2], [1, 2, 3]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.7, 0.2, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]], dtype=float),
+        "gaps": np.asarray([-0.20, -0.05, 0.03], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 3.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6], [5, 6, 7]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]], dtype=float),
+    }
+    object_samples = _aggregate_contact_samples(
+        _contact_samples_from_arrays(arrays, stiffness=100.0),
+        "slave_node_region_participation",
+    )
+
+    array_samples = _aggregate_contact_sample_arrays(arrays, "slave_node_region_participation")
+
+    assert array_samples is not None
+    object_response = _assemble_contact_response_force_only(object_samples, n_nodes=8)
+    array_response = _assemble_contact_arrays_force_only(array_samples, n_nodes=8, stiffness=100.0)
+    np.testing.assert_allclose(array_response.force, object_response.force)
+    assert array_response.normal_force == pytest.approx(object_response.normal_force)
+    assert array_response.energy == pytest.approx(object_response.energy)
+    assert _contact_active_signature_from_arrays(array_samples) == _contact_active_signature_from_samples(object_samples)
 
 
 def test_contact_active_signature_detects_status_changes() -> None:

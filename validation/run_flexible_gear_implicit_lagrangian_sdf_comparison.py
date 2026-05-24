@@ -218,11 +218,17 @@ def _contact_active_signature_from_arrays(sample_arrays: dict[str, np.ndarray] |
     if active_ids.size == 0:
         return tuple()
     sample_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    sample_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
     master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
     signature: list[tuple[int, ...]] = []
     for idx in active_ids:
-        slave = tuple(int(value) for value in np.asarray(sample_nodes[int(idx)], dtype=np.int64).reshape(-1))
-        master = tuple(int(value) for value in np.asarray(master_nodes[int(idx)], dtype=np.int64).reshape(-1))
+        slave_row = np.asarray(sample_nodes[int(idx)], dtype=np.int64).reshape(-1)
+        slave_weight_row = np.asarray(sample_weights[int(idx)], dtype=float).reshape(-1)
+        master_row = np.asarray(master_nodes[int(idx)], dtype=np.int64).reshape(-1)
+        master_weight_row = np.asarray(master_weights[int(idx)], dtype=float).reshape(-1)
+        slave = tuple(int(value) for value, weight in zip(slave_row, slave_weight_row, strict=True) if abs(float(weight)) > 1.0e-15)
+        master = tuple(int(value) for value, weight in zip(master_row, master_weight_row, strict=True) if abs(float(weight)) > 1.0e-15)
         signature.append(slave + (-1,) + master)
     return tuple(sorted(signature))
 
@@ -236,11 +242,26 @@ def _contact_active_signature_from_samples(samples: list[ContactSample] | None) 
     for sample in samples:
         if float(sample.gap) >= 0.0:
             continue
-        slave = tuple(int(value) for value in np.asarray(sample.node_ids, dtype=np.int64).reshape(-1))
+        slave_nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        slave_weights = np.asarray(sample.shape_weights, dtype=float).reshape(-1)
+        slave = tuple(
+            int(value)
+            for value, weight in zip(slave_nodes, slave_weights, strict=True)
+            if abs(float(weight)) > 1.0e-15
+        )
         if sample.master_node_ids is None:
             master: tuple[int, ...] = tuple()
         else:
-            master = tuple(int(value) for value in np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1))
+            master_nodes = np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1)
+            if sample.master_shape_weights is None:
+                master = tuple(int(value) for value in master_nodes)
+            else:
+                master_weights = np.asarray(sample.master_shape_weights, dtype=float).reshape(-1)
+                master = tuple(
+                    int(value)
+                    for value, weight in zip(master_nodes, master_weights, strict=True)
+                    if abs(float(weight)) > 1.0e-15
+                )
         signature.append(slave + (-1,) + master)
     return tuple(sorted(signature))
 
@@ -265,6 +286,293 @@ def _combined_shape_weights(
     if total > 0.0:
         weights /= total
     return ids, weights
+
+
+def _contact_averaging_modes(mode: str) -> tuple[str, str]:
+    """Return ``(base_mode, overclosure_mode)`` for contact averaging labels."""
+
+    averaging = str(mode).lower()
+    signed_mode = averaging.endswith("_constraint")
+    area_average_mode = averaging.endswith("_area_average")
+    participation_mode = averaging.endswith("_participation")
+    if sum(int(flag) for flag in (signed_mode, area_average_mode, participation_mode)) > 1:
+        raise ValueError("contact averaging mode cannot combine suffixes")
+    if signed_mode:
+        base_mode = averaging[: -len("_constraint")]
+        overclosure_mode = "signed_average"
+    elif area_average_mode:
+        base_mode = averaging[: -len("_area_average")]
+        overclosure_mode = "positive_integral_area_average"
+    elif participation_mode:
+        base_mode = averaging[: -len("_participation")]
+        overclosure_mode = "linear_penalty_participation"
+    else:
+        base_mode = averaging
+        overclosure_mode = "positive_integral"
+    if base_mode not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
+        raise ValueError(
+            "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
+            "'surface_patch', or the corresponding '*_constraint'/'*_area_average'/'*_participation' modes"
+        )
+    return base_mode, overclosure_mode
+
+
+def _combined_shape_weights_from_arrays(
+    node_rows: np.ndarray,
+    weight_rows: np.ndarray,
+    row_indices: list[int],
+    group_weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Combine padded node/weight rows into one participation row."""
+
+    accum: dict[int, float] = {}
+    for local, row_index in enumerate(row_indices):
+        nodes = np.asarray(node_rows[int(row_index)], dtype=np.int64).reshape(-1)
+        weights = np.asarray(weight_rows[int(row_index)], dtype=float).reshape(-1)
+        scale = float(group_weights[int(local)])
+        for node, weight in zip(nodes, weights, strict=True):
+            contribution = scale * float(weight)
+            if abs(contribution) <= 1.0e-30:
+                continue
+            key = int(node)
+            accum[key] = accum.get(key, 0.0) + contribution
+    if not accum:
+        return np.asarray([0], dtype=np.int64), np.asarray([0.0], dtype=float)
+    ids = np.asarray(sorted(accum), dtype=np.int64)
+    weights = np.asarray([accum[int(node)] for node in ids], dtype=float)
+    total = float(np.sum(weights))
+    if total > 0.0:
+        weights /= total
+    return ids, weights
+
+
+def _aggregate_contact_array_group(
+    row_indices: list[int],
+    *,
+    sample_nodes: np.ndarray,
+    sample_weights: np.ndarray,
+    gaps: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    master_nodes: np.ndarray,
+    master_weights: np.ndarray,
+    overclosure_mode: str,
+) -> dict[str, np.ndarray | float]:
+    """Aggregate a set of contact-array rows into one equivalent constraint."""
+
+    if not row_indices:
+        raise ValueError("row_indices must not be empty")
+    rows = np.asarray(row_indices, dtype=np.int64)
+    row_areas = np.maximum(np.asarray(areas[rows], dtype=float).reshape(-1), 0.0)
+    total_area = float(np.sum(row_areas))
+    if total_area <= 0.0:
+        group_weights = np.full(rows.size, 1.0 / float(rows.size), dtype=float)
+        total_area = float(rows.size)
+    else:
+        group_weights = row_areas / total_area
+    row_gaps = np.asarray(gaps[rows], dtype=float).reshape(-1)
+    aggregate_area = total_area
+    mode = str(overclosure_mode).lower()
+    if mode == "signed_average":
+        constraint_gap = float(group_weights @ row_gaps)
+        normal_weights = group_weights
+        kinematic_weights = group_weights
+    else:
+        penetrations = np.maximum(-row_gaps, 0.0)
+        penetration_integral = float(row_areas @ penetrations)
+        if penetration_integral > 0.0:
+            if mode == "linear_penalty_participation":
+                energy_integral = float(row_areas @ (penetrations * penetrations))
+                if energy_integral > 0.0:
+                    aggregate_area = max((penetration_integral * penetration_integral) / energy_integral, 1.0e-30)
+                    constraint_gap = -penetration_integral / aggregate_area
+                else:
+                    aggregate_area = total_area
+                    constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
+                normal_weights = row_areas * penetrations / penetration_integral
+                kinematic_weights = normal_weights
+            else:
+                constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
+                if mode == "positive_integral_area_average":
+                    normal_weights = group_weights
+                    kinematic_weights = group_weights
+                else:
+                    normal_weights = row_areas * penetrations / penetration_integral
+                    kinematic_weights = normal_weights
+        else:
+            constraint_gap = float(group_weights @ row_gaps)
+            normal_weights = group_weights
+            kinematic_weights = group_weights
+    normal = np.sum(normals[rows] * normal_weights[:, None], axis=0)
+    normal_norm = float(np.linalg.norm(normal))
+    if normal_norm <= 0.0:
+        normal = np.asarray(normals[int(rows[0])], dtype=float).copy()
+        normal_norm = max(float(np.linalg.norm(normal)), 1.0e-30)
+    normal = normal / normal_norm
+    slave_ids, slave_w = _combined_shape_weights_from_arrays(sample_nodes, sample_weights, row_indices, kinematic_weights)
+    master_ids, master_w = _combined_shape_weights_from_arrays(master_nodes, master_weights, row_indices, kinematic_weights)
+    return {
+        "sample_node_ids": slave_ids,
+        "sample_weights": slave_w,
+        "gap": float(constraint_gap),
+        "normal": normal,
+        "area": float(aggregate_area),
+        "master_node_ids": master_ids,
+        "master_weights": master_w,
+    }
+
+
+def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> dict[str, np.ndarray]:
+    """Pack variable-width aggregate rows into padded sample arrays."""
+
+    if not rows:
+        return {
+            "sample_node_ids": np.empty((0, 0), dtype=np.int64),
+            "sample_weights": np.empty((0, 0), dtype=float),
+            "gaps": np.empty(0, dtype=float),
+            "normals": np.empty((0, 3), dtype=float),
+            "areas": np.empty(0, dtype=float),
+            "master_node_ids": np.empty((0, 0), dtype=np.int64),
+            "master_weights": np.empty((0, 0), dtype=float),
+        }
+    slave_width = max(int(np.asarray(row["sample_node_ids"]).size) for row in rows)
+    master_width = max(int(np.asarray(row["master_node_ids"]).size) for row in rows)
+    sample_node_ids = np.zeros((len(rows), slave_width), dtype=np.int64)
+    sample_weights = np.zeros((len(rows), slave_width), dtype=float)
+    master_node_ids = np.zeros((len(rows), master_width), dtype=np.int64)
+    master_weights = np.zeros((len(rows), master_width), dtype=float)
+    gaps = np.zeros(len(rows), dtype=float)
+    normals = np.zeros((len(rows), 3), dtype=float)
+    areas = np.zeros(len(rows), dtype=float)
+    for index, row in enumerate(rows):
+        slave_ids = np.asarray(row["sample_node_ids"], dtype=np.int64).reshape(-1)
+        slave_w = np.asarray(row["sample_weights"], dtype=float).reshape(-1)
+        master_ids = np.asarray(row["master_node_ids"], dtype=np.int64).reshape(-1)
+        master_w = np.asarray(row["master_weights"], dtype=float).reshape(-1)
+        sample_node_ids[index, : slave_ids.size] = slave_ids
+        sample_weights[index, : slave_w.size] = slave_w
+        master_node_ids[index, : master_ids.size] = master_ids
+        master_weights[index, : master_w.size] = master_w
+        gaps[index] = float(row["gap"])
+        normals[index] = np.asarray(row["normal"], dtype=float).reshape(3)
+        areas[index] = float(row["area"])
+    return {
+        "sample_node_ids": sample_node_ids,
+        "sample_weights": sample_weights,
+        "gaps": gaps,
+        "normals": normals,
+        "areas": areas,
+        "master_node_ids": master_node_ids,
+        "master_weights": master_weights,
+    }
+
+
+def _aggregate_contact_sample_arrays(sample_arrays: dict[str, np.ndarray], mode: str) -> dict[str, np.ndarray] | None:
+    """Aggregate contact sample arrays without object conversion.
+
+    This keeps the C++/batched query path available for Abaqus-style
+    surface-to-surface constraint-region modes.
+    """
+
+    base_mode, overclosure_mode = _contact_averaging_modes(mode)
+    if base_mode == "none":
+        return sample_arrays
+    if base_mode == "surface_patch":
+        return None
+    if base_mode == "slave_node_point":
+        return None
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0:
+        return sample_arrays
+    sample_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    sample_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    normal_norm = np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)
+    normals = normals / normal_norm[:, None]
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    groups: dict[tuple[int, ...] | int, list[int]] = {}
+    order: list[tuple[int, ...] | int] = []
+    expanded_sample_nodes = sample_nodes
+    expanded_sample_weights = sample_weights
+    expanded_gaps = gaps
+    expanded_normals = normals
+    expanded_areas = areas
+    expanded_master_nodes = master_nodes
+    expanded_master_weights = master_weights
+    if base_mode == "slave_face":
+        for idx, nodes in enumerate(sample_nodes):
+            key = tuple(int(v) for v in np.asarray(nodes, dtype=np.int64).reshape(-1))
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(int(idx))
+    else:
+        row_nodes: list[np.ndarray] = []
+        row_weights: list[np.ndarray] = []
+        row_gaps: list[float] = []
+        row_normals: list[np.ndarray] = []
+        row_areas: list[float] = []
+        row_master_nodes: list[np.ndarray] = []
+        row_master_weights: list[np.ndarray] = []
+        for idx in range(gaps.size):
+            nodes = np.asarray(sample_nodes[idx], dtype=np.int64).reshape(-1)
+            weights = np.asarray(sample_weights[idx], dtype=float).reshape(-1)
+            for local, (node, weight) in enumerate(zip(nodes, weights, strict=True)):
+                tributary = float(areas[idx]) * max(float(weight), 0.0)
+                if tributary <= 0.0:
+                    continue
+                if base_mode == "slave_node":
+                    shape = np.zeros_like(weights, dtype=float)
+                    shape[int(local)] = 1.0
+                else:
+                    shape = weights.copy()
+                expanded_index = len(row_gaps)
+                row_nodes.append(nodes.copy())
+                row_weights.append(shape)
+                row_gaps.append(float(gaps[idx]))
+                row_normals.append(normals[idx].copy())
+                row_areas.append(tributary)
+                row_master_nodes.append(np.asarray(master_nodes[idx], dtype=np.int64).reshape(-1).copy())
+                row_master_weights.append(np.asarray(master_weights[idx], dtype=float).reshape(-1).copy())
+                key = int(node)
+                if key not in groups:
+                    groups[key] = []
+                    order.append(key)
+                groups[key].append(expanded_index)
+        if not row_gaps:
+            return {
+                "sample_node_ids": np.empty((0, sample_nodes.shape[1]), dtype=np.int64),
+                "sample_weights": np.empty((0, sample_weights.shape[1]), dtype=float),
+                "gaps": np.empty(0, dtype=float),
+                "normals": np.empty((0, 3), dtype=float),
+                "areas": np.empty(0, dtype=float),
+                "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
+                "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
+            }
+        expanded_sample_nodes = np.vstack(row_nodes).astype(np.int64, copy=False)
+        expanded_sample_weights = np.vstack(row_weights).astype(float, copy=False)
+        expanded_gaps = np.asarray(row_gaps, dtype=float)
+        expanded_normals = np.vstack(row_normals).astype(float, copy=False)
+        expanded_areas = np.asarray(row_areas, dtype=float)
+        expanded_master_nodes = np.vstack(row_master_nodes).astype(np.int64, copy=False)
+        expanded_master_weights = np.vstack(row_master_weights).astype(float, copy=False)
+    aggregated = [
+        _aggregate_contact_array_group(
+            groups[key],
+            sample_nodes=expanded_sample_nodes,
+            sample_weights=expanded_sample_weights,
+            gaps=expanded_gaps,
+            normals=expanded_normals,
+            areas=expanded_areas,
+            master_nodes=expanded_master_nodes,
+            master_weights=expanded_master_weights,
+            overclosure_mode=overclosure_mode,
+        )
+        for key in order
+    ]
+    return _pack_aggregated_contact_rows(aggregated)
 
 
 def _aggregate_contact_sample_group(
@@ -463,35 +771,9 @@ def _tribute_contact_sample_to_slave_node_regions(sample: ContactSample) -> list
 def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[ContactSample]:
     """Aggregate contact samples using Abaqus-style surface constraint regions."""
 
-    averaging = str(mode).lower()
-    signed_mode = averaging.endswith("_constraint")
-    area_average_mode = averaging.endswith("_area_average")
-    participation_mode = averaging.endswith("_participation")
-    if sum(int(flag) for flag in (signed_mode, area_average_mode, participation_mode)) > 1:
-        raise ValueError("contact averaging mode cannot combine suffixes")
-    if signed_mode:
-        base_mode = averaging[: -len("_constraint")]
-    elif area_average_mode:
-        base_mode = averaging[: -len("_area_average")]
-    elif participation_mode:
-        base_mode = averaging[: -len("_participation")]
-    else:
-        base_mode = averaging
-    if base_mode not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
-        raise ValueError(
-            "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
-            "'surface_patch', or the corresponding '*_constraint'/'*_area_average'/'*_participation' modes"
-        )
+    base_mode, overclosure_mode = _contact_averaging_modes(mode)
     if base_mode == "none" or not samples:
         return samples
-    if signed_mode:
-        overclosure_mode = "signed_average"
-    elif area_average_mode:
-        overclosure_mode = "positive_integral_area_average"
-    elif participation_mode:
-        overclosure_mode = "linear_penalty_participation"
-    else:
-        overclosure_mode = "positive_integral"
     if base_mode == "slave_face":
         groups: dict[tuple[int, ...], list[ContactSample]] = {}
         order: list[tuple[int, ...]] = []
@@ -3344,17 +3626,27 @@ def solve_sfc_source_drive_pair(
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if (
             len(contact_geometries) != 1
-            or contact_averaging != "none"
-            or contact_normal_filter != "none"
             or bool(source_contact_footprint_clipping)
         ):
+            return None
+        if contact_averaging == "slave_node_point":
+            return None
+        if contact_normal_filter not in {"none", "opposing"}:
             return None
         if contact_direction == "secondary_average" and contact_projection == "secondary_line":
             geometry = contact_geometries[0]
             if hasattr(geometry, "secondary_normal_projection_sample_arrays"):
-                return geometry.secondary_normal_projection_sample_arrays(x_contact)
+                arrays = geometry.secondary_normal_projection_sample_arrays(x_contact)
+                if arrays is not None and contact_averaging != "none":
+                    return _aggregate_contact_sample_arrays(arrays, contact_averaging)
+                return arrays
             return None
-        return contact_geometries[0].sample_arrays(x_contact)
+        if contact_normal_filter != "none":
+            return None
+        arrays = contact_geometries[0].sample_arrays(x_contact)
+        if arrays is not None and contact_averaging != "none":
+            return _aggregate_contact_sample_arrays(arrays, contact_averaging)
+        return arrays
 
     def source_samples(x_contact: np.ndarray) -> list[Any]:
         collected: list[Any] = []
