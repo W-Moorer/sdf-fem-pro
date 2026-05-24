@@ -3,6 +3,8 @@ AGENTS.md
 legacy_abaqus_prototype/
 
 results/
+commercial_software_comparison/
+reference/
 
 __pycache__/
 *.py[cod]
