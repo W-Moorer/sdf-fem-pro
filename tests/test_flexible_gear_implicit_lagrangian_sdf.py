@@ -25,6 +25,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_samples_from_arrays,
     _default_contact_search_radius,
     _default_secondary_contact_tracking_radius,
+    _default_secondary_line_hard_distance_limit,
     _default_secondary_line_distance_limit,
     _filter_contact_samples_by_normal_compatibility,
     _node_average_cell_scalar,
@@ -288,6 +289,71 @@ def test_linear_penalty_participation_preserves_force_and_energy() -> None:
     assert aggregated[0].area < sum(sample.area for sample in samples)
 
 
+def test_signed_participation_uses_region_status_before_point_pressure() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.7, 0.2, 0.1], dtype=float),
+            gap=-0.10,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=1.0,
+            stiffness=100.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.8, 0.1, 0.1], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.2, 0.6, 0.2], dtype=float),
+            gap=0.20,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=1.0,
+            stiffness=100.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.1, 0.8, 0.1], dtype=float),
+        ),
+    ]
+
+    pointwise = _aggregate_contact_samples(samples, "slave_face_participation")[0]
+    signed_status = _aggregate_contact_samples(samples, "slave_face_signed_participation")[0]
+
+    assert pointwise.gap < 0.0
+    assert signed_status.gap == pytest.approx(0.05)
+
+
+def test_signed_participation_preserves_closed_region_virtual_work() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.7, 0.2, 0.1], dtype=float),
+            gap=-0.30,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=1.0,
+            stiffness=100.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.8, 0.1, 0.1], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.2, 0.6, 0.2], dtype=float),
+            gap=0.10,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=1.0,
+            stiffness=100.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.1, 0.8, 0.1], dtype=float),
+        ),
+    ]
+
+    participation = _aggregate_contact_samples(samples, "slave_face_participation")
+    signed_status = _aggregate_contact_samples(samples, "slave_face_signed_participation")
+    participation_response = _assemble_contact_response_force_only(participation, n_nodes=7)
+    signed_response = _assemble_contact_response_force_only(signed_status, n_nodes=7)
+
+    assert signed_status[0].gap < 0.0
+    assert signed_response.normal_force == pytest.approx(participation_response.normal_force)
+    assert signed_response.energy == pytest.approx(participation_response.energy)
+
+
 def test_array_participation_matches_object_participation() -> None:
     arrays = {
         "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2], [1, 2, 3]], dtype=np.int64),
@@ -312,6 +378,31 @@ def test_array_participation_matches_object_participation() -> None:
     assert array_response.normal_force == pytest.approx(object_response.normal_force)
     assert array_response.energy == pytest.approx(object_response.energy)
     assert _contact_active_signature_from_arrays(array_samples) == _contact_active_signature_from_samples(object_samples)
+
+
+def test_array_signed_participation_matches_object_signed_participation() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2], [1, 2, 3]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.7, 0.2, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]], dtype=float),
+        "gaps": np.asarray([-0.20, 0.05, 0.03], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 3.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6], [5, 6, 7]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]], dtype=float),
+    }
+    object_samples = _aggregate_contact_samples(
+        _contact_samples_from_arrays(arrays, stiffness=100.0),
+        "slave_node_region_signed_participation",
+    )
+
+    array_samples = _aggregate_contact_sample_arrays(arrays, "slave_node_region_signed_participation")
+
+    assert array_samples is not None
+    object_response = _assemble_contact_response_force_only(object_samples, n_nodes=8)
+    array_response = _assemble_contact_arrays_force_only(array_samples, n_nodes=8, stiffness=100.0)
+    np.testing.assert_allclose(array_response.force, object_response.force)
+    assert array_response.normal_force == pytest.approx(object_response.normal_force)
+    assert array_response.energy == pytest.approx(object_response.energy)
 
 
 def test_contact_active_signature_detects_status_changes() -> None:
@@ -888,15 +979,53 @@ def test_secondary_normal_projection_preserves_closed_line_intersection_past_lim
     assert sample.gap == pytest.approx(-0.2)
 
 
+def test_secondary_normal_projection_releases_remote_line_past_hard_limit() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.1, 0.1, -0.2],
+            [0.9, 0.1, -0.2],
+            [0.1, 0.9, -0.2],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=False,
+        secondary_line_distance_limit=0.05,
+        secondary_line_hard_distance_limit=0.1,
+    )
+
+    sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
+
+    assert sample.gap == pytest.approx(0.2)
+
+
 def test_secondary_line_distance_limit_is_mesh_derived() -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
 
     limit = _default_secondary_line_distance_limit(pair, target_overclosure=1.0e-5)
+    hard_limit = _default_secondary_line_hard_distance_limit(pair, target_overclosure=1.0e-5)
 
     assert limit <= _default_contact_search_radius(pair, target_overclosure=1.0e-5)
     assert limit >= 1.0e-4
     assert limit >= 2.5e-5
+    assert hard_limit == pytest.approx(2.0 * limit)
 
 
 def test_secondary_normal_projection_does_not_overclose_open_closest_feature() -> None:
@@ -1017,6 +1146,48 @@ def test_secondary_normal_projection_sample_arrays_match_scalar_when_cpp_availab
     assert arrays["gaps"][0] == pytest.approx(scalar.gap)
     np.testing.assert_allclose(arrays["normals"][0], scalar.normal)
     np.testing.assert_allclose(arrays["master_weights"][0], scalar.master_shape_weights)
+
+
+def test_secondary_normal_projection_sample_arrays_reject_near_tangent_constraint() -> None:
+    if not _cpp_projection.secondary_normal_indexed_faces_available():
+        pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.1, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.6],
+            [0.15, 0.0, -0.6],
+            [0.0, 0.3, -0.6],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=True,
+    )
+    x = np.vstack([master_nodes, slave_nodes])
+
+    accepted = contact.secondary_normal_projection_sample_arrays(x, dot_threshold=0.0)
+    rejected = contact.secondary_normal_projection_sample_arrays(x, dot_threshold=-0.25)
+
+    assert accepted is not None
+    assert accepted["gaps"].size == 1
+    assert accepted["gaps"][0] < 0.0
+    assert rejected is not None
+    assert rejected["gaps"].size == 0
 
 
 def test_secondary_path_tracking_keeps_previous_anchor_face() -> None:
@@ -1166,6 +1337,46 @@ def test_secondary_normal_projection_sample_arrays_preserve_closed_line_intersec
     assert arrays is not None
     assert arrays["gaps"].shape == (1,)
     assert arrays["gaps"][0] == pytest.approx(-0.2)
+
+
+def test_secondary_normal_projection_sample_arrays_release_remote_line_past_hard_limit() -> None:
+    if not _cpp_projection.secondary_normal_indexed_faces_available():
+        pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.1, 0.1, -0.2],
+            [0.9, 0.1, -0.2],
+            [0.1, 0.9, -0.2],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 1, 2]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=True,
+        secondary_line_distance_limit=0.05,
+        secondary_line_hard_distance_limit=0.1,
+    )
+
+    arrays = contact.secondary_normal_projection_sample_arrays(np.vstack([master_nodes, slave_nodes]))
+
+    assert arrays is not None
+    assert arrays["gaps"].shape == (1,)
+    assert arrays["gaps"][0] == pytest.approx(0.2)
 
 
 def test_secondary_normal_projection_sample_arrays_do_not_overclose_open_closest_feature() -> None:

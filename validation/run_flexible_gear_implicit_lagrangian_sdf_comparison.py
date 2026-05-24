@@ -292,12 +292,18 @@ def _contact_averaging_modes(mode: str) -> tuple[str, str]:
     """Return ``(base_mode, overclosure_mode)`` for contact averaging labels."""
 
     averaging = str(mode).lower()
+    signed_participation_mode = averaging.endswith("_signed_participation")
     signed_mode = averaging.endswith("_constraint")
     area_average_mode = averaging.endswith("_area_average")
     participation_mode = averaging.endswith("_participation")
-    if sum(int(flag) for flag in (signed_mode, area_average_mode, participation_mode)) > 1:
+    if signed_participation_mode:
+        participation_mode = False
+    if sum(int(flag) for flag in (signed_mode, area_average_mode, participation_mode, signed_participation_mode)) > 1:
         raise ValueError("contact averaging mode cannot combine suffixes")
-    if signed_mode:
+    if signed_participation_mode:
+        base_mode = averaging[: -len("_signed_participation")]
+        overclosure_mode = "signed_status_linear_penalty_participation"
+    elif signed_mode:
         base_mode = averaging[: -len("_constraint")]
         overclosure_mode = "signed_average"
     elif area_average_mode:
@@ -312,7 +318,8 @@ def _contact_averaging_modes(mode: str) -> tuple[str, str]:
     if base_mode not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
         raise ValueError(
             "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
-            "'surface_patch', or the corresponding '*_constraint'/'*_area_average'/'*_participation' modes"
+            "'surface_patch', or the corresponding '*_constraint'/'*_area_average'/'*_participation'/"
+            "'*_signed_participation' modes"
         )
     return base_mode, overclosure_mode
 
@@ -377,6 +384,29 @@ def _aggregate_contact_array_group(
         constraint_gap = float(group_weights @ row_gaps)
         normal_weights = group_weights
         kinematic_weights = group_weights
+    elif mode == "signed_status_linear_penalty_participation":
+        signed_gap = float(group_weights @ row_gaps)
+        if signed_gap >= 0.0:
+            constraint_gap = signed_gap
+            normal_weights = group_weights
+            kinematic_weights = group_weights
+        else:
+            penetrations = np.maximum(-row_gaps, 0.0)
+            penetration_integral = float(row_areas @ penetrations)
+            if penetration_integral > 0.0:
+                energy_integral = float(row_areas @ (penetrations * penetrations))
+                if energy_integral > 0.0:
+                    aggregate_area = max((penetration_integral * penetration_integral) / energy_integral, 1.0e-30)
+                    constraint_gap = -penetration_integral / aggregate_area
+                else:
+                    aggregate_area = total_area
+                    constraint_gap = signed_gap
+                normal_weights = row_areas * penetrations / penetration_integral
+                kinematic_weights = normal_weights
+            else:
+                constraint_gap = signed_gap
+                normal_weights = group_weights
+                kinematic_weights = group_weights
     else:
         penetrations = np.maximum(-row_gaps, 0.0)
         penetration_integral = float(row_areas @ penetrations)
@@ -598,15 +628,27 @@ def _aggregate_contact_sample_group(
     constraint force is assembled from the same positive pressure weights, but
     the area and gap are chosen so that the aggregate contact force and penalty
     energy match the underlying sample set when the local normal is constant.
+    ``signed_status_linear_penalty_participation`` uses the same participation
+    force distribution only after the signed area-average region clearance is
+    closed.  This mirrors the Abaqus surface-to-surface idea that a constraint
+    region has one open/closed status instead of independent pointwise pressure
+    at every quadrature sample.
     """
 
     if not samples:
         raise ValueError("samples must not be empty")
     mode = str(overclosure_mode).lower()
-    if mode not in {"positive_integral", "positive_integral_area_average", "signed_average", "linear_penalty_participation"}:
+    if mode not in {
+        "positive_integral",
+        "positive_integral_area_average",
+        "signed_average",
+        "linear_penalty_participation",
+        "signed_status_linear_penalty_participation",
+    }:
         raise ValueError(
             "overclosure_mode must be 'positive_integral', 'positive_integral_area_average', "
-            "'signed_average', or 'linear_penalty_participation'"
+            "'signed_average', 'linear_penalty_participation', or "
+            "'signed_status_linear_penalty_participation'"
         )
     areas = np.asarray([max(float(sample.area), 0.0) for sample in samples], dtype=float)
     total_area = float(np.sum(areas))
@@ -621,6 +663,29 @@ def _aggregate_contact_sample_group(
         constraint_gap = float(group_weights @ gaps)
         normal_weights = group_weights
         kinematic_weights = group_weights
+    elif mode == "signed_status_linear_penalty_participation":
+        signed_gap = float(group_weights @ gaps)
+        if signed_gap >= 0.0:
+            constraint_gap = signed_gap
+            normal_weights = group_weights
+            kinematic_weights = group_weights
+        else:
+            penetrations = np.maximum(-gaps, 0.0)
+            penetration_integral = float(areas @ penetrations)
+            if penetration_integral > 0.0:
+                energy_integral = float(areas @ (penetrations * penetrations))
+                if energy_integral > 0.0:
+                    aggregate_area = max((penetration_integral * penetration_integral) / energy_integral, 1.0e-30)
+                    constraint_gap = -penetration_integral / aggregate_area
+                else:
+                    aggregate_area = total_area
+                    constraint_gap = signed_gap
+                normal_weights = areas * penetrations / penetration_integral
+                kinematic_weights = normal_weights
+            else:
+                constraint_gap = signed_gap
+                normal_weights = group_weights
+                kinematic_weights = group_weights
     else:
         penetrations = np.maximum(-gaps, 0.0)
         penetration_integral = float(areas @ penetrations)
@@ -2090,6 +2155,18 @@ def _default_secondary_line_distance_limit(pair: CroppedGearPair, *, target_over
     return max(_contact_patch_representative_length(pair), 2.5 * float(target_overclosure), 1.0e-4)
 
 
+def _default_secondary_line_hard_distance_limit(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:
+    """Return the hard normal-line re-capture distance for secondary contact.
+
+    The soft line-distance limit can be overridden by a genuinely closed
+    closest-feature query to avoid releasing real overclosure.  A second,
+    larger hard tube prevents that exception from accepting remote line hits
+    far outside the local finite-sliding constraint region.
+    """
+
+    return 2.0 * _default_secondary_line_distance_limit(pair, target_overclosure=target_overclosure)
+
+
 def _orient_faces_toward(nodes: np.ndarray, faces: np.ndarray, direction: np.ndarray) -> np.ndarray:
     out = np.asarray(faces, dtype=np.int64).copy()
     normals = _triangle_normals(nodes, out)
@@ -3205,7 +3282,9 @@ def solve_sfc_source_drive_pair(
     source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
+    source_secondary_normal_min_projection: float = 0.0,
     source_secondary_line_distance_limit: float | None = None,
+    source_secondary_line_hard_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = False,
     source_contact_active_set_stability: bool = False,
     source_contact_footprint_clipping: bool = False,
@@ -3244,11 +3323,16 @@ def solve_sfc_source_drive_pair(
     if contact_search_radius < 0.0:
         raise ValueError("source_contact_search_radius must be non-negative")
     secondary_line_distance_limit = None
+    secondary_line_hard_distance_limit = None
     if str(source_contact_direction).lower() == "secondary_average" and str(source_contact_projection).lower() == "secondary_line":
         if source_secondary_line_distance_limit is None:
             secondary_line_distance_limit = _default_secondary_line_distance_limit(pair, target_overclosure=1.0e-5)
         elif float(source_secondary_line_distance_limit) >= 0.0:
             secondary_line_distance_limit = float(source_secondary_line_distance_limit)
+        if source_secondary_line_hard_distance_limit is None:
+            secondary_line_hard_distance_limit = _default_secondary_line_hard_distance_limit(pair, target_overclosure=1.0e-5)
+        elif float(source_secondary_line_hard_distance_limit) >= 0.0:
+            secondary_line_hard_distance_limit = float(source_secondary_line_hard_distance_limit)
     def make_contact(order: str, stiffness: float) -> LagrangianSDFSurfaceContactGeometry:
         if order == "gear2_slave":
             master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
@@ -3265,6 +3349,7 @@ def solve_sfc_source_drive_pair(
                 clip_to_master_footprint=bool(source_contact_footprint_clipping),
                 secondary_path_tracking=bool(source_secondary_path_tracking),
                 secondary_line_distance_limit=secondary_line_distance_limit,
+                secondary_line_hard_distance_limit=secondary_line_hard_distance_limit,
             )
         master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
         return LagrangianSDFSurfaceContactGeometry(
@@ -3280,6 +3365,7 @@ def solve_sfc_source_drive_pair(
             clip_to_master_footprint=bool(source_contact_footprint_clipping),
             secondary_path_tracking=bool(source_secondary_path_tracking),
             secondary_line_distance_limit=secondary_line_distance_limit,
+            secondary_line_hard_distance_limit=secondary_line_hard_distance_limit,
         )
 
     if contact_pair_order == "symmetric_two_pass":
@@ -3309,6 +3395,10 @@ def solve_sfc_source_drive_pair(
         "slave_node_participation",
         "slave_node_region_participation",
         "surface_patch_participation",
+        "slave_face_signed_participation",
+        "slave_node_signed_participation",
+        "slave_node_region_signed_participation",
+        "surface_patch_signed_participation",
     }
     if contact_averaging not in valid_contact_averaging:
         raise ValueError(
@@ -3329,6 +3419,10 @@ def solve_sfc_source_drive_pair(
         raise ValueError("source_contact_projection must be 'closest_feature', 'secondary_plane', or 'secondary_line'")
     if contact_projection != "closest_feature" and contact_direction != "secondary_average":
         raise ValueError("secondary contact projection modes require source_contact_direction='secondary_average'")
+    secondary_normal_min_projection = float(source_secondary_normal_min_projection)
+    if not (0.0 <= secondary_normal_min_projection < 1.0):
+        raise ValueError("source_secondary_normal_min_projection must be in [0, 1)")
+    secondary_dot_threshold = -secondary_normal_min_projection
     internal_kinematics = str(source_internal_kinematics).lower()
     if internal_kinematics not in {"linearized_mpc", "corotated_rp", "finite_stvk_visual"}:
         raise ValueError(
@@ -3638,7 +3732,10 @@ def solve_sfc_source_drive_pair(
         if contact_direction == "secondary_average" and contact_projection == "secondary_line":
             geometry = contact_geometries[0]
             if hasattr(geometry, "secondary_normal_projection_sample_arrays"):
-                arrays = geometry.secondary_normal_projection_sample_arrays(x_contact)
+                arrays = geometry.secondary_normal_projection_sample_arrays(
+                    x_contact,
+                    dot_threshold=secondary_dot_threshold,
+                )
                 if arrays is not None and contact_averaging != "none":
                     return _aggregate_contact_sample_arrays(arrays, contact_averaging)
                 return arrays
@@ -3659,11 +3756,21 @@ def solve_sfc_source_drive_pair(
                 and contact_projection == "secondary_line"
                 and hasattr(geometry, "secondary_normal_projection_sample_arrays")
             ):
-                arrays = geometry.secondary_normal_projection_sample_arrays(x_contact)
+                arrays = geometry.secondary_normal_projection_sample_arrays(
+                    x_contact,
+                    dot_threshold=secondary_dot_threshold,
+                )
                 if arrays is not None:
                     collected.extend(_contact_samples_from_arrays(arrays, stiffness=pressure_stiffness))
                 elif hasattr(geometry, "secondary_normal_projection_samples"):
-                    collected.extend(list(geometry.secondary_normal_projection_samples(x_contact)))
+                    collected.extend(
+                        list(
+                            geometry.secondary_normal_projection_samples(
+                                x_contact,
+                                dot_threshold=secondary_dot_threshold,
+                            )
+                        )
+                    )
             elif use_compatible_query:
                 arrays = (
                     geometry.normal_compatible_sample_arrays(x_contact)
@@ -4018,6 +4125,10 @@ def solve_sfc_source_drive_pair(
         "source_contact_projection": contact_projection,
         "source_contact_pair_order": contact_pair_order,
         "source_contact_search_radius": float(contact_search_radius),
+        "source_secondary_normal_min_projection": float(secondary_normal_min_projection),
+        "source_secondary_line_hard_distance_limit": (
+            "" if secondary_line_hard_distance_limit is None else float(secondary_line_hard_distance_limit)
+        ),
         "source_secondary_path_tracking": bool(source_secondary_path_tracking),
         "source_contact_active_set_stability": bool(source_contact_active_set_stability),
         "source_contact_footprint_clipping": bool(source_contact_footprint_clipping),

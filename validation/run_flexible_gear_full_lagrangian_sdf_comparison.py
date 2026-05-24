@@ -628,6 +628,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source contact projection: {summary.get('source_contact_projection', '')}",
         f"- source contact pair order: {summary.get('source_contact_pair_order', '')}",
         f"- source contact search radius: {summary.get('source_contact_search_radius', '')}",
+        f"- source secondary normal min projection: {summary.get('source_secondary_normal_min_projection', '')}",
+        f"- source secondary line hard distance limit: {summary.get('source_secondary_line_hard_distance_limit', '')}",
         f"- source secondary path tracking: {summary.get('source_secondary_path_tracking', '')}",
         f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
@@ -806,7 +808,9 @@ def run_full_gear(
     source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
+    source_secondary_normal_min_projection: float = 0.0,
     source_secondary_line_distance_limit: float | None = None,
+    source_secondary_line_hard_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = False,
     source_contact_active_set_stability: bool = False,
     source_contact_footprint_clipping: bool = False,
@@ -865,7 +869,9 @@ def run_full_gear(
             source_contact_projection=str(source_contact_projection),
             source_contact_pair_order=str(source_contact_pair_order),
             source_contact_search_radius=source_contact_search_radius,
+            source_secondary_normal_min_projection=float(source_secondary_normal_min_projection),
             source_secondary_line_distance_limit=source_secondary_line_distance_limit,
+            source_secondary_line_hard_distance_limit=source_secondary_line_hard_distance_limit,
             source_secondary_path_tracking=bool(source_secondary_path_tracking),
             source_contact_active_set_stability=bool(source_contact_active_set_stability),
             source_contact_footprint_clipping=bool(source_contact_footprint_clipping),
@@ -1090,6 +1096,10 @@ def main(argv: list[str] | None = None) -> int:
             "slave_node_participation",
             "slave_node_region_participation",
             "surface_patch_participation",
+            "slave_face_signed_participation",
+            "slave_node_signed_participation",
+            "slave_node_region_signed_participation",
+            "surface_patch_signed_participation",
         ),
         default="none",
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
@@ -1131,12 +1141,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional source-drive broad-phase radius; closest-feature projection still determines the final gap.",
     )
     parser.add_argument(
+        "--source-secondary-normal-min-projection",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum opposing normal projection for secondary-normal line constraints. "
+            "Values above zero reject near-tangential line intersections that do not "
+            "form a well-conditioned Abaqus-style surface-to-surface constraint."
+        ),
+    )
+    parser.add_argument(
         "--source-secondary-line-distance-limit",
         type=float,
         default=None,
         help=(
             "Optional accepted signed distance for source secondary-line projection. "
             "A negative value disables this final line-distance gate."
+        ),
+    )
+    parser.add_argument(
+        "--source-secondary-line-hard-distance-limit",
+        type=float,
+        default=None,
+        help=(
+            "Optional hard maximum distance for secondary-normal line constraints. "
+            "A negative value disables the hard finite-sliding tracking tube."
         ),
     )
     parser.add_argument(
@@ -1229,7 +1258,9 @@ def main(argv: list[str] | None = None) -> int:
         source_contact_projection=str(args.source_contact_projection),
         source_contact_pair_order=str(args.source_contact_pair_order),
         source_contact_search_radius=args.source_contact_search_radius,
+        source_secondary_normal_min_projection=float(args.source_secondary_normal_min_projection),
         source_secondary_line_distance_limit=args.source_secondary_line_distance_limit,
+        source_secondary_line_hard_distance_limit=args.source_secondary_line_hard_distance_limit,
         source_secondary_path_tracking=bool(args.source_secondary_path_tracking),
         source_contact_active_set_stability=bool(args.source_contact_active_set_stability),
         source_contact_footprint_clipping=bool(args.source_contact_footprint_clipping),
