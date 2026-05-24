@@ -18,6 +18,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _aggregate_contact_samples,
     _assemble_contact_arrays_force_only,
     _assemble_contact_response_force_only,
+    _contact_active_signature_from_arrays,
+    _contact_active_signature_from_samples,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
     _default_secondary_contact_tracking_radius,
@@ -244,6 +246,62 @@ def test_slave_face_contact_averaging_combines_tri3_samples_without_tuning() -> 
     np.testing.assert_allclose(merged.master_shape_weights, [1.0, 0.0, 0.0])
     assert merged.node_ids.tolist() == [0, 1, 2]
     assert merged.master_node_ids.tolist() == [4, 5, 6]
+
+
+def test_linear_penalty_participation_preserves_force_and_energy() -> None:
+    samples = [
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.7, 0.2, 0.1], dtype=float),
+            gap=-0.20,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=2.0,
+            stiffness=100.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.8, 0.1, 0.1], dtype=float),
+        ),
+        ContactSample(
+            node_ids=np.asarray([0, 1, 2], dtype=np.int64),
+            shape_weights=np.asarray([0.2, 0.6, 0.2], dtype=float),
+            gap=-0.05,
+            normal=np.asarray([0.0, 0.0, 1.0], dtype=float),
+            area=3.0,
+            stiffness=100.0,
+            master_node_ids=np.asarray([4, 5, 6], dtype=np.int64),
+            master_shape_weights=np.asarray([0.1, 0.8, 0.1], dtype=float),
+        ),
+    ]
+
+    distributed = _assemble_contact_response_force_only(samples, n_nodes=7)
+    aggregated = _aggregate_contact_samples(samples, "slave_face_participation")
+    reduced = _assemble_contact_response_force_only(aggregated, n_nodes=7)
+
+    assert len(aggregated) == 1
+    assert reduced.normal_force == pytest.approx(distributed.normal_force)
+    assert reduced.energy == pytest.approx(distributed.energy)
+    np.testing.assert_allclose(reduced.force.sum(axis=0), distributed.force.sum(axis=0), atol=1.0e-12)
+    assert aggregated[0].area < sum(sample.area for sample in samples)
+
+
+def test_contact_active_signature_detects_status_changes() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [1, 2, 3]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.3, 0.3, 0.4], [0.2, 0.5, 0.3]], dtype=float),
+        "gaps": np.asarray([-0.01, 0.02], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([0.5, 0.5], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [5, 6, 7]], dtype=np.int64),
+        "master_weights": np.asarray([[0.6, 0.2, 0.2], [0.2, 0.6, 0.2]], dtype=float),
+    }
+    samples = _contact_samples_from_arrays(arrays, stiffness=10.0)
+
+    signature = _contact_active_signature_from_arrays(arrays)
+    sample_signature = _contact_active_signature_from_samples(samples)
+
+    assert signature == sample_signature
+    assert len(signature) == 1
+    arrays["gaps"][1] = -0.01
+    assert _contact_active_signature_from_arrays(arrays) != signature
 
 
 def test_active_reduced_gap_jacobian_matches_full_projection() -> None:

@@ -576,6 +576,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source contact pair order: {summary.get('source_contact_pair_order', '')}",
         f"- source contact search radius: {summary.get('source_contact_search_radius', '')}",
         f"- source secondary path tracking: {summary.get('source_secondary_path_tracking', '')}",
+        f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
@@ -744,6 +745,7 @@ def run_full_gear(
     source_contact_search_radius: float | None = None,
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = False,
+    source_contact_active_set_stability: bool = False,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
@@ -802,6 +804,7 @@ def run_full_gear(
             source_contact_search_radius=source_contact_search_radius,
             source_secondary_line_distance_limit=source_secondary_line_distance_limit,
             source_secondary_path_tracking=bool(source_secondary_path_tracking),
+            source_contact_active_set_stability=bool(source_contact_active_set_stability),
             source_contact_footprint_clipping=bool(source_contact_footprint_clipping),
             source_internal_kinematics=str(source_internal_kinematics),
             source_rotating_inertia=str(source_rotating_inertia),
@@ -1012,6 +1015,10 @@ def main(argv: list[str] | None = None) -> int:
             "slave_node_area_average",
             "slave_node_region_area_average",
             "surface_patch_area_average",
+            "slave_face_participation",
+            "slave_node_participation",
+            "slave_node_region_participation",
+            "surface_patch_participation",
         ),
         default="none",
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
@@ -1067,6 +1074,14 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Use previous accepted secondary-normal anchor faces as path-tracking "
             "hints for Abaqus-style finite-sliding surface-to-surface contact."
+        ),
+    )
+    parser.add_argument(
+        "--source-contact-active-set-stability",
+        action="store_true",
+        help=(
+            "Require one stable active contact signature before accepting a "
+            "source-drive nonlinear iteration."
         ),
     )
     parser.add_argument(
@@ -1145,6 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
         source_contact_search_radius=args.source_contact_search_radius,
         source_secondary_line_distance_limit=args.source_secondary_line_distance_limit,
         source_secondary_path_tracking=bool(args.source_secondary_path_tracking),
+        source_contact_active_set_stability=bool(args.source_contact_active_set_stability),
         source_contact_footprint_clipping=bool(args.source_contact_footprint_clipping),
         source_internal_kinematics=str(args.source_internal_kinematics),
         source_rotating_inertia=str(args.source_rotating_inertia),

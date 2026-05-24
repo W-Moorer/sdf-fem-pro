@@ -206,6 +206,45 @@ def _contact_samples_from_arrays(sample_arrays: dict[str, np.ndarray], *, stiffn
     return out
 
 
+def _contact_active_signature_from_arrays(sample_arrays: dict[str, np.ndarray] | None) -> tuple[tuple[int, ...], ...]:
+    """Return a deterministic active contact signature for convergence checks."""
+
+    if sample_arrays is None:
+        return tuple()
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0:
+        return tuple()
+    active_ids = np.flatnonzero(gaps < 0.0)
+    if active_ids.size == 0:
+        return tuple()
+    sample_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    signature: list[tuple[int, ...]] = []
+    for idx in active_ids:
+        slave = tuple(int(value) for value in np.asarray(sample_nodes[int(idx)], dtype=np.int64).reshape(-1))
+        master = tuple(int(value) for value in np.asarray(master_nodes[int(idx)], dtype=np.int64).reshape(-1))
+        signature.append(slave + (-1,) + master)
+    return tuple(sorted(signature))
+
+
+def _contact_active_signature_from_samples(samples: list[ContactSample] | None) -> tuple[tuple[int, ...], ...]:
+    """Return a deterministic active contact signature for sample objects."""
+
+    if not samples:
+        return tuple()
+    signature: list[tuple[int, ...]] = []
+    for sample in samples:
+        if float(sample.gap) >= 0.0:
+            continue
+        slave = tuple(int(value) for value in np.asarray(sample.node_ids, dtype=np.int64).reshape(-1))
+        if sample.master_node_ids is None:
+            master: tuple[int, ...] = tuple()
+        else:
+            master = tuple(int(value) for value in np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1))
+        signature.append(slave + (-1,) + master)
+    return tuple(sorted(signature))
+
+
 def _combined_shape_weights(
     node_rows: list[np.ndarray],
     weight_rows: list[np.ndarray],
@@ -246,14 +285,20 @@ def _aggregate_contact_sample_group(
     in an average sense over a finite secondary-surface region, so the signed
     clearance is averaged before the pressure-overclosure law decides whether
     that region is active.
+    ``linear_penalty_participation`` preserves the virtual-work distribution of
+    a set of linear pressure-overclosure quadrature samples: the equivalent
+    constraint force is assembled from the same positive pressure weights, but
+    the area and gap are chosen so that the aggregate contact force and penalty
+    energy match the underlying sample set when the local normal is constant.
     """
 
     if not samples:
         raise ValueError("samples must not be empty")
     mode = str(overclosure_mode).lower()
-    if mode not in {"positive_integral", "positive_integral_area_average", "signed_average"}:
+    if mode not in {"positive_integral", "positive_integral_area_average", "signed_average", "linear_penalty_participation"}:
         raise ValueError(
-            "overclosure_mode must be 'positive_integral', 'positive_integral_area_average', or 'signed_average'"
+            "overclosure_mode must be 'positive_integral', 'positive_integral_area_average', "
+            "'signed_average', or 'linear_penalty_participation'"
         )
     areas = np.asarray([max(float(sample.area), 0.0) for sample in samples], dtype=float)
     total_area = float(np.sum(areas))
@@ -263,6 +308,7 @@ def _aggregate_contact_sample_group(
     else:
         group_weights = areas / total_area
     gaps = np.asarray([float(sample.gap) for sample in samples], dtype=float)
+    aggregate_area = total_area
     if mode == "signed_average":
         constraint_gap = float(group_weights @ gaps)
         normal_weights = group_weights
@@ -271,11 +317,22 @@ def _aggregate_contact_sample_group(
         penetrations = np.maximum(-gaps, 0.0)
         penetration_integral = float(areas @ penetrations)
         if penetration_integral > 0.0:
-            constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
+            if mode == "linear_penalty_participation":
+                energy_integral = float(areas @ (penetrations * penetrations))
+                if energy_integral > 0.0:
+                    aggregate_area = max((penetration_integral * penetration_integral) / energy_integral, 1.0e-30)
+                    constraint_gap = -penetration_integral / aggregate_area
+                else:
+                    aggregate_area = total_area
+                    constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
+                normal_weights = areas * penetrations / penetration_integral
+                kinematic_weights = normal_weights
+            else:
+                constraint_gap = -penetration_integral / max(total_area, 1.0e-30)
             if mode == "positive_integral_area_average":
                 normal_weights = group_weights
                 kinematic_weights = group_weights
-            else:
+            elif mode == "positive_integral":
                 normal_weights = areas * penetrations / penetration_integral
                 kinematic_weights = normal_weights
         else:
@@ -311,7 +368,7 @@ def _aggregate_contact_sample_group(
         shape_weights=slave_weights,
         gap=float(constraint_gap),
         normal=normal,
-        area=float(total_area),
+        area=float(aggregate_area),
         stiffness=float(samples[0].stiffness),
         master_node_ids=master_nodes,
         master_shape_weights=master_weights,
@@ -409,18 +466,21 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
     averaging = str(mode).lower()
     signed_mode = averaging.endswith("_constraint")
     area_average_mode = averaging.endswith("_area_average")
-    if signed_mode and area_average_mode:
-        raise ValueError("contact averaging mode cannot combine '_constraint' and '_area_average'")
+    participation_mode = averaging.endswith("_participation")
+    if sum(int(flag) for flag in (signed_mode, area_average_mode, participation_mode)) > 1:
+        raise ValueError("contact averaging mode cannot combine suffixes")
     if signed_mode:
         base_mode = averaging[: -len("_constraint")]
     elif area_average_mode:
         base_mode = averaging[: -len("_area_average")]
+    elif participation_mode:
+        base_mode = averaging[: -len("_participation")]
     else:
         base_mode = averaging
     if base_mode not in {"none", "slave_face", "slave_node", "slave_node_region", "surface_patch"}:
         raise ValueError(
             "contact averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
-            "'surface_patch', or the corresponding '*_constraint'/'*_area_average' modes"
+            "'surface_patch', or the corresponding '*_constraint'/'*_area_average'/'*_participation' modes"
         )
     if base_mode == "none" or not samples:
         return samples
@@ -428,6 +488,8 @@ def _aggregate_contact_samples(samples: list[ContactSample], mode: str) -> list[
         overclosure_mode = "signed_average"
     elif area_average_mode:
         overclosure_mode = "positive_integral_area_average"
+    elif participation_mode:
+        overclosure_mode = "linear_penalty_participation"
     else:
         overclosure_mode = "positive_integral"
     if base_mode == "slave_face":
@@ -2861,6 +2923,7 @@ def solve_sfc_source_drive_pair(
     source_contact_search_radius: float | None = None,
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = False,
+    source_contact_active_set_stability: bool = False,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
@@ -2958,11 +3021,15 @@ def solve_sfc_source_drive_pair(
         "slave_node_area_average",
         "slave_node_region_area_average",
         "surface_patch_area_average",
+        "slave_face_participation",
+        "slave_node_participation",
+        "slave_node_region_participation",
+        "surface_patch_participation",
     }
     if contact_averaging not in valid_contact_averaging:
         raise ValueError(
             "source_contact_averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
-            "'slave_node_point', 'surface_patch', or a '*_constraint' signed-average mode"
+            "'slave_node_point', 'surface_patch', or a supported suffix mode"
         )
     contact_kinematics = str(source_contact_kinematics).lower()
     if contact_kinematics not in {"linearized_mpc", "finite_rp_corotated"}:
@@ -3354,6 +3421,8 @@ def solve_sfc_source_drive_pair(
         last_contact = contact0
         last_sample_arrays: dict[str, np.ndarray] | None = None
         last_samples: list[Any] | None = None
+        previous_active_signature: tuple[tuple[int, ...], ...] | None = None
+        active_set_stable = not bool(source_contact_active_set_stability)
         contact_matches_q_guess = False
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
@@ -3366,11 +3435,19 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
                 last_samples = samples
                 last_sample_arrays = None
+                active_signature = _contact_active_signature_from_samples(samples)
             else:
                 samples = []
                 last_contact = _assemble_contact_arrays_force_only(sample_arrays, model.n_nodes, stiffness=pressure_stiffness)
                 last_sample_arrays = sample_arrays
                 last_samples = None
+                active_signature = _contact_active_signature_from_arrays(sample_arrays)
+            active_set_stable = (
+                not bool(source_contact_active_set_stability)
+                or previous_active_signature is None
+                or active_signature == previous_active_signature
+            )
+            previous_active_signature = active_signature
             contact_matches_q_guess = True
             assemble_current_internal_tangent = internal_kinematics == "finite_stvk_visual"
             internal_red, internal_tangent_red = internal_reduced_response_from_state(
@@ -3465,7 +3542,7 @@ def solve_sfc_source_drive_pair(
             )
             correction_converged = correction_norm <= float(tolerance) * correction_scale
             residual_converged = residual_norm <= max(float(tolerance) * balance_scale, 1.0e-10)
-            if correction_converged and residual_converged:
+            if correction_converged and residual_converged and active_set_stable:
                 break
             q_guess[free] += correction_free
             contact_matches_q_guess = False
@@ -3482,10 +3559,18 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
                 last_samples = accepted_samples
                 last_sample_arrays = None
+                active_set_stable = (
+                    not bool(source_contact_active_set_stability)
+                    or _contact_active_signature_from_samples(accepted_samples) == previous_active_signature
+                )
             else:
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
                 last_sample_arrays = accepted_arrays
                 last_samples = None
+                active_set_stable = (
+                    not bool(source_contact_active_set_stability)
+                    or _contact_active_signature_from_arrays(accepted_arrays) == previous_active_signature
+                )
         previous = external - internal_reduced_from_state(q_new) + assembly.reduce_vector(last_contact.force)
         if rotating_inertia == "centripetal":
             previous = previous - centripetal_reduced_from_state(q_new, v_new)
@@ -3537,6 +3622,7 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_velocity_z": float(v_new[hub2_slice.start + 5]),
                     "rp2_angular_acceleration_z": float(a_new[hub2_slice.start + 5]),
                     "gear2_torque_z": float(gear2_torque_z),
+                    "contact_active_set_stable": int(bool(active_set_stable)),
                 }
             )
             if contact_node_diagnostics is not None:
@@ -3639,6 +3725,7 @@ def solve_sfc_source_drive_pair(
         "source_contact_pair_order": contact_pair_order,
         "source_contact_search_radius": float(contact_search_radius),
         "source_secondary_path_tracking": bool(source_secondary_path_tracking),
+        "source_contact_active_set_stability": bool(source_contact_active_set_stability),
         "source_contact_footprint_clipping": bool(source_contact_footprint_clipping),
         "source_internal_kinematics": internal_kinematics,
         "source_rotating_inertia": rotating_inertia,
