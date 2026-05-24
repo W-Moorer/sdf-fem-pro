@@ -696,15 +696,22 @@ class LagrangianSDFSurfaceContactGeometry:
                 self.secondary_line_distance_limit is not None
                 and abs_gap > float(self.secondary_line_distance_limit)
             ):
-                if abs_gap < rejected_abs_gap:
-                    rejected_abs_gap = abs_gap
-                    rejected_line = {
-                        "gap": abs_gap,
-                        "normal": contact_normal.copy(),
-                        "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
-                        "master_weights": np.clip(bary, 0.0, 1.0),
-                    }
-                continue
+                closest_payload = self._global_closest_feature_payload(x, master_x, master_faces, cache_key=cache_key)
+                if gap < -1.0e-14 and float(closest_payload["gap"]) <= 1.0e-14:
+                    # Large overclosure is physical when the closest feature is
+                    # also closed; the distance limit only rejects remote line
+                    # intersections over an actually open nearest feature.
+                    pass
+                else:
+                    if abs_gap < rejected_abs_gap:
+                        rejected_abs_gap = abs_gap
+                        rejected_line = {
+                            "gap": abs_gap,
+                            "normal": contact_normal.copy(),
+                            "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
+                            "master_weights": np.clip(bary, 0.0, 1.0),
+                        }
+                    continue
             key = self._secondary_tracking_key(
                 face_id=int(face_id),
                 barycentric=np.asarray(bary, dtype=float),
@@ -924,12 +931,6 @@ class LagrangianSDFSurfaceContactGeometry:
                     face_ids[int(local)] = int(matching[0])
                 master_bary[int(local)] = np.asarray(payload["master_weights"], dtype=float).reshape(3)
         active = gaps < -1.0e-14
-        if self.secondary_line_distance_limit is not None:
-            distance_limit = float(self.secondary_line_distance_limit)
-            outside_line_tube = active & (np.abs(gaps) > distance_limit)
-            if np.any(outside_line_tube):
-                gaps[outside_line_tube] = np.abs(gaps[outside_line_tube])
-                active = gaps < -1.0e-14
         if (
             np.any(active)
             and _cpp_projection_available()
@@ -950,6 +951,18 @@ class LagrangianSDFSurfaceContactGeometry:
                 normals[release_indices] = np.asarray(closest_normals, dtype=float)[release]
                 face_ids[release_indices] = closest_face_ids[release]
                 master_bary[release_indices] = np.asarray(closest_bary, dtype=float)[release]
+            if self.secondary_line_distance_limit is not None:
+                outside = active & (np.abs(gaps) > float(self.secondary_line_distance_limit))
+                if np.any(outside):
+                    outside_active = np.flatnonzero(outside)
+                    outside_local = np.flatnonzero(outside[active])
+                    closed = (
+                        (closest_face_ids[outside_local] >= 0)
+                        & (closest_gaps[outside_local] <= 1.0e-14)
+                    )
+                    release_outside = outside_active[~closed]
+                    if release_outside.size:
+                        gaps[release_outside] = np.abs(gaps[release_outside])
         cache = self._ensure_secondary_face_cache()
         cache[valid_cache_indices] = face_ids
         if bool(self.secondary_path_tracking):

@@ -25,9 +25,23 @@
    - 修复：新增 `secondary_path_tracking`。每个 secondary 约束点保存上一接受步的 master face 与 barycentric anchor；下一步在该 face 及其邻域内优先更新 normal-line 约束，再回退到瞬时投影。该策略由接触路径历史和网格邻域驱动，不按某条误差曲线调参。
    - 覆盖测试：`secondary_path_tracking_keeps_previous_anchor_face` 和 batch 路径对应测试。
 
-## 当前仍未通过的误差区间
+5. **line-distance gate 误裁剪真实闭合接触**
+   - 现象：全齿面 `0.00020 s` 对比中，位移误差仍很小（约 `0.34%`），但 p95 node-averaged von Mises / equivalent strain 误差跳到约 `37.6%`。同一时刻 SFC active samples 从 `220` 掉到 `204`，法向力从 `191 N` 掉到 `116 N`，而 Abaqus active contact node count 继续增加。
+   - 原因：`secondary_line_distance_limit` 最初直接把 `abs(gap)` 超出局部代表长度的负 gap 翻成正 gap。齿轮工况中默认 limit 为 `0.0008633`，而真实压入到 `0.00020 s` 已达到同一量级，因此有效接触约束被误释放。
+   - 修复：line-distance gate 只释放“secondary line 命中远处面片，但真实 closest-feature 仍为分离”的伪接触；若 closest-feature 也已闭合，则保留 secondary-normal 线投影 gap。该修复同时覆盖标量 Python 路径和 C++ batch 路径。
+   - 覆盖测试：`secondary_normal_projection_preserves_closed_line_intersection_past_limit` 和 `secondary_normal_projection_sample_arrays_preserve_closed_line_intersection_past_limit`。
 
-完整 0.0004 s、`finite_stvk_visual + consistent tangent + secondary_line_distance_limit` 后：
+6. **secondary tracking tube 过窄导致候选面提前丢失**
+   - 现象：修复 line-distance gate 后，最小 gap 不再被截断，但 `0.00020 s` p95 应力误差仍约 `36.5%`，active samples 仍然偏少。
+   - 原因：secondary-normal 路径的默认 contact search radius 仍为 `1e-4`，只对应初始间隙/接触分辨率，而不是 Abaqus finite-sliding surface-to-surface 的局部 constraint region。随着齿面切向滑移和压入增长，有效主面候选在进入精确 closest-feature 检查前已被 broad phase 裁掉。
+   - 修复：默认 secondary tracking radius 改为 `max(初始法向包络, 局部接触面代表长度, 1e-4)`。在当前全齿面工况中，该值从 `1e-4` 增至 `0.0008633433402562334`。最终是否形成接触仍由 secondary-normal projection 与 closest-feature open-clearance release 决定，不降低几何精度。
+   - 验证：`results/source_gear_tracking_radius_fullpatch_00020/sfc_vs_abaqus_history_metric_errors.csv` 中，`0.00020 s` 位移误差 `0.395%`，p95 node-averaged von Mises / equivalent strain 误差 `1.42%`，max node-averaged von Mises / equivalent strain 误差 `3.55%`，mean node-averaged stress/strain 误差 `1.98%`。接触压力 max / mean active 误差分别为 `7.89% / 4.04%`。
+
+## 历史未通过的误差区间
+
+以下结论对应修复第 5-6 点之前的旧实现。它们解释了本轮继续定位的出发点，不再代表当前 `0.00020 s` 验证结果。
+
+完整 0.0004 s、旧版 `finite_stvk_visual + consistent tangent + secondary_line_distance_limit` 后：
 
 - 位移最大误差：约 `3.21%`。
 - 末段 p95 / max node-averaged von Mises 误差：约 `0.25% / 0.75%`。
@@ -69,9 +83,9 @@ previous accepted contact state
 -> pressure-overclosure enforcement
 ```
 
-因此，剩余误差应定位为 **finite-sliding path-based surface-to-surface contact tracking 与 constraint participation factors 尚未实现**，不是 SDF gap 查询本身的错误。
+因此，当时的剩余误差应定位为 **finite-sliding path-based surface-to-surface contact tracking、constraint participation factors 与 tracking tube 口径尚未完全对齐**，不是 SDF gap 查询本身的错误。
 
-本轮已经实现 path-based tracking 的第一层：上一接受步 anchor face/barycentric 的保存和优先查询。尚未完整实现 Abaqus 的 constraint participation factors、接触区域平均权重和 active-set 收敛控制，因此中段应力误差仍不能声明已经小于 10%。
+本轮已经实现 path-based tracking 的第一层、participation 聚合、active-set stability 选项、closed-feature line gate 修正和局部 constraint-region tracking radius。当前已验证到 `0.00020 s`：位移、p95/max/mean 应力应变和接触压力指标均低于 10%。完整 `0.00040 s` 仍需用新实现重跑确认。
 
 后续补充实现：
 

@@ -436,6 +436,59 @@ def compare_animation_manifests(
     return rows
 
 
+def compare_sfc_history_to_abaqus_manifest(
+    *,
+    sfc_history: Path,
+    abaqus_manifest: Path,
+    out_csv: Path,
+) -> list[Row]:
+    """Compare SFC scalar history with Abaqus VTK manifest metrics by time.
+
+    This avoids writing large SFC VTK files for every short diagnostic run while
+    still checking the displacement, stress, strain, and contact fields against
+    the already-exported Abaqus reference frames.
+    """
+
+    sfc_rows = _read_csv_rows(sfc_history)
+    abaqus_rows = _read_csv_rows(abaqus_manifest)
+    if not sfc_rows or not abaqus_rows:
+        _write_csv(out_csv, [])
+        return []
+    t_abaqus = np.asarray([float(row.get("time", 0.0) or 0.0) for row in abaqus_rows], dtype=float)
+    metric_pairs = [
+        ("max_displacement_norm", "max_displacement_magnitude"),
+        ("p95_von_mises_nodeavg", "p95_von_mises_nodeavg"),
+        ("p95_equivalent_elastic_strain_nodeavg", "p95_equivalent_elastic_strain_nodeavg"),
+        ("max_von_mises_nodeavg", "max_von_mises_nodeavg"),
+        ("max_equivalent_elastic_strain_nodeavg", "max_equivalent_elastic_strain_nodeavg"),
+        ("mean_von_mises_nodeavg", "mean_von_mises_nodeavg"),
+        ("mean_equivalent_elastic_strain_nodeavg", "mean_equivalent_elastic_strain_nodeavg"),
+        ("active_contact_node_count", "active_contact_node_count"),
+        ("max_contact_pressure_nodeavg", "max_contact_pressure_nodeavg"),
+        ("mean_active_contact_pressure_nodeavg", "mean_active_contact_pressure_nodeavg"),
+    ]
+    rows: list[Row] = []
+    for frame, sfc_row in enumerate(sfc_rows):
+        t_value = float(sfc_row.get("time", 0.0) or 0.0)
+        row: Row = {"frame": int(frame), "time": t_value}
+        for sfc_key, abaqus_key in metric_pairs:
+            if sfc_key not in sfc_row or not _manifest_column_available(abaqus_rows, abaqus_key):
+                continue
+            try:
+                sfc_value = float(sfc_row.get(sfc_key, 0.0) or 0.0)
+                abaqus_series = np.asarray([float(item.get(abaqus_key, 0.0) or 0.0) for item in abaqus_rows], dtype=float)
+            except (TypeError, ValueError):
+                continue
+            abaqus_value = float(np.interp(t_value, t_abaqus, abaqus_series))
+            row[f"sfc_{sfc_key}"] = sfc_value
+            row[f"abaqus_{abaqus_key}"] = abaqus_value
+            row[f"{sfc_key}_abs_error"] = abs(sfc_value - abaqus_value)
+            row[f"{sfc_key}_rel_error"] = abs(sfc_value - abaqus_value) / max(abs(abaqus_value), 1.0e-12)
+        rows.append(row)
+    _write_csv(out_csv, rows)
+    return rows
+
+
 def _selected_surface_entries_for_full_mesh(
     mesh: GearMesh,
     entries: tuple[tuple[int, str], ...],
@@ -652,6 +705,16 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
                 f"- VTK metric errors: `{Path(str(summary.get('animation_metric_errors'))).name}`",
                 f"- VTK metric curves: `{Path(str(summary.get('animation_metric_figure'))).name}`",
                 "- Curves use the same displacement/stress/strain fields written to the SFC and Abaqus VTK animations.",
+            ]
+        )
+    if summary.get("history_metric_errors"):
+        lines.extend(
+            [
+                "",
+                "## History Field-Curve Alignment",
+                "",
+                f"- history metric errors: `{Path(str(summary.get('history_metric_errors'))).name}`",
+                "- This lightweight check compares SFC scalar history against Abaqus VTK manifest fields without writing SFC VTK frames.",
             ]
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -935,6 +998,14 @@ def run_full_gear(
         )
         summary["animation_metric_errors"] = str(animation_errors)
         summary["animation_metric_figure"] = str(animation_figure)
+    if summary.get("abaqus_vtk_manifest"):
+        history_errors = out_dir / "sfc_vs_abaqus_history_metric_errors.csv"
+        compare_sfc_history_to_abaqus_manifest(
+            sfc_history=history_path,
+            abaqus_manifest=Path(str(summary["abaqus_vtk_manifest"])),
+            out_csv=history_errors,
+        )
+        summary["history_metric_errors"] = str(history_errors)
     if summary.get("sfc_vtk_manifest") or summary.get("abaqus_vtk_manifest"):
         color_ranges = write_animation_color_ranges(
             out_dir,

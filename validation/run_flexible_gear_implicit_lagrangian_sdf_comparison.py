@@ -2063,15 +2063,17 @@ def _default_secondary_contact_tracking_radius(pair: CroppedGearPair, *, target_
     elements track a local secondary-to-main constraint region and do not let a
     slave point jump across a large curved patch to a remote tooth flank.  For
     the secondary-normal line projection path, the broad phase is therefore a
-    contact tracking tube rather than a global closest-feature radius.  Its
-    scale follows the initial normal clearance plus the requested overclosure
-    tolerance, with a small floor matching the validation deck's contact
-    resolution.  This keeps the final projection exact within the contact tube
-    while excluding remote grazing intersections that Abaqus would not activate.
+    contact tracking tube rather than a global closest-feature radius.  The
+    tube must still cover the local contact patch length scale; otherwise a
+    growing overclosure can prune valid main-surface candidates before the
+    exact closest-feature release check has a chance to accept or reject them.
+    This keeps the final projection exact within a local surface-to-surface
+    constraint region while excluding remote grazing intersections by the
+    closest-feature/open-clearance check, not by a case-fitted radius.
     """
 
     normal_envelope = 2.5 * max(float(pair.initial_patch_gap) + float(target_overclosure), 0.0)
-    return max(normal_envelope, 1.0e-4)
+    return max(normal_envelope, _contact_patch_representative_length(pair), 1.0e-4)
 
 
 def _default_secondary_line_distance_limit(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:

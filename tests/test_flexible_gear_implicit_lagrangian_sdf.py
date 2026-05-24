@@ -21,6 +21,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _assemble_contact_response_force_only,
     _contact_active_signature_from_arrays,
     _contact_active_signature_from_samples,
+    _contact_patch_representative_length,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
     _default_secondary_contact_tracking_radius,
@@ -37,6 +38,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_corotated_visual_state_and_internal,
     _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
+    _write_csv,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
     solve_sfc_cropped_pair,
@@ -51,6 +53,7 @@ from sfc.sdf import _cpp_projection
 from sfc.sdf.material_sdf import MaterialSDF
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
+    compare_sfc_history_to_abaqus_manifest,
     compare_animation_manifests,
     write_animation_color_ranges,
     write_paraview_animation_setup,
@@ -116,7 +119,7 @@ def test_default_contact_search_radius_uses_surface_feature_size() -> None:
     assert radius > 1.0
 
 
-def test_secondary_contact_tracking_radius_uses_clearance_tube_not_feature_size() -> None:
+def test_secondary_contact_tracking_radius_covers_local_constraint_region() -> None:
     nodes = np.asarray(
         [
             [0.0, 0.0, 0.0],
@@ -134,9 +137,10 @@ def test_secondary_contact_tracking_radius_uses_clearance_tube_not_feature_size(
 
     closest_radius = _default_contact_search_radius(pair, target_overclosure=1.0e-5)
     tracking_radius = _default_secondary_contact_tracking_radius(pair, target_overclosure=1.0e-5)
+    representative = _contact_patch_representative_length(pair)
 
     assert closest_radius > 1.0
-    assert tracking_radius == pytest.approx(1.0e-4)
+    assert tracking_radius == pytest.approx(representative)
     assert tracking_radius < closest_radius
 
 
@@ -329,6 +333,57 @@ def test_contact_active_signature_detects_status_changes() -> None:
     assert len(signature) == 1
     arrays["gaps"][1] = -0.01
     assert _contact_active_signature_from_arrays(arrays) != signature
+
+
+def test_compare_sfc_history_to_abaqus_manifest_outputs_metric_errors(tmp_path: Path) -> None:
+    history = tmp_path / "sfc_history.csv"
+    manifest = tmp_path / "abaqus_manifest.csv"
+    out = tmp_path / "errors.csv"
+    _write_csv(
+        history,
+        [
+            {
+                "time": 0.0,
+                "max_displacement_norm": 0.0,
+                "p95_von_mises_nodeavg": 2.0,
+                "p95_equivalent_elastic_strain_nodeavg": 0.1,
+                "active_contact_node_count": 1,
+            },
+            {
+                "time": 1.0,
+                "max_displacement_norm": 3.0,
+                "p95_von_mises_nodeavg": 5.0,
+                "p95_equivalent_elastic_strain_nodeavg": 0.2,
+                "active_contact_node_count": 2,
+            },
+        ],
+    )
+    _write_csv(
+        manifest,
+        [
+            {
+                "time": 0.0,
+                "max_displacement_magnitude": 0.0,
+                "p95_von_mises_nodeavg": 2.0,
+                "p95_equivalent_elastic_strain_nodeavg": 0.1,
+                "active_contact_node_count": 1,
+            },
+            {
+                "time": 1.0,
+                "max_displacement_magnitude": 4.0,
+                "p95_von_mises_nodeavg": 10.0,
+                "p95_equivalent_elastic_strain_nodeavg": 0.4,
+                "active_contact_node_count": 3,
+            },
+        ],
+    )
+
+    rows = compare_sfc_history_to_abaqus_manifest(sfc_history=history, abaqus_manifest=manifest, out_csv=out)
+
+    assert out.exists()
+    assert rows[-1]["max_displacement_norm_rel_error"] == pytest.approx(0.25)
+    assert rows[-1]["p95_von_mises_nodeavg_rel_error"] == pytest.approx(0.5)
+    assert rows[-1]["active_contact_node_count_abs_error"] == pytest.approx(1.0)
 
 
 def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
@@ -798,7 +853,7 @@ def test_secondary_normal_projection_samples_use_line_intersection_gap() -> None
     assert np.sum(sample.master_shape_weights) == pytest.approx(1.0)
 
 
-def test_secondary_normal_projection_releases_remote_line_intersection() -> None:
+def test_secondary_normal_projection_preserves_closed_line_intersection_past_limit() -> None:
     master_nodes = np.asarray(
         [
             [0.0, 0.0, 0.0],
@@ -830,7 +885,7 @@ def test_secondary_normal_projection_releases_remote_line_intersection() -> None
 
     sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
 
-    assert sample.gap == pytest.approx(0.2)
+    assert sample.gap == pytest.approx(-0.2)
 
 
 def test_secondary_line_distance_limit_is_mesh_derived() -> None:
@@ -874,6 +929,7 @@ def test_secondary_normal_projection_does_not_overclose_open_closest_feature() -
         quadrature="centroid",
         search_radius=1.0,
         compiled_batch_projection=False,
+        secondary_line_distance_limit=0.01,
     )
 
     sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
@@ -1073,7 +1129,7 @@ def test_secondary_path_tracking_batch_keeps_previous_anchor_face() -> None:
     assert arrays["gaps"][0] == pytest.approx(-0.010)
 
 
-def test_secondary_normal_projection_sample_arrays_release_remote_line_intersection() -> None:
+def test_secondary_normal_projection_sample_arrays_preserve_closed_line_intersection_past_limit() -> None:
     if not _cpp_projection.secondary_normal_indexed_faces_available():
         pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
     master_nodes = np.asarray(
@@ -1109,7 +1165,7 @@ def test_secondary_normal_projection_sample_arrays_release_remote_line_intersect
 
     assert arrays is not None
     assert arrays["gaps"].shape == (1,)
-    assert arrays["gaps"][0] == pytest.approx(0.2)
+    assert arrays["gaps"][0] == pytest.approx(-0.2)
 
 
 def test_secondary_normal_projection_sample_arrays_do_not_overclose_open_closest_feature() -> None:
@@ -1144,6 +1200,7 @@ def test_secondary_normal_projection_sample_arrays_do_not_overclose_open_closest
         quadrature="centroid",
         search_radius=1.0,
         compiled_batch_projection=True,
+        secondary_line_distance_limit=0.01,
     )
 
     arrays = contact.secondary_normal_projection_sample_arrays(np.vstack([master_nodes, slave_nodes]))
