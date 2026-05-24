@@ -1,0 +1,237 @@
+"""Diagnose SFC vs Abaqus contact-status alignment for the source gear case.
+
+The script is intentionally a validation/postprocessing tool.  It reads SFC
+history CSV output and Abaqus validation outputs, but it is not imported by the
+core solver.  Its purpose is to localize mismatches in Abaqus-style
+surface-to-surface contact status before changing solver theory.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SFC_HISTORY = ROOT / "results" / "source_gear_abq_dt_current_settings_00040" / "sfc_full_gear_lagrangian_sdf_history.csv"
+DEFAULT_ABAQUS_MANIFEST = (
+    ROOT
+    / "results"
+    / "source_gear_abaqus_penalty_full_stride2_match_step_0004"
+    / "abaqus_vtk_contact_full_check"
+    / "abaqus_contact_full_manifest.csv"
+)
+DEFAULT_ABAQUS_STA = (
+    ROOT
+    / "results"
+    / "source_gear_abaqus_penalty_full_stride2_match_step_0004"
+    / "abaqus_run"
+    / "gear_contact_source_penalty.sta"
+)
+DEFAULT_OUT_DIR = ROOT / "results" / "source_gear_contact_status_diagnostics"
+
+
+Row = dict[str, Any]
+
+
+def _read_csv(path: Path) -> list[Row]:
+    with Path(path).open(newline="", encoding="utf-8-sig") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def _write_csv(path: Path, rows: list[Row]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in keys:
+                keys.append(key)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _float(row: Row, key: str, default: float = 0.0) -> float:
+    value = row.get(key, "")
+    if value in ("", None):
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def parse_abaqus_sta_increments(path: Path) -> list[Row]:
+    """Parse Abaqus/Standard ``.sta`` increment rows."""
+
+    increments: list[Row] = []
+    for raw in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = raw.split()
+        if len(parts) < 9:
+            continue
+        try:
+            step = int(parts[0])
+            inc = int(parts[1])
+            attempt = int(parts[2])
+            severe = int(parts[3])
+            equilibrium = int(parts[4])
+            total_iters = int(parts[5])
+            total_time = float(parts[6])
+            step_time = float(parts[7])
+            increment_size = float(parts[8])
+        except ValueError:
+            continue
+        increments.append(
+            {
+                "step": step,
+                "increment": inc,
+                "attempt": attempt,
+                "severe_discontinuity_iterations": severe,
+                "equilibrium_iterations": equilibrium,
+                "total_iterations": total_iters,
+                "total_time": total_time,
+                "step_time": step_time,
+                "increment_size": increment_size,
+            }
+        )
+    return increments
+
+
+def _nearest_by_time(rows: list[Row], time_value: float) -> Row:
+    if not rows:
+        return {}
+    return min(rows, key=lambda row: abs(_float(row, "time") - float(time_value)))
+
+
+def _nearest_increment(increments: list[Row], time_value: float) -> Row:
+    if not increments:
+        return {}
+    return min(increments, key=lambda row: abs(float(row["total_time"]) - float(time_value)))
+
+
+def build_contact_status_diagnostics(
+    *,
+    sfc_history: Path,
+    abaqus_manifest: Path,
+    abaqus_sta: Path | None = None,
+) -> list[Row]:
+    """Return per-output-frame contact-status mismatch diagnostics."""
+
+    sfc_rows = _read_csv(Path(sfc_history))
+    abaqus_rows = _read_csv(Path(abaqus_manifest))
+    increments = parse_abaqus_sta_increments(Path(abaqus_sta)) if abaqus_sta is not None and Path(abaqus_sta).exists() else []
+    diagnostics: list[Row] = []
+    for sfc in sfc_rows:
+        time_value = _float(sfc, "time")
+        abaqus = _nearest_by_time(abaqus_rows, time_value)
+        inc = _nearest_increment(increments, time_value)
+        sfc_active = _float(sfc, "active_contact_node_count")
+        abaqus_active = _float(abaqus, "active_contact_node_count")
+        sfc_p95_stress = _float(sfc, "p95_von_mises_nodeavg")
+        abaqus_p95_stress = _float(abaqus, "p95_von_mises_nodeavg")
+        sfc_p95_strain = _float(sfc, "p95_equivalent_elastic_strain_nodeavg")
+        abaqus_p95_strain = _float(abaqus, "p95_equivalent_elastic_strain_nodeavg")
+        active_delta = sfc_active - abaqus_active
+        abaqus_pressure = _float(abaqus, "max_contact_pressure_nodeavg")
+        row = {
+            "time": time_value,
+            "abaqus_nearest_time": _float(abaqus, "time"),
+            "abaqus_increment_size": inc.get("increment_size", ""),
+            "abaqus_total_iterations": inc.get("total_iterations", ""),
+            "abaqus_severe_discontinuity_iterations": inc.get("severe_discontinuity_iterations", ""),
+            "sfc_newton_iterations": _float(sfc, "newton_iterations"),
+            "sfc_newton_residual_norm": _float(sfc, "newton_residual_norm"),
+            "sfc_active_contact_node_count": sfc_active,
+            "abaqus_active_contact_node_count": abaqus_active,
+            "active_contact_node_count_delta": active_delta,
+            "active_contact_node_count_rel_delta": abs(active_delta) / max(abs(abaqus_active), 1.0),
+            "sfc_max_contact_pressure_nodeavg": _float(sfc, "max_contact_pressure_nodeavg"),
+            "abaqus_max_contact_pressure_nodeavg": abaqus_pressure,
+            "sfc_mean_active_contact_pressure_nodeavg": _float(sfc, "mean_active_contact_pressure_nodeavg"),
+            "abaqus_mean_active_contact_pressure_nodeavg": _float(abaqus, "mean_active_contact_pressure_nodeavg"),
+            "sfc_min_contact_gap_node": _float(sfc, "min_contact_gap_node", _float(sfc, "min_gap")),
+            "abaqus_min_contact_gap_node": _float(abaqus, "min_contact_gap_node"),
+            "sfc_p95_von_mises_nodeavg": sfc_p95_stress,
+            "abaqus_p95_von_mises_nodeavg": abaqus_p95_stress,
+            "p95_von_mises_nodeavg_rel_error": abs(sfc_p95_stress - abaqus_p95_stress) / max(abs(abaqus_p95_stress), 1.0e-30),
+            "sfc_p95_equivalent_elastic_strain_nodeavg": sfc_p95_strain,
+            "abaqus_p95_equivalent_elastic_strain_nodeavg": abaqus_p95_strain,
+            "p95_equivalent_elastic_strain_nodeavg_rel_error": abs(sfc_p95_strain - abaqus_p95_strain) / max(abs(abaqus_p95_strain), 1.0e-30),
+            "release_stage_mismatch": int(abaqus_active <= 50.0 and sfc_active > 100.0 and abaqus_pressure <= 1.0e-12),
+        }
+        diagnostics.append(row)
+    return diagnostics
+
+
+def _max_row(rows: list[Row], key: str) -> Row | None:
+    values = [row for row in rows if row.get(key, "") != ""]
+    if not values:
+        return None
+    return max(values, key=lambda row: _float(row, key))
+
+
+def write_summary(path: Path, rows: list[Row], *, sfc_history: Path, abaqus_manifest: Path, abaqus_sta: Path | None) -> None:
+    p95_row = _max_row(rows, "p95_von_mises_nodeavg_rel_error")
+    active_row = _max_row(rows, "active_contact_node_count_rel_delta")
+    release_rows = [row for row in rows if int(row.get("release_stage_mismatch", 0))]
+    increments = parse_abaqus_sta_increments(abaqus_sta) if abaqus_sta is not None and abaqus_sta.exists() else []
+    increment_sizes = sorted({float(row["increment_size"]) for row in increments}) if increments else []
+    lines = [
+        "# Source Gear Contact-Status Diagnostics",
+        "",
+        "This diagnostic compares SFC contact status with Abaqus validation outputs before changing the contact formulation.",
+        "",
+        f"- SFC history: `{sfc_history}`",
+        f"- Abaqus manifest: `{abaqus_manifest}`",
+        f"- Abaqus status file: `{abaqus_sta}`" if abaqus_sta is not None else "- Abaqus status file: not provided",
+        f"- Abaqus increment sizes parsed from `.sta`: `{increment_sizes}`" if increment_sizes else "- Abaqus increment sizes parsed from `.sta`: not available",
+    ]
+    if p95_row is not None:
+        lines.append(
+            f"- max p95 stress/strain relative error: `{100.0 * _float(p95_row, 'p95_von_mises_nodeavg_rel_error'):.3f}%` at `t={_float(p95_row, 'time'):.8g}`"
+        )
+    if active_row is not None:
+        lines.append(
+            f"- max active-count relative delta: `{100.0 * _float(active_row, 'active_contact_node_count_rel_delta'):.3f}%` at `t={_float(active_row, 'time'):.8g}`"
+        )
+    lines.extend(
+        [
+            f"- release-stage mismatch frames: `{len(release_rows)}`",
+            "",
+            "## Interpretation",
+            "",
+            "A release-stage mismatch means Abaqus reports no or near-zero active contact and zero peak CPRESS, while SFC still carries a large active set. This isolates the remaining error to Abaqus-style finite-sliding contact-status and pressure-overclosure enforcement semantics, not to RP kinematics or the SDF distance query alone.",
+            "",
+            "The next solver change should therefore be validated by reducing the release-stage mismatch count and the p95 stress/strain error together.",
+        ]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sfc-history", type=Path, default=DEFAULT_SFC_HISTORY)
+    parser.add_argument("--abaqus-manifest", type=Path, default=DEFAULT_ABAQUS_MANIFEST)
+    parser.add_argument("--abaqus-sta", type=Path, default=DEFAULT_ABAQUS_STA)
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    args = parser.parse_args(argv)
+    rows = build_contact_status_diagnostics(
+        sfc_history=args.sfc_history,
+        abaqus_manifest=args.abaqus_manifest,
+        abaqus_sta=args.abaqus_sta,
+    )
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = args.out_dir / "source_gear_contact_status_diagnostics.csv"
+    md_path = args.out_dir / "source_gear_contact_status_diagnostics.md"
+    _write_csv(csv_path, rows)
+    write_summary(md_path, rows, sfc_history=args.sfc_history, abaqus_manifest=args.abaqus_manifest, abaqus_sta=args.abaqus_sta)
+    print(md_path.read_text(encoding="utf-8"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
