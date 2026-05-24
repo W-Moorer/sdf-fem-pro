@@ -1730,6 +1730,20 @@ def _default_secondary_contact_tracking_radius(pair: CroppedGearPair, *, target_
     return max(normal_envelope, 1.0e-4)
 
 
+def _default_secondary_line_distance_limit(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:
+    """Return the accepted normal-projection distance for secondary-line contact.
+
+    Candidate tracking and final contact enforcement have different roles.  The
+    broad phase may keep neighboring faces for continuity, but a
+    surface-to-surface normal-line constraint should not convert an arbitrarily
+    remote line intersection into pressure.  The accepted line distance is
+    therefore tied to the representative local contact facet length and the
+    requested overclosure scale, which is mesh-derived rather than curve-fitted.
+    """
+
+    return max(_contact_patch_representative_length(pair), 2.5 * float(target_overclosure), 1.0e-4)
+
+
 def _orient_faces_toward(nodes: np.ndarray, faces: np.ndarray, direction: np.ndarray) -> np.ndarray:
     out = np.asarray(faces, dtype=np.int64).copy()
     normals = _triangle_normals(nodes, out)
@@ -2845,6 +2859,7 @@ def solve_sfc_source_drive_pair(
     source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
+    source_secondary_line_distance_limit: float | None = None,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
@@ -2880,6 +2895,12 @@ def solve_sfc_source_drive_pair(
         contact_search_radius = float(source_contact_search_radius)
     if contact_search_radius < 0.0:
         raise ValueError("source_contact_search_radius must be non-negative")
+    secondary_line_distance_limit = None
+    if str(source_contact_direction).lower() == "secondary_average" and str(source_contact_projection).lower() == "secondary_line":
+        if source_secondary_line_distance_limit is None:
+            secondary_line_distance_limit = _default_secondary_line_distance_limit(pair, target_overclosure=1.0e-5)
+        elif float(source_secondary_line_distance_limit) >= 0.0:
+            secondary_line_distance_limit = float(source_secondary_line_distance_limit)
     def make_contact(order: str, stiffness: float) -> LagrangianSDFSurfaceContactGeometry:
         if order == "gear2_slave":
             master = MaterialSDF.from_triangle_surface(pair.gear1.nodes, pair.gear1.contact_faces)
@@ -2894,6 +2915,7 @@ def solve_sfc_source_drive_pair(
                 search_radius=contact_search_radius,
                 compiled_batch_projection=True,
                 clip_to_master_footprint=bool(source_contact_footprint_clipping),
+                secondary_line_distance_limit=secondary_line_distance_limit,
             )
         master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
         return LagrangianSDFSurfaceContactGeometry(
@@ -2907,6 +2929,7 @@ def solve_sfc_source_drive_pair(
             search_radius=contact_search_radius,
             compiled_batch_projection=True,
             clip_to_master_footprint=bool(source_contact_footprint_clipping),
+            secondary_line_distance_limit=secondary_line_distance_limit,
         )
 
     if contact_pair_order == "symmetric_two_pass":
@@ -3029,9 +3052,14 @@ def solve_sfc_source_drive_pair(
             ),
         )[0]
 
-    def internal_reduced_from_state(q_reduced: np.ndarray) -> np.ndarray:
+    def internal_reduced_response_from_state(
+        q_reduced: np.ndarray,
+        *,
+        assemble_tangent: bool = False,
+    ) -> tuple[np.ndarray, csr_matrix | None]:
         if internal_kinematics != "finite_stvk_visual":
-            return np.asarray(K_solve @ q_reduced, dtype=float).reshape(-1)
+            tangent = K_solve if assemble_tangent else None
+            return np.asarray(K_solve @ q_reduced, dtype=float).reshape(-1), tangent
         x_linear = model.X + assembly.expand_displacements(q_reduced)
         theta = (
             float(q_reduced[assembly.hub_slice(0).start + 5]),
@@ -3044,7 +3072,7 @@ def solve_sfc_source_drive_pair(
             body_reference_points=body_reference_points,
             body_rotation_z=theta,
         )[0]
-        internal = stvk_internal_response(model, x_visual, assemble_tangent=False)
+        internal = stvk_internal_response(model, x_visual, assemble_tangent=bool(assemble_tangent))
         visual_jacobian = _source_drive_finite_visual_jacobian(
             assembly=assembly,
             reference_nodes=model.X,
@@ -3052,7 +3080,15 @@ def solve_sfc_source_drive_pair(
             body_reference_points=body_reference_points,
             body_rotation_z=theta,
         )
-        return np.asarray(visual_jacobian.T @ np.asarray(internal.force, dtype=float).reshape(-1), dtype=float).reshape(-1)
+        reduced_force = np.asarray(visual_jacobian.T @ np.asarray(internal.force, dtype=float).reshape(-1), dtype=float).reshape(-1)
+        if not assemble_tangent:
+            return reduced_force, None
+        reduced_tangent = (visual_jacobian.T @ internal.tangent @ visual_jacobian).tocsr()
+        return reduced_force, reduced_tangent
+
+    def internal_reduced_from_state(q_reduced: np.ndarray) -> np.ndarray:
+        force, _tangent = internal_reduced_response_from_state(q_reduced, assemble_tangent=False)
+        return force
 
     def centripetal_reduced_from_state(q_reduced: np.ndarray, v_reduced: np.ndarray) -> np.ndarray:
         if rotating_inertia == "none":
@@ -3333,7 +3369,11 @@ def solve_sfc_source_drive_pair(
                 last_sample_arrays = sample_arrays
                 last_samples = None
             contact_matches_q_guess = True
-            internal_red = internal_reduced_from_state(q_guess)
+            assemble_current_internal_tangent = internal_kinematics == "finite_stvk_visual"
+            internal_red, internal_tangent_red = internal_reduced_response_from_state(
+                q_guess,
+                assemble_tangent=assemble_current_internal_tangent,
+            )
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
             a_guess = c0 * (q_guess - q_pred)
@@ -3355,7 +3395,12 @@ def solve_sfc_source_drive_pair(
                 current_base_free = base_free
                 current_base_lu = base_preconditioner_lu
                 if rotating_inertia == "finite_kinematic" and free.size:
-                    current_base = (inertia_mass * c0 + K_solve * scale).tocsr()
+                    stiffness_for_iteration = internal_tangent_red if internal_tangent_red is not None else K_solve
+                    current_base = (inertia_mass * c0 + stiffness_for_iteration * scale).tocsr()
+                    current_base_free = current_base[free[:, None], free].tocsr()
+                    current_base_lu = None
+                elif internal_tangent_red is not None and free.size:
+                    current_base = (M_red * c0 + internal_tangent_red * scale).tocsr()
                     current_base_free = current_base[free[:, None], free].tocsr()
                     current_base_lu = None
                 if rotating_inertia != "none" and base_free is not None:

@@ -234,6 +234,7 @@ class LagrangianSDFSurfaceContactGeometry:
     compiled_batch_projection: bool = False
     clip_to_master_footprint: bool = False
     secondary_tracking_rings: int = 2
+    secondary_line_distance_limit: float | None = None
     _oracle: LagrangianSDFContactOracle = field(init=False, repr=False)
     _secondary_face_cache: np.ndarray | None = field(default=None, init=False, repr=False)
     _master_face_tracking_neighborhoods: tuple[np.ndarray, ...] = field(init=False, repr=False)
@@ -253,6 +254,8 @@ class LagrangianSDFSurfaceContactGeometry:
             raise ValueError("quadrature must be 'centroid' or 'tri3'")
         if int(self.secondary_tracking_rings) < 0:
             raise ValueError("secondary_tracking_rings must be non-negative")
+        if self.secondary_line_distance_limit is not None and float(self.secondary_line_distance_limit) < 0.0:
+            raise ValueError("secondary_line_distance_limit must be non-negative")
         self.slave_faces = faces
         self.master_reference_nodes = master_nodes
         self._master_face_tracking_neighborhoods = _triangle_face_neighborhoods(
@@ -591,6 +594,8 @@ class LagrangianSDFSurfaceContactGeometry:
         best: dict[str, np.ndarray | float] | None = None
         best_abs_gap = np.inf
         best_face_id = -1
+        rejected_line: dict[str, np.ndarray | float] | None = None
+        rejected_abs_gap = np.inf
         for face_id in candidate_ids.reshape(-1):
             nodes = master_faces[int(face_id)]
             master_tri = master_x[nodes]
@@ -611,6 +616,19 @@ class LagrangianSDFSurfaceContactGeometry:
             if bary is None or np.min(bary) < -1.0e-10 or np.max(bary) > 1.0 + 1.0e-10:
                 continue
             abs_gap = abs(gap)
+            if (
+                self.secondary_line_distance_limit is not None
+                and abs_gap > float(self.secondary_line_distance_limit)
+            ):
+                if abs_gap < rejected_abs_gap:
+                    rejected_abs_gap = abs_gap
+                    rejected_line = {
+                        "gap": abs_gap,
+                        "normal": contact_normal.copy(),
+                        "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
+                        "master_weights": np.clip(bary, 0.0, 1.0),
+                    }
+                continue
             if abs_gap < best_abs_gap:
                 best_abs_gap = abs_gap
                 best = {
@@ -626,13 +644,13 @@ class LagrangianSDFSurfaceContactGeometry:
             # normal ray can intersect a remote, back-facing facet and create a
             # compressive penalty over an actually open nearest surface region.
             if float(best["gap"]) < -1.0e-14:
-                query = self._oracle.query(x, cache_key=cache_key)
-                if float(query.gap) > 1.0e-14:
+                closest_payload = self._global_closest_feature_payload(x, master_x, master_faces, cache_key=cache_key)
+                if float(closest_payload["gap"]) > 1.0e-14:
                     return {
-                        "gap": float(query.gap),
-                        "normal": query.normal,
-                        "master_node_ids": query.master_node_ids,
-                        "master_weights": query.master_weights,
+                        "gap": float(closest_payload["gap"]),
+                        "normal": np.asarray(closest_payload["normal"], dtype=float),
+                        "master_node_ids": np.asarray(closest_payload["master_node_ids"], dtype=np.int64),
+                        "master_weights": np.asarray(closest_payload["master_weights"], dtype=float),
                     }
             weights = np.asarray(best["master_weights"], dtype=float)
             total = float(np.sum(weights))
@@ -641,6 +659,12 @@ class LagrangianSDFSurfaceContactGeometry:
             if cache_index is not None and best_face_id >= 0:
                 self._ensure_secondary_face_cache()[int(cache_index)] = int(best_face_id)
             return best
+        if rejected_line is not None:
+            weights = np.asarray(rejected_line["master_weights"], dtype=float)
+            total = float(np.sum(weights))
+            if total > 0.0:
+                rejected_line["master_weights"] = weights / total
+            return rejected_line
         query = self._oracle.query(x, cache_key=cache_key)
         if cache_index is not None and int(query.face_id) >= 0:
             self._ensure_secondary_face_cache()[int(cache_index)] = int(query.face_id)
@@ -648,6 +672,33 @@ class LagrangianSDFSurfaceContactGeometry:
         return {
             "gap": float(query.gap),
             "normal": normal,
+            "master_node_ids": query.master_node_ids,
+            "master_weights": query.master_weights,
+        }
+
+    def _global_closest_feature_payload(
+        self,
+        point: np.ndarray,
+        master_x: np.ndarray,
+        master_faces: np.ndarray,
+        *,
+        cache_key: object,
+    ) -> dict[str, np.ndarray | float]:
+        x = np.asarray(point, dtype=float).reshape(3)
+        if bool(self.compiled_batch_projection) and _cpp_projection_available() and _cpp_closest_points_all_faces is not None:
+            gaps, normals, face_ids, bary, _closest = _cpp_closest_points_all_faces(x.reshape(1, 3), master_x, master_faces)
+            face_id = int(np.asarray(face_ids, dtype=np.int64)[0])
+            if face_id >= 0:
+                return {
+                    "gap": float(np.asarray(gaps, dtype=float)[0]),
+                    "normal": np.asarray(normals, dtype=float)[0],
+                    "master_node_ids": np.asarray(master_faces[face_id], dtype=np.int64),
+                    "master_weights": np.asarray(bary, dtype=float)[0],
+                }
+        query = self._oracle.query(x, cache_key=cache_key)
+        return {
+            "gap": float(query.gap),
+            "normal": query.normal,
             "master_node_ids": query.master_node_ids,
             "master_weights": query.master_weights,
         }
@@ -750,6 +801,33 @@ class LagrangianSDFSurfaceContactGeometry:
         normals = np.asarray(normals, dtype=float)[valid]
         master_bary = np.asarray(master_bary, dtype=float)[valid]
         face_ids = face_ids[valid]
+        active = gaps < -1.0e-14
+        if self.secondary_line_distance_limit is not None:
+            distance_limit = float(self.secondary_line_distance_limit)
+            outside_line_tube = active & (np.abs(gaps) > distance_limit)
+            if np.any(outside_line_tube):
+                gaps[outside_line_tube] = np.abs(gaps[outside_line_tube])
+                active = gaps < -1.0e-14
+        if (
+            np.any(active)
+            and _cpp_projection_available()
+            and _cpp_closest_points_all_faces is not None
+        ):
+            closest_gaps, closest_normals, closest_face_ids, closest_bary, _closest = _cpp_closest_points_all_faces(
+                point_array[valid][active],
+                master_x,
+                self.master_material.boundary_faces,
+            )
+            closest_gaps = np.asarray(closest_gaps, dtype=float)
+            closest_face_ids = np.asarray(closest_face_ids, dtype=np.int64)
+            release = (closest_face_ids >= 0) & (closest_gaps > 1.0e-14)
+            if np.any(release):
+                active_indices = np.flatnonzero(active)
+                release_indices = active_indices[release]
+                gaps[release_indices] = closest_gaps[release]
+                normals[release_indices] = np.asarray(closest_normals, dtype=float)[release]
+                face_ids[release_indices] = closest_face_ids[release]
+                master_bary[release_indices] = np.asarray(closest_bary, dtype=float)[release]
         cache = self._ensure_secondary_face_cache()
         cache[valid_cache_indices] = face_ids
         master_nodes = self.master_material.boundary_faces[face_ids] + int(self.master_node_offset)

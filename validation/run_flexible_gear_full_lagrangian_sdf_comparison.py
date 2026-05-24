@@ -741,9 +741,11 @@ def run_full_gear(
     source_contact_projection: str = "closest_feature",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
+    source_secondary_line_distance_limit: float | None = None,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
+    source_max_iterations: int = 8,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -782,6 +784,7 @@ def run_full_gear(
             gear2_torque_z=model.gear2_torque_z,
             hht_alpha=float(hht_alpha),
             tet4_mass_kind=str(tet4_mass_kind),
+            max_iterations=max(1, int(source_max_iterations)),
             vtk_out_dir=(sfc_vtk_dir if sfc_vtk_dir is not None else out_dir / "sfc_vtk") if write_sfc_vtk else None,
             vtk_frame_stride=max(1, int(vtk_frame_stride)),
             history_frame_stride=max(1, int(history_frame_stride)),
@@ -795,6 +798,7 @@ def run_full_gear(
             source_contact_projection=str(source_contact_projection),
             source_contact_pair_order=str(source_contact_pair_order),
             source_contact_search_radius=source_contact_search_radius,
+            source_secondary_line_distance_limit=source_secondary_line_distance_limit,
             source_contact_footprint_clipping=bool(source_contact_footprint_clipping),
             source_internal_kinematics=str(source_internal_kinematics),
             source_rotating_inertia=str(source_rotating_inertia),
@@ -1046,6 +1050,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional source-drive broad-phase radius; closest-feature projection still determines the final gap.",
     )
     parser.add_argument(
+        "--source-secondary-line-distance-limit",
+        type=float,
+        default=None,
+        help=(
+            "Optional accepted signed distance for source secondary-line projection. "
+            "A negative value disables this final line-distance gate."
+        ),
+    )
+    parser.add_argument(
         "--source-contact-footprint-clipping",
         action="store_true",
         help="Clip slave triangle contact support to the projected master footprint before pressure integration.",
@@ -1061,6 +1074,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=("none", "centripetal", "finite_kinematic"),
         default="none",
         help="Optional finite-RP inertia residual for source-drive dynamics.",
+    )
+    parser.add_argument(
+        "--source-max-iterations",
+        type=int,
+        default=8,
+        help="Maximum nonlinear iterations per fixed source-drive time increment.",
     )
     parser.add_argument(
         "--source-checkpoint",
@@ -1113,9 +1132,11 @@ def main(argv: list[str] | None = None) -> int:
         source_contact_projection=str(args.source_contact_projection),
         source_contact_pair_order=str(args.source_contact_pair_order),
         source_contact_search_radius=args.source_contact_search_radius,
+        source_secondary_line_distance_limit=args.source_secondary_line_distance_limit,
         source_contact_footprint_clipping=bool(args.source_contact_footprint_clipping),
         source_internal_kinematics=str(args.source_internal_kinematics),
         source_rotating_inertia=str(args.source_rotating_inertia),
+        source_max_iterations=int(args.source_max_iterations),
         source_checkpoint_path=args.source_checkpoint,
         resume_source_checkpoint=bool(args.resume_source_checkpoint),
         source_checkpoint_stride=int(args.source_checkpoint_stride),
