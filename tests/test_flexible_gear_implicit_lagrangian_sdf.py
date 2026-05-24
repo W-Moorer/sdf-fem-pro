@@ -878,6 +878,116 @@ def test_secondary_normal_projection_sample_arrays_match_scalar_when_cpp_availab
     np.testing.assert_allclose(arrays["master_weights"][0], scalar.master_shape_weights)
 
 
+def test_secondary_path_tracking_keeps_previous_anchor_face() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.009],
+            [1.0, 0.0, -0.009],
+            [0.0, 1.0, -0.009],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.10, 0.10, -0.010],
+            [0.30, 0.10, -0.010],
+            [0.10, 0.30, -0.010],
+        ],
+        dtype=float,
+    )
+    master_faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+    slave_faces = np.asarray([[0, 2, 1]], dtype=np.int64)
+
+    instantaneous = LagrangianSDFSurfaceContactGeometry(
+        slave_faces,
+        MaterialSDF.from_triangle_surface(master_nodes, master_faces),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+    )
+    tracked = LagrangianSDFSurfaceContactGeometry(
+        slave_faces,
+        MaterialSDF.from_triangle_surface(master_nodes, master_faces),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        secondary_path_tracking=True,
+        secondary_tracking_rings=1,
+    )
+    tracked._update_secondary_tracking_cache(
+        cache_index=0,
+        face_id=0,
+        barycentric=np.asarray([0.70, 0.15, 0.15], dtype=float),
+    )
+    x = np.vstack([master_nodes, slave_nodes])
+
+    instantaneous_sample = list(instantaneous.secondary_normal_projection_samples(x))[0]
+    tracked_sample = list(tracked.secondary_normal_projection_samples(x))[0]
+
+    assert instantaneous_sample.master_node_ids.tolist() == [3, 4, 5]
+    assert tracked_sample.master_node_ids.tolist() == [0, 1, 2]
+    assert instantaneous_sample.gap == pytest.approx(-0.001)
+    assert tracked_sample.gap == pytest.approx(-0.010)
+
+
+def test_secondary_path_tracking_batch_keeps_previous_anchor_face() -> None:
+    if not _cpp_projection.secondary_normal_indexed_faces_available():
+        pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.009],
+            [1.0, 0.0, -0.009],
+            [0.0, 1.0, -0.009],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.10, 0.10, -0.010],
+            [0.30, 0.10, -0.010],
+            [0.10, 0.30, -0.010],
+        ],
+        dtype=float,
+    )
+    master_faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, master_faces),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=True,
+        secondary_path_tracking=True,
+        secondary_tracking_rings=1,
+    )
+    contact._update_secondary_tracking_cache(
+        cache_index=0,
+        face_id=0,
+        barycentric=np.asarray([0.70, 0.15, 0.15], dtype=float),
+    )
+
+    arrays = contact.secondary_normal_projection_sample_arrays(np.vstack([master_nodes, slave_nodes]))
+
+    assert arrays is not None
+    assert arrays["master_node_ids"][0].tolist() == [0, 1, 2]
+    assert arrays["gaps"][0] == pytest.approx(-0.010)
+
+
 def test_secondary_normal_projection_sample_arrays_release_remote_line_intersection() -> None:
     if not _cpp_projection.secondary_normal_indexed_faces_available():
         pytest.skip("C++ secondary-normal indexed projection backend is unavailable")

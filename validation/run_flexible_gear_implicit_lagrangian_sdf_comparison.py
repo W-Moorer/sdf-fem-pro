@@ -2860,6 +2860,7 @@ def solve_sfc_source_drive_pair(
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
     source_secondary_line_distance_limit: float | None = None,
+    source_secondary_path_tracking: bool = False,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
@@ -2915,6 +2916,7 @@ def solve_sfc_source_drive_pair(
                 search_radius=contact_search_radius,
                 compiled_batch_projection=True,
                 clip_to_master_footprint=bool(source_contact_footprint_clipping),
+                secondary_path_tracking=bool(source_secondary_path_tracking),
                 secondary_line_distance_limit=secondary_line_distance_limit,
             )
         master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
@@ -2929,6 +2931,7 @@ def solve_sfc_source_drive_pair(
             search_radius=contact_search_radius,
             compiled_batch_projection=True,
             clip_to_master_footprint=bool(source_contact_footprint_clipping),
+            secondary_path_tracking=bool(source_secondary_path_tracking),
             secondary_line_distance_limit=secondary_line_distance_limit,
         )
 
@@ -3635,6 +3638,7 @@ def solve_sfc_source_drive_pair(
         "source_contact_projection": contact_projection,
         "source_contact_pair_order": contact_pair_order,
         "source_contact_search_radius": float(contact_search_radius),
+        "source_secondary_path_tracking": bool(source_secondary_path_tracking),
         "source_contact_footprint_clipping": bool(source_contact_footprint_clipping),
         "source_internal_kinematics": internal_kinematics,
         "source_rotating_inertia": rotating_inertia,
