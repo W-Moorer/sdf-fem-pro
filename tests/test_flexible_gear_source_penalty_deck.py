@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
 from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
+    full_gear_evidence_ladder_rows,
     full_gear_entry_gate_metrics,
     run_full_gear,
     source_convergence_gate_metrics,
@@ -100,6 +101,47 @@ def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
     assert int(gate["full_gear_entry_gate_passed"]) == 1
     assert int(gate["full_gear_entry_strict_sync_min_steps_met"]) == 0
     assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 0
+
+
+def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
+    summary = {
+        "source_convergence_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "full_gear_entry_gate_passed": 1,
+        "full_gear_entry_ready_for_strict_sync_window": 0,
+        "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
+        "sfc_vtk_manifest": "sfc_manifest.csv",
+        "abaqus_vtk_manifest": "abaqus_manifest.csv",
+        "animation_metric_errors": "sfc_vs_abaqus_vtk_metric_errors.csv",
+        "history_metric_errors": "sfc_vs_abaqus_history_metric_errors.csv",
+    }
+
+    rows = {row["evidence_stage"]: row for row in full_gear_evidence_ladder_rows(summary)}
+
+    assert int(rows["region_contact_totals"]["paper_evidence_allowed"]) == 1
+    assert int(rows["nodal_cpress_copen"]["paper_evidence_allowed"]) == 1
+    assert int(rows["stress_strain_clouds"]["paper_evidence_allowed"]) == 0
+    assert rows["stress_strain_clouds"]["blocking_reason"] == "strict_sync_gate_or_animation_metric_missing"
+
+
+def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
+    summary = {
+        "source_convergence_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "full_gear_entry_gate_passed": 1,
+        "full_gear_entry_ready_for_strict_sync_window": 1,
+        "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
+        "sfc_vtk_manifest": "sfc_manifest.csv",
+        "abaqus_vtk_manifest": "abaqus_manifest.csv",
+        "animation_metric_errors": "sfc_vs_abaqus_vtk_metric_errors.csv",
+        "history_metric_errors": "sfc_vs_abaqus_history_metric_errors.csv",
+    }
+
+    rows = {row["evidence_stage"]: row for row in full_gear_evidence_ladder_rows(summary)}
+
+    assert int(rows["history_vs_abaqus_manifest_totals"]["paper_evidence_allowed"]) == 1
+    assert int(rows["nodal_cpress_copen"]["paper_evidence_allowed"]) == 1
+    assert int(rows["stress_strain_clouds"]["paper_evidence_allowed"]) == 1
 
 
 def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:
@@ -382,6 +424,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_convergence_gate" in summary
     assert "contact_total_gate" in summary
     assert "full_gear_entry_gate" in summary
+    assert "full_gear_evidence_ladder" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
     assert int(summary["source_convergence_gate_passed"]) == 1
     assert int(summary["contact_total_gate_passed"]) == 1
@@ -392,13 +435,18 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
     contact_total_gate_csv = tmp_path / "sfc_contact_total_gate.csv"
     entry_gate_csv = tmp_path / "sfc_full_gear_entry_gate.csv"
+    evidence_ladder_csv = tmp_path / "sfc_full_gear_evidence_ladder.csv"
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
     assert convergence_gate_csv.exists()
     assert contact_total_gate_csv.exists()
     assert entry_gate_csv.exists()
+    assert evidence_ladder_csv.exists()
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
     assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
     assert "contact_total_gate_passed" in contact_total_gate_csv.read_text(encoding="utf-8")
     assert "full_gear_entry_gate_passed" in entry_gate_csv.read_text(encoding="utf-8")
+    evidence_text = evidence_ladder_csv.read_text(encoding="utf-8")
+    assert "region_contact_totals" in evidence_text
+    assert "stress_strain_clouds" in evidence_text

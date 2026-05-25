@@ -461,6 +461,108 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     }
 
 
+def _artifact_present(summary: Row, key: str) -> int:
+    value = summary.get(key)
+    return int(value not in ("", None))
+
+
+def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
+    """Return the paper-evidence ladder for full-gear validation artifacts.
+
+    Diagnostic plots may exist before all gates pass.  This manifest records
+    whether each layer is allowed to support manuscript claims, preserving the
+    required order: contact totals first, then nodal CPRESS/COPEN, then stress
+    and strain cloud comparisons.
+    """
+
+    source_ok = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    totals_ok = _row_int_flag(summary, "contact_total_gate_passed", default=0)
+    entry_ok = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
+    strict_ok = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
+    sfc_manifest_present = _artifact_present(summary, "sfc_vtk_manifest")
+    abaqus_manifest_present = _artifact_present(summary, "abaqus_vtk_manifest")
+    animation_metrics_present = _artifact_present(summary, "animation_metric_errors")
+    history_metrics_present = _artifact_present(summary, "history_metric_errors")
+
+    region_allowed = int(bool(source_ok) and bool(totals_ok))
+    nodal_allowed = int(
+        bool(entry_ok)
+        and bool(sfc_manifest_present)
+        and bool(abaqus_manifest_present)
+        and bool(animation_metrics_present)
+    )
+    cloud_allowed = int(
+        bool(strict_ok)
+        and bool(sfc_manifest_present)
+        and bool(abaqus_manifest_present)
+        and bool(animation_metrics_present)
+    )
+    history_allowed = int(bool(strict_ok) and bool(abaqus_manifest_present) and bool(history_metrics_present))
+
+    def row(
+        stage: str,
+        *,
+        allowed: int,
+        required_before: str,
+        artifact_key: str,
+        blocking_reason: str,
+    ) -> Row:
+        return {
+            "evidence_stage": stage,
+            "comparison_order": len(rows) + 1,
+            "paper_evidence_allowed": int(allowed),
+            "diagnostic_allowed": 1,
+            "required_before": required_before,
+            "artifact_key": artifact_key,
+            "artifact_present": _artifact_present(summary, artifact_key),
+            "artifact_path": str(summary.get(artifact_key, "")),
+            "blocking_reason": "" if allowed else blocking_reason,
+            "source_convergence_gate_passed": int(source_ok),
+            "contact_total_gate_passed": int(totals_ok),
+            "full_gear_entry_gate_passed": int(entry_ok),
+            "full_gear_strict_sync_ready": int(strict_ok),
+        }
+
+    rows: list[Row] = []
+    rows.append(
+        row(
+            "region_contact_totals",
+            allowed=region_allowed,
+            required_before="nodal_cpress_copen",
+            artifact_key="contact_total_priority_metrics",
+            blocking_reason="source_convergence_or_contact_total_gate_failed",
+        )
+    )
+    rows.append(
+        row(
+            "history_vs_abaqus_manifest_totals",
+            allowed=history_allowed,
+            required_before="stress_strain_clouds",
+            artifact_key="history_metric_errors",
+            blocking_reason="strict_sync_or_history_manifest_missing",
+        )
+    )
+    rows.append(
+        row(
+            "nodal_cpress_copen",
+            allowed=nodal_allowed,
+            required_before="stress_strain_clouds",
+            artifact_key="animation_metric_errors",
+            blocking_reason="full_gear_entry_gate_or_vtk_manifest_missing",
+        )
+    )
+    rows.append(
+        row(
+            "stress_strain_clouds",
+            allowed=cloud_allowed,
+            required_before="solver_timing_claim",
+            artifact_key="animation_metric_errors",
+            blocking_reason="strict_sync_gate_or_animation_metric_missing",
+        )
+    )
+    return rows
+
+
 def write_animation_color_ranges(
     out_dir: Path,
     *,
@@ -1038,6 +1140,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- full-gear entry gate: {summary.get('full_gear_entry_gate_passed', '')}",
         "- full-gear strict-sync ready: "
         f"{summary.get('full_gear_entry_ready_for_strict_sync_window', '')}",
+        f"- full-gear evidence manifest: {summary.get('full_gear_evidence_ladder', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
@@ -1072,6 +1175,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         lines.append(f"- contact-total gate CSV: `{Path(str(summary.get('contact_total_gate'))).name}`")
     if summary.get("full_gear_entry_gate"):
         lines.append(f"- full-gear entry gate CSV: `{Path(str(summary.get('full_gear_entry_gate'))).name}`")
+    if summary.get("full_gear_evidence_ladder"):
+        lines.append(f"- full-gear evidence ladder CSV: `{Path(str(summary.get('full_gear_evidence_ladder'))).name}`")
     if summary.get("source_increment_trials"):
         lines.append(f"- source increment trial ledger: `{Path(str(summary.get('source_increment_trials'))).name}`")
     if summary.get("sfc_vtk_pvd"):
@@ -1483,6 +1588,9 @@ def run_full_gear(
                 abaqus_pvd=Path(str(summary["abaqus_vtk_pvd"])) if summary.get("abaqus_vtk_pvd") else None,
             )
         )
+    evidence_ladder_path = out_dir / "sfc_full_gear_evidence_ladder.csv"
+    _write_csv(evidence_ladder_path, full_gear_evidence_ladder_rows(summary))
+    summary["full_gear_evidence_ladder"] = str(evidence_ladder_path)
     write_full_summary(out_dir / "full_gear_lagrangian_sdf_summary.md", summary, history_path, abaqus_row=abaqus_row)
     _write_csv(out_dir / "full_gear_lagrangian_sdf_summary.csv", [summary])
     return history, summary
