@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFQ4MasterSurfaceContactGeometry  # noqa: E402
+from sfc.contact.validation_gates import contact_total_priority_gate_metrics  # noqa: E402
 from validation.run_abaqus_lagrangian_sdf_tooth_patch_hard_contact import (  # noqa: E402
     ToothPatchHardContactCase,
     _pressure_enforcement_stiffness,
@@ -41,6 +42,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _contact_active_region_continuity_metrics_from_arrays,
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
+    _secondary_region_contact_node_diagnostics_from_arrays,
 )
 from validation.run_two_block_sliding_region_validation import run_validation as run_two_block_sliding_validation  # noqa: E402
 
@@ -81,6 +83,8 @@ def tooth_patch_region_gate_metrics(rows: list[Row], *, two_block_summary: Row |
     """Gate the tilted Q4 patch before cropped/full gear escalation."""
 
     prerequisite = int(float((two_block_summary or {}).get("two_block_sliding_region_gate_passed", 0))) == 1
+    total_gate = contact_total_priority_gate_metrics(rows)
+    total_gate_passed = int(total_gate["contact_total_gate_passed"]) == 1
     active_rows = [
         row
         for row in rows
@@ -126,8 +130,9 @@ def tooth_patch_region_gate_metrics(rows: list[Row], *, two_block_summary: Row |
         and active_jaccard_min >= 0.999
     )
     totals_ok = bool(active_rows) and max_force_mismatch <= 1.0e-12 and max_work_mismatch <= 1.0e-12
-    gate_passed = prerequisite and no_nodal_clouds and law_ok and q4_payload_ok and path_ok and totals_ok
+    gate_passed = prerequisite and total_gate_passed and no_nodal_clouds and law_ok and q4_payload_ok and path_ok and totals_ok
     return {
+        **total_gate,
         "tooth_patch_region_gate_passed": int(gate_passed),
         "comparison_stage": "tooth_patch_region_totals_before_cropped_gear_clouds",
         "two_block_sliding_prerequisite_gate_passed": int(prerequisite),
@@ -209,6 +214,11 @@ def run_validation(
             raise RuntimeError("slave_node_region_constraint aggregation unexpectedly fell back")
         response = _assemble_contact_arrays_force_only(regions, x.shape[0], stiffness=stiffness)
         region_metrics = _contact_region_integral_metrics_from_arrays(regions, stiffness=stiffness)
+        pressure_diagnostics = _secondary_region_contact_node_diagnostics_from_arrays(
+            regions,
+            x.shape[0],
+            stiffness=stiffness,
+        )
         law_metrics = _constraint_region_contact_law_metrics_from_arrays(
             regions,
             raw_arrays,
@@ -247,6 +257,10 @@ def run_validation(
             ),
         }
         row.update(region_metrics)
+        if pressure_diagnostics is not None:
+            row["contact_secondary_pressure_recovery_source"] = pressure_diagnostics["metrics"][
+                "contact_secondary_pressure_recovery_source"
+            ]
         row.update(law_metrics)
         row.update(path_metrics)
         row.update(continuity)

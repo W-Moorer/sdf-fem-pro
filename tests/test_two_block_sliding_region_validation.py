@@ -26,6 +26,8 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert int(summary["two_block_constraint_region_law_gate_passed"]) == 1
     assert int(summary["two_block_force_consistency_gate_passed"]) == 1
     assert int(summary["two_block_virtual_work_consistency_gate_passed"]) == 1
+    assert int(summary["contact_total_gate_passed"]) == 1
+    assert int(summary["contact_total_secondary_pressure_recovery_from_region"]) == 1
     assert float(summary["active_region_jaccard_min"]) >= float(summary["path_tracking_min_active_region_jaccard_threshold"])
     assert float(summary["path_cache_hit_fraction_min_after_first"]) >= float(summary["path_tracking_min_cache_hit_threshold"])
     assert float(summary["path_cache_match_fraction_min_after_first"]) >= float(summary["path_tracking_min_cache_match_threshold"])
@@ -56,6 +58,8 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert "nodal_cpress_deferred" in total_rows[0]
     assert "contact_constraint_open_closed_source" in total_rows[0]
     assert "contact_constraint_force_distribution" in total_rows[0]
+    assert total_rows[0]["contact_secondary_pressure_recovery_source"] == "constraint_region"
+    assert "max_contact_secondary_pressure_nodeavg" not in total_rows[0]
 
     with continuity.open(newline="", encoding="utf-8") as handle:
         continuity_rows = list(csv.DictReader(handle))
@@ -100,6 +104,7 @@ def test_two_block_gate_requires_flat_punch_and_region_law() -> None:
         "contact_constraint_normal_source": "area_average_region_normal",
         "contact_constraint_force_distribution": "region_area_slave_shape_master_payload",
         "contact_constraint_independent_quadrature_penalty_disabled": 1,
+        "contact_secondary_pressure_recovery_source": "constraint_region",
     }
     rows = [dict(row), dict(row)]
 

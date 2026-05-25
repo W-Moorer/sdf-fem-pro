@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
+from sfc.contact.validation_gates import contact_total_priority_gate_metrics  # noqa: E402
 from sfc.fem.calculix_aligned import ContactSample  # noqa: E402
 from sfc.sdf.material_sdf import MaterialSDF  # noqa: E402
 from validation.run_calculix_deformable_sdf_contact_validation import build_two_block_model  # noqa: E402
@@ -40,6 +41,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _constraint_region_contact_law_metrics_from_arrays,
+    _secondary_region_contact_node_diagnostics_from_arrays,
 )
 from validation.run_flat_punch_region_penetration_validation import run_validation as run_flat_punch_validation  # noqa: E402
 
@@ -136,6 +138,8 @@ def two_block_sliding_region_gate_metrics(
     """
 
     flat_gate = int(float((flat_punch_summary or {}).get("flat_punch_rf_penetration_gate_passed", 0))) == 1
+    total_gate = contact_total_priority_gate_metrics(rows)
+    total_gate_passed = int(total_gate["contact_total_gate_passed"]) == 1
     active_rows = [
         row
         for row in rows
@@ -194,6 +198,7 @@ def two_block_sliding_region_gate_metrics(
     work_consistency_ok = max_work_mismatch <= 1.0e-12
     gate_passed = (
         flat_gate
+        and total_gate_passed
         and no_nodal_clouds
         and active_totals_present
         and law_rows_ok
@@ -203,6 +208,7 @@ def two_block_sliding_region_gate_metrics(
         and work_consistency_ok
     )
     return {
+        **total_gate,
         "two_block_sliding_region_gate_passed": int(gate_passed),
         "comparison_stage": "two_block_sliding_totals_before_cropped_gear_or_clouds",
         "flat_punch_prerequisite_gate_passed": int(flat_gate),
@@ -314,6 +320,11 @@ def run_validation(
             raise RuntimeError("slave_node_region_constraint aggregation unexpectedly fell back")
         response = _assemble_contact_arrays_force_only(regions, model.nodes.shape[0], stiffness=float(pressure_stiffness))
         region_metrics = _contact_region_integral_metrics_from_arrays(regions, stiffness=float(pressure_stiffness))
+        pressure_diagnostics = _secondary_region_contact_node_diagnostics_from_arrays(
+            regions,
+            model.nodes.shape[0],
+            stiffness=float(pressure_stiffness),
+        )
         law_metrics = _constraint_region_contact_law_metrics_from_arrays(
             regions,
             arrays,
@@ -352,6 +363,10 @@ def run_validation(
             "min_region_gap": float(np.min(np.asarray(regions["gaps"], dtype=float))) if np.asarray(regions["gaps"]).size else 0.0,
         }
         row.update(region_metrics)
+        if pressure_diagnostics is not None:
+            row["contact_secondary_pressure_recovery_source"] = pressure_diagnostics["metrics"][
+                "contact_secondary_pressure_recovery_source"
+            ]
         row.update(law_metrics)
         row.update(path_metrics)
         row.update(continuity)

@@ -30,6 +30,8 @@ def test_tooth_patch_region_constraint_gate_writes_totals_before_clouds(tmp_path
     assert int(summary["tooth_patch_constraint_region_law_gate_passed"]) == 1
     assert int(summary["tooth_patch_q4_master_payload_gate_passed"]) == 1
     assert int(summary["tooth_patch_path_tracking_gate_passed"]) == 1
+    assert int(summary["contact_total_gate_passed"]) == 1
+    assert int(summary["contact_total_secondary_pressure_recovery_from_region"]) == 1
     assert float(summary["tooth_patch_path_cache_hit_fraction_min_after_first"]) >= 0.999
     assert float(summary["tooth_patch_path_cache_match_fraction_min_after_first"]) >= 0.999
 
@@ -49,6 +51,7 @@ def test_tooth_patch_region_constraint_gate_writes_totals_before_clouds(tmp_path
     assert "contact_constraint_open_closed_source" in total_rows[0]
     assert "q4_master_payload_width" in total_rows[0]
     assert int(total_rows[0]["q4_master_payload_width"]) == 4
+    assert total_rows[0]["contact_secondary_pressure_recovery_source"] == "constraint_region"
     assert "max_contact_secondary_pressure_nodeavg" not in total_rows[0]
 
     report_text = report.read_text(encoding="utf-8")
@@ -77,6 +80,7 @@ def test_tooth_patch_region_gate_rejects_missing_prerequisite_or_q4_payload() ->
         "contact_constraint_normal_source": "area_average_region_normal",
         "contact_constraint_force_distribution": "region_area_slave_shape_master_payload",
         "contact_constraint_independent_quadrature_penalty_disabled": 1,
+        "contact_secondary_pressure_recovery_source": "constraint_region",
     }
     rows = [dict(row), dict(row)]
 
