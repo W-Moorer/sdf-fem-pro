@@ -5,8 +5,10 @@ import pytest
 
 from sfc.contact.constraint_region import (
     aggregate_contact_sample_arrays,
+    contact_active_region_continuity_metrics_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays,
+    contact_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays,
     secondary_node_pressure_recovery_from_regions,
 )
@@ -93,3 +95,52 @@ def test_secondary_pressure_recovery_uses_region_owner_nodes() -> None:
     assert metrics["max_contact_secondary_pressure_nodeavg"] == pytest.approx(10.0)
     assert metrics["mean_active_contact_secondary_pressure_nodeavg"] == pytest.approx(6.0)
     assert metrics["contact_secondary_pressure_recovery_source"] == "constraint_region"
+
+
+def test_path_tracking_metrics_report_active_face_switch_and_cache_rates() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, -0.02, 0.01], dtype=float),
+        "master_face_ids": np.asarray([3, 4, 5], dtype=np.int64),
+        "master_barycentric": np.asarray([[0.7, 0.2, 0.1], [0.2, 0.7, 0.1], [0.1, 0.2, 0.7]], dtype=float),
+        "tracking_cache_hits": np.asarray([True, True, False], dtype=bool),
+        "tracking_cache_matches": np.asarray([True, False, False], dtype=bool),
+    }
+    previous = np.asarray([3, 7, 8], dtype=np.int64)
+    previous_bary = np.asarray([[0.6, 0.3, 0.1], [0.3, 0.6, 0.1], [0.2, 0.2, 0.6]], dtype=float)
+
+    metrics, current, current_bary = contact_path_tracking_metrics_from_arrays(arrays, previous, previous_bary)
+
+    assert current is not None
+    assert current_bary is not None
+    np.testing.assert_array_equal(current, [3, 4, 5])
+    np.testing.assert_allclose(current_bary[0], [0.7, 0.2, 0.1])
+    assert metrics["contact_active_master_face_count"] == 2
+    assert metrics["contact_master_face_tracking_comparable_count"] == 2
+    assert metrics["contact_master_face_switch_count"] == 1
+    assert metrics["contact_master_face_switch_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_master_barycentric_tracking_comparable_count"] == 1
+    assert metrics["contact_master_barycentric_drift_mean"] == pytest.approx(np.sqrt(0.02))
+    assert metrics["contact_master_barycentric_drift_max"] == pytest.approx(np.sqrt(0.02))
+    assert metrics["contact_path_cache_hit_count"] == 2
+    assert metrics["contact_path_cache_hit_fraction"] == pytest.approx(1.0)
+    assert metrics["contact_path_cache_match_count"] == 1
+    assert metrics["contact_path_cache_match_fraction"] == pytest.approx(0.5)
+
+
+def test_active_region_continuity_metrics_use_secondary_constraint_regions() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, -0.02, 0.01, -0.03], dtype=float),
+        "secondary_node_ids": np.asarray([1, 2, 3, 4], dtype=np.int64),
+    }
+    previous = (1, 5)
+
+    metrics, current = contact_active_region_continuity_metrics_from_arrays(arrays, previous)
+
+    assert current == (1, 2, 4)
+    assert metrics["contact_active_region_continuity_previous_count"] == 2
+    assert metrics["contact_active_region_continuity_current_count"] == 3
+    assert metrics["contact_active_region_continuity_intersection_count"] == 1
+    assert metrics["contact_active_region_new_count"] == 2
+    assert metrics["contact_active_region_dropped_count"] == 1
+    assert metrics["contact_active_region_persistence_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_active_region_jaccard"] == pytest.approx(0.25)

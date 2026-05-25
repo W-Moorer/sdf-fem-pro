@@ -44,8 +44,10 @@ from sfc.contact.hard_contact import (  # noqa: E402
 )
 from sfc.contact.constraint_region import (  # noqa: E402
     aggregate_contact_sample_arrays as _core_aggregate_contact_sample_arrays,
+    contact_active_region_continuity_metrics_from_arrays as _core_contact_active_region_continuity_metrics_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays as _core_constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays as _core_constraint_region_pressure_tangent_scales_from_arrays,
+    contact_path_tracking_metrics_from_arrays as _core_contact_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays as _core_contact_region_integral_metrics_from_arrays,
     secondary_node_pressure_recovery_from_regions as _core_secondary_node_pressure_recovery_from_regions,
 )
@@ -325,120 +327,13 @@ def _contact_path_tracking_metrics_from_arrays(
     between accepted states.  It is intentionally separate from SDF querying.
     """
 
-    if sample_arrays is None or "master_face_ids" not in sample_arrays:
-        return {
-            "contact_active_master_face_count": 0,
-            "contact_master_face_unique_count": 0,
-            "contact_master_face_tracking_comparable_count": 0,
-            "contact_master_face_switch_count": 0,
-            "contact_master_face_switch_fraction": 0.0,
-            "contact_path_cache_hit_count": 0,
-            "contact_path_cache_hit_fraction": 0.0,
-            "contact_path_cache_match_count": 0,
-            "contact_path_cache_match_fraction": 0.0,
-            "contact_master_barycentric_tracking_comparable_count": 0,
-            "contact_master_barycentric_drift_mean": 0.0,
-            "contact_master_barycentric_drift_max": 0.0,
-        }, None, None
-    face_ids = np.asarray(sample_arrays.get("master_face_ids", np.empty(0)), dtype=np.int64).reshape(-1)
-    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
-    if face_ids.size == 0 or gaps.size == 0:
-        current = face_ids.copy()
-        return {
-            "contact_active_master_face_count": 0,
-            "contact_master_face_unique_count": 0,
-            "contact_master_face_tracking_comparable_count": 0,
-            "contact_master_face_switch_count": 0,
-            "contact_master_face_switch_fraction": 0.0,
-            "contact_path_cache_hit_count": 0,
-            "contact_path_cache_hit_fraction": 0.0,
-            "contact_path_cache_match_count": 0,
-            "contact_path_cache_match_fraction": 0.0,
-            "contact_master_barycentric_tracking_comparable_count": 0,
-            "contact_master_barycentric_drift_mean": 0.0,
-            "contact_master_barycentric_drift_max": 0.0,
-        }, current, None
-    usable = (face_ids >= 0) & (gaps <= float(active_gap_tolerance))
-    active_faces = face_ids[usable]
-    comparable = np.zeros(face_ids.shape, dtype=bool)
-    switches = np.zeros(face_ids.shape, dtype=bool)
-    if previous_master_face_ids is not None:
-        previous = np.asarray(previous_master_face_ids, dtype=np.int64).reshape(-1)
-        if previous.shape == face_ids.shape:
-            comparable = usable & (previous >= 0)
-            switches = comparable & (previous != face_ids)
-    comparable_count = int(np.count_nonzero(comparable))
-    switch_count = int(np.count_nonzero(switches))
-    metrics: Row = {
-        "contact_active_master_face_count": int(active_faces.size),
-        "contact_master_face_unique_count": int(np.unique(active_faces).size) if active_faces.size else 0,
-        "contact_master_face_tracking_comparable_count": comparable_count,
-        "contact_master_face_switch_count": switch_count,
-        "contact_master_face_switch_fraction": (
-            float(switch_count) / float(comparable_count) if comparable_count else 0.0
-        ),
-    }
-    cache_hits = np.asarray(sample_arrays.get("tracking_cache_hits", np.zeros(face_ids.shape, dtype=bool)), dtype=bool).reshape(-1)
-    cache_matches = np.asarray(
-        sample_arrays.get("tracking_cache_matches", np.zeros(face_ids.shape, dtype=bool)),
-        dtype=bool,
-    ).reshape(-1)
-    if cache_hits.shape == face_ids.shape:
-        active_hits = cache_hits[usable]
-        metrics["contact_path_cache_hit_count"] = int(np.count_nonzero(active_hits))
-        metrics["contact_path_cache_hit_fraction"] = (
-            float(np.count_nonzero(active_hits)) / float(active_faces.size) if active_faces.size else 0.0
-        )
-    else:
-        metrics["contact_path_cache_hit_count"] = 0
-        metrics["contact_path_cache_hit_fraction"] = 0.0
-    if cache_matches.shape == face_ids.shape:
-        active_matches = cache_matches[usable]
-        metrics["contact_path_cache_match_count"] = int(np.count_nonzero(active_matches))
-        metrics["contact_path_cache_match_fraction"] = (
-            float(np.count_nonzero(active_matches)) / float(active_faces.size) if active_faces.size else 0.0
-        )
-    else:
-        metrics["contact_path_cache_match_count"] = 0
-        metrics["contact_path_cache_match_fraction"] = 0.0
-    bary_in = sample_arrays.get("master_barycentric")
-    if bary_in is None:
-        weights = np.asarray(sample_arrays.get("master_weights", np.empty((0, 0))), dtype=float)
-        bary = weights if weights.ndim == 2 and weights.shape[1] == 3 else None
-    else:
-        bary = np.asarray(bary_in, dtype=float)
-    current_bary = None
-    bary_comparable = np.zeros(face_ids.shape, dtype=bool)
-    if bary is not None and bary.ndim == 2 and bary.shape[0] == face_ids.size:
-        current_bary = np.asarray(bary, dtype=float).copy()
-        previous_bary = None if previous_master_barycentric is None else np.asarray(previous_master_barycentric, dtype=float)
-        if previous_bary is not None and previous_bary.shape == current_bary.shape and previous_master_face_ids is not None:
-            previous_faces = np.asarray(previous_master_face_ids, dtype=np.int64).reshape(-1)
-            if previous_faces.shape == face_ids.shape:
-                finite_bary = np.all(np.isfinite(current_bary), axis=1) & np.all(np.isfinite(previous_bary), axis=1)
-                bary_comparable = usable & finite_bary & (previous_faces == face_ids) & (face_ids >= 0)
-                if np.any(bary_comparable):
-                    drifts = np.linalg.norm(current_bary[bary_comparable] - previous_bary[bary_comparable], axis=1)
-                    metrics["contact_master_barycentric_tracking_comparable_count"] = int(drifts.size)
-                    metrics["contact_master_barycentric_drift_mean"] = float(np.mean(drifts))
-                    metrics["contact_master_barycentric_drift_max"] = float(np.max(drifts))
-                else:
-                    metrics["contact_master_barycentric_tracking_comparable_count"] = 0
-                    metrics["contact_master_barycentric_drift_mean"] = 0.0
-                    metrics["contact_master_barycentric_drift_max"] = 0.0
-            else:
-                metrics["contact_master_barycentric_tracking_comparable_count"] = 0
-                metrics["contact_master_barycentric_drift_mean"] = 0.0
-                metrics["contact_master_barycentric_drift_max"] = 0.0
-        else:
-            metrics["contact_master_barycentric_tracking_comparable_count"] = 0
-            metrics["contact_master_barycentric_drift_mean"] = 0.0
-            metrics["contact_master_barycentric_drift_max"] = 0.0
-    else:
-        metrics["contact_master_barycentric_tracking_comparable_count"] = 0
-        metrics["contact_master_barycentric_drift_mean"] = 0.0
-        metrics["contact_master_barycentric_drift_max"] = 0.0
-    return metrics, face_ids.copy(), current_bary
+    metrics, current_faces, current_bary = _core_contact_path_tracking_metrics_from_arrays(
+        sample_arrays,
+        previous_master_face_ids,
+        previous_master_barycentric,
+        active_gap_tolerance=active_gap_tolerance,
+    )
+    return dict(metrics), current_faces, current_bary
 
 
 def _contact_active_region_continuity_metrics_from_arrays(
@@ -455,49 +350,12 @@ def _contact_active_region_continuity_metrics_from_arrays(
     pressure clouds.
     """
 
-    empty = {
-        "contact_active_region_continuity_previous_count": 0,
-        "contact_active_region_continuity_current_count": 0,
-        "contact_active_region_continuity_intersection_count": 0,
-        "contact_active_region_new_count": 0,
-        "contact_active_region_dropped_count": 0,
-        "contact_active_region_persistence_fraction": 0.0,
-        "contact_active_region_jaccard": 0.0,
-    }
-    if sample_arrays is None:
-        return empty, None
-    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
-    if gaps.size == 0:
-        return empty, tuple()
-    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
-    if secondary_ids.shape != gaps.shape or not np.any(secondary_ids >= 0):
-        region_ids = np.arange(gaps.size, dtype=np.int64)
-    else:
-        region_ids = secondary_ids
-    active_mask = (gaps <= float(active_gap_tolerance)) & (region_ids >= 0)
-    current_ids = tuple(sorted({int(region_id) for region_id in region_ids[active_mask]}))
-    if previous_active_region_ids is None:
-        metrics = dict(empty)
-        metrics["contact_active_region_continuity_current_count"] = int(len(current_ids))
-        return metrics, current_ids
-    previous_set = {int(region_id) for region_id in previous_active_region_ids}
-    current_set = set(current_ids)
-    intersection = previous_set & current_set
-    union = previous_set | current_set
-    previous_count = len(previous_set)
-    current_count = len(current_set)
-    metrics = {
-        "contact_active_region_continuity_previous_count": int(previous_count),
-        "contact_active_region_continuity_current_count": int(current_count),
-        "contact_active_region_continuity_intersection_count": int(len(intersection)),
-        "contact_active_region_new_count": int(len(current_set - previous_set)),
-        "contact_active_region_dropped_count": int(len(previous_set - current_set)),
-        "contact_active_region_persistence_fraction": (
-            float(len(intersection)) / float(previous_count) if previous_count else 0.0
-        ),
-        "contact_active_region_jaccard": float(len(intersection)) / float(len(union)) if union else 1.0,
-    }
-    return metrics, current_ids
+    metrics, current_ids = _core_contact_active_region_continuity_metrics_from_arrays(
+        sample_arrays,
+        previous_active_region_ids,
+        active_gap_tolerance=active_gap_tolerance,
+    )
+    return dict(metrics), current_ids
 
 
 def _empty_contact_region_integral_metrics() -> Row:

@@ -23,9 +23,11 @@ from .field_contact import (
 )
 from .constraint_region import (
     aggregate_contact_sample_arrays,
+    contact_active_region_continuity_metrics_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays,
     contact_averaging_modes,
+    contact_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays,
     secondary_node_pressure_recovery_from_regions,
 )
@@ -87,12 +89,14 @@ __all__ = [
     "aggregate_contact_sample_arrays",
     "compute_contact_constraints",
     "compute_field_contact_constraints",
+    "contact_active_region_continuity_metrics_from_arrays",
     "constraint_region_gap_jacobian_sparse_from_arrays",
     "constraint_region_pressure_tangent_scales_from_arrays",
     "contact_constraint_from_sample",
     "contact_averaging_modes",
     "contact_jacobian_entries",
     "contact_jacobian_row",
+    "contact_path_tracking_metrics_from_arrays",
     "contact_region_integral_metrics_from_arrays",
     "field_contact_constraint_from_sample",
     "field_contact_jacobian_entries",
