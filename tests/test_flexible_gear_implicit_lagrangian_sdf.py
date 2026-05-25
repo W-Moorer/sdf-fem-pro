@@ -24,6 +24,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_active_signature_from_samples,
     _contact_node_diagnostics_from_arrays,
     _contact_path_tracking_metrics_from_arrays,
+    _contact_region_integral_metrics_from_arrays,
     _contact_patch_representative_length,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
@@ -406,6 +407,8 @@ def test_array_constraint_region_carries_master_face_ids() -> None:
     assert "master_face_ids" in aggregated
     assert np.asarray(aggregated["master_face_ids"], dtype=np.int64).size == np.asarray(aggregated["gaps"]).size
     assert set(np.asarray(aggregated["master_face_ids"], dtype=np.int64).tolist()).issubset({10, 11, 12})
+    assert "secondary_node_ids" in aggregated
+    assert set(np.asarray(aggregated["secondary_node_ids"], dtype=np.int64).tolist()).issubset({0, 1, 2, 3})
 
 
 def test_contact_pressure_recovery_exposes_secondary_surface_aliases() -> None:
@@ -430,10 +433,50 @@ def test_contact_pressure_recovery_exposes_secondary_surface_aliases() -> None:
     assert metrics["max_contact_secondary_pressure_nodeavg"] == pytest.approx(metrics["max_contact_slave_pressure_nodeavg"])
 
 
+def test_contact_pressure_recovery_uses_secondary_region_nodes_when_available() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.2, 0.6, 0.2], [0.2, 0.6, 0.2]], dtype=float),
+        "gaps": np.asarray([-0.10, 0.05], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 2.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6]], dtype=np.int64),
+        "master_weights": np.asarray([[0.3, 0.4, 0.3], [0.3, 0.4, 0.3]], dtype=float),
+        "master_face_ids": np.asarray([20, 20], dtype=np.int64),
+        "secondary_node_ids": np.asarray([1, 2], dtype=np.int64),
+    }
+
+    diagnostics = _contact_node_diagnostics_from_arrays(arrays, n_nodes=7, stiffness=100.0)
+
+    secondary_pressure = diagnostics["fields"]["contact_secondary_pressure_nodeavg"]
+    assert secondary_pressure[0] == pytest.approx(0.0)
+    assert secondary_pressure[1] == pytest.approx(10.0)
+    assert secondary_pressure[2] == pytest.approx(0.0)
+    assert diagnostics["metrics"]["active_contact_secondary_node_count"] == 1
+
+
+def test_contact_region_integral_metrics_report_force_work_energy_area() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, -0.20, 0.05], dtype=float),
+        "areas": np.asarray([2.0, 3.0, 5.0], dtype=float),
+    }
+
+    metrics = _contact_region_integral_metrics_from_arrays(arrays, stiffness=100.0)
+
+    assert metrics["contact_region_count"] == 3
+    assert metrics["active_contact_region_count"] == 2
+    assert metrics["contact_active_area"] == pytest.approx(5.0)
+    assert metrics["contact_region_normal_force"] == pytest.approx(2.0 * 10.0 + 3.0 * 20.0)
+    assert metrics["contact_region_energy"] == pytest.approx(0.5 * 100.0 * (2.0 * 0.1 * 0.1 + 3.0 * 0.2 * 0.2))
+    assert metrics["contact_region_virtual_work"] == pytest.approx(2.0 * metrics["contact_region_energy"])
+
+
 def test_contact_path_tracking_reports_master_face_switch_fraction() -> None:
     arrays = {
         "gaps": np.asarray([-0.10, -0.02, 0.01], dtype=float),
         "master_face_ids": np.asarray([3, 4, 5], dtype=np.int64),
+        "tracking_cache_hits": np.asarray([True, True, False], dtype=bool),
+        "tracking_cache_matches": np.asarray([True, False, False], dtype=bool),
     }
     previous = np.asarray([3, 7, 8], dtype=np.int64)
 
@@ -445,6 +488,10 @@ def test_contact_path_tracking_reports_master_face_switch_fraction() -> None:
     assert metrics["contact_master_face_tracking_comparable_count"] == 2
     assert metrics["contact_master_face_switch_count"] == 1
     assert metrics["contact_master_face_switch_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_path_cache_hit_count"] == 2
+    assert metrics["contact_path_cache_hit_fraction"] == pytest.approx(1.0)
+    assert metrics["contact_path_cache_match_count"] == 1
+    assert metrics["contact_path_cache_match_fraction"] == pytest.approx(0.5)
 
 
 def test_penalty_history_reports_contact_energy_and_virtual_work() -> None:
@@ -525,7 +572,19 @@ def test_array_region_workspace_reuses_topology_without_freezing_payload() -> No
     assert reference is not None
     assert workspace.misses == 1
     assert workspace.hits == 1
-    for key in ("sample_node_ids", "sample_weights", "gaps", "normals", "areas", "master_node_ids", "master_weights"):
+    for key in (
+        "sample_node_ids",
+        "sample_weights",
+        "gaps",
+        "normals",
+        "areas",
+        "master_node_ids",
+        "master_weights",
+        "master_face_ids",
+        "secondary_node_ids",
+        "tracking_cache_hits",
+        "tracking_cache_matches",
+    ):
         np.testing.assert_allclose(np.asarray(second[key]), np.asarray(reference[key]))
 
 

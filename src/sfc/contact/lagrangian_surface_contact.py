@@ -1043,6 +1043,9 @@ class LagrangianSDFSurfaceContactGeometry:
                     if release_outside.size:
                         gaps[release_outside] = np.abs(gaps[release_outside])
         cache = self._ensure_secondary_face_cache()
+        previous_cache_face_ids = cache[valid_cache_indices].copy()
+        tracking_cache_hits = previous_cache_face_ids >= 0
+        tracking_cache_matches = tracking_cache_hits & (previous_cache_face_ids == face_ids)
         cache[valid_cache_indices] = face_ids
         if bool(self.secondary_path_tracking):
             bary_cache = self._ensure_secondary_barycentric_cache()
@@ -1061,6 +1064,8 @@ class LagrangianSDFSurfaceContactGeometry:
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
             "master_weights": master_bary,
             "master_face_ids": np.asarray(face_ids, dtype=np.int64),
+            "tracking_cache_hits": tracking_cache_hits.astype(bool, copy=False),
+            "tracking_cache_matches": tracking_cache_matches.astype(bool, copy=False),
         }
 
     def normal_compatible_sample_arrays(
@@ -1828,6 +1833,8 @@ def _empty_sample_arrays() -> dict[str, np.ndarray]:
         "master_node_ids": np.empty((0, 3), dtype=np.int64),
         "master_weights": np.empty((0, 3), dtype=float),
         "master_face_ids": np.empty(0, dtype=np.int64),
+        "tracking_cache_hits": np.empty(0, dtype=bool),
+        "tracking_cache_matches": np.empty(0, dtype=bool),
     }
 
 
