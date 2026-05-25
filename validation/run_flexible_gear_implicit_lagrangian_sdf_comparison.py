@@ -3106,6 +3106,81 @@ def _active_reduced_gap_jacobian_sparse_from_arrays(
     return coo_matrix((data, (rows, cols)), shape=(active_ids.size, free_cols.size)).tocsr()
 
 
+def _active_constraint_region_tangent_data_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    transformation: Any,
+    free: np.ndarray,
+    pressure_stiffness: float,
+    equilibrium_scale: float,
+) -> tuple[np.ndarray, Any, np.ndarray]:
+    """Return active region ids, reduced gap Jacobian, and pressure tangent scales.
+
+    For aggregated ``slave_node_region_*`` arrays each row is one secondary
+    constraint region.  With a fixed active set and fixed closest-feature
+    payload, the residual contact tangent is
+
+    ``Kc = J.T @ diag(equilibrium_scale * k_p * A_region) @ J``.
+
+    This helper centralizes the active-set filtering so the solver, tests, and
+    diagnostics all use the same Abaqus-style constraint-region tangent data.
+    """
+
+    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
+    active_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
+    if active_ids.size == 0:
+        free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
+        return active_ids, coo_matrix((0, free_cols.size), dtype=float).tocsr(), np.empty(0, dtype=float)
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    tangent_scale_all = float(equilibrium_scale) * float(pressure_stiffness) * areas[active_ids]
+    positive = tangent_scale_all > 0.0
+    if not np.any(positive):
+        free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
+        return active_ids[:0], coo_matrix((0, free_cols.size), dtype=float).tocsr(), np.empty(0, dtype=float)
+    j_free_all = _active_reduced_gap_jacobian_sparse_from_arrays(sample_arrays, transformation=transformation, free=free)
+    return active_ids[positive], j_free_all[positive], tangent_scale_all[positive]
+
+
+def _constraint_region_tangent_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    pressure_stiffness: float,
+    equilibrium_scale: float = 1.0,
+) -> Row:
+    """Return scalar diagnostics for the active constraint-region tangent."""
+
+    if sample_arrays is None:
+        return {
+            "contact_tangent_active_region_count": 0,
+            "contact_tangent_active_secondary_node_count": 0,
+            "contact_tangent_scale_sum": 0.0,
+            "contact_tangent_scale_max": 0.0,
+        }
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0:
+        return {
+            "contact_tangent_active_region_count": 0,
+            "contact_tangent_active_secondary_node_count": 0,
+            "contact_tangent_scale_sum": 0.0,
+            "contact_tangent_scale_max": 0.0,
+        }
+    active = gaps < 0.0
+    areas = np.asarray(sample_arrays.get("areas", np.zeros_like(gaps)), dtype=float).reshape(-1)
+    scales = float(equilibrium_scale) * float(pressure_stiffness) * areas[active]
+    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    if secondary_ids.shape == gaps.shape:
+        active_secondary = secondary_ids[active]
+        active_secondary = active_secondary[active_secondary >= 0]
+    else:
+        active_secondary = np.empty(0, dtype=np.int64)
+    return {
+        "contact_tangent_active_region_count": int(np.count_nonzero(active)),
+        "contact_tangent_active_secondary_node_count": int(np.unique(active_secondary).size),
+        "contact_tangent_scale_sum": float(np.sum(scales)) if scales.size else 0.0,
+        "contact_tangent_scale_max": float(np.max(scales)) if scales.size else 0.0,
+    }
+
+
 def _solve_penalty_cg_correction_sparse(
     *,
     base_matrix_free: Any,
@@ -3252,14 +3327,15 @@ def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
             return np.asarray(cg(base_matrix_free.tocsr(), rhs, rtol=1.0e-10, atol=1.0e-12, maxiter=1000)[0], dtype=float)
         except Exception:
             return None
-    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
-    tangent_scale = float(equilibrium_scale) * float(pressure_stiffness) * areas[active]
-    positive = tangent_scale > 0.0
-    if not np.any(positive):
+    _active_ids, j_free, tangent_scale = _active_constraint_region_tangent_data_from_arrays(
+        sample_arrays,
+        transformation=transformation,
+        free=free,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    if tangent_scale.size == 0:
         return None
-    j_free = _active_reduced_gap_jacobian_sparse_from_arrays(sample_arrays, transformation=transformation, free=free)
-    j_free = j_free[positive]
-    tangent_scale = tangent_scale[positive]
     return _solve_penalty_cg_correction_sparse(
         base_matrix_free=base_matrix_free,
         rhs=rhs,
@@ -4602,6 +4678,11 @@ def solve_sfc_source_drive_pair(
             if last_sample_arrays is not None
             else _contact_region_integral_metrics_from_samples(last_samples)
         )
+        contact_tangent_metrics = _constraint_region_tangent_metrics_from_arrays(
+            last_sample_arrays,
+            pressure_stiffness=pressure_stiffness,
+            equilibrium_scale=scale,
+        )
         previous = external - internal_reduced_from_state(q_new) + assembly.reduce_vector(last_contact.force)
         if rotating_inertia == "centripetal":
             previous = previous - centripetal_reduced_from_state(q_new, v_new)
@@ -4666,6 +4747,7 @@ def solve_sfc_source_drive_pair(
             if contact_node_diagnostics is not None:
                 row.update(contact_node_diagnostics.get("metrics", {}))
             row.update(contact_region_metrics)
+            row.update(contact_tangent_metrics)
             row.update(path_tracking_metrics)
             rows.append(row)
             timing_history += time.perf_counter() - t_section
@@ -4711,6 +4793,7 @@ def solve_sfc_source_drive_pair(
             )
             frame_row.update(path_tracking_metrics)
             frame_row.update(contact_region_metrics)
+            frame_row.update(contact_tangent_metrics)
             vtk_manifest_rows.append(frame_row)
             vtk_datasets.append((float(t), frame_path))
             vtk_frame_index += 1

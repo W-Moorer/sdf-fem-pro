@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import numpy as np
+from scipy.sparse import identity
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -15,6 +16,7 @@ from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE,
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse,
     _active_reduced_gap_jacobian_sparse_from_arrays,
+    _active_constraint_region_tangent_data_from_arrays,
     _ContactAggregationWorkspace,
     _aggregate_contact_samples,
     _aggregate_contact_sample_arrays,
@@ -26,6 +28,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _contact_patch_representative_length,
+    _constraint_region_tangent_metrics_from_arrays,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
     _default_secondary_contact_tracking_radius,
@@ -797,6 +800,63 @@ def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
 
     np.testing.assert_allclose(direct.toarray(), np.asarray(projected), atol=1.0e-14)
     np.testing.assert_allclose(direct_arrays.toarray(), np.asarray(projected), atol=1.0e-14)
+
+
+def test_constraint_region_tangent_matches_fixed_active_force_difference() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [1, 2, 4]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.2, 0.5, 0.3], [0.1, 0.2, 0.7]], dtype=float),
+        "gaps": np.asarray([-0.10, -0.20], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 3.0], dtype=float),
+        "master_node_ids": np.asarray([[3, 5, 5], [3, 5, 5]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.2, 0.0], [0.4, 0.6, 0.0]], dtype=float),
+        "master_face_ids": np.asarray([11, 12], dtype=np.int64),
+        "secondary_node_ids": np.asarray([0, 1], dtype=np.int64),
+    }
+    n_nodes = 6
+    n_dofs = 3 * n_nodes
+    transformation = identity(n_dofs, format="csr")
+    free = np.arange(n_dofs, dtype=np.int64)
+
+    active_ids, j_free, tangent_scale = _active_constraint_region_tangent_data_from_arrays(
+        arrays,
+        transformation=transformation,
+        free=free,
+        pressure_stiffness=100.0,
+        equilibrium_scale=1.0,
+    )
+    du = np.zeros(n_dofs, dtype=float)
+    du[2::3] = np.asarray([1.0, -2.0, 1.5, -1.0, 0.5, -0.25], dtype=float) * 1.0e-4
+    perturbed = {key: np.asarray(value).copy() for key, value in arrays.items()}
+    perturbed["gaps"] = np.asarray(arrays["gaps"], dtype=float).copy()
+    perturbed["gaps"][active_ids] += np.asarray(j_free @ du, dtype=float)
+
+    base = _assemble_contact_arrays_force_only(arrays, n_nodes=n_nodes, stiffness=100.0)
+    shifted = _assemble_contact_arrays_force_only(perturbed, n_nodes=n_nodes, stiffness=100.0)
+    actual = shifted.force.reshape(-1) - base.force.reshape(-1)
+    predicted = -np.asarray(j_free.T @ (tangent_scale * np.asarray(j_free @ du, dtype=float)), dtype=float).reshape(-1)
+
+    np.testing.assert_allclose(actual, predicted, rtol=1.0e-11, atol=1.0e-11)
+
+
+def test_constraint_region_tangent_metrics_use_region_rows() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, -0.20, 0.02], dtype=float),
+        "areas": np.asarray([2.0, 3.0, 5.0], dtype=float),
+        "secondary_node_ids": np.asarray([4, 4, 5], dtype=np.int64),
+    }
+
+    metrics = _constraint_region_tangent_metrics_from_arrays(
+        arrays,
+        pressure_stiffness=100.0,
+        equilibrium_scale=2.0,
+    )
+
+    assert metrics["contact_tangent_active_region_count"] == 2
+    assert metrics["contact_tangent_active_secondary_node_count"] == 1
+    assert metrics["contact_tangent_scale_sum"] == pytest.approx(2.0 * 100.0 * (2.0 + 3.0))
+    assert metrics["contact_tangent_scale_max"] == pytest.approx(2.0 * 100.0 * 3.0)
 
 
 def test_cropped_gear_pair_is_small_and_has_supports() -> None:
