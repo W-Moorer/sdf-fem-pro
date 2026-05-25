@@ -455,6 +455,9 @@ def compare_sfc_history_to_abaqus_manifest(
         _write_csv(out_csv, [])
         return []
     t_abaqus = np.asarray([float(row.get("time", 0.0) or 0.0) for row in abaqus_rows], dtype=float)
+    def sfc_key(preferred: str, fallback: str) -> str:
+        return preferred if _manifest_column_available(sfc_rows, preferred) else fallback
+
     metric_pairs = [
         ("max_displacement_norm", "max_displacement_magnitude"),
         ("p95_von_mises_nodeavg", "p95_von_mises_nodeavg"),
@@ -463,10 +466,13 @@ def compare_sfc_history_to_abaqus_manifest(
         ("max_equivalent_elastic_strain_nodeavg", "max_equivalent_elastic_strain_nodeavg"),
         ("mean_von_mises_nodeavg", "mean_von_mises_nodeavg"),
         ("mean_equivalent_elastic_strain_nodeavg", "mean_equivalent_elastic_strain_nodeavg"),
-        ("active_contact_node_count", "active_contact_node_count"),
-        ("max_contact_pressure_nodeavg", "max_contact_pressure_nodeavg"),
-        ("p95_contact_pressure_nodeavg", "p95_contact_pressure_nodeavg"),
-        ("mean_active_contact_pressure_nodeavg", "mean_active_contact_pressure_nodeavg"),
+        (sfc_key("active_contact_secondary_node_count", "active_contact_node_count"), "active_contact_node_count"),
+        (sfc_key("max_contact_secondary_pressure_nodeavg", "max_contact_pressure_nodeavg"), "max_contact_pressure_nodeavg"),
+        (sfc_key("p95_contact_secondary_pressure_nodeavg", "p95_contact_pressure_nodeavg"), "p95_contact_pressure_nodeavg"),
+        (
+            sfc_key("mean_active_contact_secondary_pressure_nodeavg", "mean_active_contact_pressure_nodeavg"),
+            "mean_active_contact_pressure_nodeavg",
+        ),
     ]
     rows: list[Row] = []
     for frame, sfc_row in enumerate(sfc_rows):
@@ -816,7 +822,7 @@ def run_full_gear(
     source_secondary_normal_min_projection: float = 0.0,
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_line_hard_distance_limit: float | None = None,
-    source_secondary_path_tracking: bool = False,
+    source_secondary_path_tracking: bool = True,
     source_contact_active_set_stability: bool = True,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "finite_stvk_visual",
@@ -1183,11 +1189,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-secondary-path-tracking",
+        dest="source_secondary_path_tracking",
         action="store_true",
+        default=True,
         help=(
             "Use previous accepted secondary-normal anchor faces as path-tracking "
             "hints for Abaqus-style finite-sliding surface-to-surface contact."
         ),
+    )
+    parser.add_argument(
+        "--no-source-secondary-path-tracking",
+        dest="source_secondary_path_tracking",
+        action="store_false",
+        help="Disable secondary-normal path-tracking hints for diagnostics.",
     )
     parser.add_argument(
         "--source-contact-active-set-stability",

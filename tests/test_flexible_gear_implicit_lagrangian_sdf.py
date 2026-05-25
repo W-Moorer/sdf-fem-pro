@@ -22,6 +22,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _assemble_contact_response_force_only,
     _contact_active_signature_from_arrays,
     _contact_active_signature_from_samples,
+    _contact_node_diagnostics_from_arrays,
+    _contact_path_tracking_metrics_from_arrays,
     _contact_patch_representative_length,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
@@ -41,6 +43,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
     _source_contact_active_set_is_stable,
+    _penalty_history_row,
     _write_csv,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -383,6 +386,116 @@ def test_array_participation_matches_object_participation() -> None:
     assert array_response.normal_force == pytest.approx(object_response.normal_force)
     assert array_response.energy == pytest.approx(object_response.energy)
     assert _contact_active_signature_from_arrays(array_samples) == _contact_active_signature_from_samples(object_samples)
+
+
+def test_array_constraint_region_carries_master_face_ids() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2], [1, 2, 3]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.7, 0.2, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]], dtype=float),
+        "gaps": np.asarray([-0.20, -0.05, 0.03], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 3.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6], [5, 6, 7]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]], dtype=float),
+        "master_face_ids": np.asarray([10, 11, 12], dtype=np.int64),
+    }
+
+    aggregated = _aggregate_contact_sample_arrays(arrays, "slave_node_region_participation")
+
+    assert aggregated is not None
+    assert "master_face_ids" in aggregated
+    assert np.asarray(aggregated["master_face_ids"], dtype=np.int64).size == np.asarray(aggregated["gaps"]).size
+    assert set(np.asarray(aggregated["master_face_ids"], dtype=np.int64).tolist()).issubset({10, 11, 12})
+
+
+def test_contact_pressure_recovery_exposes_secondary_surface_aliases() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [1, 2, 3]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.5, 0.5, 0.0], [0.0, 0.5, 0.5]], dtype=float),
+        "gaps": np.asarray([-0.10, 0.05], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 2.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [5, 6, 7]], dtype=np.int64),
+        "master_weights": np.asarray([[0.3, 0.4, 0.3], [0.2, 0.2, 0.6]], dtype=float),
+        "master_face_ids": np.asarray([20, 21], dtype=np.int64),
+    }
+
+    diagnostics = _contact_node_diagnostics_from_arrays(arrays, n_nodes=8, stiffness=100.0)
+
+    fields = diagnostics["fields"]
+    metrics = diagnostics["metrics"]
+    np.testing.assert_allclose(fields["contact_secondary_pressure_nodeavg"], fields["contact_slave_pressure_nodeavg"])
+    np.testing.assert_allclose(fields["contact_secondary_penetration_nodeavg"], fields["contact_slave_penetration_nodeavg"])
+    assert metrics["active_contact_secondary_node_count"] == metrics["active_contact_slave_node_count"]
+    assert metrics["max_contact_secondary_pressure_nodeavg"] == pytest.approx(metrics["max_contact_slave_pressure_nodeavg"])
+
+
+def test_contact_path_tracking_reports_master_face_switch_fraction() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, -0.02, 0.01], dtype=float),
+        "master_face_ids": np.asarray([3, 4, 5], dtype=np.int64),
+    }
+    previous = np.asarray([3, 7, 8], dtype=np.int64)
+
+    metrics, current = _contact_path_tracking_metrics_from_arrays(arrays, previous)
+
+    assert current is not None
+    np.testing.assert_array_equal(current, [3, 4, 5])
+    assert metrics["contact_active_master_face_count"] == 2
+    assert metrics["contact_master_face_tracking_comparable_count"] == 2
+    assert metrics["contact_master_face_switch_count"] == 1
+    assert metrics["contact_master_face_switch_fraction"] == pytest.approx(0.5)
+
+
+def test_penalty_history_reports_contact_energy_and_virtual_work() -> None:
+    model = SimpleNamespace(
+        X=np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        elements=np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        E=100.0,
+        nu=0.25,
+    )
+    state = SimpleNamespace(x=model.X + 0.01, v=np.zeros_like(model.X), a=np.zeros_like(model.X), time=0.0)
+    internal = SimpleNamespace(
+        force=np.zeros((4, 3), dtype=float),
+        strain=np.zeros((1, 3, 3), dtype=float),
+        stress=np.zeros((1, 3, 3), dtype=float),
+        von_mises=np.zeros(1, dtype=float),
+        strain_energy=0.25,
+    )
+    contact = SimpleNamespace(
+        active_count=1,
+        min_gap=-0.01,
+        normal_force=2.0,
+        energy=0.5,
+        force=np.asarray([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, -0.5, 0.0]]),
+    )
+
+    row = _penalty_history_row(
+        time_value=0.1,
+        closure=0.0,
+        rotation=0.0,
+        state=state,
+        model=model,
+        internal=internal,
+        contact_response=contact,
+        young=100.0,
+        poisson=0.25,
+        newton_iterations=2,
+        residual_norm=1.0e-6,
+        solver="unit",
+    )
+
+    assert row["contact_energy"] == pytest.approx(0.5)
+    assert row["contact_virtual_work"] == pytest.approx(1.0)
+    assert row["contact_resultant_force_norm"] == pytest.approx(0.0)
 
 
 def test_array_region_workspace_reuses_topology_without_freezing_payload() -> None:

@@ -321,6 +321,59 @@ def _contact_active_signature_from_samples(samples: list[ContactSample] | None) 
     return tuple(sorted(signature))
 
 
+def _contact_path_tracking_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    previous_master_face_ids: np.ndarray | None,
+) -> tuple[Row, np.ndarray | None]:
+    """Measure master-face continuity for the accepted batched contact path.
+
+    The metric is diagnostic only: it checks whether the face ids carried by
+    the secondary-normal/path-tracked projection payload change unexpectedly
+    between accepted states.  It is intentionally separate from SDF querying.
+    """
+
+    if sample_arrays is None or "master_face_ids" not in sample_arrays:
+        return {
+            "contact_active_master_face_count": 0,
+            "contact_master_face_unique_count": 0,
+            "contact_master_face_tracking_comparable_count": 0,
+            "contact_master_face_switch_count": 0,
+            "contact_master_face_switch_fraction": 0.0,
+        }, None
+    face_ids = np.asarray(sample_arrays.get("master_face_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if face_ids.size == 0 or gaps.size == 0:
+        current = face_ids.copy()
+        return {
+            "contact_active_master_face_count": 0,
+            "contact_master_face_unique_count": 0,
+            "contact_master_face_tracking_comparable_count": 0,
+            "contact_master_face_switch_count": 0,
+            "contact_master_face_switch_fraction": 0.0,
+        }, current
+    usable = (face_ids >= 0) & (gaps < 0.0)
+    active_faces = face_ids[usable]
+    comparable = np.zeros(face_ids.shape, dtype=bool)
+    switches = np.zeros(face_ids.shape, dtype=bool)
+    if previous_master_face_ids is not None:
+        previous = np.asarray(previous_master_face_ids, dtype=np.int64).reshape(-1)
+        if previous.shape == face_ids.shape:
+            comparable = usable & (previous >= 0)
+            switches = comparable & (previous != face_ids)
+    comparable_count = int(np.count_nonzero(comparable))
+    switch_count = int(np.count_nonzero(switches))
+    metrics: Row = {
+        "contact_active_master_face_count": int(active_faces.size),
+        "contact_master_face_unique_count": int(np.unique(active_faces).size) if active_faces.size else 0,
+        "contact_master_face_tracking_comparable_count": comparable_count,
+        "contact_master_face_switch_count": switch_count,
+        "contact_master_face_switch_fraction": (
+            float(switch_count) / float(comparable_count) if comparable_count else 0.0
+        ),
+    }
+    return metrics, face_ids.copy()
+
+
 def _source_contact_active_set_is_stable(
     active_signature: tuple[tuple[int, ...], ...],
     previous_active_signature: tuple[tuple[int, ...], ...] | None,
@@ -437,6 +490,7 @@ def _aggregate_contact_array_group(
     areas: np.ndarray,
     master_nodes: np.ndarray,
     master_weights: np.ndarray,
+    master_face_ids: np.ndarray | None,
     overclosure_mode: str,
 ) -> dict[str, np.ndarray | float]:
     """Aggregate a set of contact-array rows into one equivalent constraint."""
@@ -515,6 +569,16 @@ def _aggregate_contact_array_group(
     normal = normal / normal_norm
     slave_ids, slave_w = _combined_shape_weights_from_arrays(sample_nodes, sample_weights, row_indices, kinematic_weights)
     master_ids, master_w = _combined_shape_weights_from_arrays(master_nodes, master_weights, row_indices, kinematic_weights)
+    master_face_id = -1
+    if master_face_ids is not None:
+        row_face_ids = np.asarray(master_face_ids, dtype=np.int64).reshape(-1)
+        if row_face_ids.size:
+            valid_faces = row_face_ids[rows]
+            valid_mask = valid_faces >= 0
+            if np.any(valid_mask):
+                weights_for_face = np.asarray(kinematic_weights, dtype=float).reshape(-1)
+                best_local = int(np.argmax(np.where(valid_mask, weights_for_face, -np.inf)))
+                master_face_id = int(valid_faces[best_local])
     return {
         "sample_node_ids": slave_ids,
         "sample_weights": slave_w,
@@ -523,6 +587,7 @@ def _aggregate_contact_array_group(
         "area": float(aggregate_area),
         "master_node_ids": master_ids,
         "master_weights": master_w,
+        "master_face_id": int(master_face_id),
     }
 
 
@@ -538,6 +603,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
             "areas": np.empty(0, dtype=float),
             "master_node_ids": np.empty((0, 0), dtype=np.int64),
             "master_weights": np.empty((0, 0), dtype=float),
+            "master_face_ids": np.empty(0, dtype=np.int64),
         }
     slave_width = max(int(np.asarray(row["sample_node_ids"]).size) for row in rows)
     master_width = max(int(np.asarray(row["master_node_ids"]).size) for row in rows)
@@ -548,6 +614,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
     gaps = np.zeros(len(rows), dtype=float)
     normals = np.zeros((len(rows), 3), dtype=float)
     areas = np.zeros(len(rows), dtype=float)
+    master_face_ids = np.full(len(rows), -1, dtype=np.int64)
     for index, row in enumerate(rows):
         slave_ids = np.asarray(row["sample_node_ids"], dtype=np.int64).reshape(-1)
         slave_w = np.asarray(row["sample_weights"], dtype=float).reshape(-1)
@@ -560,6 +627,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         gaps[index] = float(row["gap"])
         normals[index] = np.asarray(row["normal"], dtype=float).reshape(3)
         areas[index] = float(row["area"])
+        master_face_ids[index] = int(row.get("master_face_id", -1))
     return {
         "sample_node_ids": sample_node_ids,
         "sample_weights": sample_weights,
@@ -568,6 +636,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         "areas": areas,
         "master_node_ids": master_node_ids,
         "master_weights": master_weights,
+        "master_face_ids": master_face_ids,
     }
 
 
@@ -601,6 +670,12 @@ def _aggregate_contact_sample_arrays(
     areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
     master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
     master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    master_face_ids_in = sample_arrays.get("master_face_ids")
+    master_face_ids = (
+        None
+        if master_face_ids_in is None
+        else np.asarray(master_face_ids_in, dtype=np.int64).reshape(-1)
+    )
     expanded_sample_nodes = sample_nodes
     expanded_sample_weights = sample_weights
     expanded_gaps = gaps
@@ -608,6 +683,7 @@ def _aggregate_contact_sample_arrays(
     expanded_areas = areas
     expanded_master_nodes = master_nodes
     expanded_master_weights = master_weights
+    expanded_master_face_ids = master_face_ids
     group_indices: list[list[int]]
     cache_hit = bool(
         workspace is not None
@@ -668,6 +744,7 @@ def _aggregate_contact_sample_arrays(
                     expanded_areas = areas[source_rows] * local_weights
                     expanded_master_nodes = master_nodes[source_rows]
                     expanded_master_weights = master_weights[source_rows]
+                    expanded_master_face_ids = None if master_face_ids is None else master_face_ids[source_rows]
                 else:
                     expanded_sample_nodes = np.empty((0, sample_nodes.shape[1]), dtype=np.int64)
                     expanded_sample_weights = np.empty((0, sample_weights.shape[1]), dtype=float)
@@ -676,6 +753,7 @@ def _aggregate_contact_sample_arrays(
                     expanded_areas = np.empty(0, dtype=float)
                     expanded_master_nodes = np.empty((0, master_nodes.shape[1]), dtype=np.int64)
                     expanded_master_weights = np.empty((0, master_weights.shape[1]), dtype=float)
+                    expanded_master_face_ids = None if master_face_ids is None else np.empty(0, dtype=np.int64)
                 workspace.hits += 1
         if not cache_hit:
             groups: dict[int, list[int]] = {}
@@ -727,6 +805,7 @@ def _aggregate_contact_sample_arrays(
                     "areas": np.empty(0, dtype=float),
                     "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
                     "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
+                    "master_face_ids": np.empty(0, dtype=np.int64),
                 }
             expanded_sample_nodes = sample_nodes[source_rows].copy()
             if base_mode == "slave_node":
@@ -739,6 +818,7 @@ def _aggregate_contact_sample_arrays(
             expanded_areas = areas[source_rows] * local_weights
             expanded_master_nodes = master_nodes[source_rows].copy()
             expanded_master_weights = master_weights[source_rows].copy()
+            expanded_master_face_ids = None if master_face_ids is None else master_face_ids[source_rows].copy()
             if workspace is not None:
                 workspace.misses += 1
                 workspace.store(
@@ -762,6 +842,7 @@ def _aggregate_contact_sample_arrays(
                 "areas": np.empty(0, dtype=float),
                 "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
                 "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
+                "master_face_ids": np.empty(0, dtype=np.int64),
             }
     aggregated = [
         _aggregate_contact_array_group(
@@ -773,6 +854,7 @@ def _aggregate_contact_sample_arrays(
             areas=expanded_areas,
             master_nodes=expanded_master_nodes,
             master_weights=expanded_master_weights,
+            master_face_ids=expanded_master_face_ids,
             overclosure_mode=overclosure_mode,
         )
         for rows in group_indices
@@ -1194,7 +1276,7 @@ def _empty_contact_node_diagnostics(n_nodes: int) -> dict[str, Any]:
         "max_contact_penetration_nodeavg": 0.0,
         "min_contact_gap_node": 0.0,
     }
-    for role in ("slave", "master"):
+    for role in ("slave", "master", "secondary"):
         fields.update(
             {
                 f"contact_{role}_pressure_nodeavg": np.zeros(count, dtype=float),
@@ -1242,6 +1324,27 @@ def _prefixed_contact_node_diagnostics(diagnostics: dict[str, Any], role: str) -
         "fields": {new: fields_in[old] for old, new in field_map.items() if old in fields_in},
         "metrics": {new: metrics_in[old] for old, new in metric_map.items() if old in metrics_in},
     }
+
+
+def _secondary_contact_node_aliases(slave_diagnostics: dict[str, Any]) -> dict[str, Any]:
+    """Expose slave-side pressure recovery under Abaqus secondary-surface names.
+
+    Abaqus reports CPRESS/COPEN on the secondary side for a contact pair.  SFC
+    keeps the older ``slave`` names for backward compatibility and mirrors the
+    same arrays/metrics under ``secondary`` for direct manifest comparison.
+    """
+
+    fields: dict[str, Any] = {}
+    for key, value in dict(slave_diagnostics.get("fields", {})).items():
+        if "contact_slave_" in key:
+            fields[key.replace("contact_slave_", "contact_secondary_")] = value
+    metrics: Row = {}
+    for key, value in dict(slave_diagnostics.get("metrics", {})).items():
+        if "_contact_slave_" in key:
+            metrics[key.replace("_contact_slave_", "_contact_secondary_")] = value
+        elif key.startswith("active_contact_slave_"):
+            metrics[key.replace("active_contact_slave_", "active_contact_secondary_")] = value
+    return {"fields": fields, "metrics": metrics}
 
 
 def _new_contact_accumulators(n_nodes: int) -> dict[str, np.ndarray]:
@@ -1408,6 +1511,9 @@ def _contact_node_diagnostics_from_arrays(
     diagnostics["fields"].update(master_diag["fields"])
     diagnostics["metrics"].update(slave_diag["metrics"])
     diagnostics["metrics"].update(master_diag["metrics"])
+    secondary_diag = _secondary_contact_node_aliases(slave_diag)
+    diagnostics["fields"].update(secondary_diag["fields"])
+    diagnostics["metrics"].update(secondary_diag["metrics"])
     return diagnostics
 
 
@@ -1481,6 +1587,9 @@ def _contact_node_diagnostics_from_samples(samples: Iterable[Any] | None, n_node
     diagnostics["fields"].update(master_diag["fields"])
     diagnostics["metrics"].update(slave_diag["metrics"])
     diagnostics["metrics"].update(master_diag["metrics"])
+    secondary_diag = _secondary_contact_node_aliases(slave_diag)
+    diagnostics["fields"].update(secondary_diag["fields"])
+    diagnostics["metrics"].update(secondary_diag["metrics"])
     return diagnostics
 
 
@@ -2511,6 +2620,9 @@ def _penalty_history_row(
         "active_contact_samples": int(contact_response.active_count),
         "min_gap": float(contact_response.min_gap),
         "normal_force": float(contact_response.normal_force),
+        "contact_energy": float(contact_response.energy),
+        "contact_virtual_work": float(2.0 * contact_response.energy),
+        "contact_resultant_force_norm": float(np.linalg.norm(np.asarray(contact_response.force, dtype=float).reshape((-1, 3)).sum(axis=0))),
         "max_displacement_norm": float(np.max(np.linalg.norm(disp, axis=1))),
         "p95_von_mises": float(np.percentile(internal.von_mises, 95.0)) if internal.von_mises.size else 0.0,
         "max_von_mises": float(np.max(internal.von_mises)) if internal.von_mises.size else 0.0,
@@ -3474,7 +3586,7 @@ def solve_sfc_source_drive_pair(
     source_secondary_normal_min_projection: float = 0.0,
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_line_hard_distance_limit: float | None = None,
-    source_secondary_path_tracking: bool = False,
+    source_secondary_path_tracking: bool = True,
     source_contact_active_set_stability: bool = True,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "finite_stvk_visual",
@@ -3927,6 +4039,7 @@ def solve_sfc_source_drive_pair(
     start = time.perf_counter()
     base_preconditioner_lu: Any | None = None
     contact_aggregation_workspace = _ContactAggregationWorkspace()
+    previous_path_master_face_ids: np.ndarray | None = None
 
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if (
@@ -4251,6 +4364,12 @@ def solve_sfc_source_drive_pair(
         source_step_converged_count += int(bool(step_converged))
         source_iteration_limit_reached_count += int(not bool(step_converged) and iteration_count >= max(1, int(max_iterations)))
         source_unstable_accepted_count += int(bool(source_contact_active_set_stability) and not bool(active_set_stable))
+        path_tracking_metrics, current_path_master_face_ids = _contact_path_tracking_metrics_from_arrays(
+            last_sample_arrays,
+            previous_path_master_face_ids,
+        )
+        if current_path_master_face_ids is not None:
+            previous_path_master_face_ids = current_path_master_face_ids
         previous = external - internal_reduced_from_state(q_new) + assembly.reduce_vector(last_contact.force)
         if rotating_inertia == "centripetal":
             previous = previous - centripetal_reduced_from_state(q_new, v_new)
@@ -4314,6 +4433,7 @@ def solve_sfc_source_drive_pair(
             )
             if contact_node_diagnostics is not None:
                 row.update(contact_node_diagnostics.get("metrics", {}))
+            row.update(path_tracking_metrics)
             rows.append(row)
             timing_history += time.perf_counter() - t_section
         if vtk_due:
@@ -4356,6 +4476,7 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_acceleration_z_rad_per_s2": float(a_new[hub2_slice.start + 5]),
                 }
             )
+            frame_row.update(path_tracking_metrics)
             vtk_manifest_rows.append(frame_row)
             vtk_datasets.append((float(t), frame_path))
             vtk_frame_index += 1

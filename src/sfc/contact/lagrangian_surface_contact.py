@@ -648,7 +648,7 @@ class LagrangianSDFSurfaceContactGeometry:
         *,
         dot_threshold: float,
         cache_key: object,
-    ) -> dict[str, np.ndarray | float]:
+    ) -> dict[str, np.ndarray | float | int]:
         x = np.asarray(point, dtype=float).reshape(3)
         ns = np.asarray(slave_normal, dtype=float).reshape(3)
         ns_norm = float(np.linalg.norm(ns))
@@ -659,6 +659,7 @@ class LagrangianSDFSurfaceContactGeometry:
                 "normal": query.normal,
                 "master_node_ids": query.master_node_ids,
                 "master_weights": query.master_weights,
+                "master_face_id": int(query.face_id),
             }
         ns = ns / ns_norm
         if master_tree is not None:
@@ -670,10 +671,10 @@ class LagrangianSDFSurfaceContactGeometry:
         if cache_index is not None:
             merged = self._merge_secondary_tracking_candidates([candidate_ids], np.asarray([cache_index], dtype=np.int64))
             candidate_ids = np.asarray(merged[0], dtype=np.int64)
-        best: dict[str, np.ndarray | float] | None = None
+        best: dict[str, np.ndarray | float | int] | None = None
         best_key: tuple[float, float, float, float] = (np.inf, np.inf, np.inf, np.inf)
         best_face_id = -1
-        rejected_line: dict[str, np.ndarray | float] | None = None
+        rejected_line: dict[str, np.ndarray | float | int] | None = None
         rejected_abs_gap = np.inf
         for face_id in candidate_ids.reshape(-1):
             nodes = master_faces[int(face_id)]
@@ -714,6 +715,7 @@ class LagrangianSDFSurfaceContactGeometry:
                             "normal": contact_normal.copy(),
                             "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
                             "master_weights": np.clip(bary, 0.0, 1.0),
+                            "master_face_id": int(face_id),
                         }
                     continue
             if (
@@ -734,6 +736,7 @@ class LagrangianSDFSurfaceContactGeometry:
                             "normal": contact_normal.copy(),
                             "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
                             "master_weights": np.clip(bary, 0.0, 1.0),
+                            "master_face_id": int(face_id),
                         }
                     continue
             key = self._secondary_tracking_key(
@@ -749,6 +752,7 @@ class LagrangianSDFSurfaceContactGeometry:
                     "normal": contact_normal.copy(),
                     "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
                     "master_weights": np.clip(bary, 0.0, 1.0),
+                    "master_face_id": int(face_id),
                 }
                 best_face_id = int(face_id)
         if best is not None:
@@ -764,6 +768,7 @@ class LagrangianSDFSurfaceContactGeometry:
                         "normal": np.asarray(closest_payload["normal"], dtype=float),
                         "master_node_ids": np.asarray(closest_payload["master_node_ids"], dtype=np.int64),
                         "master_weights": np.asarray(closest_payload["master_weights"], dtype=float),
+                        "master_face_id": int(closest_payload.get("master_face_id", -1)),
                     }
             weights = np.asarray(best["master_weights"], dtype=float)
             total = float(np.sum(weights))
@@ -795,6 +800,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "normal": normal,
             "master_node_ids": query.master_node_ids,
             "master_weights": query.master_weights,
+            "master_face_id": int(query.face_id),
         }
 
     def _global_closest_feature_payload(
@@ -804,7 +810,7 @@ class LagrangianSDFSurfaceContactGeometry:
         master_faces: np.ndarray,
         *,
         cache_key: object,
-    ) -> dict[str, np.ndarray | float]:
+    ) -> dict[str, np.ndarray | float | int]:
         x = np.asarray(point, dtype=float).reshape(3)
         if bool(self.compiled_batch_projection) and _cpp_projection_available() and _cpp_closest_points_all_faces is not None:
             gaps, normals, face_ids, bary, _closest = _cpp_closest_points_all_faces(x.reshape(1, 3), master_x, master_faces)
@@ -815,6 +821,7 @@ class LagrangianSDFSurfaceContactGeometry:
                     "normal": np.asarray(normals, dtype=float)[0],
                     "master_node_ids": np.asarray(master_faces[face_id], dtype=np.int64),
                     "master_weights": np.asarray(bary, dtype=float)[0],
+                    "master_face_id": int(face_id),
                 }
         query = self._oracle.query(x, cache_key=cache_key)
         return {
@@ -822,6 +829,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "normal": query.normal,
             "master_node_ids": query.master_node_ids,
             "master_weights": query.master_weights,
+            "master_face_id": int(query.face_id),
         }
 
     def secondary_normal_projection_sample_arrays(
@@ -979,11 +987,15 @@ class LagrangianSDFSurfaceContactGeometry:
                     continue
                 gaps[int(local)] = float(payload["gap"])
                 normals[int(local)] = np.asarray(payload["normal"], dtype=float).reshape(3)
-                matching = np.flatnonzero(
-                    np.all(self.master_material.boundary_faces == nodes.reshape(1, 3), axis=1)
-                )
-                if matching.size:
-                    face_ids[int(local)] = int(matching[0])
+                payload_face_id = int(payload.get("master_face_id", -1))
+                if payload_face_id >= 0:
+                    face_ids[int(local)] = payload_face_id
+                else:
+                    matching = np.flatnonzero(
+                        np.all(self.master_material.boundary_faces == nodes.reshape(1, 3), axis=1)
+                    )
+                    if matching.size:
+                        face_ids[int(local)] = int(matching[0])
                 master_bary[int(local)] = np.asarray(payload["master_weights"], dtype=float).reshape(3)
         active = gaps < -1.0e-14
         if (
@@ -1048,6 +1060,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "areas": np.asarray(areas, dtype=float),
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
             "master_weights": master_bary,
+            "master_face_ids": np.asarray(face_ids, dtype=np.int64),
         }
 
     def normal_compatible_sample_arrays(
@@ -1140,6 +1153,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "areas": np.asarray(areas, dtype=float),
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
             "master_weights": master_bary,
+            "master_face_ids": np.asarray(face_ids, dtype=np.int64),
         }
 
     def nodal_samples(self, x_current: np.ndarray):
@@ -1231,6 +1245,7 @@ class LagrangianSDFSurfaceContactGeometry:
                 "areas": np.empty(0, dtype=float),
                 "master_node_ids": np.empty((0, 3), dtype=np.int64),
                 "master_weights": np.empty((0, 3), dtype=float),
+                "master_face_ids": np.empty(0, dtype=np.int64),
             }
         kept_faces = global_faces[keep]
         kept_triangles = triangles[keep]
@@ -1258,6 +1273,7 @@ class LagrangianSDFSurfaceContactGeometry:
                     "areas": np.empty(0, dtype=float),
                     "master_node_ids": np.empty((0, 3), dtype=np.int64),
                     "master_weights": np.empty((0, 3), dtype=float),
+                    "master_face_ids": np.empty(0, dtype=np.int64),
                 }
             point_array = point_array[point_keep]
             sample_nodes = sample_nodes[point_keep]
@@ -1300,6 +1316,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "areas": np.asarray(areas, dtype=float),
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
             "master_weights": np.asarray(master_bary, dtype=float),
+            "master_face_ids": np.asarray(face_ids, dtype=np.int64),
         }
 
     def sample_arrays(self, x_current: np.ndarray) -> dict[str, np.ndarray] | None:
@@ -1337,6 +1354,7 @@ class LagrangianSDFSurfaceContactGeometry:
                 "areas": np.empty(0, dtype=float),
                 "master_node_ids": np.empty((0, 3), dtype=np.int64),
                 "master_weights": np.empty((0, 3), dtype=float),
+                "master_face_ids": np.empty(0, dtype=np.int64),
             }
         kept_faces = global_faces[keep]
         kept_triangles = triangles[keep]
@@ -1366,6 +1384,7 @@ class LagrangianSDFSurfaceContactGeometry:
                     "areas": np.empty(0, dtype=float),
                     "master_node_ids": np.empty((0, 3), dtype=np.int64),
                     "master_weights": np.empty((0, 3), dtype=float),
+                    "master_face_ids": np.empty(0, dtype=np.int64),
                 }
             point_array = point_array[point_keep]
             sample_nodes = sample_nodes[point_keep]
@@ -1408,6 +1427,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "areas": np.asarray(areas, dtype=float),
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
             "master_weights": np.asarray(master_bary, dtype=float),
+            "master_face_ids": np.asarray(face_ids, dtype=np.int64),
         }
 
     def _prepare_sampling(
@@ -1807,6 +1827,7 @@ def _empty_sample_arrays() -> dict[str, np.ndarray]:
         "areas": np.empty(0, dtype=float),
         "master_node_ids": np.empty((0, 3), dtype=np.int64),
         "master_weights": np.empty((0, 3), dtype=float),
+        "master_face_ids": np.empty(0, dtype=np.int64),
     }
 
 
