@@ -3466,8 +3466,12 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert int(summary["cropped_patch_contact_total_gate_passed"]) == 1
     assert int(summary["cropped_patch_increment_gate_passed"]) == 1
     assert int(summary["cropped_patch_constraint_region_tangent_gate_passed"]) == 1
+    assert int(summary["cropped_patch_active_set_line_search_gate_passed"]) == 1
     assert int(summary["contact_total_gate_passed"]) == 1
     assert int(summary["contact_total_secondary_pressure_recovery_from_region"]) == 1
+    assert int(summary["hard_line_search_trial_count"]) >= 0
+    assert int(summary["hard_line_search_unstable_count"]) == 0
+    assert int(summary["hard_accepted_tracking_commit_count"]) > 0
     assert int(history[-1]["nodal_cpress_deferred"]) == 1
     assert history[-1]["contact_secondary_pressure_recovery_source"] == "constraint_region"
     assert "max_contact_secondary_pressure_nodeavg" not in history[-1]
@@ -3482,6 +3486,10 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert float(history[-1]["hard_normalized_contact_force_increment"]) <= float(
         summary["hard_contact_force_increment_tolerance"]
     )
+    assert int(history[-1]["hard_line_search_trial_count"]) >= 0
+    assert int(history[-1]["hard_line_search_unstable_count"]) == 0
+    assert 0.0 < float(history[-1]["hard_line_search_last_alpha"]) <= 1.0
+    assert int(history[-1]["hard_accepted_tracking_committed"]) > 0
     assert history[-1]["contact_tangent_source"] == "constraint_region_arrays"
     assert history[-1]["contact_tangent_gap_jacobian_source"] == "constraint_region_fixed_payload"
     assert history[-1]["contact_tangent_pressure_derivative"] == "linear_penalty_active_set"
@@ -3522,6 +3530,7 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(gate["cropped_patch_contact_total_gate_passed"]) == 1
     assert int(gate["cropped_patch_increment_gate_passed"]) == 1
     assert int(gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 1
+    assert int(gate["cropped_patch_active_set_line_search_gate_passed"]) == 1
     assert int(gate["contact_total_gate_passed"]) == 1
     assert int(gate["contact_total_nodal_cpress_deferred"]) == 1
     assert int(gate["contact_total_no_nodal_priority_columns"]) == 1
@@ -3543,6 +3552,9 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert all(int(row["hard_increment_converged"]) == 1 for row in history)
     assert all(int(row["hard_increment_accepted"]) == 1 for row in history)
     assert all(int(row["hard_increment_cutback_required"]) == 0 for row in history)
+    assert all(int(row["hard_line_search_unstable_count"]) == 0 for row in history)
+    assert all(0.0 < float(row["hard_line_search_last_alpha"]) <= 1.0 for row in history)
+    assert all(int(row["hard_accepted_tracking_committed"]) > 0 for row in history)
     assert all(int(row["contact_tangent_used_by_hard_kkt"]) == 1 for row in history)
     assert all(int(row["contact_tangent_active_region_count"]) == int(row["active_contact_region_count"]) for row in history)
     assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0
@@ -3558,6 +3570,16 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(bad_tangent_gate["cropped_patch_gate_passed"]) == 0
     assert int(bad_tangent_gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 0
     assert bad_tangent_gate["cropped_patch_gate_reason"] == "constraint_region_tangent_gate_failed"
+    bad_line_search_history = [dict(row) for row in history]
+    bad_line_search_history[-1]["hard_line_search_unstable_count"] = 1
+    bad_line_search_gate = _cropped_patch_contact_gate_metrics(
+        bad_line_search_history,
+        summary,
+        require_monotone_trend=False,
+    )
+    assert int(bad_line_search_gate["cropped_patch_gate_passed"]) == 0
+    assert int(bad_line_search_gate["cropped_patch_active_set_line_search_gate_passed"]) == 0
+    assert bad_line_search_gate["cropped_patch_gate_reason"] == "active_set_line_search_failed"
 
 
 def test_cropped_gear_hard_contact_supports_surface_patch_constraint_averaging() -> None:

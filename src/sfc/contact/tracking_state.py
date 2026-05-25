@@ -134,4 +134,11 @@ def _copy_array_dict(value: Any) -> dict[Any, np.ndarray] | None:
 
 
 def _restore_optional_array_attribute(obj: Any, name: str, value: Any, dtype: Any) -> None:
-    setattr(obj, name, None if value is None else np.asarray(value, dtype=dtype).copy())
+    if value is None and not hasattr(obj, name):
+        return
+    try:
+        setattr(obj, name, None if value is None else np.asarray(value, dtype=dtype).copy())
+    except AttributeError:
+        if value is None:
+            return
+        raise

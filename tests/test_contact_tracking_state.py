@@ -64,6 +64,25 @@ def test_tracking_trial_rolls_back_mutation_but_returns_query_result() -> None:
     np.testing.assert_array_equal(geometry._secondary_face_cache, [4])
 
 
+class _SlottedFaceOnlyGeometry:
+    __slots__ = ("_secondary_face_cache", "_oracle")
+
+    def __init__(self) -> None:
+        self._secondary_face_cache = np.asarray([3], dtype=np.int64)
+        self._oracle = None
+
+
+def test_tracking_restore_skips_missing_optional_slot_cache() -> None:
+    geometry = _SlottedFaceOnlyGeometry()
+
+    def query() -> str:
+        geometry._secondary_face_cache[0] = 8
+        return "ok"
+
+    assert run_contact_tracking_trial([geometry], query) == "ok"
+    np.testing.assert_array_equal(geometry._secondary_face_cache, [3])
+
+
 class _CommittableGeometry:
     def __init__(self) -> None:
         self.committed: dict[str, np.ndarray] | None = None

@@ -305,6 +305,43 @@ def _contact_active_signature_from_samples(samples: list[ContactSample] | None) 
     return tuple(sorted(signature))
 
 
+def _contact_active_signature_from_samples_mask(
+    samples: list[Any] | None,
+    active_mask: np.ndarray,
+) -> tuple[tuple[int, ...], ...]:
+    """Return active-set signature from solver-selected sample rows."""
+
+    if not samples:
+        return tuple()
+    active = np.asarray(active_mask, dtype=bool).reshape(-1)
+    signature: list[tuple[int, ...]] = []
+    for idx, sample in enumerate(samples):
+        if idx >= active.size or not bool(active[idx]):
+            continue
+        slave_nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        slave_weights = np.asarray(sample.shape_weights, dtype=float).reshape(-1)
+        slave = tuple(
+            int(value)
+            for value, weight in zip(slave_nodes, slave_weights, strict=True)
+            if abs(float(weight)) > 1.0e-15
+        )
+        if getattr(sample, "master_node_ids", None) is None:
+            master: tuple[int, ...] = tuple()
+        else:
+            master_nodes = np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1)
+            if getattr(sample, "master_shape_weights", None) is None:
+                master = tuple(int(value) for value in master_nodes)
+            else:
+                master_weights = np.asarray(sample.master_shape_weights, dtype=float).reshape(-1)
+                master = tuple(
+                    int(value)
+                    for value, weight in zip(master_nodes, master_weights, strict=True)
+                    if abs(float(weight)) > 1.0e-15
+                )
+        signature.append(slave + (-1,) + master)
+    return tuple(sorted(signature))
+
+
 def _contact_path_tracking_metrics_from_arrays(
     sample_arrays: dict[str, np.ndarray] | None,
     previous_master_face_ids: np.ndarray | None,
@@ -6224,6 +6261,8 @@ def solve_sfc_cropped_pair_hard_contact(
     correction_tolerance: float = 1.0e-4,
     contact_force_increment_tolerance: float = 1.0e-2,
     require_active_set_stability: bool = True,
+    active_set_line_search: bool = True,
+    active_set_line_search_min_alpha: float = 0.125,
 ) -> tuple[list[Row], Row]:
     """Solve the cropped gear pair with implicit Newmark + HARD contact KKT.
 
@@ -6284,6 +6323,9 @@ def solve_sfc_cropped_pair_hard_contact(
         raise ValueError("correction_tolerance must be positive")
     if float(contact_force_increment_tolerance) <= 0.0:
         raise ValueError("contact_force_increment_tolerance must be positive")
+    active_set_line_search_min_alpha = float(active_set_line_search_min_alpha)
+    if not (0.0 < active_set_line_search_min_alpha <= 1.0):
+        raise ValueError("active_set_line_search_min_alpha must lie in (0, 1]")
     start = time.perf_counter()
     timing_internal_tangent = 0.0
     timing_contact_linearization = 0.0
@@ -6292,6 +6334,11 @@ def solve_sfc_cropped_pair_hard_contact(
     timing_accepted_internal = 0.0
     timing_accepted_contact = 0.0
     timing_reaction_diagnostics = 0.0
+    hard_line_search_trial_count = 0
+    hard_line_search_reduced_count = 0
+    hard_line_search_stable_count = 0
+    hard_line_search_unstable_count = 0
+    hard_accepted_tracking_commit_count = 0
     last_iterations = 0
     last_converged = True
     cutback_count = 0
@@ -6333,6 +6380,11 @@ def solve_sfc_cropped_pair_hard_contact(
         hard_increment_decision: SourceIncrementConvergenceDecision | None = None
         hard_cutback_candidate_dt: float | None = None
         hard_increment_gate_row: Row = {}
+        step_line_search_trial_count = 0
+        step_line_search_reduced_count = 0
+        step_line_search_stable_count = 0
+        step_line_search_unstable_count = 0
+        step_line_search_last_alpha = 1.0
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             x_guess = model.X + u_guess.reshape((-1, 3))
             t_section = time.perf_counter()
@@ -6446,6 +6498,7 @@ def solve_sfc_cropped_pair_hard_contact(
             normalized_correction = correction_norm / displacement_scale
             residual_converged = normalized_residual <= float(residual_tolerance)
             correction_converged = normalized_correction <= float(correction_tolerance)
+            active_signature = _contact_active_signature_from_samples_mask(final_samples, active_now)
             hard_increment_decision = _core_increment_convergence_decision(
                 residual_converged=bool(residual_converged),
                 correction_converged=bool(correction_converged),
@@ -6477,10 +6530,100 @@ def solve_sfc_cropped_pair_hard_contact(
                 cutback_candidate_dt=hard_cutback_candidate_dt,
                 prefix="hard",
             )
-            u_guess = solution.displacement.copy()
             if bool(solution.converged) and bool(hard_increment_decision.accepted):
+                u_guess = solution.displacement.copy()
                 converged = True
                 break
+            correction_full = solution.displacement - u_guess
+            if (
+                bool(active_set_line_search)
+                and bool(require_active_set_stability)
+                and correction_norm > 0.0
+                and active_signature is not None
+            ):
+                alphas: list[float] = []
+                alpha_value = 1.0
+                while alpha_value >= active_set_line_search_min_alpha * (1.0 - 1.0e-12):
+                    alphas.append(float(alpha_value))
+                    alpha_value *= 0.5
+                if alphas[-1] > active_set_line_search_min_alpha * (1.0 + 1.0e-12):
+                    alphas.append(float(active_set_line_search_min_alpha))
+                candidates: list[tuple[float, tuple[tuple[int, ...], ...]]] = []
+                for alpha_candidate in alphas:
+                    u_trial = project_fixed_dofs(
+                        u_guess + float(alpha_candidate) * correction_full,
+                        fixed,
+                        values,
+                    )
+
+                    def query_signature() -> tuple[tuple[int, ...], ...]:
+                        x_trial = model.X + u_trial.reshape((-1, 3))
+                        trial_samples, _trial_gap, _trial_j, _trial_areas = _hard_contact_linearized_gap_jacobian(
+                            contact,
+                            x_trial,
+                            u_trial,
+                            n_total_dofs=model.n_dofs,
+                            constraint_averaging=constraint_averaging,
+                        )
+                        return _contact_active_signature_from_samples(trial_samples)
+
+                    trial_signature = _core_run_contact_tracking_trial([contact], query_signature)
+                    candidates.append((float(alpha_candidate), trial_signature))
+                alpha_choice, stable_choice, line_search_trials = _core_active_set_line_search_choice(
+                    active_signature,
+                    candidates,
+                    require_stability=True,
+                )
+                step_line_search_trial_count += int(line_search_trials)
+                hard_line_search_trial_count += int(line_search_trials)
+                if stable_choice:
+                    step_line_search_stable_count += 1
+                    hard_line_search_stable_count += 1
+                else:
+                    step_line_search_unstable_count += 1
+                    hard_line_search_unstable_count += 1
+                if alpha_choice < 1.0 - 1.0e-12:
+                    correction_full = float(alpha_choice) * correction_full
+                    step_line_search_reduced_count += 1
+                    hard_line_search_reduced_count += 1
+                step_line_search_last_alpha = float(alpha_choice)
+                active_set_stable = _core_active_set_stability_after_line_search(
+                    active_set_stable,
+                    line_search_attempted=True,
+                    line_search_stable=stable_choice,
+                )
+                hard_increment_decision = _core_increment_convergence_decision(
+                    residual_converged=bool(residual_converged),
+                    correction_converged=bool(correction_converged),
+                    contact_force_increment_converged=bool(contact_force_increment_converged),
+                    active_set_stable=bool(active_set_stable),
+                    iteration_count=int(iteration),
+                    max_iterations=max(1, int(max_iterations)),
+                    accept_unconverged=False,
+                )
+                hard_cutback_candidate_dt = (
+                    _core_increment_cutback_candidate_dt(
+                        h,
+                        min_dt=min_dt,
+                        cutback_factor=float(cutback_factor),
+                    )
+                    if hard_increment_decision.cutback_required
+                    else None
+                )
+                hard_increment_gate_row = _core_increment_gate_row(
+                    residual_converged=bool(residual_converged),
+                    correction_converged=bool(correction_converged),
+                    contact_force_increment_converged=bool(contact_force_increment_converged),
+                    active_set_stable=bool(active_set_stable),
+                    normalized_residual=float(normalized_residual),
+                    normalized_correction=float(normalized_correction),
+                    normalized_contact_force_increment=float(normalized_contact_force_increment),
+                    contact_force_increment_norm=float(contact_force_increment_norm),
+                    decision=hard_increment_decision,
+                    cutback_candidate_dt=hard_cutback_candidate_dt,
+                    prefix="hard",
+                )
+            u_guess = project_fixed_dofs(u_guess + correction_full, fixed, values)
             previous_active = active_now.copy()
             previous_iteration_contact_force = contact_force_vector.copy()
         if solution is None:
@@ -6496,6 +6639,12 @@ def solve_sfc_cropped_pair_hard_contact(
         state_x = model.X + u_new.reshape((-1, 3))
         velocity = v_new.reshape((-1, 3))
         acceleration = a_new.reshape((-1, 3))
+        accepted_contact_arrays = _core_run_contact_tracking_trial([contact], lambda: contact.sample_arrays(state_x))
+        hard_accepted_tracking_committed = _core_commit_accepted_contact_tracking_from_sample_arrays(
+            [contact],
+            accepted_contact_arrays,
+        )
+        hard_accepted_tracking_commit_count += int(hard_accepted_tracking_committed)
         t_section = time.perf_counter()
         internal = stvk_internal_response(model, state_x, assemble_tangent=False)
         timing_accepted_internal += time.perf_counter() - t_section
@@ -6633,6 +6782,12 @@ def solve_sfc_cropped_pair_hard_contact(
             "hard_active_set_converged": int(bool(solution.converged)),
             "hard_outer_converged": int(bool(converged)),
             "automatic_increment_cutbacks": int(cutback_count),
+            "hard_line_search_trial_count": int(step_line_search_trial_count),
+            "hard_line_search_reduced_count": int(step_line_search_reduced_count),
+            "hard_line_search_stable_count": int(step_line_search_stable_count),
+            "hard_line_search_unstable_count": int(step_line_search_unstable_count),
+            "hard_line_search_last_alpha": float(step_line_search_last_alpha),
+            "hard_accepted_tracking_committed": int(hard_accepted_tracking_committed),
             "hard_contact_samples": int(len(final_samples)),
             "hard_constraints": int(solution.gaps.shape[0]),
             "hht_alpha": float(hht_alpha),
@@ -6720,6 +6875,13 @@ def solve_sfc_cropped_pair_hard_contact(
         "hard_correction_tolerance": float(correction_tolerance),
         "hard_contact_force_increment_tolerance": float(contact_force_increment_tolerance),
         "hard_require_active_set_stability": str(bool(require_active_set_stability)).lower(),
+        "hard_active_set_line_search": str(bool(active_set_line_search)).lower(),
+        "hard_active_set_line_search_min_alpha": float(active_set_line_search_min_alpha),
+        "hard_line_search_trial_count": int(hard_line_search_trial_count),
+        "hard_line_search_reduced_count": int(hard_line_search_reduced_count),
+        "hard_line_search_stable_count": int(hard_line_search_stable_count),
+        "hard_line_search_unstable_count": int(hard_line_search_unstable_count),
+        "hard_accepted_tracking_commit_count": int(hard_accepted_tracking_commit_count),
         "contact_patch_min_edge_length": _contact_patch_min_edge_length(pair),
         "timing_internal_tangent_seconds": float(timing_internal_tangent),
         "timing_contact_linearization_seconds": float(timing_contact_linearization),
@@ -6768,6 +6930,7 @@ def _cropped_patch_contact_gate_metrics(
             "cropped_patch_contact_total_gate_passed": 0,
             "cropped_patch_increment_gate_passed": 0,
             "cropped_patch_constraint_region_tangent_gate_passed": 0,
+            "cropped_patch_active_set_line_search_gate_passed": 0,
             "cropped_patch_convergence_gate_passed": 0,
             "cropped_patch_contact_response_gate_passed": 0,
             "cropped_patch_pressure_stress_gate_passed": 0,
@@ -6816,6 +6979,11 @@ def _cropped_patch_contact_gate_metrics(
                 and float(row.get("contact_tangent_scale_max", 0.0)) > 0.0
             )
         )
+        for row in rows
+    )
+    line_search_ok = all(
+        int(row.get("hard_line_search_unstable_count", 0)) == 0
+        and 0.0 < float(row.get("hard_line_search_last_alpha", 1.0)) <= 1.0
         for row in rows
     )
     contact_ok = (
@@ -6885,6 +7053,7 @@ def _cropped_patch_contact_gate_metrics(
         and contact_total_ok
         and increment_ok
         and tangent_ok
+        and line_search_ok
     )
     reason = "passed"
     if not convergence_ok:
@@ -6893,6 +7062,8 @@ def _cropped_patch_contact_gate_metrics(
         reason = "increment_acceptance_gate_failed"
     elif not tangent_ok:
         reason = "constraint_region_tangent_gate_failed"
+    elif not line_search_ok:
+        reason = "active_set_line_search_failed"
     elif not contact_ok:
         reason = "missing_active_contact_response"
     elif not pressure_stress_ok:
@@ -6912,6 +7083,7 @@ def _cropped_patch_contact_gate_metrics(
         "cropped_patch_contact_total_gate_passed": int(bool(contact_total_ok)),
         "cropped_patch_increment_gate_passed": int(bool(increment_ok)),
         "cropped_patch_constraint_region_tangent_gate_passed": int(bool(tangent_ok)),
+        "cropped_patch_active_set_line_search_gate_passed": int(bool(line_search_ok)),
         "cropped_patch_convergence_gate_passed": int(bool(convergence_ok)),
         "cropped_patch_contact_response_gate_passed": int(bool(contact_ok)),
         "cropped_patch_pressure_stress_gate_passed": int(bool(pressure_stress_ok)),
