@@ -6174,6 +6174,10 @@ def solve_sfc_cropped_pair_hard_contact(
     automatic_increment: bool = True,
     cutback_factor: float = 0.5,
     linear_solver: str = "dense",
+    residual_tolerance: float = 1.0e-7,
+    correction_tolerance: float = 1.0e-4,
+    contact_force_increment_tolerance: float = 1.0e-2,
+    require_active_set_stability: bool = True,
 ) -> tuple[list[Row], Row]:
     """Solve the cropped gear pair with implicit Newmark + HARD contact KKT.
 
@@ -6228,6 +6232,12 @@ def solve_sfc_cropped_pair_hard_contact(
         raise ValueError("dt must be positive")
     if not (0.0 < float(cutback_factor) < 1.0):
         raise ValueError("cutback_factor must lie in (0, 1)")
+    if float(residual_tolerance) <= 0.0:
+        raise ValueError("residual_tolerance must be positive")
+    if float(correction_tolerance) <= 0.0:
+        raise ValueError("correction_tolerance must be positive")
+    if float(contact_force_increment_tolerance) <= 0.0:
+        raise ValueError("contact_force_increment_tolerance must be positive")
     start = time.perf_counter()
     timing_internal_tangent = 0.0
     timing_contact_linearization = 0.0
@@ -6265,7 +6275,18 @@ def solve_sfc_cropped_pair_hard_contact(
         converged = False
         iteration_count = 0
         previous_active: np.ndarray | None = None
-        active_stable_count = 0
+        previous_iteration_contact_force: np.ndarray | None = None
+        residual_converged = False
+        correction_converged = False
+        contact_force_increment_converged = False
+        active_set_stable = not bool(require_active_set_stability)
+        normalized_residual = np.inf
+        normalized_correction = np.inf
+        normalized_contact_force_increment = np.inf
+        contact_force_increment_norm = np.inf
+        hard_increment_decision: SourceIncrementConvergenceDecision | None = None
+        hard_cutback_candidate_dt: float | None = None
+        hard_increment_gate_row: Row = {}
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             x_guess = model.X + u_guess.reshape((-1, 3))
             t_section = time.perf_counter()
@@ -6334,23 +6355,92 @@ def solve_sfc_cropped_pair_hard_contact(
             timing_hard_contact_solve += time.perf_counter() - t_section
             correction_norm = float(np.linalg.norm(solution.displacement - u_guess))
             displacement_scale = max(1.0, float(np.linalg.norm(solution.displacement)))
-            u_guess = solution.displacement.copy()
             iteration_count = iteration
             active_now = np.asarray(solution.active, dtype=bool)
-            if previous_active is not None and np.array_equal(active_now, previous_active):
-                active_stable_count += 1
+            active_set_stable = bool(
+                (not bool(require_active_set_stability))
+                or (previous_active is not None and np.array_equal(active_now, previous_active))
+            )
+            contact_force_vector = (
+                np.asarray(gap_jacobian.T @ np.asarray(solution.multipliers, dtype=float), dtype=float)
+                if gap_jacobian.size and np.asarray(solution.multipliers, dtype=float).size
+                else np.zeros(model.n_dofs, dtype=float)
+            )
+            if previous_iteration_contact_force is None:
+                contact_force_increment_norm = np.inf if np.any(active_now) else 0.0
+                normalized_contact_force_increment = np.inf if np.any(active_now) else 0.0
+                contact_force_increment_converged = not bool(np.any(active_now))
             else:
-                active_stable_count = 0
-            previous_active = active_now.copy()
-            strict_correction = correction_norm <= float(tolerance) * displacement_scale
-            abaqus_style_contact_accept = bool(solution.converged) and active_stable_count >= 1 and correction_norm <= 1.0e-4 * displacement_scale
-            if bool(solution.converged) and (strict_correction or abaqus_style_contact_accept):
+                contact_force_increment_norm = float(np.linalg.norm(contact_force_vector - previous_iteration_contact_force))
+                contact_force_scale = max(
+                    1.0,
+                    float(np.linalg.norm(contact_force_vector)),
+                    float(np.linalg.norm(previous_iteration_contact_force)),
+                )
+                normalized_contact_force_increment = contact_force_increment_norm / contact_force_scale
+                contact_force_increment_converged = (
+                    normalized_contact_force_increment <= float(contact_force_increment_tolerance)
+                )
+            free_mask = np.ones(model.n_dofs, dtype=bool)
+            free_mask[np.asarray(fixed, dtype=np.int64)] = False
+            residual_vector = np.asarray(
+                effective_stiffness @ solution.displacement
+                - effective_force
+                - equilibrium_scale * contact_force_vector,
+                dtype=float,
+            )
+            residual_free = residual_vector[free_mask]
+            residual_scale = max(
+                1.0,
+                float(np.linalg.norm(effective_force[free_mask])),
+                float(np.linalg.norm((effective_stiffness @ solution.displacement)[free_mask])),
+                float(equilibrium_scale * np.linalg.norm(contact_force_vector[free_mask])),
+            )
+            normalized_residual = float(np.linalg.norm(residual_free)) / residual_scale
+            normalized_correction = correction_norm / displacement_scale
+            residual_converged = normalized_residual <= float(residual_tolerance)
+            correction_converged = normalized_correction <= float(correction_tolerance)
+            hard_increment_decision = _core_increment_convergence_decision(
+                residual_converged=bool(residual_converged),
+                correction_converged=bool(correction_converged),
+                contact_force_increment_converged=bool(contact_force_increment_converged),
+                active_set_stable=bool(active_set_stable),
+                iteration_count=int(iteration),
+                max_iterations=max(1, int(max_iterations)),
+                accept_unconverged=False,
+            )
+            hard_cutback_candidate_dt = (
+                _core_increment_cutback_candidate_dt(
+                    h,
+                    min_dt=min_dt,
+                    cutback_factor=float(cutback_factor),
+                )
+                if hard_increment_decision.cutback_required
+                else None
+            )
+            hard_increment_gate_row = _core_increment_gate_row(
+                residual_converged=bool(residual_converged),
+                correction_converged=bool(correction_converged),
+                contact_force_increment_converged=bool(contact_force_increment_converged),
+                active_set_stable=bool(active_set_stable),
+                normalized_residual=float(normalized_residual),
+                normalized_correction=float(normalized_correction),
+                normalized_contact_force_increment=float(normalized_contact_force_increment),
+                contact_force_increment_norm=float(contact_force_increment_norm),
+                decision=hard_increment_decision,
+                cutback_candidate_dt=hard_cutback_candidate_dt,
+                prefix="hard",
+            )
+            u_guess = solution.displacement.copy()
+            if bool(solution.converged) and bool(hard_increment_decision.accepted):
                 converged = True
                 break
+            previous_active = active_now.copy()
+            previous_iteration_contact_force = contact_force_vector.copy()
         if solution is None:
             raise RuntimeError("hard contact solve did not run")
         if (not converged) and bool(automatic_increment) and h > min_dt * (1.0 + 1.0e-12):
-            h_trial = max(min_dt, h * float(cutback_factor))
+            h_trial = float(hard_cutback_candidate_dt) if hard_cutback_candidate_dt is not None else max(min_dt, h * float(cutback_factor))
             cutback_count += 1
             continue
         previous_rhs_before_step = previous_rhs_balance.copy()
@@ -6512,6 +6602,7 @@ def solve_sfc_cropped_pair_hard_contact(
         row.update(path_tracking_metrics)
         row.update(active_region_metrics)
         row.update(contact_region_metrics)
+        row.update(hard_increment_gate_row)
         row["nodal_cpress_deferred"] = 1
         if secondary_pressure_diagnostics is not None:
             source = secondary_pressure_diagnostics.get("metrics", {}).get(
@@ -6572,6 +6663,10 @@ def solve_sfc_cropped_pair_hard_contact(
         "linear_solver": solver_kind,
         "effective_hard_pressure_stiffness": float(effective_pressure_stiffness),
         "pressure_smoothing_factor": float(pressure_smoothing_factor),
+        "hard_residual_tolerance": float(residual_tolerance),
+        "hard_correction_tolerance": float(correction_tolerance),
+        "hard_contact_force_increment_tolerance": float(contact_force_increment_tolerance),
+        "hard_require_active_set_stability": str(bool(require_active_set_stability)).lower(),
         "contact_patch_min_edge_length": _contact_patch_min_edge_length(pair),
         "timing_internal_tangent_seconds": float(timing_internal_tangent),
         "timing_contact_linearization_seconds": float(timing_contact_linearization),
@@ -6618,6 +6713,7 @@ def _cropped_patch_contact_gate_metrics(
             "cropped_patch_gate_passed": 0,
             "cropped_patch_gate_reason": "empty_history",
             "cropped_patch_contact_total_gate_passed": 0,
+            "cropped_patch_increment_gate_passed": 0,
             "cropped_patch_convergence_gate_passed": 0,
             "cropped_patch_contact_response_gate_passed": 0,
             "cropped_patch_pressure_stress_gate_passed": 0,
@@ -6640,6 +6736,16 @@ def _cropped_patch_contact_gate_metrics(
         and str(summary.get("contact_mode", "")) == "hard"
         and int(summary.get("final_hard_outer_converged", 0)) == 1
         and all(int(row.get("hard_outer_converged", 0)) == 1 for row in rows)
+    )
+    increment_ok = all(
+        int(row.get("hard_increment_converged", 0)) == 1
+        and int(row.get("hard_increment_accepted", 0)) == 1
+        and int(row.get("hard_increment_cutback_required", 0)) == 0
+        and int(row.get("hard_residual_converged", 0)) == 1
+        and int(row.get("hard_correction_converged", 0)) == 1
+        and int(row.get("hard_contact_force_increment_converged", 0)) == 1
+        and int(row.get("hard_active_set_stable", 0)) == 1
+        for row in rows
     )
     contact_ok = (
         int(final.get("active_contact_samples", 0)) >= int(min_active_samples)
@@ -6706,10 +6812,13 @@ def _cropped_patch_contact_gate_metrics(
         and path_tracking_ok
         and active_region_ok
         and contact_total_ok
+        and increment_ok
     )
     reason = "passed"
     if not convergence_ok:
         reason = "hard_contact_not_converged"
+    elif not increment_ok:
+        reason = "increment_acceptance_gate_failed"
     elif not contact_ok:
         reason = "missing_active_contact_response"
     elif not pressure_stress_ok:
@@ -6727,6 +6836,7 @@ def _cropped_patch_contact_gate_metrics(
         "cropped_patch_gate_passed": int(passed),
         "cropped_patch_gate_reason": reason,
         "cropped_patch_contact_total_gate_passed": int(bool(contact_total_ok)),
+        "cropped_patch_increment_gate_passed": int(bool(increment_ok)),
         "cropped_patch_convergence_gate_passed": int(bool(convergence_ok)),
         "cropped_patch_contact_response_gate_passed": int(bool(contact_ok)),
         "cropped_patch_pressure_stress_gate_passed": int(bool(pressure_stress_ok)),

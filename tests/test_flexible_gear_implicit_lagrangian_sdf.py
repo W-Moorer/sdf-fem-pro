@@ -3464,11 +3464,23 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert int(summary["cropped_patch_path_tracking_gate_passed"]) == 1
     assert int(summary["cropped_patch_active_region_continuity_gate_passed"]) == 1
     assert int(summary["cropped_patch_contact_total_gate_passed"]) == 1
+    assert int(summary["cropped_patch_increment_gate_passed"]) == 1
     assert int(summary["contact_total_gate_passed"]) == 1
     assert int(summary["contact_total_secondary_pressure_recovery_from_region"]) == 1
     assert int(history[-1]["nodal_cpress_deferred"]) == 1
     assert history[-1]["contact_secondary_pressure_recovery_source"] == "constraint_region"
     assert "max_contact_secondary_pressure_nodeavg" not in history[-1]
+    assert int(history[-1]["hard_increment_converged"]) == 1
+    assert int(history[-1]["hard_increment_accepted"]) == 1
+    assert int(history[-1]["hard_residual_converged"]) == 1
+    assert int(history[-1]["hard_correction_converged"]) == 1
+    assert int(history[-1]["hard_contact_force_increment_converged"]) == 1
+    assert int(history[-1]["hard_active_set_stable"]) == 1
+    assert float(history[-1]["hard_normalized_residual"]) <= float(summary["hard_residual_tolerance"])
+    assert float(history[-1]["hard_normalized_correction"]) <= float(summary["hard_correction_tolerance"])
+    assert float(history[-1]["hard_normalized_contact_force_increment"]) <= float(
+        summary["hard_contact_force_increment_tolerance"]
+    )
     assert "contact_active_master_face_count" in history[-1]
     assert "active_contact_region_count" in history[-1]
 
@@ -3499,6 +3511,7 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(gate["cropped_patch_path_tracking_gate_passed"]) == 1
     assert int(gate["cropped_patch_active_region_continuity_gate_passed"]) == 1
     assert int(gate["cropped_patch_contact_total_gate_passed"]) == 1
+    assert int(gate["cropped_patch_increment_gate_passed"]) == 1
     assert int(gate["contact_total_gate_passed"]) == 1
     assert int(gate["contact_total_nodal_cpress_deferred"]) == 1
     assert int(gate["contact_total_no_nodal_priority_columns"]) == 1
@@ -3517,7 +3530,16 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(history[-1]["nodal_cpress_deferred"]) == 1
     assert history[-1]["contact_secondary_pressure_recovery_source"] == "constraint_region"
     assert "max_contact_secondary_pressure_nodeavg" not in history[-1]
+    assert all(int(row["hard_increment_converged"]) == 1 for row in history)
+    assert all(int(row["hard_increment_accepted"]) == 1 for row in history)
+    assert all(int(row["hard_increment_cutback_required"]) == 0 for row in history)
     assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0
+    unstable_history = [dict(row) for row in history]
+    unstable_history[-1]["hard_contact_force_increment_converged"] = 0
+    unstable_gate = _cropped_patch_contact_gate_metrics(unstable_history, summary, require_monotone_trend=False)
+    assert int(unstable_gate["cropped_patch_gate_passed"]) == 0
+    assert int(unstable_gate["cropped_patch_increment_gate_passed"]) == 0
+    assert unstable_gate["cropped_patch_gate_reason"] == "increment_acceptance_gate_failed"
 
 
 def test_cropped_gear_hard_contact_supports_surface_patch_constraint_averaging() -> None:
