@@ -4420,7 +4420,7 @@ def solve_sfc_source_drive_pair(
     source_residual_tolerance: float = 5.0e-3,
     source_correction_tolerance: float = 1.0e-2,
     source_contact_force_increment_tolerance: float = 1.0e-2,
-    source_accept_unconverged: bool = True,
+    source_accept_unconverged: bool = False,
     source_cutback_factor: float = 0.5,
     source_min_cutback_dt: float | None = None,
     source_checkpoint_path: Path | None = None,

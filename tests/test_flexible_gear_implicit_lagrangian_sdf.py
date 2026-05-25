@@ -1476,9 +1476,10 @@ def test_source_drive_checkpoint_resume_matches_continuous_short_run(tmp_path: P
 
     assert checkpoint.exists()
     assert len(first_history) == 1
-    assert len(resumed_history) == 2
+    assert len(resumed_history) == len(continuous_history)
     assert int(first_summary["source_resume_from_step"]) == 0
     assert int(resumed_summary["source_resume_from_step"]) == 1
+    assert float(resumed_summary["source_final_time"]) == pytest.approx(float(continuous_history[-1]["time"]))
     for key in ("rp1_rotation_z", "rp2_rotation_z", "max_displacement_norm", "min_gap", "normal_force"):
         assert float(resumed_history[-1][key]) == pytest.approx(float(continuous_history[-1][key]), rel=1.0e-10, abs=1.0e-12)
 
