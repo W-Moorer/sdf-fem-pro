@@ -832,6 +832,8 @@ def run_full_gear(
     source_correction_tolerance: float = 1.0e-2,
     source_contact_force_increment_tolerance: float = 1.0e-2,
     source_accept_unconverged: bool = False,
+    source_cutback_factor: float = 0.5,
+    source_min_cutback_dt: float | None = None,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -896,6 +898,8 @@ def run_full_gear(
             source_correction_tolerance=float(source_correction_tolerance),
             source_contact_force_increment_tolerance=float(source_contact_force_increment_tolerance),
             source_accept_unconverged=bool(source_accept_unconverged),
+            source_cutback_factor=float(source_cutback_factor),
+            source_min_cutback_dt=source_min_cutback_dt,
             source_checkpoint_path=source_checkpoint_path,
             resume_source_checkpoint=bool(resume_source_checkpoint),
             source_checkpoint_stride=int(source_checkpoint_stride),
@@ -1266,6 +1270,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Diagnostic compatibility mode: accept source-drive increments that hit the iteration limit.",
     )
     parser.add_argument(
+        "--source-cutback-factor",
+        type=float,
+        default=0.5,
+        help="Trial time-increment reduction factor reported when source-drive convergence gates request a cutback.",
+    )
+    parser.add_argument(
+        "--source-min-cutback-dt",
+        type=float,
+        default=None,
+        help="Minimum source-drive cutback increment used for cutback diagnostics.",
+    )
+    parser.add_argument(
         "--source-checkpoint",
         type=Path,
         default=None,
@@ -1329,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
         source_correction_tolerance=float(args.source_correction_tolerance),
         source_contact_force_increment_tolerance=float(args.source_contact_force_increment_tolerance),
         source_accept_unconverged=bool(args.source_accept_unconverged),
+        source_cutback_factor=float(args.source_cutback_factor),
+        source_min_cutback_dt=args.source_min_cutback_dt,
         source_checkpoint_path=args.source_checkpoint,
         resume_source_checkpoint=bool(args.resume_source_checkpoint),
         source_checkpoint_stride=int(args.source_checkpoint_stride),

@@ -503,6 +503,92 @@ def _source_contact_active_set_is_stable(
     return previous_active_signature is not None and active_signature == previous_active_signature
 
 
+@dataclass(frozen=True, slots=True)
+class SourceIncrementConvergenceDecision:
+    """Abaqus-style source-drive increment acceptance gate."""
+
+    converged: bool
+    reason: str
+    iteration_limited: bool
+    cutback_required: bool
+    accepted: bool
+
+
+def _source_increment_convergence_decision(
+    *,
+    residual_converged: bool,
+    correction_converged: bool,
+    contact_force_increment_converged: bool,
+    active_set_stable: bool,
+    iteration_count: int,
+    max_iterations: int,
+    accept_unconverged: bool,
+) -> SourceIncrementConvergenceDecision:
+    """Evaluate the source-drive convergence gates as one acceptance decision.
+
+    Abaqus/Standard accepts an increment only after the nonlinear residual,
+    displacement correction, contact-force increment, and contact status have
+    all stabilized.  If the iteration limit is reached before those gates pass,
+    the mathematically correct action is a cutback, not silently treating the
+    current iterate as an accepted converged state.
+    """
+
+    converged = (
+        bool(residual_converged)
+        and bool(correction_converged)
+        and bool(contact_force_increment_converged)
+        and bool(active_set_stable)
+    )
+    if converged:
+        return SourceIncrementConvergenceDecision(
+            converged=True,
+            reason="residual_correction_contact_force_active_set",
+            iteration_limited=False,
+            cutback_required=False,
+            accepted=True,
+        )
+
+    if not bool(residual_converged):
+        reason = "residual"
+    elif not bool(correction_converged):
+        reason = "correction"
+    elif not bool(contact_force_increment_converged):
+        reason = "contact_force_increment"
+    else:
+        reason = "contact_active_set"
+
+    limited = int(iteration_count) >= max(1, int(max_iterations))
+    return SourceIncrementConvergenceDecision(
+        converged=False,
+        reason=reason,
+        iteration_limited=limited,
+        cutback_required=limited and not bool(accept_unconverged),
+        accepted=bool(accept_unconverged),
+    )
+
+
+def _source_increment_cutback_candidate_dt(
+    current_dt: float,
+    *,
+    min_dt: float,
+    cutback_factor: float,
+) -> float | None:
+    """Return the next cutback trial increment or ``None`` if at the floor."""
+
+    h = float(current_dt)
+    h_min = float(min_dt)
+    factor = float(cutback_factor)
+    if h <= 0.0:
+        raise ValueError("current_dt must be positive")
+    if h_min <= 0.0:
+        raise ValueError("min_dt must be positive")
+    if not (0.0 < factor < 1.0):
+        raise ValueError("cutback_factor must lie in (0, 1)")
+    if h <= h_min * (1.0 + 1.0e-12):
+        return None
+    return max(h_min, h * factor)
+
+
 def _combined_shape_weights(
     node_rows: list[np.ndarray],
     weight_rows: list[np.ndarray],
@@ -3789,6 +3875,8 @@ def _write_source_drive_checkpoint(
     source_step_converged_count: int = 0,
     source_iteration_limit_reached_count: int = 0,
     source_unstable_accepted_count: int = 0,
+    source_cutback_required_count: int = 0,
+    source_unconverged_accepted_count: int = 0,
 ) -> None:
     """Persist accepted source-drive state for exact fixed-step continuation."""
 
@@ -3820,6 +3908,8 @@ def _write_source_drive_checkpoint(
             source_step_converged_count=np.asarray([int(source_step_converged_count)], dtype=np.int64),
             source_iteration_limit_reached_count=np.asarray([int(source_iteration_limit_reached_count)], dtype=np.int64),
             source_unstable_accepted_count=np.asarray([int(source_unstable_accepted_count)], dtype=np.int64),
+            source_cutback_required_count=np.asarray([int(source_cutback_required_count)], dtype=np.int64),
+            source_unconverged_accepted_count=np.asarray([int(source_unconverged_accepted_count)], dtype=np.int64),
         )
     tmp.replace(path)
 
@@ -3854,6 +3944,12 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
             ),
             "source_unstable_accepted_count": (
                 int(data["source_unstable_accepted_count"][0]) if "source_unstable_accepted_count" in data else 0
+            ),
+            "source_cutback_required_count": (
+                int(data["source_cutback_required_count"][0]) if "source_cutback_required_count" in data else 0
+            ),
+            "source_unconverged_accepted_count": (
+                int(data["source_unconverged_accepted_count"][0]) if "source_unconverged_accepted_count" in data else 0
             ),
         }
 
@@ -3898,6 +3994,8 @@ def solve_sfc_source_drive_pair(
     source_correction_tolerance: float = 1.0e-2,
     source_contact_force_increment_tolerance: float = 1.0e-2,
     source_accept_unconverged: bool = True,
+    source_cutback_factor: float = 0.5,
+    source_min_cutback_dt: float | None = None,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -4048,6 +4146,14 @@ def solve_sfc_source_drive_pair(
         raise ValueError("source_correction_tolerance must be positive")
     if source_contact_force_increment_tolerance <= 0.0:
         raise ValueError("source_contact_force_increment_tolerance must be positive")
+    source_cutback_factor = float(source_cutback_factor)
+    if not (0.0 < source_cutback_factor < 1.0):
+        raise ValueError("source_cutback_factor must lie in (0, 1)")
+    source_min_cutback_dt_value = (
+        min(float(dt) * 1.0e-4, 1.0e-8) if source_min_cutback_dt is None else float(source_min_cutback_dt)
+    )
+    if source_min_cutback_dt_value <= 0.0:
+        raise ValueError("source_min_cutback_dt must be positive")
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
     steps = max(1, int(round(float(duration) / float(dt))))
@@ -4249,6 +4355,8 @@ def solve_sfc_source_drive_pair(
     source_step_converged_count = 0
     source_iteration_limit_reached_count = 0
     source_unstable_accepted_count = 0
+    source_cutback_required_count = 0
+    source_unconverged_accepted_count = 0
     checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
     start_step = 0
     if bool(resume_source_checkpoint):
@@ -4277,6 +4385,8 @@ def solve_sfc_source_drive_pair(
         source_step_converged_count = int(checkpoint.get("source_step_converged_count", 0))
         source_iteration_limit_reached_count = int(checkpoint.get("source_iteration_limit_reached_count", 0))
         source_unstable_accepted_count = int(checkpoint.get("source_unstable_accepted_count", 0))
+        source_cutback_required_count = int(checkpoint.get("source_cutback_required_count", 0))
+        source_unconverged_accepted_count = int(checkpoint.get("source_unconverged_accepted_count", 0))
         state = MechanicsState(
             model.X + assembly.expand_displacements(q),
             assembly.expand_displacements(v),
@@ -4464,6 +4574,8 @@ def solve_sfc_source_drive_pair(
         normalized_residual = np.inf
         normalized_correction = np.inf
         normalized_contact_force_increment = np.inf
+        residual_converged = False
+        correction_converged = False
         contact_force_increment_converged = False
         previous_iteration_contact_red: np.ndarray | None = None
         for iteration in range(1, max(1, int(max_iterations)) + 1):
@@ -4613,29 +4725,51 @@ def solve_sfc_source_drive_pair(
                 )
             correction_converged = normalized_correction <= source_correction_tolerance
             residual_converged = normalized_residual <= source_residual_tolerance
-            if correction_converged and residual_converged and active_set_stable and contact_force_increment_converged:
+            iteration_decision = _source_increment_convergence_decision(
+                residual_converged=residual_converged,
+                correction_converged=correction_converged,
+                contact_force_increment_converged=contact_force_increment_converged,
+                active_set_stable=active_set_stable,
+                iteration_count=iteration,
+                max_iterations=max_iterations,
+                accept_unconverged=source_accept_unconverged,
+            )
+            if iteration_decision.converged:
                 step_converged = True
-                step_convergence_reason = "residual_correction_contact_force_active_set"
+                step_convergence_reason = iteration_decision.reason
                 break
-            if not residual_converged:
-                step_convergence_reason = "residual"
-            elif not correction_converged:
-                step_convergence_reason = "correction"
-            elif not contact_force_increment_converged:
-                step_convergence_reason = "contact_force_increment"
-            elif not active_set_stable:
-                step_convergence_reason = "contact_active_set"
+            step_convergence_reason = iteration_decision.reason
             previous_iteration_contact_red = contact_red.copy()
             q_guess[free] += correction_free
             contact_matches_q_guess = False
-        iteration_limited = (not bool(step_converged)) and iteration_count >= max(1, int(max_iterations))
-        if iteration_limited and not bool(source_accept_unconverged):
+        increment_decision = _source_increment_convergence_decision(
+            residual_converged=residual_converged,
+            correction_converged=correction_converged,
+            contact_force_increment_converged=contact_force_increment_converged,
+            active_set_stable=active_set_stable,
+            iteration_count=iteration_count,
+            max_iterations=max_iterations,
+            accept_unconverged=source_accept_unconverged,
+        )
+        step_convergence_reason = increment_decision.reason
+        iteration_limited = increment_decision.iteration_limited
+        cutback_candidate_dt = (
+            _source_increment_cutback_candidate_dt(
+                float(dt),
+                min_dt=source_min_cutback_dt_value,
+                cutback_factor=source_cutback_factor,
+            )
+            if increment_decision.cutback_required
+            else None
+        )
+        if increment_decision.cutback_required:
             raise RuntimeError(
                 "source-drive increment failed Abaqus-style convergence gates "
                 f"at step {step}: reason={step_convergence_reason}, "
                 f"normalized_residual={normalized_residual:.6e}, "
                 f"normalized_correction={normalized_correction:.6e}, "
-                f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}"
+                f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}, "
+                f"cutback_candidate_dt={cutback_candidate_dt}"
             )
         q_new = _project_reduced_fixed(q_guess, fixed, values)
         a_new = c0 * (q_new - q_pred)
@@ -4665,7 +4799,9 @@ def solve_sfc_source_drive_pair(
                     require_stability=bool(source_contact_active_set_stability),
                 )
         source_step_converged_count += int(bool(step_converged))
-        source_iteration_limit_reached_count += int(not bool(step_converged) and iteration_count >= max(1, int(max_iterations)))
+        source_iteration_limit_reached_count += int(bool(increment_decision.iteration_limited))
+        source_cutback_required_count += int(bool(increment_decision.cutback_required))
+        source_unconverged_accepted_count += int((not bool(increment_decision.converged)) and bool(increment_decision.accepted))
         source_unstable_accepted_count += int(bool(source_contact_active_set_stability) and not bool(active_set_stable))
         path_tracking_metrics, current_path_master_face_ids = _contact_path_tracking_metrics_from_arrays(
             last_sample_arrays,
@@ -4737,7 +4873,12 @@ def solve_sfc_source_drive_pair(
                     "contact_active_set_stable": int(bool(active_set_stable)),
                     "source_step_converged": int(bool(step_converged)),
                     "source_step_convergence_reason": step_convergence_reason,
-                    "source_iteration_limit_reached": int(not bool(step_converged) and iteration_count >= max(1, int(max_iterations))),
+                    "source_increment_accepted": int(bool(increment_decision.accepted)),
+                    "source_increment_cutback_required": int(bool(increment_decision.cutback_required)),
+                    "source_increment_cutback_candidate_dt": (
+                        "" if cutback_candidate_dt is None else float(cutback_candidate_dt)
+                    ),
+                    "source_iteration_limit_reached": int(bool(increment_decision.iteration_limited)),
                     "source_normalized_residual": float(normalized_residual),
                     "source_normalized_correction": float(normalized_correction),
                     "source_normalized_contact_force_increment": float(normalized_contact_force_increment),
@@ -4822,6 +4963,8 @@ def solve_sfc_source_drive_pair(
                 source_step_converged_count=source_step_converged_count,
                 source_iteration_limit_reached_count=source_iteration_limit_reached_count,
                 source_unstable_accepted_count=source_unstable_accepted_count,
+                source_cutback_required_count=source_cutback_required_count,
+                source_unconverged_accepted_count=source_unconverged_accepted_count,
             )
     wall = time.perf_counter() - start
     summary = {
@@ -4868,9 +5011,13 @@ def solve_sfc_source_drive_pair(
         "source_correction_tolerance": float(source_correction_tolerance),
         "source_contact_force_increment_tolerance": float(source_contact_force_increment_tolerance),
         "source_accept_unconverged": bool(source_accept_unconverged),
+        "source_cutback_factor": float(source_cutback_factor),
+        "source_min_cutback_dt": float(source_min_cutback_dt_value),
         "source_step_converged_count": int(source_step_converged_count),
         "source_iteration_limit_reached_count": int(source_iteration_limit_reached_count),
         "source_unstable_accepted_count": int(source_unstable_accepted_count),
+        "source_cutback_required_count": int(source_cutback_required_count),
+        "source_unconverged_accepted_count": int(source_unconverged_accepted_count),
         "sfc_history_frame_stride": int(history_stride),
         "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),

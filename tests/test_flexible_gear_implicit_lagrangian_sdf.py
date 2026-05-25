@@ -47,6 +47,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
     _source_contact_active_set_is_stable,
+    _source_increment_convergence_decision,
+    _source_increment_cutback_candidate_dt,
     _penalty_history_row,
     _write_csv,
     _write_abaqus_alignment_deck,
@@ -696,6 +698,63 @@ def test_source_contact_active_set_stability_requires_repeated_signature() -> No
     assert not _source_contact_active_set_is_stable(signature, tuple(), require_stability=True)
 
 
+def test_source_increment_decision_requires_all_abaqus_style_gates() -> None:
+    decision = _source_increment_convergence_decision(
+        residual_converged=True,
+        correction_converged=True,
+        contact_force_increment_converged=True,
+        active_set_stable=True,
+        iteration_count=2,
+        max_iterations=16,
+        accept_unconverged=False,
+    )
+
+    assert decision.converged
+    assert decision.accepted
+    assert not decision.cutback_required
+    assert decision.reason == "residual_correction_contact_force_active_set"
+
+    limited = _source_increment_convergence_decision(
+        residual_converged=True,
+        correction_converged=True,
+        contact_force_increment_converged=False,
+        active_set_stable=True,
+        iteration_count=16,
+        max_iterations=16,
+        accept_unconverged=False,
+    )
+
+    assert not limited.converged
+    assert not limited.accepted
+    assert limited.iteration_limited
+    assert limited.cutback_required
+    assert limited.reason == "contact_force_increment"
+
+
+def test_source_increment_decision_marks_diagnostic_unconverged_acceptance() -> None:
+    decision = _source_increment_convergence_decision(
+        residual_converged=False,
+        correction_converged=True,
+        contact_force_increment_converged=True,
+        active_set_stable=True,
+        iteration_count=16,
+        max_iterations=16,
+        accept_unconverged=True,
+    )
+
+    assert not decision.converged
+    assert decision.accepted
+    assert decision.iteration_limited
+    assert not decision.cutback_required
+    assert decision.reason == "residual"
+
+
+def test_source_increment_cutback_candidate_dt_respects_floor() -> None:
+    assert _source_increment_cutback_candidate_dt(1.0e-3, min_dt=1.0e-6, cutback_factor=0.5) == pytest.approx(5.0e-4)
+    assert _source_increment_cutback_candidate_dt(1.0e-6, min_dt=1.0e-6, cutback_factor=0.5) is None
+    assert _source_increment_cutback_candidate_dt(1.5e-6, min_dt=1.0e-6, cutback_factor=0.5) == pytest.approx(1.0e-6)
+
+
 def test_active_overlap_metrics_reports_precision_and_recall() -> None:
     sfc = np.asarray([True, True, False, True, False])
     abaqus = np.asarray([True, False, True, True, False])
@@ -1030,7 +1089,12 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert int(summary["reduced_dofs"]) > 0
     assert float(summary["timing_source_base_lu_seconds"]) >= 0.0
     assert int(summary["source_sparse_cg_base_lu_preconditioner"]) >= 0
+    assert int(summary["source_unconverged_accepted_count"]) >= 0
+    assert int(summary["source_cutback_required_count"]) >= 0
     assert summary["source_rotation_unit"] == "radian"
+    assert "source_increment_accepted" in history[-1]
+    assert "source_increment_cutback_required" in history[-1]
+    assert "source_increment_cutback_candidate_dt" in history[-1]
     manifest = Path(str(summary["sfc_vtk_manifest"]))
     assert manifest.exists()
     text = manifest.read_text(encoding="utf-8")
