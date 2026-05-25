@@ -633,6 +633,66 @@ def _source_active_set_line_search_choice(
     return (1.0 if first_alpha is None else float(first_alpha)), False, int(trial_count)
 
 
+def _snapshot_contact_tracking_state(contact_geometries: Iterable[Any]) -> list[dict[str, Any]]:
+    """Capture path-tracking caches so trial queries cannot become accepted state."""
+
+    states: list[dict[str, Any]] = []
+    for geometry in contact_geometries:
+        oracle = getattr(geometry, "_oracle", None)
+        states.append(
+            {
+                "geometry": geometry,
+                "secondary_face_cache": (
+                    None
+                    if getattr(geometry, "_secondary_face_cache", None) is None
+                    else np.asarray(getattr(geometry, "_secondary_face_cache")).copy()
+                ),
+                "secondary_barycentric_cache": (
+                    None
+                    if getattr(geometry, "_secondary_barycentric_cache", None) is None
+                    else np.asarray(getattr(geometry, "_secondary_barycentric_cache")).copy()
+                ),
+                "oracle": oracle,
+                "oracle_patch_cache": dict(getattr(oracle, "_patch_cache", {})) if oracle is not None else None,
+                "oracle_barycentric_cache": (
+                    {
+                        key: np.asarray(value, dtype=float).copy()
+                        for key, value in getattr(oracle, "_barycentric_cache", {}).items()
+                    }
+                    if oracle is not None
+                    else None
+                ),
+            }
+        )
+    return states
+
+
+def _restore_contact_tracking_state(states: list[dict[str, Any]]) -> None:
+    """Restore path-tracking caches captured by ``_snapshot_contact_tracking_state``."""
+
+    for state_row in states:
+        geometry = state_row["geometry"]
+        face_cache = state_row["secondary_face_cache"]
+        bary_cache = state_row["secondary_barycentric_cache"]
+        setattr(geometry, "_secondary_face_cache", None if face_cache is None else np.asarray(face_cache, dtype=np.int64).copy())
+        setattr(
+            geometry,
+            "_secondary_barycentric_cache",
+            None if bary_cache is None else np.asarray(bary_cache, dtype=float).copy(),
+        )
+        oracle = state_row.get("oracle")
+        if oracle is not None:
+            setattr(oracle, "_patch_cache", dict(state_row.get("oracle_patch_cache") or {}))
+            setattr(
+                oracle,
+                "_barycentric_cache",
+                {
+                    key: np.asarray(value, dtype=float).copy()
+                    for key, value in (state_row.get("oracle_barycentric_cache") or {}).items()
+                },
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class SourceIncrementConvergenceDecision:
     """Abaqus-style source-drive increment acceptance gate."""
@@ -5034,59 +5094,19 @@ def solve_sfc_source_drive_pair(
             collected = _aggregate_contact_samples(collected, aggregate_mode)
         return collected
 
-    def snapshot_contact_tracking_state() -> list[dict[str, Any]]:
-        states: list[dict[str, Any]] = []
-        for geometry in contact_geometries:
-            oracle = getattr(geometry, "_oracle", None)
-            states.append(
-                {
-                    "geometry": geometry,
-                    "secondary_face_cache": (
-                        None
-                        if getattr(geometry, "_secondary_face_cache", None) is None
-                        else np.asarray(getattr(geometry, "_secondary_face_cache")).copy()
-                    ),
-                    "secondary_barycentric_cache": (
-                        None
-                        if getattr(geometry, "_secondary_barycentric_cache", None) is None
-                        else np.asarray(getattr(geometry, "_secondary_barycentric_cache")).copy()
-                    ),
-                    "oracle": oracle,
-                    "oracle_patch_cache": dict(getattr(oracle, "_patch_cache", {})) if oracle is not None else None,
-                    "oracle_barycentric_cache": (
-                        {
-                            key: np.asarray(value, dtype=float).copy()
-                            for key, value in getattr(oracle, "_barycentric_cache", {}).items()
-                        }
-                        if oracle is not None
-                        else None
-                    ),
-                }
-            )
-        return states
+    def source_sample_arrays_trial(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
+        cache_state = _snapshot_contact_tracking_state(contact_geometries)
+        try:
+            return source_sample_arrays(x_contact)
+        finally:
+            _restore_contact_tracking_state(cache_state)
 
-    def restore_contact_tracking_state(states: list[dict[str, Any]]) -> None:
-        for state_row in states:
-            geometry = state_row["geometry"]
-            face_cache = state_row["secondary_face_cache"]
-            bary_cache = state_row["secondary_barycentric_cache"]
-            setattr(geometry, "_secondary_face_cache", None if face_cache is None else np.asarray(face_cache, dtype=np.int64).copy())
-            setattr(
-                geometry,
-                "_secondary_barycentric_cache",
-                None if bary_cache is None else np.asarray(bary_cache, dtype=float).copy(),
-            )
-            oracle = state_row.get("oracle")
-            if oracle is not None:
-                setattr(oracle, "_patch_cache", dict(state_row.get("oracle_patch_cache") or {}))
-                setattr(
-                    oracle,
-                    "_barycentric_cache",
-                    {
-                        key: np.asarray(value, dtype=float).copy()
-                        for key, value in (state_row.get("oracle_barycentric_cache") or {}).items()
-                    },
-                )
+    def source_samples_trial(x_contact: np.ndarray) -> list[Any]:
+        cache_state = _snapshot_contact_tracking_state(contact_geometries)
+        try:
+            return source_samples(x_contact)
+        finally:
+            _restore_contact_tracking_state(cache_state)
 
     accepted_step = int(start_step)
     accepted_time = float(start_time)
@@ -5123,7 +5143,6 @@ def solve_sfc_source_drive_pair(
         last_samples: list[Any] | None = None
         previous_active_signature: tuple[tuple[int, ...], ...] | None = None
         active_set_stable = not bool(source_contact_active_set_stability)
-        contact_matches_q_guess = False
         step_converged = False
         step_convergence_reason = "iteration_limit"
         contact_force_increment_norm = np.inf
@@ -5143,9 +5162,9 @@ def solve_sfc_source_drive_pair(
             x_guess = model.X + assembly.expand_displacements(q_guess)
             x_contact = contact_positions_from_reduced(q_guess)
             t_section = time.perf_counter()
-            sample_arrays = source_sample_arrays(x_contact)
+            sample_arrays = source_sample_arrays_trial(x_contact)
             if sample_arrays is None:
-                samples = source_samples(x_contact)
+                samples = source_samples_trial(x_contact)
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
                 last_samples = samples
                 last_sample_arrays = None
@@ -5162,7 +5181,6 @@ def solve_sfc_source_drive_pair(
                 require_stability=bool(source_contact_active_set_stability),
             )
             previous_active_signature = active_signature
-            contact_matches_q_guess = True
             assemble_current_internal_tangent = internal_kinematics == "finite_stvk_visual"
             internal_red, internal_tangent_red = internal_reduced_response_from_state(
                 q_guess,
@@ -5241,7 +5259,7 @@ def solve_sfc_source_drive_pair(
                 if correction_free is None:
                     source_direct_fallback_count += 1
                     if sample_arrays is not None:
-                        samples = source_samples(x_contact)
+                        samples = source_samples_trial(x_contact)
                     correction_free = _solve_reduced_penalty_low_rank_correction(
                         base_matrix_free=current_base_free,
                         base_lu_cache=base_lu_cache if rotating_inertia == "none" else [None],
@@ -5319,15 +5337,11 @@ def solve_sfc_source_drive_pair(
                     q_trial[free] += float(alpha_candidate) * correction_free
                     q_trial = _project_reduced_fixed(q_trial, fixed, values)
                     x_trial_contact = contact_positions_from_reduced(q_trial)
-                    cache_state = snapshot_contact_tracking_state()
-                    try:
-                        trial_arrays = source_sample_arrays(x_trial_contact)
-                        if trial_arrays is None:
-                            trial_signature = _contact_active_signature_from_samples(source_samples(x_trial_contact))
-                        else:
-                            trial_signature = _contact_active_signature_from_arrays(trial_arrays)
-                    finally:
-                        restore_contact_tracking_state(cache_state)
+                    trial_arrays = source_sample_arrays_trial(x_trial_contact)
+                    if trial_arrays is None:
+                        trial_signature = _contact_active_signature_from_samples(source_samples_trial(x_trial_contact))
+                    else:
+                        trial_signature = _contact_active_signature_from_arrays(trial_arrays)
                     candidates.append((float(alpha_candidate), trial_signature))
                 alpha_choice, stable_choice, line_search_trials = _source_active_set_line_search_choice(
                     active_signature,
@@ -5345,7 +5359,6 @@ def solve_sfc_source_drive_pair(
                     source_line_search_reduced_count += 1
                 step_line_search_last_alpha = float(alpha_choice)
             q_guess[free] += correction_free
-            contact_matches_q_guess = False
         increment_decision = _source_increment_convergence_decision(
             residual_converged=residual_converged,
             correction_converged=correction_converged,
@@ -5397,28 +5410,28 @@ def solve_sfc_source_drive_pair(
         v_new = v_pred + gamma * float(step_dt) * a_new
         x_new = model.X + assembly.expand_displacements(q_new)
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
-        if not contact_matches_q_guess:
-            accepted_contact_x = contact_positions_from_reduced(q_new)
-            accepted_arrays = source_sample_arrays(accepted_contact_x)
-            if accepted_arrays is None:
-                accepted_samples = source_samples(accepted_contact_x)
-                last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
-                last_samples = accepted_samples
-                last_sample_arrays = None
-                active_set_stable = _source_contact_active_set_is_stable(
-                    _contact_active_signature_from_samples(accepted_samples),
-                    previous_active_signature,
-                    require_stability=bool(source_contact_active_set_stability),
-                )
-            else:
-                last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
-                last_sample_arrays = accepted_arrays
-                last_samples = None
-                active_set_stable = _source_contact_active_set_is_stable(
-                    _contact_active_signature_from_arrays(accepted_arrays),
-                    previous_active_signature,
-                    require_stability=bool(source_contact_active_set_stability),
-                )
+        # Commit path-tracking caches only after the increment is accepted.
+        accepted_contact_x = contact_positions_from_reduced(q_new)
+        accepted_arrays = source_sample_arrays(accepted_contact_x)
+        if accepted_arrays is None:
+            accepted_samples = source_samples(accepted_contact_x)
+            last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
+            last_samples = accepted_samples
+            last_sample_arrays = None
+            active_set_stable = _source_contact_active_set_is_stable(
+                _contact_active_signature_from_samples(accepted_samples),
+                previous_active_signature,
+                require_stability=bool(source_contact_active_set_stability),
+            )
+        else:
+            last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
+            last_sample_arrays = accepted_arrays
+            last_samples = None
+            active_set_stable = _source_contact_active_set_is_stable(
+                _contact_active_signature_from_arrays(accepted_arrays),
+                previous_active_signature,
+                require_stability=bool(source_contact_active_set_stability),
+            )
         source_step_converged_count += int(bool(step_converged))
         source_iteration_limit_reached_count += int(bool(increment_decision.iteration_limited))
         source_cutback_required_count += int(bool(increment_decision.cutback_required))

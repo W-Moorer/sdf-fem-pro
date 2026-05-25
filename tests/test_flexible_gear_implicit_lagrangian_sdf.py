@@ -55,6 +55,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_increment_convergence_decision,
     _source_increment_cutback_candidate_dt,
     _source_increment_gate_row,
+    _snapshot_contact_tracking_state,
+    _restore_contact_tracking_state,
     _run_source_automatic_increment_controller,
     _penalty_history_row,
     _write_csv,
@@ -777,6 +779,36 @@ def test_source_active_set_line_search_reports_unstable_full_step_fallback() -> 
     assert alpha == pytest.approx(1.0)
     assert not stable
     assert trials == 2
+
+
+def test_contact_tracking_snapshot_restore_rolls_back_trial_cache_mutation() -> None:
+    oracle = SimpleNamespace(
+        _patch_cache={"region-a": 7},
+        _barycentric_cache={"region-a": np.asarray([0.2, 0.3, 0.5], dtype=float)},
+    )
+    geometry = SimpleNamespace(
+        _secondary_face_cache=np.asarray([1, 2, -1], dtype=np.int64),
+        _secondary_barycentric_cache=np.asarray(
+            [[0.1, 0.2, 0.7], [0.3, 0.3, 0.4], [np.nan, np.nan, np.nan]],
+            dtype=float,
+        ),
+        _oracle=oracle,
+    )
+
+    snapshot = _snapshot_contact_tracking_state([geometry])
+    geometry._secondary_face_cache[:] = [9, 9, 9]
+    geometry._secondary_barycentric_cache[:] = 0.0
+    oracle._patch_cache["region-a"] = 99
+    oracle._patch_cache["trial-only"] = 123
+    oracle._barycentric_cache["region-a"][:] = [1.0, 0.0, 0.0]
+
+    _restore_contact_tracking_state(snapshot)
+
+    np.testing.assert_array_equal(geometry._secondary_face_cache, [1, 2, -1])
+    np.testing.assert_allclose(geometry._secondary_barycentric_cache[:2], [[0.1, 0.2, 0.7], [0.3, 0.3, 0.4]])
+    assert np.isnan(geometry._secondary_barycentric_cache[2]).all()
+    assert oracle._patch_cache == {"region-a": 7}
+    np.testing.assert_allclose(oracle._barycentric_cache["region-a"], [0.2, 0.3, 0.5])
 
 
 def test_source_increment_decision_requires_all_abaqus_style_gates() -> None:
