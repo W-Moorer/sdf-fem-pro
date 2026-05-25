@@ -691,6 +691,41 @@ def _source_increment_cutback_candidate_dt(
     return max(h_min, h * factor)
 
 
+def _source_increment_gate_row(
+    *,
+    residual_converged: bool,
+    correction_converged: bool,
+    contact_force_increment_converged: bool,
+    active_set_stable: bool,
+    normalized_residual: float,
+    normalized_correction: float,
+    normalized_contact_force_increment: float,
+    contact_force_increment_norm: float,
+    decision: SourceIncrementConvergenceDecision,
+    cutback_candidate_dt: float | None,
+) -> Row:
+    """Return one manifest/history row for Abaqus-style increment gates."""
+
+    return {
+        "source_residual_converged": int(bool(residual_converged)),
+        "source_correction_converged": int(bool(correction_converged)),
+        "source_contact_force_increment_converged": int(bool(contact_force_increment_converged)),
+        "source_active_set_stable": int(bool(active_set_stable)),
+        "source_increment_converged": int(bool(decision.converged)),
+        "source_increment_accepted": int(bool(decision.accepted)),
+        "source_increment_cutback_required": int(bool(decision.cutback_required)),
+        "source_increment_cutback_candidate_dt": (
+            "" if cutback_candidate_dt is None else float(cutback_candidate_dt)
+        ),
+        "source_iteration_limit_reached": int(bool(decision.iteration_limited)),
+        "source_step_convergence_reason": str(decision.reason),
+        "source_normalized_residual": float(normalized_residual),
+        "source_normalized_correction": float(normalized_correction),
+        "source_normalized_contact_force_increment": float(normalized_contact_force_increment),
+        "source_contact_force_increment_norm": float(contact_force_increment_norm),
+    }
+
+
 def _combined_shape_weights(
     node_rows: list[np.ndarray],
     weight_rows: list[np.ndarray],
@@ -5053,6 +5088,18 @@ def solve_sfc_source_drive_pair(
                 f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}, "
                 f"cutback_candidate_dt={cutback_candidate_dt}"
             )
+        increment_gate_row = _source_increment_gate_row(
+            residual_converged=residual_converged,
+            correction_converged=correction_converged,
+            contact_force_increment_converged=contact_force_increment_converged,
+            active_set_stable=active_set_stable,
+            normalized_residual=normalized_residual,
+            normalized_correction=normalized_correction,
+            normalized_contact_force_increment=normalized_contact_force_increment,
+            contact_force_increment_norm=contact_force_increment_norm,
+            decision=increment_decision,
+            cutback_candidate_dt=cutback_candidate_dt,
+        )
         q_new = _project_reduced_fixed(q_guess, fixed, values)
         a_new = c0 * (q_new - q_pred)
         v_new = v_pred + gamma * float(dt) * a_new
@@ -5163,19 +5210,9 @@ def solve_sfc_source_drive_pair(
                     "gear2_torque_z": float(gear2_torque_z),
                     "contact_active_set_stable": int(bool(active_set_stable)),
                     "source_step_converged": int(bool(step_converged)),
-                    "source_step_convergence_reason": step_convergence_reason,
-                    "source_increment_accepted": int(bool(increment_decision.accepted)),
-                    "source_increment_cutback_required": int(bool(increment_decision.cutback_required)),
-                    "source_increment_cutback_candidate_dt": (
-                        "" if cutback_candidate_dt is None else float(cutback_candidate_dt)
-                    ),
-                    "source_iteration_limit_reached": int(bool(increment_decision.iteration_limited)),
-                    "source_normalized_residual": float(normalized_residual),
-                    "source_normalized_correction": float(normalized_correction),
-                    "source_normalized_contact_force_increment": float(normalized_contact_force_increment),
-                    "source_contact_force_increment_norm": float(contact_force_increment_norm),
                 }
             )
+            row.update(increment_gate_row)
             if contact_node_diagnostics is not None:
                 row.update(contact_node_diagnostics.get("metrics", {}))
             row.update(contact_region_metrics)
@@ -5224,6 +5261,7 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_acceleration_z_rad_per_s2": float(a_new[hub2_slice.start + 5]),
                 }
             )
+            frame_row.update(increment_gate_row)
             frame_row.update(path_tracking_metrics)
             frame_row.update(active_region_continuity_metrics)
             frame_row.update(contact_region_metrics)

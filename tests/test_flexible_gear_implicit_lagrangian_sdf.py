@@ -52,6 +52,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_contact_active_set_is_stable,
     _source_increment_convergence_decision,
     _source_increment_cutback_candidate_dt,
+    _source_increment_gate_row,
     _penalty_history_row,
     _write_csv,
     _write_abaqus_alignment_deck,
@@ -799,6 +800,41 @@ def test_source_increment_cutback_candidate_dt_respects_floor() -> None:
     assert _source_increment_cutback_candidate_dt(1.5e-6, min_dt=1.0e-6, cutback_factor=0.5) == pytest.approx(1.0e-6)
 
 
+def test_source_increment_gate_row_records_all_acceptance_gates() -> None:
+    decision = _source_increment_convergence_decision(
+        residual_converged=True,
+        correction_converged=False,
+        contact_force_increment_converged=True,
+        active_set_stable=True,
+        iteration_count=16,
+        max_iterations=16,
+        accept_unconverged=False,
+    )
+
+    row = _source_increment_gate_row(
+        residual_converged=True,
+        correction_converged=False,
+        contact_force_increment_converged=True,
+        active_set_stable=True,
+        normalized_residual=1.0e-4,
+        normalized_correction=2.0e-2,
+        normalized_contact_force_increment=3.0e-4,
+        contact_force_increment_norm=4.0,
+        decision=decision,
+        cutback_candidate_dt=5.0e-6,
+    )
+
+    assert row["source_residual_converged"] == 1
+    assert row["source_correction_converged"] == 0
+    assert row["source_contact_force_increment_converged"] == 1
+    assert row["source_active_set_stable"] == 1
+    assert row["source_increment_converged"] == 0
+    assert row["source_increment_accepted"] == 0
+    assert row["source_increment_cutback_required"] == 1
+    assert row["source_step_convergence_reason"] == "correction"
+    assert row["source_increment_cutback_candidate_dt"] == pytest.approx(5.0e-6)
+
+
 def test_active_overlap_metrics_reports_precision_and_recall() -> None:
     sfc = np.asarray([True, True, False, True, False])
     abaqus = np.asarray([True, False, True, True, False])
@@ -1234,6 +1270,11 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "source_increment_accepted" in history[-1]
     assert "source_increment_cutback_required" in history[-1]
     assert "source_increment_cutback_candidate_dt" in history[-1]
+    assert "source_residual_converged" in history[-1]
+    assert "source_correction_converged" in history[-1]
+    assert "source_contact_force_increment_converged" in history[-1]
+    assert "source_active_set_stable" in history[-1]
+    assert "source_increment_converged" in history[-1]
     assert "contact_active_region_continuity_current_count" in history[-1]
     assert "contact_active_region_jaccard" in history[-1]
     manifest = Path(str(summary["sfc_vtk_manifest"]))
@@ -1245,6 +1286,8 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "active_contact_slave_node_count" in text
     assert "active_contact_master_node_count" in text
     assert "max_contact_pressure_nodeavg" in text
+    assert "source_residual_converged" in text
+    assert "source_contact_force_increment_converged" in text
     vtk_text = (vtk_dir / "sfc_0001.vtk").read_text(encoding="ascii")
     assert "SCALARS contact_pressure_nodeavg float 1" in vtk_text
     assert "SCALARS contact_secondary_pressure_nodeavg float 1" in vtk_text
