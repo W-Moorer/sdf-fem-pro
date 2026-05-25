@@ -48,6 +48,39 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
 Row = dict[str, Any]
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_full_lagrangian_sdf"
 
+CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
+    "time",
+    "source_accepted_step",
+    "normal_force",
+    "rp_force_norm",
+    "opposing_rp_force_norm",
+    "rp_contact_force_norm",
+    "opposing_rp_contact_force_norm",
+    "contact_region_normal_force",
+    "contact_region_virtual_work",
+    "contact_region_energy",
+    "contact_active_area",
+    "contact_region_count",
+    "active_contact_region_count",
+    "contact_mean_active_region_pressure",
+    "contact_active_region_jaccard",
+    "contact_active_region_persistence_fraction",
+    "contact_path_cache_hit_fraction",
+    "contact_path_cache_match_fraction",
+    "contact_master_face_switch_fraction",
+)
+
+NODAL_CONTACT_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
+    "active_contact_node_count",
+    "active_contact_secondary_node_count",
+    "max_contact_pressure_nodeavg",
+    "max_contact_secondary_pressure_nodeavg",
+    "p95_contact_pressure_nodeavg",
+    "p95_contact_secondary_pressure_nodeavg",
+    "mean_active_contact_pressure_nodeavg",
+    "mean_active_contact_secondary_pressure_nodeavg",
+)
+
 
 def _read_csv_rows(path: Path) -> list[Row]:
     if not path.exists():
@@ -71,6 +104,31 @@ def _max_column(rows: list[Row], column: str) -> float:
 
 def _manifest_column_available(rows: list[Row], column: str) -> bool:
     return bool(rows) and column in rows[0]
+
+
+def write_contact_total_priority_csv(history_rows: list[Row], out_path: Path) -> Path:
+    """Write the contact-total gate CSV before nodal CPRESS/COPEN checks.
+
+    This file intentionally excludes nodal pressure values.  It is the
+    comparison entry point for total force, contact work/energy, active area,
+    active region count, and path/active-set continuity.
+    """
+
+    rows: list[Row] = []
+    for index, source in enumerate(history_rows):
+        row: Row = {
+            "frame": int(index),
+            "comparison_stage": "region_totals_before_nodal_cpress",
+            "nodal_cpress_deferred": 1,
+        }
+        for key in CONTACT_TOTAL_PRIORITY_COLUMNS:
+            if key in source:
+                row[key] = source[key]
+        present_nodal = [key for key in NODAL_CONTACT_DIAGNOSTIC_COLUMNS if key in source]
+        row["deferred_nodal_contact_columns"] = ";".join(present_nodal)
+        rows.append(row)
+    _write_csv(out_path, rows)
+    return out_path
 
 
 def write_animation_color_ranges(
@@ -967,6 +1025,9 @@ def run_full_gear(
         summary["gear2_torque_z"] = float(model.gear2_torque_z)
     history_path = out_dir / "sfc_full_gear_lagrangian_sdf_history.csv"
     _write_csv(history_path, history)
+    contact_total_priority_path = out_dir / "sfc_contact_total_priority_metrics.csv"
+    write_contact_total_priority_csv(history, contact_total_priority_path)
+    summary["contact_total_priority_metrics"] = str(contact_total_priority_path)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
     _write_abaqus_alignment_deck(
         deck_path,

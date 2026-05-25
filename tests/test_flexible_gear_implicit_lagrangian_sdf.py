@@ -77,6 +77,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
     compare_sfc_history_to_abaqus_manifest,
     compare_animation_manifests,
+    write_contact_total_priority_csv,
     write_animation_color_ranges,
     write_paraview_animation_setup,
 )
@@ -1032,6 +1033,38 @@ def test_compare_sfc_history_to_abaqus_manifest_outputs_metric_errors(tmp_path: 
     assert rows[-1]["max_displacement_norm_rel_error"] == pytest.approx(0.25)
     assert rows[-1]["p95_von_mises_nodeavg_rel_error"] == pytest.approx(0.5)
     assert rows[-1]["active_contact_node_count_abs_error"] == pytest.approx(1.0)
+
+
+def test_contact_total_priority_csv_defers_nodal_pressure(tmp_path: Path) -> None:
+    out = tmp_path / "sfc_contact_total_priority_metrics.csv"
+    write_contact_total_priority_csv(
+        [
+            {
+                "time": 0.0,
+                "normal_force": 12.0,
+                "contact_region_normal_force": 12.0,
+                "contact_region_virtual_work": 0.2,
+                "contact_region_energy": 0.1,
+                "contact_active_area": 3.0,
+                "active_contact_region_count": 4,
+                "contact_path_cache_hit_fraction": 1.0,
+                "max_contact_secondary_pressure_nodeavg": 99.0,
+                "active_contact_secondary_node_count": 5,
+            }
+        ],
+        out,
+    )
+
+    rows = gear_implicit._read_csv_rows(out)
+
+    assert rows[0]["comparison_stage"] == "region_totals_before_nodal_cpress"
+    assert rows[0]["nodal_cpress_deferred"] == "1"
+    assert rows[0]["contact_region_normal_force"] == "12.0"
+    assert rows[0]["contact_region_virtual_work"] == "0.2"
+    assert rows[0]["contact_active_area"] == "3.0"
+    assert "max_contact_secondary_pressure_nodeavg" not in rows[0]
+    assert "active_contact_secondary_node_count" not in rows[0]
+    assert "max_contact_secondary_pressure_nodeavg" in rows[0]["deferred_nodal_contact_columns"]
 
 
 def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
