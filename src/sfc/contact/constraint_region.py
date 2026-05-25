@@ -925,12 +925,8 @@ def _aggregate_group(
             else -1
         ),
         "secondary_node_id": int(secondary_node_id),
-        "tracking_cache_hit": bool(
-            tracking_cache_hits is not None and tracking_cache_hits.size and np.any(tracking_cache_hits[row_ids])
-        ),
-        "tracking_cache_match": bool(
-            tracking_cache_matches is not None and tracking_cache_matches.size and np.any(tracking_cache_matches[row_ids])
-        ),
+        "tracking_cache_hit": _representative_tracking_flag(tracking_cache_hits, source_row),
+        "tracking_cache_match": _representative_tracking_flag(tracking_cache_matches, source_row),
         "tracking_barycentric_distance": _weighted_tracking_distance(
             tracking_barycentric_distances,
             row_ids,
@@ -1036,6 +1032,15 @@ def _weighted_tracking_distance(values: np.ndarray | None, rows: list[int], weig
     if weight_sum > 0.0:
         return float(finite_weights @ distances[finite] / weight_sum)
     return float(np.mean(distances[finite]))
+
+
+def _representative_tracking_flag(values: np.ndarray | None, source_row: int) -> bool:
+    if values is None or values.size == 0:
+        return False
+    flat = np.asarray(values, dtype=bool).reshape(-1)
+    if not (0 <= int(source_row) < flat.size):
+        return False
+    return bool(flat[int(source_row)])
 
 
 def _empty_contact_region_integral_metrics() -> dict[str, float | int]:

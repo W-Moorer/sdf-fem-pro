@@ -53,6 +53,7 @@ def test_slave_node_region_constraint_uses_signed_average_gap_and_payload() -> N
     assert regions["master_weights"][0] == pytest.approx([1.0 / 6.0, 0.4, 13.0 / 30.0])
     assert regions["master_face_ids"].tolist() == [7, 8]
     assert regions["tracking_cache_hits"].tolist() == [True, True]
+    assert regions["tracking_cache_matches"].tolist() == [True, False]
 
 
 def test_constraint_region_totals_and_tangent_use_region_rows() -> None:

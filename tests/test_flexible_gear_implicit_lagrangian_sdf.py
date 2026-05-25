@@ -750,6 +750,31 @@ def test_array_constraint_region_closed_force_from_region_gap() -> None:
     assert response.energy == pytest.approx(1.0)
 
 
+def test_array_constraint_region_tracking_match_uses_representative_payload_row() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.25, 0.75, 0.0], [0.75, 0.25, 0.0]], dtype=float),
+        "gaps": np.asarray([-0.10, -0.10], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([1.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [7, 8, 9]], dtype=np.int64),
+        "master_weights": np.asarray([[0.2, 0.3, 0.5], [0.6, 0.3, 0.1]], dtype=float),
+        "master_barycentric": np.asarray([[0.2, 0.3, 0.5], [0.6, 0.3, 0.1]], dtype=float),
+        "master_face_ids": np.asarray([11, 22], dtype=np.int64),
+        "secondary_cache_indices": np.asarray([0, 1], dtype=np.int64),
+        "tracking_cache_hits": np.asarray([True, True], dtype=bool),
+        "tracking_cache_matches": np.asarray([False, True], dtype=bool),
+    }
+
+    region = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
+
+    assert region is not None
+    assert region["secondary_node_ids"].tolist() == [0, 1]
+    assert region["master_face_ids"].tolist() == [22, 11]
+    assert region["tracking_cache_hits"].tolist() == [True, True]
+    assert region["tracking_cache_matches"].tolist() == [True, False]
+
+
 def test_constraint_region_contact_law_metrics_describe_region_status_and_distribution() -> None:
     raw = {
         "gaps": np.asarray([-0.30, 0.10], dtype=float),

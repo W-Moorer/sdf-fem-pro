@@ -937,16 +937,8 @@ def _aggregate_contact_array_group(
         source_row = int(rows[int(representative_local)])
         if cache_ids.size > source_row:
             secondary_cache_index = int(cache_ids[source_row])
-    tracking_hit = False
-    if tracking_cache_hits is not None:
-        row_hits = np.asarray(tracking_cache_hits, dtype=bool).reshape(-1)
-        if row_hits.size:
-            tracking_hit = bool(np.any(row_hits[rows]))
-    tracking_match = False
-    if tracking_cache_matches is not None:
-        row_matches = np.asarray(tracking_cache_matches, dtype=bool).reshape(-1)
-        if row_matches.size:
-            tracking_match = bool(np.any(row_matches[rows]))
+    tracking_hit = _representative_tracking_flag(tracking_cache_hits, rows, representative_local)
+    tracking_match = _representative_tracking_flag(tracking_cache_matches, rows, representative_local)
     tracking_barycentric_distance = np.nan
     if tracking_barycentric_distances is not None:
         row_distances = np.asarray(tracking_barycentric_distances, dtype=float).reshape(-1)
@@ -976,6 +968,25 @@ def _aggregate_contact_array_group(
         "tracking_cache_match": int(tracking_match),
         "tracking_barycentric_distance": float(tracking_barycentric_distance),
     }
+
+
+def _representative_tracking_flag(
+    values: np.ndarray | None,
+    rows: np.ndarray,
+    representative_local: int | None,
+) -> bool:
+    """Return the path-tracking flag carried by the representative payload row."""
+
+    if values is None or values.size == 0 or representative_local is None:
+        return False
+    local = int(representative_local)
+    if not (0 <= local < rows.size):
+        return False
+    source_row = int(rows[local])
+    flat = np.asarray(values, dtype=bool).reshape(-1)
+    if not (0 <= source_row < flat.size):
+        return False
+    return bool(flat[source_row])
 
 
 def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> dict[str, np.ndarray]:
