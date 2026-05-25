@@ -264,6 +264,10 @@ class NewtonAcceptanceMetrics:
     correction_ratio: float
     active_contact_count: int
     contact_element_change: int
+    contact_force_increment: float
+    contact_force_increment_ratio: float
+    contact_force_increment_ok: bool
+    active_set_stable: bool
     contact_energy: float
     total_energy: float
     energy_residual: float
@@ -930,6 +934,7 @@ def hht_step(
     _restore_contact_state(contact_geometry, previous_contact_snapshot)
     previous_ram: float | None = None
     previous_active_count: int | None = None
+    previous_contact_force: np.ndarray | None = None
     for iteration in range(max(1, int(max_iterations))):
         _begin_contact_newton_iteration(contact_geometry, iteration + 1)
         x_guess = model.X + u_guess.reshape((-1, 3))
@@ -964,12 +969,14 @@ def hht_step(
             previous_energy=previous_energy,
             previous_ram=previous_ram,
             previous_active_count=previous_active_count,
+            previous_contact_force=previous_contact_force,
             iteration=iteration_count,
             gravity=gravity,
         )
         acceptance_metrics.append(metric)
         previous_ram = metric.ram
         previous_active_count = metric.active_contact_count
+        previous_contact_force = np.asarray(trial_diagnostics.contact.force, dtype=float).reshape(-1).copy()
         relative_correction_accept = np.linalg.norm(correction) <= tolerance * max(1.0, np.linalg.norm(u_guess))
         if acceptance_policy == "relative_correction" and relative_correction_accept:
             acceptance_reason = "relative_correction"
@@ -1072,6 +1079,7 @@ def _newton_acceptance_metrics(
     previous_energy: float,
     previous_ram: float | None,
     previous_active_count: int | None,
+    previous_contact_force: np.ndarray | None,
     iteration: int,
     gravity: float,
 ) -> NewtonAcceptanceMetrics:
@@ -1085,23 +1093,36 @@ def _newton_acceptance_metrics(
     correction_ratio = cam / max(uam, 1.0e-30)
     previous_active = diagnostics.contact.active_count if previous_active_count is None else int(previous_active_count)
     contact_change = abs(int(diagnostics.contact.active_count) - previous_active)
+    active_set_stable = contact_change == 0
+    contact_force = np.asarray(diagnostics.contact.force, dtype=float).reshape(-1)
+    if previous_contact_force is None:
+        contact_force_increment = np.inf if int(diagnostics.contact.active_count) > 0 else 0.0
+        contact_force_increment_ratio = np.inf if int(diagnostics.contact.active_count) > 0 else 0.0
+    else:
+        previous_force = np.asarray(previous_contact_force, dtype=float).reshape(-1)
+        if previous_force.shape != contact_force.shape:
+            raise ValueError("previous_contact_force must have the same flattened shape as the current contact force")
+        contact_force_increment = float(np.linalg.norm(contact_force - previous_force))
+        force_scale = max(float(np.linalg.norm(contact_force)), float(np.linalg.norm(previous_force)), qam, 1.0e-30)
+        contact_force_increment_ratio = contact_force_increment / force_scale
     energy_residual = float(diagnostics.total_energy - previous_energy)
     energy_scale = max(abs(float(previous_energy)), abs(float(diagnostics.total_energy)), 1.0)
     energy_stabilization = bool(diagnostics.contact.active_count > 0 and abs(energy_residual) > 5.0e-2 * energy_scale)
 
     residual_ok = residual_ratio <= 5.0e-3
     correction_ok = correction_ratio <= 1.0e-2
+    contact_force_increment_ok = bool(diagnostics.contact.active_count == 0 or contact_force_increment_ratio <= 1.0e-2)
     relaxed_ok = (
         previous_ram is not None
         and previous_ram > 0.0
         and ram * cam <= 1.0e-2 * max(uam, 1.0e-30) * previous_ram
     )
     loose_residual_ok = residual_ratio <= 2.0e-2
-    contact_stable = contact_change == 0
     accepted = bool(
         iteration > 1
         and residual_ok
-        and contact_stable
+        and active_set_stable
+        and contact_force_increment_ok
         and not energy_stabilization
         and (correction_ok or relaxed_ok or loose_residual_ok or cam < 1.0e-8)
     )
@@ -1111,8 +1132,10 @@ def _newton_acceptance_metrics(
         reason = "need_second_iteration"
     elif not residual_ok:
         reason = "residual_ratio"
-    elif not contact_stable:
+    elif not active_set_stable:
         reason = "contact_element_change"
+    elif not contact_force_increment_ok:
+        reason = "contact_force_increment"
     elif energy_stabilization:
         reason = "energy_contact_stabilization"
     else:
@@ -1127,6 +1150,10 @@ def _newton_acceptance_metrics(
         correction_ratio=float(correction_ratio),
         active_contact_count=int(diagnostics.contact.active_count),
         contact_element_change=int(contact_change),
+        contact_force_increment=float(contact_force_increment),
+        contact_force_increment_ratio=float(contact_force_increment_ratio),
+        contact_force_increment_ok=bool(contact_force_increment_ok),
+        active_set_stable=bool(active_set_stable),
         contact_energy=float(diagnostics.contact.energy),
         total_energy=float(diagnostics.total_energy),
         energy_residual=energy_residual,

@@ -7,9 +7,13 @@ import pytest
 
 from sfc.fem.calculix_aligned import (
     ContactSample,
+    ContactResponse,
+    InternalResponse,
     MechanicsModel,
     PlaneContactGeometry,
+    StepDiagnostics,
     _nodal_gravity_loads,
+    _newton_acceptance_metrics,
     _stvk_internal_response_quadrature_loop,
     _restore_contact_state,
     _snapshot_contact_state,
@@ -430,3 +434,73 @@ def test_hht_step_supports_clean_room_calculix_multicriteria_acceptance() -> Non
     assert diagnostics.newton_iterations <= 8
     assert diagnostics.newton_acceptance_metrics[-1].ram >= 0.0
     assert diagnostics.newton_acceptance_metrics[-1].cam >= 0.0
+    assert diagnostics.newton_acceptance_metrics[-1].contact_force_increment_ratio >= 0.0
+
+
+def test_calculix_multicriteria_rejects_unstable_contact_force_increment() -> None:
+    model = _unit_tet_model()
+    zero_tangent = model.mass_matrix * 0.0
+    internal = InternalResponse(
+        force=np.zeros((model.n_nodes, 3), dtype=float),
+        strain=np.zeros((model.elements.shape[0], 6), dtype=float),
+        stress=np.zeros((model.elements.shape[0], 3, 3), dtype=float),
+        von_mises=np.zeros(model.elements.shape[0], dtype=float),
+        strain_energy=0.0,
+        material_tangent=zero_tangent,
+        geometric_tangent=zero_tangent,
+    )
+    contact_force = np.zeros((model.n_nodes, 3), dtype=float)
+    contact_force[0, 2] = 1.0
+    contact = ContactResponse(
+        force=contact_force,
+        tangent=zero_tangent,
+        min_gap=-0.1,
+        max_penetration=0.1,
+        active_count=1,
+        normal_force=1.0,
+        energy=0.0,
+    )
+    diagnostics = StepDiagnostics(
+        internal=internal,
+        contact=contact,
+        kinetic_energy=0.0,
+        gravitational_energy=0.0,
+        total_energy=0.0,
+    )
+    residual = np.full(model.n_dofs, 1.0e-8, dtype=float)
+    correction = np.full(model.n_dofs, 1.0e-12, dtype=float)
+    increment = np.full(model.n_dofs, 1.0e-6, dtype=float)
+
+    unstable = _newton_acceptance_metrics(
+        model,
+        residual,
+        correction,
+        increment,
+        diagnostics,
+        previous_energy=0.0,
+        previous_ram=1.0e-6,
+        previous_active_count=1,
+        previous_contact_force=np.zeros(model.n_dofs, dtype=float),
+        iteration=2,
+        gravity=0.0,
+    )
+    stable = _newton_acceptance_metrics(
+        model,
+        residual,
+        correction,
+        increment,
+        diagnostics,
+        previous_energy=0.0,
+        previous_ram=1.0e-6,
+        previous_active_count=1,
+        previous_contact_force=contact_force.reshape(-1).copy(),
+        iteration=2,
+        gravity=0.0,
+    )
+
+    assert unstable.active_set_stable
+    assert not unstable.contact_force_increment_ok
+    assert unstable.reason == "contact_force_increment"
+    assert not unstable.accepted_by_calculix_style
+    assert stable.contact_force_increment_ok
+    assert stable.accepted_by_calculix_style
