@@ -721,6 +721,24 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     nodal_deferred = _row_int_flag(summary, "contact_total_nodal_cpress_deferred", default=0)
     no_nodal_priority_columns = _row_int_flag(summary, "contact_total_no_nodal_priority_columns", default=0)
     active_contact_present = _row_int_flag(summary, "contact_total_active_contact_present", default=0)
+    tooth_patch_passed = _row_int_flag(summary, "tooth_patch_region_gate_passed", default=0)
+    tooth_patch_ready = _row_int_flag(summary, "tooth_patch_ready_for_cropped_gear_patch", default=0)
+    cropped_patch_passed = _row_int_flag(summary, "cropped_patch_gate_passed", default=0)
+    cropped_pressure_stress_passed = _row_int_flag(summary, "cropped_patch_pressure_stress_gate_passed", default=0)
+    cropped_path_passed = _row_int_flag(summary, "cropped_patch_path_tracking_gate_passed", default=0)
+    cropped_active_region_passed = _row_int_flag(
+        summary,
+        "cropped_patch_active_region_continuity_gate_passed",
+        default=0,
+    )
+    patch_ladder_passed = int(
+        bool(tooth_patch_passed)
+        and bool(tooth_patch_ready)
+        and bool(cropped_patch_passed)
+        and bool(cropped_pressure_stress_passed)
+        and bool(cropped_path_passed)
+        and bool(cropped_active_region_passed)
+    )
     path_tracking_passed = _row_int_flag(
         summary,
         "path_tracking_gate_passed",
@@ -734,7 +752,8 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     strict_sync_min_steps_met = int(accepted_count >= int(min_strict_sync_steps))
     path_tracking_ready = int((not bool(active_contact_present)) or bool(path_columns_present))
     base_gate_passed = int(
-        bool(source_trial_passed)
+        bool(patch_ladder_passed)
+        and bool(source_trial_passed)
         and bool(source_convergence_passed)
         and bool(contact_law_passed)
         and bool(tangent_passed)
@@ -753,6 +772,13 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_ready_for_nodal_contact_outputs": base_gate_passed,
         "full_gear_entry_ready_for_strict_sync_window": strict_sync_ready,
         "full_gear_entry_ready_for_stress_cloud_comparison": strict_sync_ready,
+        "full_gear_entry_patch_ladder_gate_passed": int(patch_ladder_passed),
+        "full_gear_entry_tooth_patch_region_gate_passed": int(tooth_patch_passed),
+        "full_gear_entry_tooth_patch_ready_for_cropped_gear_patch": int(tooth_patch_ready),
+        "full_gear_entry_cropped_patch_gate_passed": int(cropped_patch_passed),
+        "full_gear_entry_cropped_patch_pressure_stress_gate_passed": int(cropped_pressure_stress_passed),
+        "full_gear_entry_cropped_patch_path_tracking_gate_passed": int(cropped_path_passed),
+        "full_gear_entry_cropped_patch_active_region_continuity_gate_passed": int(cropped_active_region_passed),
         "full_gear_entry_source_trial_gate_passed": int(source_trial_passed),
         "full_gear_entry_source_convergence_gate_passed": int(source_convergence_passed),
         "full_gear_entry_constraint_region_contact_law_gate_passed": int(contact_law_passed),
@@ -786,6 +812,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     and strain cloud comparisons.
     """
 
+    patch_ladder_ok = _row_int_flag(summary, "full_gear_entry_patch_ladder_gate_passed", default=0)
     source_ok = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
     law_ok = _row_int_flag(summary, "constraint_region_contact_law_gate_passed", default=0)
     tangent_ok = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=0)
@@ -798,7 +825,14 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     animation_metrics_present = _artifact_present(summary, "animation_metric_errors")
     history_metrics_present = _artifact_present(summary, "history_metric_errors")
 
-    region_allowed = int(bool(source_ok) and bool(law_ok) and bool(tangent_ok) and bool(path_ok) and bool(totals_ok))
+    region_allowed = int(
+        bool(patch_ladder_ok)
+        and bool(source_ok)
+        and bool(law_ok)
+        and bool(tangent_ok)
+        and bool(path_ok)
+        and bool(totals_ok)
+    )
     nodal_allowed = int(
         bool(entry_ok)
         and bool(sfc_manifest_present)
@@ -836,6 +870,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "constraint_region_tangent_gate_passed": int(tangent_ok),
             "path_tracking_gate_passed": int(path_ok),
             "contact_total_gate_passed": int(totals_ok),
+            "patch_ladder_gate_passed": int(patch_ladder_ok),
             "full_gear_entry_gate_passed": int(entry_ok),
             "full_gear_strict_sync_ready": int(strict_ok),
         }
@@ -843,11 +878,20 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     rows: list[Row] = []
     rows.append(
         row(
+            "patch_ladder_prerequisites",
+            allowed=patch_ladder_ok,
+            required_before="full_gear_10_step",
+            artifact_key="cropped_patch_gate",
+            blocking_reason="tooth_patch_or_cropped_patch_gate_failed",
+        )
+    )
+    rows.append(
+        row(
             "region_contact_totals",
             allowed=region_allowed,
             required_before="nodal_cpress_copen",
             artifact_key="contact_total_priority_metrics",
-            blocking_reason="source_convergence_or_contact_total_gate_failed",
+            blocking_reason="patch_ladder_source_convergence_or_contact_total_gate_failed",
         )
     )
     rows.append(

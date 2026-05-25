@@ -169,6 +169,12 @@ def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
 
 def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     summary = {
+        "tooth_patch_region_gate_passed": 1,
+        "tooth_patch_ready_for_cropped_gear_patch": 1,
+        "cropped_patch_gate_passed": 1,
+        "cropped_patch_pressure_stress_gate_passed": 1,
+        "cropped_patch_path_tracking_gate_passed": 1,
+        "cropped_patch_active_region_continuity_gate_passed": 1,
         "source_trial_gate_passed": 1,
         "source_convergence_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
@@ -188,8 +194,16 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     gate = full_gear_entry_gate_metrics(summary)
 
     assert int(gate["full_gear_entry_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_patch_ladder_gate_passed"]) == 1
     assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 1
     assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 1
+
+    missing_patch = dict(summary)
+    missing_patch["tooth_patch_region_gate_passed"] = 0
+    failed_patch = full_gear_entry_gate_metrics(missing_patch)
+
+    assert int(failed_patch["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_patch["full_gear_entry_patch_ladder_gate_passed"]) == 0
 
     missing_totals = dict(summary)
     missing_totals["contact_total_gate_passed"] = 0
@@ -215,6 +229,12 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
 def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
     summary = {
+        "tooth_patch_region_gate_passed": 1,
+        "tooth_patch_ready_for_cropped_gear_patch": 1,
+        "cropped_patch_gate_passed": 1,
+        "cropped_patch_pressure_stress_gate_passed": 1,
+        "cropped_patch_path_tracking_gate_passed": 1,
+        "cropped_patch_active_region_continuity_gate_passed": 1,
         "source_trial_gate_passed": 1,
         "source_convergence_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
@@ -239,6 +259,7 @@ def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
 
 def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
     summary = {
+        "full_gear_entry_patch_ladder_gate_passed": 1,
         "source_convergence_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
@@ -255,6 +276,7 @@ def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
 
     rows = {row["evidence_stage"]: row for row in full_gear_evidence_ladder_rows(summary)}
 
+    assert int(rows["patch_ladder_prerequisites"]["paper_evidence_allowed"]) == 1
     assert int(rows["region_contact_totals"]["paper_evidence_allowed"]) == 1
     assert int(rows["nodal_cpress_copen"]["paper_evidence_allowed"]) == 1
     assert int(rows["stress_strain_clouds"]["paper_evidence_allowed"]) == 0
@@ -263,6 +285,7 @@ def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
 
 def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
     summary = {
+        "full_gear_entry_patch_ladder_gate_passed": 1,
         "source_convergence_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
@@ -279,6 +302,7 @@ def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
 
     rows = {row["evidence_stage"]: row for row in full_gear_evidence_ladder_rows(summary)}
 
+    assert int(rows["patch_ladder_prerequisites"]["paper_evidence_allowed"]) == 1
     assert int(rows["history_vs_abaqus_manifest_totals"]["paper_evidence_allowed"]) == 1
     assert int(rows["nodal_cpress_copen"]["paper_evidence_allowed"]) == 1
     assert int(rows["stress_strain_clouds"]["paper_evidence_allowed"]) == 1
