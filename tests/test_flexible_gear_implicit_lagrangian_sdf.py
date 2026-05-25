@@ -403,6 +403,7 @@ def test_array_constraint_region_carries_master_face_ids() -> None:
         "areas": np.asarray([2.0, 3.0, 1.0], dtype=float),
         "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6], [5, 6, 7]], dtype=np.int64),
         "master_weights": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]], dtype=float),
+        "master_barycentric": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]], dtype=float),
         "master_face_ids": np.asarray([10, 11, 12], dtype=np.int64),
     }
 
@@ -412,6 +413,8 @@ def test_array_constraint_region_carries_master_face_ids() -> None:
     assert "master_face_ids" in aggregated
     assert np.asarray(aggregated["master_face_ids"], dtype=np.int64).size == np.asarray(aggregated["gaps"]).size
     assert set(np.asarray(aggregated["master_face_ids"], dtype=np.int64).tolist()).issubset({10, 11, 12})
+    assert "master_barycentric" in aggregated
+    assert np.asarray(aggregated["master_barycentric"], dtype=float).shape == (np.asarray(aggregated["gaps"]).size, 3)
     assert "secondary_node_ids" in aggregated
     assert set(np.asarray(aggregated["secondary_node_ids"], dtype=np.int64).tolist()).issubset({0, 1, 2, 3})
 
@@ -480,19 +483,26 @@ def test_contact_path_tracking_reports_master_face_switch_fraction() -> None:
     arrays = {
         "gaps": np.asarray([-0.10, -0.02, 0.01], dtype=float),
         "master_face_ids": np.asarray([3, 4, 5], dtype=np.int64),
+        "master_barycentric": np.asarray([[0.7, 0.2, 0.1], [0.2, 0.7, 0.1], [0.1, 0.2, 0.7]], dtype=float),
         "tracking_cache_hits": np.asarray([True, True, False], dtype=bool),
         "tracking_cache_matches": np.asarray([True, False, False], dtype=bool),
     }
     previous = np.asarray([3, 7, 8], dtype=np.int64)
+    previous_bary = np.asarray([[0.6, 0.3, 0.1], [0.3, 0.6, 0.1], [0.2, 0.2, 0.6]], dtype=float)
 
-    metrics, current = _contact_path_tracking_metrics_from_arrays(arrays, previous)
+    metrics, current, current_bary = _contact_path_tracking_metrics_from_arrays(arrays, previous, previous_bary)
 
     assert current is not None
+    assert current_bary is not None
     np.testing.assert_array_equal(current, [3, 4, 5])
+    np.testing.assert_allclose(current_bary[0], [0.7, 0.2, 0.1])
     assert metrics["contact_active_master_face_count"] == 2
     assert metrics["contact_master_face_tracking_comparable_count"] == 2
     assert metrics["contact_master_face_switch_count"] == 1
     assert metrics["contact_master_face_switch_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_master_barycentric_tracking_comparable_count"] == 1
+    assert metrics["contact_master_barycentric_drift_mean"] == pytest.approx(np.sqrt(0.02))
+    assert metrics["contact_master_barycentric_drift_max"] == pytest.approx(np.sqrt(0.02))
     assert metrics["contact_path_cache_hit_count"] == 2
     assert metrics["contact_path_cache_hit_fraction"] == pytest.approx(1.0)
     assert metrics["contact_path_cache_match_count"] == 1
@@ -585,12 +595,14 @@ def test_array_region_workspace_reuses_topology_without_freezing_payload() -> No
         "areas",
         "master_node_ids",
         "master_weights",
+        "master_barycentric",
         "master_face_ids",
         "secondary_node_ids",
         "tracking_cache_hits",
         "tracking_cache_matches",
+        "tracking_barycentric_distances",
     ):
-        np.testing.assert_allclose(np.asarray(second[key]), np.asarray(reference[key]))
+        np.testing.assert_allclose(np.asarray(second[key]), np.asarray(reference[key]), equal_nan=True)
 
 
 def test_array_signed_participation_matches_object_signed_participation() -> None:
@@ -1551,6 +1563,8 @@ def test_secondary_normal_projection_sample_arrays_match_scalar_when_cpp_availab
     assert arrays["gaps"][0] == pytest.approx(scalar.gap)
     np.testing.assert_allclose(arrays["normals"][0], scalar.normal)
     np.testing.assert_allclose(arrays["master_weights"][0], scalar.master_shape_weights)
+    np.testing.assert_allclose(arrays["master_barycentric"][0], scalar.master_shape_weights)
+    assert "tracking_barycentric_distances" in arrays
 
 
 def test_secondary_normal_projection_sample_arrays_reject_near_tangent_constraint() -> None:

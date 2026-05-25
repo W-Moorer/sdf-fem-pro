@@ -329,11 +329,13 @@ def _contact_active_signature_from_samples(samples: list[ContactSample] | None) 
 def _contact_path_tracking_metrics_from_arrays(
     sample_arrays: dict[str, np.ndarray] | None,
     previous_master_face_ids: np.ndarray | None,
-) -> tuple[Row, np.ndarray | None]:
+    previous_master_barycentric: np.ndarray | None = None,
+) -> tuple[Row, np.ndarray | None, np.ndarray | None]:
     """Measure master-face continuity for the accepted batched contact path.
 
-    The metric is diagnostic only: it checks whether the face ids carried by
-    the secondary-normal/path-tracked projection payload change unexpectedly
+    The metric is diagnostic only: it checks whether the face ids and
+    representative barycentric coordinates carried by the
+    secondary-normal/path-tracked projection payload change unexpectedly
     between accepted states.  It is intentionally separate from SDF querying.
     """
 
@@ -348,7 +350,10 @@ def _contact_path_tracking_metrics_from_arrays(
             "contact_path_cache_hit_fraction": 0.0,
             "contact_path_cache_match_count": 0,
             "contact_path_cache_match_fraction": 0.0,
-        }, None
+            "contact_master_barycentric_tracking_comparable_count": 0,
+            "contact_master_barycentric_drift_mean": 0.0,
+            "contact_master_barycentric_drift_max": 0.0,
+        }, None, None
     face_ids = np.asarray(sample_arrays.get("master_face_ids", np.empty(0)), dtype=np.int64).reshape(-1)
     gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
     if face_ids.size == 0 or gaps.size == 0:
@@ -363,7 +368,10 @@ def _contact_path_tracking_metrics_from_arrays(
             "contact_path_cache_hit_fraction": 0.0,
             "contact_path_cache_match_count": 0,
             "contact_path_cache_match_fraction": 0.0,
-        }, current
+            "contact_master_barycentric_tracking_comparable_count": 0,
+            "contact_master_barycentric_drift_mean": 0.0,
+            "contact_master_barycentric_drift_max": 0.0,
+        }, current, None
     usable = (face_ids >= 0) & (gaps < 0.0)
     active_faces = face_ids[usable]
     comparable = np.zeros(face_ids.shape, dtype=bool)
@@ -407,7 +415,44 @@ def _contact_path_tracking_metrics_from_arrays(
     else:
         metrics["contact_path_cache_match_count"] = 0
         metrics["contact_path_cache_match_fraction"] = 0.0
-    return metrics, face_ids.copy()
+    bary_in = sample_arrays.get("master_barycentric")
+    if bary_in is None:
+        weights = np.asarray(sample_arrays.get("master_weights", np.empty((0, 0))), dtype=float)
+        bary = weights if weights.ndim == 2 and weights.shape[1] == 3 else None
+    else:
+        bary = np.asarray(bary_in, dtype=float)
+    current_bary = None
+    bary_comparable = np.zeros(face_ids.shape, dtype=bool)
+    if bary is not None and bary.shape == (face_ids.size, 3):
+        current_bary = np.asarray(bary, dtype=float).copy()
+        previous_bary = None if previous_master_barycentric is None else np.asarray(previous_master_barycentric, dtype=float)
+        if previous_bary is not None and previous_bary.shape == current_bary.shape and previous_master_face_ids is not None:
+            previous_faces = np.asarray(previous_master_face_ids, dtype=np.int64).reshape(-1)
+            if previous_faces.shape == face_ids.shape:
+                finite_bary = np.all(np.isfinite(current_bary), axis=1) & np.all(np.isfinite(previous_bary), axis=1)
+                bary_comparable = usable & finite_bary & (previous_faces == face_ids) & (face_ids >= 0)
+                if np.any(bary_comparable):
+                    drifts = np.linalg.norm(current_bary[bary_comparable] - previous_bary[bary_comparable], axis=1)
+                    metrics["contact_master_barycentric_tracking_comparable_count"] = int(drifts.size)
+                    metrics["contact_master_barycentric_drift_mean"] = float(np.mean(drifts))
+                    metrics["contact_master_barycentric_drift_max"] = float(np.max(drifts))
+                else:
+                    metrics["contact_master_barycentric_tracking_comparable_count"] = 0
+                    metrics["contact_master_barycentric_drift_mean"] = 0.0
+                    metrics["contact_master_barycentric_drift_max"] = 0.0
+            else:
+                metrics["contact_master_barycentric_tracking_comparable_count"] = 0
+                metrics["contact_master_barycentric_drift_mean"] = 0.0
+                metrics["contact_master_barycentric_drift_max"] = 0.0
+        else:
+            metrics["contact_master_barycentric_tracking_comparable_count"] = 0
+            metrics["contact_master_barycentric_drift_mean"] = 0.0
+            metrics["contact_master_barycentric_drift_max"] = 0.0
+    else:
+        metrics["contact_master_barycentric_tracking_comparable_count"] = 0
+        metrics["contact_master_barycentric_drift_mean"] = 0.0
+        metrics["contact_master_barycentric_drift_max"] = 0.0
+    return metrics, face_ids.copy(), current_bary
 
 
 def _empty_contact_region_integral_metrics() -> Row:
@@ -686,10 +731,12 @@ def _aggregate_contact_array_group(
     areas: np.ndarray,
     master_nodes: np.ndarray,
     master_weights: np.ndarray,
+    master_barycentric: np.ndarray | None,
     master_face_ids: np.ndarray | None,
     secondary_node_id: int | None,
     tracking_cache_hits: np.ndarray | None,
     tracking_cache_matches: np.ndarray | None,
+    tracking_barycentric_distances: np.ndarray | None,
     overclosure_mode: str,
 ) -> dict[str, np.ndarray | float]:
     """Aggregate a set of contact-array rows into one equivalent constraint."""
@@ -769,6 +816,7 @@ def _aggregate_contact_array_group(
     slave_ids, slave_w = _combined_shape_weights_from_arrays(sample_nodes, sample_weights, row_indices, kinematic_weights)
     master_ids, master_w = _combined_shape_weights_from_arrays(master_nodes, master_weights, row_indices, kinematic_weights)
     master_face_id = -1
+    representative_local: int | None = None
     if master_face_ids is not None:
         row_face_ids = np.asarray(master_face_ids, dtype=np.int64).reshape(-1)
         if row_face_ids.size:
@@ -777,7 +825,13 @@ def _aggregate_contact_array_group(
             if np.any(valid_mask):
                 weights_for_face = np.asarray(kinematic_weights, dtype=float).reshape(-1)
                 best_local = int(np.argmax(np.where(valid_mask, weights_for_face, -np.inf)))
+                representative_local = best_local
                 master_face_id = int(valid_faces[best_local])
+    master_bary = np.full(3, np.nan, dtype=float)
+    if master_barycentric is not None and representative_local is not None:
+        row_bary = np.asarray(master_barycentric, dtype=float)
+        if row_bary.ndim == 2 and row_bary.shape[0] >= int(np.max(rows)) + 1 and row_bary.shape[1] == 3:
+            master_bary = row_bary[int(rows[int(representative_local)])].copy()
     tracking_hit = False
     if tracking_cache_hits is not None:
         row_hits = np.asarray(tracking_cache_hits, dtype=bool).reshape(-1)
@@ -788,6 +842,19 @@ def _aggregate_contact_array_group(
         row_matches = np.asarray(tracking_cache_matches, dtype=bool).reshape(-1)
         if row_matches.size:
             tracking_match = bool(np.any(row_matches[rows]))
+    tracking_barycentric_distance = np.nan
+    if tracking_barycentric_distances is not None:
+        row_distances = np.asarray(tracking_barycentric_distances, dtype=float).reshape(-1)
+        if row_distances.size:
+            distances = row_distances[rows]
+            finite = np.isfinite(distances)
+            if np.any(finite):
+                weights_for_distance = np.asarray(kinematic_weights, dtype=float).reshape(-1)[finite]
+                weight_sum = float(np.sum(weights_for_distance))
+                if weight_sum > 0.0:
+                    tracking_barycentric_distance = float(weights_for_distance @ distances[finite] / weight_sum)
+                else:
+                    tracking_barycentric_distance = float(np.mean(distances[finite]))
     return {
         "sample_node_ids": slave_ids,
         "sample_weights": slave_w,
@@ -796,10 +863,12 @@ def _aggregate_contact_array_group(
         "area": float(aggregate_area),
         "master_node_ids": master_ids,
         "master_weights": master_w,
+        "master_barycentric": master_bary,
         "master_face_id": int(master_face_id),
         "secondary_node_id": int(-1 if secondary_node_id is None else secondary_node_id),
         "tracking_cache_hit": int(tracking_hit),
         "tracking_cache_match": int(tracking_match),
+        "tracking_barycentric_distance": float(tracking_barycentric_distance),
     }
 
 
@@ -815,10 +884,12 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
             "areas": np.empty(0, dtype=float),
             "master_node_ids": np.empty((0, 0), dtype=np.int64),
             "master_weights": np.empty((0, 0), dtype=float),
+            "master_barycentric": np.empty((0, 3), dtype=float),
             "master_face_ids": np.empty(0, dtype=np.int64),
             "secondary_node_ids": np.empty(0, dtype=np.int64),
             "tracking_cache_hits": np.empty(0, dtype=bool),
             "tracking_cache_matches": np.empty(0, dtype=bool),
+            "tracking_barycentric_distances": np.empty(0, dtype=float),
         }
     slave_width = max(int(np.asarray(row["sample_node_ids"]).size) for row in rows)
     master_width = max(int(np.asarray(row["master_node_ids"]).size) for row in rows)
@@ -830,9 +901,11 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
     normals = np.zeros((len(rows), 3), dtype=float)
     areas = np.zeros(len(rows), dtype=float)
     master_face_ids = np.full(len(rows), -1, dtype=np.int64)
+    master_barycentric = np.full((len(rows), 3), np.nan, dtype=float)
     secondary_node_ids = np.full(len(rows), -1, dtype=np.int64)
     tracking_cache_hits = np.zeros(len(rows), dtype=bool)
     tracking_cache_matches = np.zeros(len(rows), dtype=bool)
+    tracking_barycentric_distances = np.full(len(rows), np.nan, dtype=float)
     for index, row in enumerate(rows):
         slave_ids = np.asarray(row["sample_node_ids"], dtype=np.int64).reshape(-1)
         slave_w = np.asarray(row["sample_weights"], dtype=float).reshape(-1)
@@ -846,9 +919,11 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         normals[index] = np.asarray(row["normal"], dtype=float).reshape(3)
         areas[index] = float(row["area"])
         master_face_ids[index] = int(row.get("master_face_id", -1))
+        master_barycentric[index] = np.asarray(row.get("master_barycentric", np.full(3, np.nan)), dtype=float).reshape(3)
         secondary_node_ids[index] = int(row.get("secondary_node_id", -1))
         tracking_cache_hits[index] = bool(row.get("tracking_cache_hit", 0))
         tracking_cache_matches[index] = bool(row.get("tracking_cache_match", 0))
+        tracking_barycentric_distances[index] = float(row.get("tracking_barycentric_distance", np.nan))
     return {
         "sample_node_ids": sample_node_ids,
         "sample_weights": sample_weights,
@@ -857,10 +932,12 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         "areas": areas,
         "master_node_ids": master_node_ids,
         "master_weights": master_weights,
+        "master_barycentric": master_barycentric,
         "master_face_ids": master_face_ids,
         "secondary_node_ids": secondary_node_ids,
         "tracking_cache_hits": tracking_cache_hits,
         "tracking_cache_matches": tracking_cache_matches,
+        "tracking_barycentric_distances": tracking_barycentric_distances,
     }
 
 
@@ -894,6 +971,12 @@ def _aggregate_contact_sample_arrays(
     areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
     master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
     master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    master_barycentric_in = sample_arrays.get("master_barycentric")
+    master_barycentric = (
+        np.asarray(master_barycentric_in, dtype=float)
+        if master_barycentric_in is not None
+        else (master_weights.copy() if master_weights.ndim == 2 and master_weights.shape[1] == 3 else None)
+    )
     master_face_ids_in = sample_arrays.get("master_face_ids")
     master_face_ids = (
         None
@@ -907,6 +990,7 @@ def _aggregate_contact_sample_arrays(
     expanded_areas = areas
     expanded_master_nodes = master_nodes
     expanded_master_weights = master_weights
+    expanded_master_barycentric = master_barycentric
     expanded_master_face_ids = master_face_ids
     tracking_cache_hits_in = sample_arrays.get("tracking_cache_hits")
     tracking_cache_matches_in = sample_arrays.get("tracking_cache_matches")
@@ -914,8 +998,15 @@ def _aggregate_contact_sample_arrays(
     tracking_cache_matches = (
         None if tracking_cache_matches_in is None else np.asarray(tracking_cache_matches_in, dtype=bool).reshape(-1)
     )
+    tracking_barycentric_distances_in = sample_arrays.get("tracking_barycentric_distances")
+    tracking_barycentric_distances = (
+        None
+        if tracking_barycentric_distances_in is None
+        else np.asarray(tracking_barycentric_distances_in, dtype=float).reshape(-1)
+    )
     expanded_tracking_cache_hits = tracking_cache_hits
     expanded_tracking_cache_matches = tracking_cache_matches
+    expanded_tracking_barycentric_distances = tracking_barycentric_distances
     group_indices: list[list[int]]
     group_secondary_node_ids: np.ndarray | None = None
     cache_hit = bool(
@@ -981,10 +1072,14 @@ def _aggregate_contact_sample_arrays(
                     expanded_areas = areas[source_rows] * local_weights
                     expanded_master_nodes = master_nodes[source_rows]
                     expanded_master_weights = master_weights[source_rows]
+                    expanded_master_barycentric = None if master_barycentric is None else master_barycentric[source_rows]
                     expanded_master_face_ids = None if master_face_ids is None else master_face_ids[source_rows]
                     expanded_tracking_cache_hits = None if tracking_cache_hits is None else tracking_cache_hits[source_rows]
                     expanded_tracking_cache_matches = (
                         None if tracking_cache_matches is None else tracking_cache_matches[source_rows]
+                    )
+                    expanded_tracking_barycentric_distances = (
+                        None if tracking_barycentric_distances is None else tracking_barycentric_distances[source_rows]
                     )
                 else:
                     expanded_sample_nodes = np.empty((0, sample_nodes.shape[1]), dtype=np.int64)
@@ -994,10 +1089,14 @@ def _aggregate_contact_sample_arrays(
                     expanded_areas = np.empty(0, dtype=float)
                     expanded_master_nodes = np.empty((0, master_nodes.shape[1]), dtype=np.int64)
                     expanded_master_weights = np.empty((0, master_weights.shape[1]), dtype=float)
+                    expanded_master_barycentric = None if master_barycentric is None else np.empty((0, 3), dtype=float)
                     expanded_master_face_ids = None if master_face_ids is None else np.empty(0, dtype=np.int64)
                     expanded_tracking_cache_hits = None if tracking_cache_hits is None else np.empty(0, dtype=bool)
                     expanded_tracking_cache_matches = (
                         None if tracking_cache_matches is None else np.empty(0, dtype=bool)
+                    )
+                    expanded_tracking_barycentric_distances = (
+                        None if tracking_barycentric_distances is None else np.empty(0, dtype=float)
                     )
                 workspace.hits += 1
         if not cache_hit:
@@ -1052,10 +1151,12 @@ def _aggregate_contact_sample_arrays(
                     "areas": np.empty(0, dtype=float),
                     "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
                     "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
+                    "master_barycentric": np.empty((0, 3), dtype=float),
                     "master_face_ids": np.empty(0, dtype=np.int64),
                     "secondary_node_ids": np.empty(0, dtype=np.int64),
                     "tracking_cache_hits": np.empty(0, dtype=bool),
                     "tracking_cache_matches": np.empty(0, dtype=bool),
+                    "tracking_barycentric_distances": np.empty(0, dtype=float),
                 }
             expanded_sample_nodes = sample_nodes[source_rows].copy()
             if base_mode == "slave_node":
@@ -1068,10 +1169,14 @@ def _aggregate_contact_sample_arrays(
             expanded_areas = areas[source_rows] * local_weights
             expanded_master_nodes = master_nodes[source_rows].copy()
             expanded_master_weights = master_weights[source_rows].copy()
+            expanded_master_barycentric = None if master_barycentric is None else master_barycentric[source_rows].copy()
             expanded_master_face_ids = None if master_face_ids is None else master_face_ids[source_rows].copy()
             expanded_tracking_cache_hits = None if tracking_cache_hits is None else tracking_cache_hits[source_rows].copy()
             expanded_tracking_cache_matches = (
                 None if tracking_cache_matches is None else tracking_cache_matches[source_rows].copy()
+            )
+            expanded_tracking_barycentric_distances = (
+                None if tracking_barycentric_distances is None else tracking_barycentric_distances[source_rows].copy()
             )
             if workspace is not None:
                 workspace.misses += 1
@@ -1097,10 +1202,12 @@ def _aggregate_contact_sample_arrays(
                 "areas": np.empty(0, dtype=float),
                 "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
                 "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
+                "master_barycentric": np.empty((0, 3), dtype=float),
                 "master_face_ids": np.empty(0, dtype=np.int64),
                 "secondary_node_ids": np.empty(0, dtype=np.int64),
                 "tracking_cache_hits": np.empty(0, dtype=bool),
                 "tracking_cache_matches": np.empty(0, dtype=bool),
+                "tracking_barycentric_distances": np.empty(0, dtype=float),
             }
     if group_secondary_node_ids is None:
         group_secondary_node_ids = np.full(len(group_indices), -1, dtype=np.int64)
@@ -1114,10 +1221,12 @@ def _aggregate_contact_sample_arrays(
             areas=expanded_areas,
             master_nodes=expanded_master_nodes,
             master_weights=expanded_master_weights,
+            master_barycentric=expanded_master_barycentric,
             master_face_ids=expanded_master_face_ids,
             secondary_node_id=int(group_secondary_node_ids[int(group_index)]),
             tracking_cache_hits=expanded_tracking_cache_hits,
             tracking_cache_matches=expanded_tracking_cache_matches,
+            tracking_barycentric_distances=expanded_tracking_barycentric_distances,
             overclosure_mode=overclosure_mode,
         )
         for group_index, rows in enumerate(group_indices)
@@ -4453,6 +4562,7 @@ def solve_sfc_source_drive_pair(
     base_preconditioner_lu: Any | None = None
     contact_aggregation_workspace = _ContactAggregationWorkspace()
     previous_path_master_face_ids: np.ndarray | None = None
+    previous_path_master_barycentric: np.ndarray | None = None
 
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if (
@@ -4803,12 +4913,15 @@ def solve_sfc_source_drive_pair(
         source_cutback_required_count += int(bool(increment_decision.cutback_required))
         source_unconverged_accepted_count += int((not bool(increment_decision.converged)) and bool(increment_decision.accepted))
         source_unstable_accepted_count += int(bool(source_contact_active_set_stability) and not bool(active_set_stable))
-        path_tracking_metrics, current_path_master_face_ids = _contact_path_tracking_metrics_from_arrays(
+        path_tracking_metrics, current_path_master_face_ids, current_path_master_barycentric = _contact_path_tracking_metrics_from_arrays(
             last_sample_arrays,
             previous_path_master_face_ids,
+            previous_path_master_barycentric,
         )
         if current_path_master_face_ids is not None:
             previous_path_master_face_ids = current_path_master_face_ids
+        if current_path_master_barycentric is not None:
+            previous_path_master_barycentric = current_path_master_barycentric
         contact_region_metrics = (
             _contact_region_integral_metrics_from_arrays(last_sample_arrays, stiffness=pressure_stiffness)
             if last_sample_arrays is not None

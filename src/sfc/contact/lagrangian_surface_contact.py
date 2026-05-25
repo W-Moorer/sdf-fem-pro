@@ -1047,12 +1047,20 @@ class LagrangianSDFSurfaceContactGeometry:
         tracking_cache_hits = previous_cache_face_ids >= 0
         tracking_cache_matches = tracking_cache_hits & (previous_cache_face_ids == face_ids)
         cache[valid_cache_indices] = face_ids
+        tracking_barycentric_distances = np.full(face_ids.shape, np.nan, dtype=float)
         if bool(self.secondary_path_tracking):
             bary_cache = self._ensure_secondary_barycentric_cache()
+            previous_barycentric = bary_cache[valid_cache_indices].copy()
             totals = np.sum(master_bary, axis=1)
             normalized = np.asarray(master_bary, dtype=float).copy()
             good = totals > 1.0e-30
             normalized[good] /= totals[good, None]
+            previous_good = np.all(np.isfinite(previous_barycentric), axis=1)
+            if np.any(previous_good):
+                tracking_barycentric_distances[previous_good] = np.linalg.norm(
+                    normalized[previous_good] - previous_barycentric[previous_good],
+                    axis=1,
+                )
             bary_cache[valid_cache_indices] = normalized
         master_nodes = self.master_material.boundary_faces[face_ids] + int(self.master_node_offset)
         return {
@@ -1063,9 +1071,11 @@ class LagrangianSDFSurfaceContactGeometry:
             "areas": np.asarray(areas, dtype=float),
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
             "master_weights": master_bary,
+            "master_barycentric": master_bary,
             "master_face_ids": np.asarray(face_ids, dtype=np.int64),
             "tracking_cache_hits": tracking_cache_hits.astype(bool, copy=False),
             "tracking_cache_matches": tracking_cache_matches.astype(bool, copy=False),
+            "tracking_barycentric_distances": tracking_barycentric_distances,
         }
 
     def normal_compatible_sample_arrays(
@@ -1832,9 +1842,11 @@ def _empty_sample_arrays() -> dict[str, np.ndarray]:
         "areas": np.empty(0, dtype=float),
         "master_node_ids": np.empty((0, 3), dtype=np.int64),
         "master_weights": np.empty((0, 3), dtype=float),
+        "master_barycentric": np.empty((0, 3), dtype=float),
         "master_face_ids": np.empty(0, dtype=np.int64),
         "tracking_cache_hits": np.empty(0, dtype=bool),
         "tracking_cache_matches": np.empty(0, dtype=bool),
+        "tracking_barycentric_distances": np.empty(0, dtype=float),
     }
 
 
