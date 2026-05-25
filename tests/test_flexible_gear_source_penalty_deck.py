@@ -325,14 +325,19 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary
+    assert "contact_total_gate" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
     assert int(summary["source_convergence_gate_passed"]) == 1
+    assert int(summary["contact_total_gate_passed"]) == 1
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
     trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
     convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
+    contact_total_gate_csv = tmp_path / "sfc_contact_total_gate.csv"
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
     assert convergence_gate_csv.exists()
+    assert contact_total_gate_csv.exists()
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
     assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
+    assert "contact_total_gate_passed" in contact_total_gate_csv.read_text(encoding="utf-8")

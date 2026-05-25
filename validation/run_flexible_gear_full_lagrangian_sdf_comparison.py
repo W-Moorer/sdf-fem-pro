@@ -131,6 +131,72 @@ def write_contact_total_priority_csv(history_rows: list[Row], out_path: Path) ->
     return out_path
 
 
+def _row_has_value(row: Row, key: str) -> bool:
+    value = row.get(key)
+    return value not in ("", None)
+
+
+def contact_total_priority_gate_metrics(priority_rows: list[Row]) -> Row:
+    """Gate for total contact quantities before nodal CPRESS/COPEN checks."""
+
+    active_rows: list[Row] = []
+    for row in priority_rows:
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        active_area = _finite_row_float(row, "contact_active_area") or 0.0
+        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
+        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
+            active_rows.append(row)
+    required_total_columns = (
+        "contact_region_normal_force",
+        "contact_region_virtual_work",
+        "contact_region_energy",
+        "contact_active_area",
+        "active_contact_region_count",
+    )
+    required_path_columns = (
+        "contact_path_cache_hit_fraction",
+        "contact_path_cache_match_fraction",
+        "contact_master_face_switch_fraction",
+    )
+    has_rows = len(priority_rows) > 0
+    nodal_deferred = all(_row_int_flag(row, "nodal_cpress_deferred", default=0) == 1 for row in priority_rows)
+    no_nodal_columns = all(
+        not _row_has_value(row, column)
+        for row in priority_rows
+        for column in NODAL_CONTACT_DIAGNOSTIC_COLUMNS
+    )
+    total_columns_present = True
+    path_columns_present = True
+    force_consistent = True
+    max_force_mismatch = 0.0
+    for row in active_rows:
+        total_columns_present = total_columns_present and all(_row_has_value(row, key) for key in required_total_columns)
+        path_columns_present = path_columns_present and all(_row_has_value(row, key) for key in required_path_columns)
+        normal_force = _finite_row_float(row, "normal_force")
+        region_force = _finite_row_float(row, "contact_region_normal_force")
+        if normal_force is not None and region_force is not None:
+            mismatch = abs(float(normal_force) - float(region_force))
+            scale = max(1.0, abs(float(normal_force)), abs(float(region_force)))
+            max_force_mismatch = max(max_force_mismatch, mismatch / scale)
+            force_consistent = force_consistent and mismatch <= 1.0e-6 * scale
+    active_contact_present = len(active_rows) > 0
+    active_total_gate = (not active_contact_present) or (total_columns_present and path_columns_present and force_consistent)
+    gate_passed = int(has_rows and nodal_deferred and no_nodal_columns and active_total_gate)
+    return {
+        "contact_total_gate_passed": gate_passed,
+        "comparison_stage": "region_totals_before_nodal_cpress",
+        "contact_total_row_count": int(len(priority_rows)),
+        "contact_total_active_row_count": int(len(active_rows)),
+        "contact_total_active_contact_present": int(active_contact_present),
+        "contact_total_nodal_cpress_deferred": int(nodal_deferred),
+        "contact_total_no_nodal_priority_columns": int(no_nodal_columns),
+        "contact_total_required_columns_present": int(total_columns_present),
+        "contact_total_path_columns_present": int(path_columns_present),
+        "contact_total_force_consistency_passed": int(force_consistent),
+        "contact_total_force_relative_mismatch_max": float(max_force_mismatch),
+    }
+
+
 def _finite_row_float(row: Row, *keys: str) -> float | None:
     for key in keys:
         value = row.get(key)
@@ -912,6 +978,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source unstable accepted steps: {summary.get('source_unstable_accepted_count', '')}",
         f"- source line-search unstable count: {summary.get('source_line_search_unstable_count', '')}",
         f"- source constraint-region tangent solves: {summary.get('source_constraint_region_tangent_solve_count', '')}",
+        f"- contact-total gate: {summary.get('contact_total_gate_passed', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
@@ -942,6 +1009,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         lines.append(f"- source convergence gate CSV: `{Path(str(summary.get('source_convergence_gate'))).name}`")
     if summary.get("contact_total_priority_metrics"):
         lines.append(f"- contact-total priority metrics: `{Path(str(summary.get('contact_total_priority_metrics'))).name}`")
+    if summary.get("contact_total_gate"):
+        lines.append(f"- contact-total gate CSV: `{Path(str(summary.get('contact_total_gate'))).name}`")
     if summary.get("source_increment_trials"):
         lines.append(f"- source increment trial ledger: `{Path(str(summary.get('source_increment_trials'))).name}`")
     if summary.get("sfc_vtk_pvd"):
@@ -1255,6 +1324,11 @@ def run_full_gear(
     contact_total_priority_path = out_dir / "sfc_contact_total_priority_metrics.csv"
     write_contact_total_priority_csv(history, contact_total_priority_path)
     summary["contact_total_priority_metrics"] = str(contact_total_priority_path)
+    contact_total_gate = contact_total_priority_gate_metrics(_read_csv_rows(contact_total_priority_path))
+    contact_total_gate_path = out_dir / "sfc_contact_total_gate.csv"
+    _write_csv(contact_total_gate_path, [contact_total_gate])
+    summary.update(contact_total_gate)
+    summary["contact_total_gate"] = str(contact_total_gate_path)
     source_convergence_gate = source_convergence_gate_metrics(summary, history)
     source_convergence_gate_path = out_dir / "sfc_source_convergence_gate.csv"
     _write_csv(source_convergence_gate_path, [source_convergence_gate])
