@@ -55,6 +55,13 @@ from sfc.contact.constraint_region import (  # noqa: E402
     secondary_node_pressure_recovery_from_regions as _core_secondary_node_pressure_recovery_from_regions,
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
+from sfc.contact.tracking_state import (  # noqa: E402
+    accepted_contact_response_can_reuse as _core_accepted_contact_response_can_reuse,
+    commit_accepted_contact_tracking_from_sample_arrays as _core_commit_accepted_contact_tracking_from_sample_arrays,
+    restore_contact_tracking_state as _core_restore_contact_tracking_state,
+    run_contact_tracking_trial as _core_run_contact_tracking_trial,
+    snapshot_contact_tracking_state as _core_snapshot_contact_tracking_state,
+)
 from sfc.fem.calculix_aligned import (  # noqa: E402
     ContactSample,
     ContactResponse,
@@ -603,61 +610,13 @@ def _source_active_set_stability_after_line_search(
 def _snapshot_contact_tracking_state(contact_geometries: Iterable[Any]) -> list[dict[str, Any]]:
     """Capture path-tracking caches so trial queries cannot become accepted state."""
 
-    states: list[dict[str, Any]] = []
-    for geometry in contact_geometries:
-        oracle = getattr(geometry, "_oracle", None)
-        states.append(
-            {
-                "geometry": geometry,
-                "secondary_face_cache": (
-                    None
-                    if getattr(geometry, "_secondary_face_cache", None) is None
-                    else np.asarray(getattr(geometry, "_secondary_face_cache")).copy()
-                ),
-                "secondary_barycentric_cache": (
-                    None
-                    if getattr(geometry, "_secondary_barycentric_cache", None) is None
-                    else np.asarray(getattr(geometry, "_secondary_barycentric_cache")).copy()
-                ),
-                "oracle": oracle,
-                "oracle_patch_cache": dict(getattr(oracle, "_patch_cache", {})) if oracle is not None else None,
-                "oracle_barycentric_cache": (
-                    {
-                        key: np.asarray(value, dtype=float).copy()
-                        for key, value in getattr(oracle, "_barycentric_cache", {}).items()
-                    }
-                    if oracle is not None
-                    else None
-                ),
-            }
-        )
-    return states
+    return _core_snapshot_contact_tracking_state(contact_geometries)
 
 
 def _restore_contact_tracking_state(states: list[dict[str, Any]]) -> None:
     """Restore path-tracking caches captured by ``_snapshot_contact_tracking_state``."""
 
-    for state_row in states:
-        geometry = state_row["geometry"]
-        face_cache = state_row["secondary_face_cache"]
-        bary_cache = state_row["secondary_barycentric_cache"]
-        setattr(geometry, "_secondary_face_cache", None if face_cache is None else np.asarray(face_cache, dtype=np.int64).copy())
-        setattr(
-            geometry,
-            "_secondary_barycentric_cache",
-            None if bary_cache is None else np.asarray(bary_cache, dtype=float).copy(),
-        )
-        oracle = state_row.get("oracle")
-        if oracle is not None:
-            setattr(oracle, "_patch_cache", dict(state_row.get("oracle_patch_cache") or {}))
-            setattr(
-                oracle,
-                "_barycentric_cache",
-                {
-                    key: np.asarray(value, dtype=float).copy()
-                    for key, value in (state_row.get("oracle_barycentric_cache") or {}).items()
-                },
-            )
+    _core_restore_contact_tracking_state(states)
 
 
 def _source_increment_convergence_decision(
@@ -5032,37 +4991,22 @@ def solve_sfc_source_drive_pair(
         return collected
 
     def source_sample_arrays_trial(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
-        cache_state = _snapshot_contact_tracking_state(contact_geometries)
-        try:
-            return source_sample_arrays(x_contact)
-        finally:
-            _restore_contact_tracking_state(cache_state)
+        return _core_run_contact_tracking_trial(contact_geometries, lambda: source_sample_arrays(x_contact))
 
     def source_sample_arrays_trial_with_raw(
         x_contact: np.ndarray,
     ) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray] | None]:
-        cache_state = _snapshot_contact_tracking_state(contact_geometries)
-        try:
+        def query() -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray] | None]:
             raw_arrays = source_sample_arrays_raw(x_contact)
             return raw_arrays, aggregate_source_sample_arrays(raw_arrays)
-        finally:
-            _restore_contact_tracking_state(cache_state)
+
+        return _core_run_contact_tracking_trial(contact_geometries, query)
 
     def commit_accepted_tracking_from_raw(raw_arrays: dict[str, np.ndarray] | None) -> int:
-        if raw_arrays is None or len(contact_geometries) != 1:
-            return 0
-        geometry = contact_geometries[0]
-        commit = getattr(geometry, "commit_secondary_tracking_from_sample_arrays", None)
-        if commit is None:
-            return 0
-        return int(commit(raw_arrays))
+        return _core_commit_accepted_contact_tracking_from_sample_arrays(contact_geometries, raw_arrays)
 
     def source_samples_trial(x_contact: np.ndarray) -> list[Any]:
-        cache_state = _snapshot_contact_tracking_state(contact_geometries)
-        try:
-            return source_samples(x_contact)
-        finally:
-            _restore_contact_tracking_state(cache_state)
+        return _core_run_contact_tracking_trial(contact_geometries, lambda: source_samples(x_contact))
 
     accepted_step = int(start_step)
     accepted_time = float(start_time)
@@ -5425,7 +5369,10 @@ def solve_sfc_source_drive_pair(
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         # Commit path-tracking caches only after the increment is accepted.
         accepted_contact_x = contact_positions_from_reduced(q_new)
-        accepted_reused_response = bool(increment_decision.converged and last_sample_arrays is not None)
+        accepted_reused_response = _core_accepted_contact_response_can_reuse(
+            converged=bool(increment_decision.converged),
+            sample_arrays_present=last_sample_arrays is not None,
+        )
         if accepted_reused_response:
             accepted_arrays = last_sample_arrays
             source_accepted_contact_response_reuse_count += 1
