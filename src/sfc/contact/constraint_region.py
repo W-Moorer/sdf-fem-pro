@@ -9,8 +9,26 @@ node-to-surface penalty sample.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, diags
+
+
+@dataclass(slots=True)
+class ConstraintRegionContactResponse:
+    """Penalty response assembled from secondary constraint-region rows."""
+
+    force: np.ndarray
+    tangent: csr_matrix
+    min_gap: float
+    max_penetration: float
+    active_count: int
+    normal_force: float
+    energy: float
+    virtual_work: float
+    active_area: float
+    metrics: dict[str, float | int | str]
 
 
 def contact_averaging_modes(mode: str) -> tuple[str, str]:
@@ -363,6 +381,112 @@ def constraint_region_reduced_contact_tangent_sparse_from_arrays(
     metrics["contact_tangent_matrix_nnz"] = int(tangent.nnz)
     metrics["contact_tangent_coordinate_space"] = "reduced_free"
     return active_ids, reduced_jacobian, scales, tangent, metrics
+
+
+def constraint_region_penalty_response_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    n_nodes: int,
+    pressure_stiffness: float,
+    tangent_equilibrium_scale: float = 1.0,
+    include_tangent: bool = True,
+) -> ConstraintRegionContactResponse:
+    """Assemble force, tangent, and totals from region rows.
+
+    Each row of ``sample_arrays`` is treated as one secondary constraint
+    region.  The open/closed state is determined by that row's averaged gap,
+    and its pressure is distributed to slave and master nodes using the
+    already-aggregated shape weights and closest-feature payload.  This is the
+    core response path for Abaqus-style constraint-region contact; raw
+    quadrature points should be aggregated before calling this function.
+    """
+
+    count = int(n_nodes)
+    force = np.zeros((count, 3), dtype=float)
+    ndofs = 3 * count
+    empty_tangent = coo_matrix((ndofs, ndofs), dtype=float).tocsr()
+    if sample_arrays is None:
+        return ConstraintRegionContactResponse(
+            force=force,
+            tangent=empty_tangent,
+            min_gap=0.0,
+            max_penetration=0.0,
+            active_count=0,
+            normal_force=0.0,
+            energy=0.0,
+            virtual_work=0.0,
+            active_area=0.0,
+            metrics=_empty_contact_region_integral_metrics(),
+        )
+
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0:
+        return ConstraintRegionContactResponse(
+            force=force,
+            tangent=empty_tangent,
+            min_gap=0.0,
+            max_penetration=0.0,
+            active_count=0,
+            normal_force=0.0,
+            energy=0.0,
+            virtual_work=0.0,
+            active_area=0.0,
+            metrics=_empty_contact_region_integral_metrics(),
+        )
+
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    normals /= np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)[:, None]
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    penetrations = np.maximum(-gaps, 0.0)
+    active = penetrations > 0.0
+    region_forces = float(pressure_stiffness) * areas * penetrations
+    if np.any(active):
+        vectors = region_forces[active, None] * normals[active]
+        _scatter_weighted_vectors(
+            force,
+            np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)[active],
+            np.asarray(sample_arrays["sample_weights"], dtype=float)[active],
+            vectors,
+            sign=1.0,
+        )
+        _scatter_weighted_vectors(
+            force,
+            np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)[active],
+            np.asarray(sample_arrays["master_weights"], dtype=float)[active],
+            vectors,
+            sign=-1.0,
+        )
+
+    if include_tangent:
+        _, _, _, tangent, tangent_metrics = constraint_region_contact_tangent_sparse_from_arrays(
+            sample_arrays,
+            n_nodes=count,
+            pressure_stiffness=float(pressure_stiffness),
+            equilibrium_scale=float(tangent_equilibrium_scale),
+        )
+    else:
+        tangent = empty_tangent
+        tangent_metrics = constraint_region_tangent_metrics_from_arrays(
+            sample_arrays,
+            pressure_stiffness=float(pressure_stiffness),
+            equilibrium_scale=float(tangent_equilibrium_scale),
+        )
+        tangent_metrics["contact_tangent_included"] = 0
+
+    metrics = contact_region_integral_metrics_from_arrays(sample_arrays, stiffness=float(pressure_stiffness))
+    metrics.update(tangent_metrics)
+    return ConstraintRegionContactResponse(
+        force=force,
+        tangent=tangent,
+        min_gap=float(np.min(gaps)),
+        max_penetration=float(np.max(penetrations)) if penetrations.size else 0.0,
+        active_count=int(np.count_nonzero(active)),
+        normal_force=float(np.sum(region_forces[active])) if np.any(active) else 0.0,
+        energy=float(metrics["contact_region_energy"]),
+        virtual_work=float(metrics["contact_region_virtual_work"]),
+        active_area=float(metrics["contact_active_area"]),
+        metrics=metrics,
+    )
 
 
 def constraint_region_tangent_metrics_from_arrays(
@@ -837,6 +961,22 @@ def _combined_shape_weights(
     if total > 0.0:
         weights /= total
     return ids, weights
+
+
+def _scatter_weighted_vectors(
+    force: np.ndarray,
+    node_rows: np.ndarray,
+    weight_rows: np.ndarray,
+    vectors: np.ndarray,
+    *,
+    sign: float,
+) -> None:
+    for local in range(node_rows.shape[1] if node_rows.ndim == 2 else 0):
+        nodes = node_rows[:, local]
+        weights = weight_rows[:, local]
+        valid = (nodes >= 0) & (nodes < force.shape[0]) & (np.abs(weights) > 0.0)
+        if np.any(valid):
+            np.add.at(force, nodes[valid], float(sign) * weights[valid, None] * vectors[valid])
 
 
 def _pack_rows(rows: list[dict[str, np.ndarray | float | int]]) -> dict[str, np.ndarray]:

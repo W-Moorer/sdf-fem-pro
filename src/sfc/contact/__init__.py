@@ -22,6 +22,7 @@ from .field_contact import (
     triangle_surface_quadrature_samples,
 )
 from .constraint_region import (
+    ConstraintRegionContactResponse,
     active_constraint_region_tangent_data_from_arrays,
     aggregate_contact_sample_arrays,
     contact_active_region_continuity_metrics_from_arrays,
@@ -31,6 +32,7 @@ from .constraint_region import (
     constraint_region_reduced_contact_tangent_sparse_from_arrays,
     constraint_region_reduced_gap_jacobian_sparse_from_arrays,
     constraint_region_tangent_metrics_from_arrays,
+    constraint_region_penalty_response_from_arrays,
     contact_averaging_modes,
     contact_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays,
@@ -80,6 +82,7 @@ from .sdf_geometry import DynamicSurfaceSDFContactGeometry
 __all__ = [
     "ContactConstraint",
     "ContactBackendResult",
+    "ConstraintRegionContactResponse",
     "DynamicSurfaceSDFContactGeometry",
     "FieldContactConstraint",
     "FieldContactMatrixFreeStiffness",
@@ -111,6 +114,7 @@ __all__ = [
     "constraint_region_reduced_contact_tangent_sparse_from_arrays",
     "constraint_region_reduced_gap_jacobian_sparse_from_arrays",
     "constraint_region_tangent_metrics_from_arrays",
+    "constraint_region_penalty_response_from_arrays",
     "contact_constraint_from_sample",
     "contact_averaging_modes",
     "contact_jacobian_entries",

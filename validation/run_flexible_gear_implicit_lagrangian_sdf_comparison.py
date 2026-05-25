@@ -47,6 +47,7 @@ from sfc.contact.constraint_region import (  # noqa: E402
     aggregate_contact_sample_arrays as _core_aggregate_contact_sample_arrays,
     contact_active_region_continuity_metrics_from_arrays as _core_contact_active_region_continuity_metrics_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays as _core_constraint_region_gap_jacobian_sparse_from_arrays,
+    constraint_region_penalty_response_from_arrays as _core_constraint_region_penalty_response_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays as _core_constraint_region_pressure_tangent_scales_from_arrays,
     constraint_region_reduced_gap_jacobian_sparse_from_arrays as _core_constraint_region_reduced_gap_jacobian_sparse_from_arrays,
     constraint_region_tangent_metrics_from_arrays as _core_constraint_region_tangent_metrics_from_arrays,
@@ -191,52 +192,19 @@ def _assemble_contact_response_force_only(samples: Iterable[Any], n_nodes: int) 
 def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_nodes: int, *, stiffness: float) -> ContactResponse:
     """Assemble contact force, diagnostics, and fixed-active-set tangent."""
 
-    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
-    force = np.zeros((int(n_nodes), 3), dtype=float)
-    if gaps.size == 0:
-        tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
-        return ContactResponse(force, tangent, 0.0, 0.0, 0, 0.0, 0.0)
-    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
-    normal_norm = np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)
-    normals = normals / normal_norm[:, None]
-    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
-    penetration = np.maximum(-gaps, 0.0)
-    active = penetration > 0.0
-    lam = float(stiffness) * areas * penetration
-    if np.any(active):
-        active_vectors = lam[active, None] * normals[active]
-        slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)[active]
-        slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)[active]
-        master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)[active]
-        master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)[active]
-        for local in range(slave_nodes.shape[1]):
-            np.add.at(force, slave_nodes[:, local], slave_weights[:, local, None] * active_vectors)
-        for local in range(master_nodes.shape[1]):
-            np.add.at(force, master_nodes[:, local], -master_weights[:, local, None] * active_vectors)
-    active_ids, gap_jacobian = _constraint_region_gap_jacobian_sparse_from_arrays(
+    response = _core_constraint_region_penalty_response_from_arrays(
         sample_arrays,
         n_nodes=int(n_nodes),
-        active_only=True,
+        pressure_stiffness=float(stiffness),
     )
-    if active_ids.size:
-        tangent_scales = float(stiffness) * areas[active_ids]
-        positive = tangent_scales > 0.0
-        if np.any(positive):
-            j_active = gap_jacobian[positive]
-            scaled_j = j_active.multiply(tangent_scales[positive][:, None])
-            tangent = (j_active.T @ scaled_j).tocsr()
-        else:
-            tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
-    else:
-        tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
     return ContactResponse(
-        force,
-        tangent,
-        float(np.min(gaps)),
-        float(np.max(penetration)) if penetration.size else 0.0,
-        int(np.count_nonzero(active)),
-        float(np.sum(lam[active])) if np.any(active) else 0.0,
-        float(0.5 * float(stiffness) * np.sum(areas * penetration * penetration)),
+        response.force,
+        response.tangent,
+        response.min_gap,
+        response.max_penetration,
+        response.active_count,
+        response.normal_force,
+        response.energy,
     )
 
 

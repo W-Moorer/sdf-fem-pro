@@ -10,6 +10,7 @@ from sfc.contact.constraint_region import (
     contact_active_region_continuity_metrics_from_arrays,
     constraint_region_contact_tangent_sparse_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays,
+    constraint_region_penalty_response_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays,
     constraint_region_reduced_contact_tangent_sparse_from_arrays,
     constraint_region_reduced_gap_jacobian_sparse_from_arrays,
@@ -102,6 +103,43 @@ def test_constraint_region_contact_tangent_is_fixed_active_set_jtwj() -> None:
     assert metrics["contact_tangent_active_secondary_node_count"] == 2
     assert metrics["contact_tangent_j_nnz"] == jacobian.nnz
     assert metrics["contact_tangent_matrix_nnz"] == tangent.nnz
+
+
+def test_constraint_region_penalty_response_uses_region_rows_for_force_and_totals() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+
+    response = constraint_region_penalty_response_from_arrays(
+        regions,
+        n_nodes=13,
+        pressure_stiffness=100.0,
+    )
+
+    assert response.active_count == 2
+    assert response.max_penetration == pytest.approx(0.1)
+    assert response.normal_force == pytest.approx(20.0)
+    assert response.energy == pytest.approx(0.8)
+    assert response.virtual_work == pytest.approx(1.6)
+    assert response.active_area == pytest.approx(4.0)
+    assert response.metrics["active_contact_region_count"] == 2
+    assert response.metrics["contact_region_normal_force"] == pytest.approx(20.0)
+    assert response.force.shape == (13, 3)
+    assert response.tangent.shape == (39, 39)
+    np.testing.assert_allclose(np.sum(response.force[:3], axis=0), [0.0, 0.0, 20.0])
+    np.testing.assert_allclose(np.sum(response.force[10:13], axis=0), [0.0, 0.0, -20.0])
+
+
+def test_constraint_region_penalty_response_is_not_independent_sample_penalty() -> None:
+    raw = _raw_two_sample_arrays()
+    independent = constraint_region_penalty_response_from_arrays(raw, n_nodes=13, pressure_stiffness=100.0)
+    regions = aggregate_contact_sample_arrays(raw, "slave_node_region_constraint")
+    assert regions is not None
+    averaged = constraint_region_penalty_response_from_arrays(regions, n_nodes=13, pressure_stiffness=100.0)
+
+    assert independent.normal_force == pytest.approx(40.0)
+    assert averaged.normal_force == pytest.approx(20.0)
+    assert averaged.active_count == 2
+    assert independent.active_count == 1
 
 
 def test_reduced_constraint_region_tangent_applies_transformation_and_free_dofs() -> None:
