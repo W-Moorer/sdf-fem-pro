@@ -1379,6 +1379,8 @@ class LagrangianSDFSurfaceContactGeometry:
         sample_nodes = np.repeat(kept_faces, n_quadrature, axis=0)
         sample_weights = np.tile(barycentric, (kept_faces.shape[0], 1))
         areas = (kept_areas[:, None] * weight_scale[None, :]).reshape(-1)
+        kept_face_indices = np.flatnonzero(keep)
+        cache_indices = (kept_face_indices[:, None] * n_quadrature + np.arange(n_quadrature, dtype=np.int64)[None, :]).reshape(-1)
         candidate_offsets = None
         candidate_face_ids = None
         if master_tree is not None and point_array.size:
@@ -1386,6 +1388,8 @@ class LagrangianSDFSurfaceContactGeometry:
             use_indexed_candidates = use_indexed_projection
             if use_indexed_candidates:
                 raw_candidates = master_tree.query_ball_point(point_array, candidate_radius, return_sorted=False)
+                if bool(self.secondary_path_tracking):
+                    raw_candidates = self._merge_secondary_tracking_candidates(raw_candidates, cache_indices)
                 point_keep = np.fromiter((len(ids) > 0 for ids in raw_candidates), dtype=bool, count=len(raw_candidates))
             else:
                 point_nearest = np.asarray(master_tree.query(point_array, k=1)[0], dtype=float)
@@ -1405,6 +1409,7 @@ class LagrangianSDFSurfaceContactGeometry:
             sample_nodes = sample_nodes[point_keep]
             sample_weights = sample_weights[point_keep]
             areas = areas[point_keep]
+            cache_indices = cache_indices[point_keep]
             if use_indexed_candidates:
                 kept_candidates = [raw_candidates[int(index)] for index in np.flatnonzero(point_keep)]
                 candidate_offsets, candidate_face_ids = _flatten_candidate_lists(kept_candidates)
@@ -1433,17 +1438,48 @@ class LagrangianSDFSurfaceContactGeometry:
                 master_x,
                 self.master_material.boundary_faces,
             )
-        master_nodes = self.master_material.boundary_faces[np.asarray(face_ids, dtype=np.int64)] + int(self.master_node_offset)
-        return {
+        face_ids = np.asarray(face_ids, dtype=np.int64)
+        master_bary = np.asarray(master_bary, dtype=float)
+        tracking_payload: dict[str, np.ndarray] = {}
+        if bool(self.secondary_path_tracking):
+            cache = self._ensure_secondary_face_cache()
+            previous_cache_face_ids = cache[cache_indices].copy()
+            tracking_cache_hits = previous_cache_face_ids >= 0
+            tracking_cache_matches = tracking_cache_hits & (previous_cache_face_ids == face_ids)
+            cache[cache_indices] = face_ids
+            tracking_barycentric_distances = np.full(face_ids.shape, np.nan, dtype=float)
+            bary_cache = self._ensure_secondary_barycentric_cache()
+            previous_barycentric = bary_cache[cache_indices].copy()
+            totals = np.sum(master_bary, axis=1)
+            normalized = master_bary.copy()
+            good = totals > 1.0e-30
+            normalized[good] /= totals[good, None]
+            previous_good = np.all(np.isfinite(previous_barycentric), axis=1)
+            if np.any(previous_good):
+                tracking_barycentric_distances[previous_good] = np.linalg.norm(
+                    normalized[previous_good] - previous_barycentric[previous_good],
+                    axis=1,
+                )
+            bary_cache[cache_indices] = normalized
+            tracking_payload = {
+                "tracking_cache_hits": tracking_cache_hits.astype(bool, copy=False),
+                "tracking_cache_matches": tracking_cache_matches.astype(bool, copy=False),
+                "tracking_barycentric_distances": tracking_barycentric_distances,
+            }
+        master_nodes = self.master_material.boundary_faces[face_ids] + int(self.master_node_offset)
+        arrays = {
             "sample_node_ids": np.asarray(sample_nodes, dtype=np.int64),
             "sample_weights": np.asarray(sample_weights, dtype=float),
             "gaps": np.asarray(gaps, dtype=float),
             "normals": np.asarray(normals, dtype=float),
             "areas": np.asarray(areas, dtype=float),
             "master_node_ids": np.asarray(master_nodes, dtype=np.int64),
-            "master_weights": np.asarray(master_bary, dtype=float),
-            "master_face_ids": np.asarray(face_ids, dtype=np.int64),
+            "master_weights": master_bary,
+            "master_barycentric": master_bary,
+            "master_face_ids": face_ids,
         }
+        arrays.update(tracking_payload)
+        return arrays
 
     def _prepare_sampling(
         self,

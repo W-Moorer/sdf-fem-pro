@@ -3084,6 +3084,10 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert int(summary["cropped_patch_convergence_gate_passed"]) == 1
     assert int(summary["cropped_patch_contact_response_gate_passed"]) == 1
     assert int(summary["cropped_patch_pressure_stress_gate_passed"]) == 1
+    assert int(summary["cropped_patch_path_tracking_gate_passed"]) == 1
+    assert int(summary["cropped_patch_active_region_continuity_gate_passed"]) == 1
+    assert "contact_active_master_face_count" in history[-1]
+    assert "active_contact_region_count" in history[-1]
 
 
 def test_cropped_patch_gate_checks_pressure_and_stress_trend() -> None:
@@ -3108,6 +3112,17 @@ def test_cropped_patch_gate_checks_pressure_and_stress_trend() -> None:
     assert len(history) == 2
     assert int(gate["cropped_patch_gate_passed"]) == 1
     assert int(gate["cropped_patch_pressure_stress_trend_gate_passed"]) == 1
+    assert int(gate["cropped_patch_path_tracking_gate_passed"]) == 1
+    assert int(gate["cropped_patch_active_region_continuity_gate_passed"]) == 1
+    assert float(gate["cropped_patch_path_cache_hit_fraction_min_after_first"]) >= float(
+        gate["cropped_patch_min_path_cache_hit_threshold"]
+    )
+    assert float(gate["cropped_patch_path_cache_match_fraction_min_after_first"]) >= float(
+        gate["cropped_patch_min_path_cache_match_threshold"]
+    )
+    assert float(gate["cropped_patch_active_region_jaccard_min_after_first"]) >= float(
+        gate["cropped_patch_min_active_region_jaccard_threshold"]
+    )
     assert float(history[-1]["normal_force"]) >= 0.8 * float(history[0]["normal_force"])
     assert float(history[-1]["max_contact_pressure"]) >= 0.8 * float(history[0]["max_contact_pressure"])
     assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0

@@ -330,6 +330,8 @@ def _contact_path_tracking_metrics_from_arrays(
     sample_arrays: dict[str, np.ndarray] | None,
     previous_master_face_ids: np.ndarray | None,
     previous_master_barycentric: np.ndarray | None = None,
+    *,
+    active_gap_tolerance: float = 0.0,
 ) -> tuple[Row, np.ndarray | None, np.ndarray | None]:
     """Measure master-face continuity for the accepted batched contact path.
 
@@ -372,7 +374,7 @@ def _contact_path_tracking_metrics_from_arrays(
             "contact_master_barycentric_drift_mean": 0.0,
             "contact_master_barycentric_drift_max": 0.0,
         }, current, None
-    usable = (face_ids >= 0) & (gaps < 0.0)
+    usable = (face_ids >= 0) & (gaps <= float(active_gap_tolerance))
     active_faces = face_ids[usable]
     comparable = np.zeros(face_ids.shape, dtype=bool)
     switches = np.zeros(face_ids.shape, dtype=bool)
@@ -458,6 +460,8 @@ def _contact_path_tracking_metrics_from_arrays(
 def _contact_active_region_continuity_metrics_from_arrays(
     sample_arrays: dict[str, np.ndarray] | None,
     previous_active_region_ids: tuple[int, ...] | None,
+    *,
+    active_gap_tolerance: float = 0.0,
 ) -> tuple[Row, tuple[int, ...] | None]:
     """Measure accepted-state active constraint-region continuity.
 
@@ -486,7 +490,7 @@ def _contact_active_region_continuity_metrics_from_arrays(
         region_ids = np.arange(gaps.size, dtype=np.int64)
     else:
         region_ids = secondary_ids
-    active_mask = (gaps < 0.0) & (region_ids >= 0)
+    active_mask = (gaps <= float(active_gap_tolerance)) & (region_ids >= 0)
     current_ids = tuple(sorted({int(region_id) for region_id in region_ids[active_mask]}))
     if previous_active_region_ids is None:
         metrics = dict(empty)
@@ -5873,6 +5877,36 @@ def _cropped_pair_model_and_contact(
     return model, contact
 
 
+def _cropped_pair_path_tracking_contact(
+    pair: CroppedGearPair,
+    *,
+    pressure_stiffness: float,
+    target_overclosure: float,
+) -> LagrangianSDFSurfaceContactGeometry:
+    """Return the diagnostic secondary-normal contact path for a cropped pair.
+
+    The hard-contact solve can still use its existing closest-feature
+    linearization.  This diagnostic path samples accepted states with
+    Abaqus-style secondary-normal regions so cropped-patch validation can catch
+    master-face jumps before escalating to the full gear.
+    """
+
+    n1 = pair.gear1.nodes.shape[0]
+    master = MaterialSDF.from_triangle_surface(pair.gear2.nodes, pair.gear2.contact_faces)
+    return LagrangianSDFSurfaceContactGeometry(
+        pair.gear1.contact_faces,
+        master,
+        pair.gear2.nodes,
+        pressure_stiffness=float(pressure_stiffness),
+        slave_node_offset=0,
+        master_node_offset=n1,
+        quadrature="tri3",
+        search_radius=_default_contact_search_radius(pair, target_overclosure=target_overclosure),
+        compiled_batch_projection=True,
+        secondary_path_tracking=True,
+    )
+
+
 def _hard_contact_linearized_gap_jacobian(
     contact: LagrangianSDFSurfaceContactGeometry,
     x_linearization: np.ndarray,
@@ -6162,6 +6196,11 @@ def solve_sfc_cropped_pair_hard_contact(
         pressure_stiffness=pressure_stiffness,
         target_overclosure=target_overclosure,
     )
+    tracking_contact = _cropped_pair_path_tracking_contact(
+        pair,
+        pressure_stiffness=pressure_stiffness,
+        target_overclosure=target_overclosure,
+    )
     fixed0, values0 = _fixed_conditions_for_pair(pair, closure=0.0, rotation_z=0.0)
     u0 = project_fixed_dofs(np.zeros(model.n_dofs, dtype=float), fixed0, values0)
     state_x = model.X + u0.reshape((-1, 3))
@@ -6188,6 +6227,9 @@ def solve_sfc_cropped_pair_hard_contact(
     last_converged = True
     cutback_count = 0
     increment_count = 0
+    previous_path_master_face_ids: np.ndarray | None = None
+    previous_path_master_barycentric: np.ndarray | None = None
+    previous_active_region_ids: tuple[int, ...] | None = None
     t = 0.0
     h_trial = max_dt
     while t < float(duration) - 1.0e-15:
@@ -6311,6 +6353,34 @@ def solve_sfc_cropped_pair_hard_contact(
         t_section = time.perf_counter()
         raw_gaps = np.asarray([float(sample.gap) for sample in contact.samples(state_x)], dtype=float)
         timing_accepted_contact += time.perf_counter() - t_section
+        tracking_arrays = tracking_contact.sample_arrays(state_x)
+        tracking_regions = (
+            None
+            if tracking_arrays is None
+            else _aggregate_contact_sample_arrays(tracking_arrays, "slave_node_region_constraint")
+        )
+        path_tracking_metrics, current_path_master_face_ids, current_path_master_barycentric = (
+            _contact_path_tracking_metrics_from_arrays(
+                tracking_regions,
+                previous_path_master_face_ids,
+                previous_path_master_barycentric,
+                active_gap_tolerance=np.inf,
+            )
+        )
+        if current_path_master_face_ids is not None:
+            previous_path_master_face_ids = current_path_master_face_ids
+        if current_path_master_barycentric is not None:
+            previous_path_master_barycentric = current_path_master_barycentric
+        active_region_metrics, current_active_region_ids = _contact_active_region_continuity_metrics_from_arrays(
+            tracking_regions,
+            previous_active_region_ids,
+            active_gap_tolerance=np.inf,
+        )
+        contact_region_metrics = _contact_region_integral_metrics_from_arrays(
+            tracking_regions,
+            stiffness=float(effective_pressure_stiffness),
+        )
+        previous_active_region_ids = current_active_region_ids
         active = np.asarray(solution.active, dtype=bool)
         multipliers = np.asarray(solution.multipliers, dtype=float)
         active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
@@ -6416,6 +6486,12 @@ def solve_sfc_cropped_pair_hard_contact(
         row.update({f"rp2_inertia_{key}": value for key, value in hub2_inertia_reaction.items()})
         row.update({f"rp1_contact_{key}": value for key, value in hub1_contact_reaction.items()})
         row.update({f"rp2_contact_{key}": value for key, value in hub2_contact_reaction.items()})
+        row.update(path_tracking_metrics)
+        row.update(active_region_metrics)
+        row.update(contact_region_metrics)
+        row["path_tracking_constraint_regions"] = (
+            int(np.asarray(tracking_regions["gaps"], dtype=float).size) if tracking_regions is not None else 0
+        )
         row.update(_node_averaged_internal_metric_row(model, internal))
         row["rp_reaction_definition"] = "static_physical_constraint_residual"
         row["rp_force_drive"] = float(hub1_static_reaction["rp_force_drive"])
@@ -6487,15 +6563,21 @@ def _cropped_patch_contact_gate_metrics(
     min_active_samples: int = 1,
     trend_ratio_floor: float = 0.80,
     require_monotone_trend: bool = False,
+    min_path_cache_hit_fraction: float = 0.999,
+    min_path_cache_match_fraction: float = 0.999,
+    min_active_region_jaccard: float = 0.999,
+    max_master_face_switch_fraction: float = 0.60,
+    max_master_barycentric_drift: float = 0.75,
 ) -> Row:
     """Return cropped-patch contact sanity gates before full-gear escalation.
 
     This gate is intentionally local to the SFC cropped-patch layer.  It checks
     that the HARD-contact solve converged, that a nonzero active contact region
-    exists, and that pressure/stress/strain measures are finite and nonnegative.
-    When ``require_monotone_trend`` is enabled, a multi-step normal compression
-    sequence must not lose pressure, stress, or strain trend relative to the
-    first accepted step.
+    exists, that pressure/stress/strain measures are finite and nonnegative,
+    and that accepted-state path tracking remains continuous when a multi-step
+    history is available.  When ``require_monotone_trend`` is enabled, a
+    multi-step normal compression sequence must not lose pressure, stress, or
+    strain trend relative to the first accepted step.
     """
 
     rows = list(history)
@@ -6507,6 +6589,8 @@ def _cropped_patch_contact_gate_metrics(
             "cropped_patch_contact_response_gate_passed": 0,
             "cropped_patch_pressure_stress_gate_passed": 0,
             "cropped_patch_pressure_stress_trend_gate_passed": 0,
+            "cropped_patch_path_tracking_gate_passed": 0,
+            "cropped_patch_active_region_continuity_gate_passed": 0,
         }
     final = rows[-1]
     finite_keys = [
@@ -6545,7 +6629,41 @@ def _cropped_patch_contact_gate_metrics(
             if final_value < float(trend_ratio_floor) * first_value:
                 trend_ok = False
                 break
-    passed = bool(convergence_ok and contact_ok and pressure_stress_ok and trend_ok)
+    tracking_rows = rows[1:] if len(rows) > 1 else []
+    has_path_metrics = any("contact_path_cache_hit_fraction" in row for row in tracking_rows)
+    path_cache_hit_min = (
+        float(min(float(row.get("contact_path_cache_hit_fraction", 0.0)) for row in tracking_rows))
+        if tracking_rows and has_path_metrics
+        else 1.0
+    )
+    path_cache_match_min = (
+        float(min(float(row.get("contact_path_cache_match_fraction", 0.0)) for row in tracking_rows))
+        if tracking_rows and has_path_metrics
+        else 1.0
+    )
+    face_switch_max = (
+        float(max(float(row.get("contact_master_face_switch_fraction", 0.0)) for row in tracking_rows))
+        if tracking_rows and has_path_metrics
+        else 0.0
+    )
+    barycentric_drift_max = (
+        float(max(float(row.get("contact_master_barycentric_drift_max", 0.0)) for row in tracking_rows))
+        if tracking_rows and has_path_metrics
+        else 0.0
+    )
+    active_jaccard_min = (
+        float(min(float(row.get("contact_active_region_jaccard", 0.0)) for row in tracking_rows))
+        if tracking_rows and has_path_metrics
+        else 1.0
+    )
+    path_tracking_ok = bool(
+        path_cache_hit_min >= float(min_path_cache_hit_fraction)
+        and path_cache_match_min >= float(min_path_cache_match_fraction)
+        and face_switch_max <= float(max_master_face_switch_fraction)
+        and barycentric_drift_max <= float(max_master_barycentric_drift)
+    )
+    active_region_ok = bool(active_jaccard_min >= float(min_active_region_jaccard))
+    passed = bool(convergence_ok and contact_ok and pressure_stress_ok and trend_ok and path_tracking_ok and active_region_ok)
     reason = "passed"
     if not convergence_ok:
         reason = "hard_contact_not_converged"
@@ -6555,6 +6673,10 @@ def _cropped_patch_contact_gate_metrics(
         reason = "invalid_pressure_stress_strain_response"
     elif not trend_ok:
         reason = "pressure_stress_trend_regressed"
+    elif not path_tracking_ok:
+        reason = "path_tracking_discontinuous"
+    elif not active_region_ok:
+        reason = "active_region_discontinuous"
     return {
         "cropped_patch_gate_passed": int(passed),
         "cropped_patch_gate_reason": reason,
@@ -6562,8 +6684,20 @@ def _cropped_patch_contact_gate_metrics(
         "cropped_patch_contact_response_gate_passed": int(bool(contact_ok)),
         "cropped_patch_pressure_stress_gate_passed": int(bool(pressure_stress_ok)),
         "cropped_patch_pressure_stress_trend_gate_passed": int(bool(trend_ok)),
+        "cropped_patch_path_tracking_gate_passed": int(bool(path_tracking_ok)),
+        "cropped_patch_active_region_continuity_gate_passed": int(bool(active_region_ok)),
         "cropped_patch_min_active_samples_threshold": int(min_active_samples),
         "cropped_patch_trend_ratio_floor": float(trend_ratio_floor),
+        "cropped_patch_path_cache_hit_fraction_min_after_first": float(path_cache_hit_min),
+        "cropped_patch_path_cache_match_fraction_min_after_first": float(path_cache_match_min),
+        "cropped_patch_master_face_switch_fraction_max": float(face_switch_max),
+        "cropped_patch_master_barycentric_drift_max": float(barycentric_drift_max),
+        "cropped_patch_active_region_jaccard_min_after_first": float(active_jaccard_min),
+        "cropped_patch_min_path_cache_hit_threshold": float(min_path_cache_hit_fraction),
+        "cropped_patch_min_path_cache_match_threshold": float(min_path_cache_match_fraction),
+        "cropped_patch_max_master_face_switch_threshold": float(max_master_face_switch_fraction),
+        "cropped_patch_max_master_barycentric_drift_threshold": float(max_master_barycentric_drift),
+        "cropped_patch_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
         "cropped_patch_final_max_contact_pressure": float(final.get("max_contact_pressure", 0.0)),
         "cropped_patch_final_p95_von_mises_nodeavg": float(
             final.get("p95_von_mises_nodeavg", final.get("p95_von_mises", 0.0))
@@ -7230,6 +7364,11 @@ def write_summary(
         f"- final hard outer iterations: {summary.get('final_hard_outer_iterations', '')}",
         f"- final hard outer converged: {summary.get('final_hard_outer_converged', '')}",
         f"- cropped patch contact gate: {'PASS' if int(summary.get('cropped_patch_gate_passed', 0)) else 'FAIL'} ({summary.get('cropped_patch_gate_reason', '')})",
+        f"- cropped patch path tracking gate: {'PASS' if int(summary.get('cropped_patch_path_tracking_gate_passed', 0)) else 'FAIL'}",
+        f"- cropped patch active-region continuity gate: {'PASS' if int(summary.get('cropped_patch_active_region_continuity_gate_passed', 0)) else 'FAIL'}",
+        f"- cropped patch min path-cache hit/match: {float(summary.get('cropped_patch_path_cache_hit_fraction_min_after_first', 0.0)):.6e} / {float(summary.get('cropped_patch_path_cache_match_fraction_min_after_first', 0.0)):.6e}",
+        f"- cropped patch max face switch/drift: {float(summary.get('cropped_patch_master_face_switch_fraction_max', 0.0)):.6e} / {float(summary.get('cropped_patch_master_barycentric_drift_max', 0.0)):.6e}",
+        f"- cropped patch min active-region Jaccard: {float(summary.get('cropped_patch_active_region_jaccard_min_after_first', 0.0)):.6e}",
         f"- cropped patch final max pressure: {float(summary.get('cropped_patch_final_max_contact_pressure', 0.0)):.6e}",
         f"- cropped patch final p95 von Mises nodeavg: {float(summary.get('cropped_patch_final_p95_von_mises_nodeavg', 0.0)):.6e}",
         f"- cropped patch final p95 equivalent strain nodeavg: {float(summary.get('cropped_patch_final_p95_equivalent_elastic_strain_nodeavg', 0.0)):.6e}",
