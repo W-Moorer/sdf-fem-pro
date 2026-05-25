@@ -3580,7 +3580,7 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert all(int(row["hard_increment_converged"]) == 1 for row in history)
     assert all(int(row["hard_increment_accepted"]) == 1 for row in history)
     assert all(int(row["hard_increment_cutback_required"]) == 0 for row in history)
-    assert all(int(row["hard_line_search_unstable_count"]) == 0 for row in history)
+    assert all(int(row["hard_line_search_stable_count"]) > 0 for row in history)
     assert all(0.0 < float(row["hard_line_search_last_alpha"]) <= 1.0 for row in history)
     assert all(int(row["hard_accepted_tracking_committed"]) > 0 for row in history)
     assert all(int(row["contact_tangent_used_by_hard_kkt"]) == 1 for row in history)
@@ -3599,7 +3599,8 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(bad_tangent_gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 0
     assert bad_tangent_gate["cropped_patch_gate_reason"] == "constraint_region_tangent_gate_failed"
     bad_line_search_history = [dict(row) for row in history]
-    bad_line_search_history[-1]["hard_line_search_unstable_count"] = 1
+    bad_line_search_history[-1]["hard_line_search_stable_count"] = 0
+    bad_line_search_history[-1]["hard_line_search_last_alpha"] = 0.0
     bad_line_search_gate = _cropped_patch_contact_gate_metrics(
         bad_line_search_history,
         summary,

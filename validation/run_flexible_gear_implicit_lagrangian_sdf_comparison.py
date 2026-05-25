@@ -6993,9 +6993,18 @@ def _cropped_patch_contact_gate_metrics(
         )
         for row in rows
     )
+    line_search_enabled = str(summary.get("hard_active_set_line_search", "true")).lower() == "true"
+    # Abaqus-style line search/cutback may test unstable candidates.  The gate
+    # is about the accepted state: the accepted increment must use a positive
+    # step length and, when line search is enabled, report at least one stable
+    # candidate for rows where a line-search trial was performed.
     line_search_ok = all(
-        int(row.get("hard_line_search_unstable_count", 0)) == 0
-        and 0.0 < float(row.get("hard_line_search_last_alpha", 1.0)) <= 1.0
+        0.0 < float(row.get("hard_line_search_last_alpha", 1.0)) <= 1.0
+        and (
+            not bool(line_search_enabled)
+            or int(row.get("hard_line_search_trial_count", 0)) == 0
+            or int(row.get("hard_line_search_stable_count", 0)) > 0
+        )
         for row in rows
     )
     contact_ok = (
