@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 from scipy.sparse.linalg import LinearOperator, cg, splu
 from scipy.spatial import cKDTree
 
@@ -3520,6 +3520,52 @@ def _constraint_region_tangent_metrics_from_arrays(
     )
 
 
+def _constraint_region_linearization_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    n_nodes: int,
+    pressure_stiffness: float,
+    equilibrium_scale: float = 1.0,
+) -> Row:
+    """Return accepted-state fixed-payload region tangent evidence.
+
+    The hard-contact KKT solve uses the region gap Jacobian directly, while the
+    penalty/contact-force response uses the equivalent fixed-active
+    ``J.T W J`` tangent.  These diagnostics make that linearization explicit in
+    cropped-patch validation before escalating to full gear cases.
+    """
+
+    metrics = _constraint_region_tangent_metrics_from_arrays(
+        sample_arrays,
+        pressure_stiffness=float(pressure_stiffness),
+        equilibrium_scale=float(equilibrium_scale),
+    )
+    if sample_arrays is None:
+        metrics["contact_tangent_j_nnz"] = 0
+        metrics["contact_tangent_matrix_nnz"] = 0
+        return metrics
+    active_ids, active_j = _constraint_region_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=int(n_nodes),
+        active_only=True,
+    )
+    active_ids2, scales = _constraint_region_pressure_tangent_scales_from_arrays(
+        sample_arrays,
+        pressure_stiffness=float(pressure_stiffness),
+        equilibrium_scale=float(equilibrium_scale),
+    )
+    if active_ids2.size and not np.array_equal(active_ids, active_ids2):
+        row_lookup = {int(region_id): int(row) for row, region_id in enumerate(active_ids)}
+        keep = np.asarray([row_lookup[int(region_id)] for region_id in active_ids2], dtype=np.int64)
+        active_j = active_j[keep]
+    matrix_nnz = int((active_j.T @ diags(np.asarray(scales, dtype=float), format="csr") @ active_j).nnz) if scales.size else 0
+    metrics["contact_tangent_j_nnz"] = int(active_j.nnz)
+    metrics["contact_tangent_matrix_nnz"] = matrix_nnz
+    metrics["contact_tangent_coordinate_space"] = "full_nodal"
+    metrics["contact_tangent_used_by_hard_kkt"] = 1
+    return metrics
+
+
 def _solve_penalty_cg_correction_sparse(
     *,
     base_matrix_free: Any,
@@ -6483,6 +6529,12 @@ def solve_sfc_cropped_pair_hard_contact(
             tracking_regions,
             stiffness=float(effective_pressure_stiffness),
         )
+        contact_tangent_metrics = _constraint_region_linearization_metrics_from_arrays(
+            tracking_regions,
+            n_nodes=model.n_nodes,
+            pressure_stiffness=float(effective_pressure_stiffness),
+            equilibrium_scale=equilibrium_scale,
+        )
         secondary_pressure_diagnostics = (
             None
             if tracking_regions is None
@@ -6602,6 +6654,7 @@ def solve_sfc_cropped_pair_hard_contact(
         row.update(path_tracking_metrics)
         row.update(active_region_metrics)
         row.update(contact_region_metrics)
+        row.update(contact_tangent_metrics)
         row.update(hard_increment_gate_row)
         row["nodal_cpress_deferred"] = 1
         if secondary_pressure_diagnostics is not None:
@@ -6714,6 +6767,7 @@ def _cropped_patch_contact_gate_metrics(
             "cropped_patch_gate_reason": "empty_history",
             "cropped_patch_contact_total_gate_passed": 0,
             "cropped_patch_increment_gate_passed": 0,
+            "cropped_patch_constraint_region_tangent_gate_passed": 0,
             "cropped_patch_convergence_gate_passed": 0,
             "cropped_patch_contact_response_gate_passed": 0,
             "cropped_patch_pressure_stress_gate_passed": 0,
@@ -6745,6 +6799,23 @@ def _cropped_patch_contact_gate_metrics(
         and int(row.get("hard_correction_converged", 0)) == 1
         and int(row.get("hard_contact_force_increment_converged", 0)) == 1
         and int(row.get("hard_active_set_stable", 0)) == 1
+        for row in rows
+    )
+    tangent_ok = all(
+        (
+            int(row.get("active_contact_region_count", 0)) == 0
+            or (
+                str(row.get("contact_tangent_source", "")) == "constraint_region_arrays"
+                and str(row.get("contact_tangent_gap_jacobian_source", "")) == "constraint_region_fixed_payload"
+                and str(row.get("contact_tangent_pressure_derivative", "")) == "linear_penalty_active_set"
+                and int(row.get("contact_tangent_fixed_active_set", 0)) == 1
+                and int(row.get("contact_tangent_used_by_hard_kkt", 0)) == 1
+                and int(row.get("contact_tangent_active_region_count", -1))
+                == int(row.get("active_contact_region_count", -2))
+                and int(row.get("contact_tangent_j_nnz", 0)) > 0
+                and float(row.get("contact_tangent_scale_max", 0.0)) > 0.0
+            )
+        )
         for row in rows
     )
     contact_ok = (
@@ -6813,12 +6884,15 @@ def _cropped_patch_contact_gate_metrics(
         and active_region_ok
         and contact_total_ok
         and increment_ok
+        and tangent_ok
     )
     reason = "passed"
     if not convergence_ok:
         reason = "hard_contact_not_converged"
     elif not increment_ok:
         reason = "increment_acceptance_gate_failed"
+    elif not tangent_ok:
+        reason = "constraint_region_tangent_gate_failed"
     elif not contact_ok:
         reason = "missing_active_contact_response"
     elif not pressure_stress_ok:
@@ -6837,6 +6911,7 @@ def _cropped_patch_contact_gate_metrics(
         "cropped_patch_gate_reason": reason,
         "cropped_patch_contact_total_gate_passed": int(bool(contact_total_ok)),
         "cropped_patch_increment_gate_passed": int(bool(increment_ok)),
+        "cropped_patch_constraint_region_tangent_gate_passed": int(bool(tangent_ok)),
         "cropped_patch_convergence_gate_passed": int(bool(convergence_ok)),
         "cropped_patch_contact_response_gate_passed": int(bool(contact_ok)),
         "cropped_patch_pressure_stress_gate_passed": int(bool(pressure_stress_ok)),
