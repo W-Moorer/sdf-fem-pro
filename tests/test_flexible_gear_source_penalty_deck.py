@@ -234,6 +234,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                 "_source_increment_trial_rows": [
                     {
                         "source_trial_index": 1,
+                        "source_trial_end_time": 0.1,
                         "source_trial_accepted": 1,
                         "source_trial_retry_required": 0,
                     }
@@ -278,6 +279,11 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert captured["source_stress_postprocess"] == "finite_stvk_visual"
     assert captured["source_checkpoint_stride"] == 7
     assert "source_increment_trials" in summary
+    assert "source_increment_trial_gate" in summary
+    assert int(summary["source_trial_gate_passed"]) == 1
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
+    trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
     assert trial_csv.exists()
+    assert trial_gate_csv.exists()
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
+    assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")

@@ -77,6 +77,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     build_full_active_pair,
     compare_sfc_history_to_abaqus_manifest,
     compare_animation_manifests,
+    source_increment_trial_gate_metrics,
     write_contact_total_priority_csv,
     write_animation_color_ranges,
     write_paraview_animation_setup,
@@ -1583,6 +1584,46 @@ def test_source_drive_cutback_retries_without_accepting_failed_trial(
     assert float(trial_rows[0]["source_increment_cutback_candidate_dt"]) == pytest.approx(5.0e-6)
     assert float(trial_rows[1]["source_trial_end_time"]) == pytest.approx(history[0]["time"])
     assert float(trial_rows[2]["source_trial_end_time"]) == pytest.approx(history[1]["time"])
+
+
+def test_source_increment_trial_gate_allows_cutback_history_subset() -> None:
+    history = [
+        {"time": 5.0e-6, "source_increment_accepted": 1},
+        {"time": 1.0e-5, "source_increment_accepted": 1},
+    ]
+    trial_rows = [
+        {
+            "source_trial_index": 1,
+            "source_trial_start_time": 0.0,
+            "source_trial_end_time": 1.0e-5,
+            "source_trial_accepted": 0,
+            "source_trial_retry_required": 1,
+        },
+        {
+            "source_trial_index": 2,
+            "source_trial_start_time": 0.0,
+            "source_trial_end_time": 5.0e-6,
+            "source_trial_accepted": 1,
+            "source_trial_retry_required": 0,
+        },
+        {
+            "source_trial_index": 3,
+            "source_trial_start_time": 5.0e-6,
+            "source_trial_end_time": 1.0e-5,
+            "source_trial_accepted": 1,
+            "source_trial_retry_required": 0,
+        },
+    ]
+
+    gate = source_increment_trial_gate_metrics(history, trial_rows)
+
+    assert int(gate["source_trial_gate_passed"]) == 1
+    assert int(gate["source_trial_accepted_count"]) == 2
+    assert int(gate["source_trial_rejected_count"]) == 1
+    assert int(gate["source_trial_history_row_count"]) == 2
+    assert int(gate["source_trial_history_time_match_count"]) == 2
+    assert int(gate["source_trial_unmatched_history_count"]) == 0
+    assert float(gate["source_trial_accepted_history_time_linf"]) == pytest.approx(0.0)
 
 
 def test_source_drive_checkpoint_resume_matches_continuous_short_run(tmp_path: Path) -> None:

@@ -131,6 +131,129 @@ def write_contact_total_priority_csv(history_rows: list[Row], out_path: Path) ->
     return out_path
 
 
+def _finite_row_float(row: Row, *keys: str) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        if value in ("", None):
+            continue
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(result):
+            return result
+    return None
+
+
+def _row_int_flag(row: Row, key: str, *, default: int = 0) -> int:
+    value = row.get(key, default)
+    if value in ("", None):
+        return int(default)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _match_time_sequence(
+    query_times: list[float],
+    reference_times: list[float],
+    *,
+    tolerance: float,
+) -> tuple[int, float]:
+    """Return ordered-subsequence matches and the largest matched time error."""
+
+    if not query_times:
+        return 0, 0.0
+    reference_index = 0
+    matched = 0
+    max_error = 0.0
+    for query_time in query_times:
+        best_index = -1
+        best_error = np.inf
+        for index in range(reference_index, len(reference_times)):
+            error = abs(reference_times[index] - query_time)
+            if error < best_error:
+                best_error = error
+                best_index = index
+            if error <= tolerance:
+                break
+        if best_index >= 0 and best_error <= tolerance:
+            reference_index = best_index + 1
+            matched += 1
+            max_error = max(max_error, float(best_error))
+    return matched, float(max_error if np.isfinite(max_error) else np.inf)
+
+
+def _time_in_list(time: float, candidates: list[float], *, tolerance: float) -> bool:
+    return any(abs(candidate - time) <= tolerance for candidate in candidates)
+
+
+def source_increment_trial_gate_metrics(
+    history_rows: list[Row],
+    trial_rows: list[Row],
+    *,
+    tolerance: float = 1.0e-12,
+) -> Row:
+    """Gate that rejected/cutback source trials never become accepted history.
+
+    History may be frame-strided, so the accepted history times only need to be
+    an ordered subset of the accepted trial end times.  This still proves the
+    Abaqus-style cutback ledger is the state authority: rejected trials are
+    recorded for diagnostics, but accepted output can only come from accepted
+    trial states.
+    """
+
+    accepted_trials = [row for row in trial_rows if _row_int_flag(row, "source_trial_accepted") == 1]
+    rejected_trials = [row for row in trial_rows if _row_int_flag(row, "source_trial_accepted") == 0]
+    history_times = [
+        time
+        for time in (_finite_row_float(row, "time", "source_trial_end_time") for row in history_rows)
+        if time is not None
+    ]
+    accepted_trial_times = [
+        time
+        for time in (_finite_row_float(row, "source_trial_end_time", "time") for row in accepted_trials)
+        if time is not None
+    ]
+    rejected_trial_times = [
+        time
+        for time in (_finite_row_float(row, "source_trial_end_time", "time") for row in rejected_trials)
+        if time is not None
+    ]
+    matched_count, max_time_error = _match_time_sequence(
+        history_times,
+        accepted_trial_times,
+        tolerance=float(tolerance),
+    )
+    unmatched_history_count = max(0, len(history_times) - matched_count)
+    history_all_accepted = all(_row_int_flag(row, "source_increment_accepted", default=1) == 1 for row in history_rows)
+    rejected_only_history_hits = 0
+    for rejected_time in rejected_trial_times:
+        if not _time_in_list(rejected_time, accepted_trial_times, tolerance=float(tolerance)) and _time_in_list(
+            rejected_time,
+            history_times,
+            tolerance=float(tolerance),
+        ):
+            rejected_only_history_hits += 1
+    gate_passed = int(unmatched_history_count == 0 and history_all_accepted and rejected_only_history_hits == 0)
+    return {
+        "source_trial_gate_passed": gate_passed,
+        "source_trial_history_times_in_accepted_trials": int(unmatched_history_count == 0),
+        "source_trial_history_all_accepted": int(history_all_accepted),
+        "source_trial_rejected_only_history_hits": int(rejected_only_history_hits),
+        "source_trial_accepted_count": int(len(accepted_trials)),
+        "source_trial_rejected_count": int(len(rejected_trials)),
+        "source_trial_history_row_count": int(len(history_rows)),
+        "source_trial_history_time_match_count": int(matched_count),
+        "source_trial_unmatched_history_count": int(unmatched_history_count),
+        "source_trial_accepted_history_time_linf": float(max_time_error),
+        "source_trial_last_history_time": float(history_times[-1]) if history_times else 0.0,
+        "source_trial_last_accepted_trial_time": float(accepted_trial_times[-1]) if accepted_trial_times else 0.0,
+        "source_trial_time_tolerance": float(tolerance),
+    }
+
+
 def write_animation_color_ranges(
     out_dir: Path,
     *,
@@ -1030,6 +1153,11 @@ def run_full_gear(
         trial_path = out_dir / "sfc_source_increment_trials.csv"
         _write_csv(trial_path, source_increment_trial_rows)
         summary["source_increment_trials"] = str(trial_path)
+        trial_gate = source_increment_trial_gate_metrics(history, source_increment_trial_rows)
+        trial_gate_path = out_dir / "sfc_source_increment_trial_gate.csv"
+        _write_csv(trial_gate_path, [trial_gate])
+        summary.update(trial_gate)
+        summary["source_increment_trial_gate"] = str(trial_gate_path)
     contact_total_priority_path = out_dir / "sfc_contact_total_priority_metrics.csv"
     write_contact_total_priority_csv(history, contact_total_priority_path)
     summary["contact_total_priority_metrics"] = str(contact_total_priority_path)
