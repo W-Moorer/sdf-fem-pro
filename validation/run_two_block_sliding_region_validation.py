@@ -39,7 +39,9 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _contact_active_region_continuity_metrics_from_arrays,
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
+    _constraint_region_contact_law_metrics_from_arrays,
 )
+from validation.run_flat_punch_region_penetration_validation import run_validation as run_flat_punch_validation  # noqa: E402
 
 Row = dict[str, Any]
 DEFAULT_OUT_DIR = ROOT / "results" / "two_block_sliding_region_validation"
@@ -114,6 +116,120 @@ def _sliding_positions(reference_nodes: np.ndarray, *, lower_node_count: int, ap
     return x
 
 
+def two_block_sliding_region_gate_metrics(
+    rows: list[Row],
+    *,
+    flat_punch_summary: Row | None,
+    min_cache_hit_fraction: float = 0.999,
+    min_cache_match_fraction: float = 0.999,
+    min_active_region_jaccard: float = 0.999,
+    max_master_face_switch_fraction: float = 0.60,
+    max_master_barycentric_drift: float = 0.75,
+) -> Row:
+    """Gate the second validation layer before cropped/full gear escalation.
+
+    This gate depends on the flat-punch RF/penetration calibration, then checks
+    only region-level sliding quantities: total normal force, virtual
+    work/energy consistency, active area/region count, accepted-state path
+    tracking, and active-region continuity.  Nodal CPRESS/COPEN fields remain
+    deferred to later visualization layers.
+    """
+
+    flat_gate = int(float((flat_punch_summary or {}).get("flat_punch_rf_penetration_gate_passed", 0))) == 1
+    active_rows = [
+        row
+        for row in rows
+        if int(float(row.get("active_contact_region_count", row.get("active_contact_samples", 0)))) > 0
+        or float(row.get("contact_active_area", 0.0)) > 0.0
+        or float(row.get("normal_force", 0.0)) > 0.0
+    ]
+    no_nodal_clouds = bool(rows) and all(int(float(row.get("nodal_cpress_deferred", 0))) == 1 for row in rows)
+    active_totals_present = bool(active_rows) and all(
+        float(row.get("normal_force", 0.0)) >= 0.0
+        and float(row.get("contact_active_area", 0.0)) > 0.0
+        and int(float(row.get("active_contact_region_count", 0))) > 0
+        for row in active_rows
+    )
+    max_force_mismatch = 0.0
+    max_work_mismatch = 0.0
+    law_rows_ok = True
+    for row in active_rows:
+        normal_force = float(row.get("normal_force", 0.0))
+        region_force = float(row.get("contact_region_normal_force", normal_force))
+        force_scale = max(abs(normal_force), abs(region_force), 1.0)
+        max_force_mismatch = max(max_force_mismatch, abs(normal_force - region_force) / force_scale)
+        work = float(row.get("contact_virtual_work", 0.0))
+        region_work = float(row.get("contact_region_virtual_work", work))
+        work_scale = max(abs(work), abs(region_work), 1.0)
+        max_work_mismatch = max(max_work_mismatch, abs(work - region_work) / work_scale)
+        law_rows_ok = law_rows_ok and str(row.get("contact_constraint_law_source", "")) == "slave_node_region_constraint"
+        law_rows_ok = (
+            law_rows_ok
+            and str(row.get("contact_constraint_open_closed_source", "")) == "signed_area_average_region_gap"
+            and str(row.get("contact_constraint_normal_source", "")) == "area_average_region_normal"
+            and str(row.get("contact_constraint_force_distribution", "")) == "region_area_slave_shape_master_payload"
+            and int(float(row.get("contact_constraint_independent_quadrature_penalty_disabled", 0))) == 1
+        )
+    tracking_rows = rows[1:] if len(rows) > 1 else []
+    cache_hit_values = [float(row.get("contact_path_cache_hit_fraction", 0.0)) for row in tracking_rows]
+    cache_match_values = [float(row.get("contact_path_cache_match_fraction", 0.0)) for row in tracking_rows]
+    switch_values = [float(row.get("contact_master_face_switch_fraction", 0.0)) for row in tracking_rows]
+    barycentric_values = [float(row.get("contact_master_barycentric_drift_max", 0.0)) for row in tracking_rows]
+    active_jaccard_values = [float(row.get("contact_active_region_jaccard", 0.0)) for row in tracking_rows]
+    cache_hit_min = min(cache_hit_values) if cache_hit_values else 1.0
+    cache_match_min = min(cache_match_values) if cache_match_values else 1.0
+    master_face_switch_fraction_max = max(switch_values) if switch_values else 0.0
+    master_barycentric_drift_max = max(barycentric_values) if barycentric_values else 0.0
+    active_jaccard_min = min(active_jaccard_values) if active_jaccard_values else 1.0
+    path_tracking_ok = (
+        bool(rows)
+        and cache_hit_min >= float(min_cache_hit_fraction)
+        and cache_match_min >= float(min_cache_match_fraction)
+        and active_jaccard_min >= float(min_active_region_jaccard)
+        and master_face_switch_fraction_max <= float(max_master_face_switch_fraction)
+        and master_barycentric_drift_max <= float(max_master_barycentric_drift)
+    )
+    active_region_continuity_ok = active_jaccard_min >= float(min_active_region_jaccard)
+    force_consistency_ok = max_force_mismatch <= 1.0e-12
+    work_consistency_ok = max_work_mismatch <= 1.0e-12
+    gate_passed = (
+        flat_gate
+        and no_nodal_clouds
+        and active_totals_present
+        and law_rows_ok
+        and path_tracking_ok
+        and active_region_continuity_ok
+        and force_consistency_ok
+        and work_consistency_ok
+    )
+    return {
+        "two_block_sliding_region_gate_passed": int(gate_passed),
+        "comparison_stage": "two_block_sliding_totals_before_cropped_gear_or_clouds",
+        "flat_punch_prerequisite_gate_passed": int(flat_gate),
+        "two_block_active_row_count": int(len(active_rows)),
+        "two_block_nodal_cpress_deferred": int(no_nodal_clouds),
+        "two_block_active_totals_present": int(active_totals_present),
+        "two_block_constraint_region_law_gate_passed": int(law_rows_ok),
+        "two_block_path_tracking_gate_passed": int(path_tracking_ok),
+        "two_block_active_region_continuity_gate_passed": int(active_region_continuity_ok),
+        "two_block_force_consistency_gate_passed": int(force_consistency_ok),
+        "two_block_virtual_work_consistency_gate_passed": int(work_consistency_ok),
+        "two_block_force_relative_mismatch_max": float(max_force_mismatch),
+        "two_block_virtual_work_relative_mismatch_max": float(max_work_mismatch),
+        "two_block_path_cache_hit_fraction_min_after_first": float(cache_hit_min),
+        "two_block_path_cache_match_fraction_min_after_first": float(cache_match_min),
+        "two_block_active_region_jaccard_min": float(active_jaccard_min),
+        "two_block_master_face_switch_fraction_max": float(master_face_switch_fraction_max),
+        "two_block_master_barycentric_drift_max": float(master_barycentric_drift_max),
+        "two_block_path_tracking_min_cache_hit_threshold": float(min_cache_hit_fraction),
+        "two_block_path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
+        "two_block_path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
+        "two_block_path_tracking_max_face_switch_threshold": float(max_master_face_switch_fraction),
+        "two_block_path_tracking_max_barycentric_drift_threshold": float(max_master_barycentric_drift),
+        "two_block_ready_for_cropped_gear_patch": int(gate_passed),
+    }
+
+
 def run_validation(
     *,
     out_dir: Path,
@@ -129,11 +245,14 @@ def run_validation(
     min_active_region_jaccard: float = 0.999,
     max_master_face_switch_fraction: float = 0.60,
     max_master_barycentric_drift: float = 0.75,
+    run_flat_punch_prerequisite: bool = True,
 ) -> tuple[list[Row], Row]:
     """Run the sliding sequence and write region-level validation outputs."""
 
     if int(steps) < 2:
         raise ValueError("steps must be at least 2")
+    if float(penetration) <= 0.0:
+        raise ValueError("penetration must be positive for the sliding contact validation")
     if not (0.0 <= float(min_cache_hit_fraction) <= 1.0):
         raise ValueError("min_cache_hit_fraction must be in [0, 1]")
     if not (0.0 <= float(min_cache_match_fraction) <= 1.0):
@@ -145,6 +264,16 @@ def run_validation(
     if float(max_master_barycentric_drift) < 0.0:
         raise ValueError("max_master_barycentric_drift must be non-negative")
     out_dir.mkdir(parents=True, exist_ok=True)
+    flat_punch_summary: Row | None = None
+    if bool(run_flat_punch_prerequisite):
+        _flat_rows, flat_punch_summary = run_flat_punch_validation(
+            out_dir=out_dir / "flat_punch_prerequisite",
+            resolution=int(resolution),
+            gap=float(gap),
+            penetrations=(0.0, 0.5 * float(penetration), float(penetration)),
+            pressure_stiffness=float(pressure_stiffness),
+            quadrature=str(quadrature),
+        )
     model = build_two_block_model(resolution=int(resolution), approach=float(gap) + float(penetration), gap=float(gap))
     lower_nodes = np.asarray(model.nodes[: model.lower_node_count], dtype=float)
     master = MaterialSDF.from_triangle_surface(lower_nodes, np.asarray(model.lower_top_faces, dtype=np.int64))
@@ -185,6 +314,11 @@ def run_validation(
             raise RuntimeError("slave_node_region_constraint aggregation unexpectedly fell back")
         response = _assemble_contact_arrays_force_only(regions, model.nodes.shape[0], stiffness=float(pressure_stiffness))
         region_metrics = _contact_region_integral_metrics_from_arrays(regions, stiffness=float(pressure_stiffness))
+        law_metrics = _constraint_region_contact_law_metrics_from_arrays(
+            regions,
+            arrays,
+            averaging_mode="slave_node_region_constraint",
+        )
         path_metrics, current_master_face_ids, current_master_barycentric = _contact_path_tracking_metrics_from_arrays(
             regions,
             previous_master_face_ids,
@@ -201,6 +335,11 @@ def run_validation(
         previous_active_regions = current_active_regions
         row: Row = {
             "step": int(step),
+            "comparison_stage": "two_block_sliding_totals_before_cropped_gear_or_clouds",
+            "nodal_cpress_deferred": 1,
+            "flat_punch_prerequisite_gate_passed": (
+                "" if flat_punch_summary is None else int(flat_punch_summary["flat_punch_rf_penetration_gate_passed"])
+            ),
             "time": float(alpha),
             "lateral_shift": float(shift),
             "normal_penetration": float(penetration),
@@ -213,6 +352,7 @@ def run_validation(
             "min_region_gap": float(np.min(np.asarray(regions["gaps"], dtype=float))) if np.asarray(regions["gaps"]).size else 0.0,
         }
         row.update(region_metrics)
+        row.update(law_metrics)
         row.update(path_metrics)
         row.update(continuity)
         rows.append(row)
@@ -220,6 +360,7 @@ def run_validation(
     totals_path = out_dir / "two_block_sliding_contact_totals.csv"
     continuity_path = out_dir / "two_block_sliding_region_continuity.csv"
     tracking_path = out_dir / "two_block_sliding_path_tracking.csv"
+    gate_path = out_dir / "two_block_sliding_region_gate.csv"
     summary_path = out_dir / "two_block_sliding_region_summary.md"
     _write_csv(totals_path, rows)
     continuity_keys = [
@@ -303,6 +444,24 @@ def run_validation(
         and float(summary["master_face_switch_fraction_max"]) <= float(max_master_face_switch_fraction)
         and float(summary["master_barycentric_drift_max"]) <= float(max_master_barycentric_drift)
     )
+    for row in rows:
+        row["path_tracking_min_cache_hit_threshold"] = float(min_cache_hit_fraction)
+        row["path_tracking_min_cache_match_threshold"] = float(min_cache_match_fraction)
+    gate = two_block_sliding_region_gate_metrics(
+        rows,
+        flat_punch_summary=flat_punch_summary,
+        min_cache_hit_fraction=float(min_cache_hit_fraction),
+        min_cache_match_fraction=float(min_cache_match_fraction),
+        min_active_region_jaccard=float(min_active_region_jaccard),
+        max_master_face_switch_fraction=float(max_master_face_switch_fraction),
+        max_master_barycentric_drift=float(max_master_barycentric_drift),
+    )
+    _write_csv(gate_path, [gate])
+    summary.update(gate)
+    summary["gate_csv"] = str(gate_path)
+    if flat_punch_summary is not None:
+        summary["flat_punch_prerequisite_summary_csv"] = str(out_dir / "flat_punch_prerequisite" / "flat_punch_region_summary.csv")
+        summary["flat_punch_prerequisite_gate_csv"] = str(out_dir / "flat_punch_prerequisite" / "flat_punch_rf_penetration_gate.csv")
     summary_path.write_text(
         "\n".join(
             [
@@ -320,6 +479,10 @@ def run_validation(
                 f"- min path-cache match fraction after first frame: {summary['path_cache_match_fraction_min_after_first']:.12e}",
                 f"- max master-barycentric drift: {summary['master_barycentric_drift_max']:.12e}",
                 f"- accepted-state path tracking gate: {'PASS' if int(summary['path_tracking_gate_passed']) else 'FAIL'}",
+                f"- flat-punch prerequisite gate: {'PASS' if int(summary['flat_punch_prerequisite_gate_passed']) else 'FAIL'}",
+                f"- two-block sliding region gate: {'PASS' if int(summary['two_block_sliding_region_gate_passed']) else 'FAIL'}",
+                f"- nodal CPRESS/COPEN deferred: {'yes' if int(summary['two_block_nodal_cpress_deferred']) else 'no'}",
+                f"- constraint-region law gate: {'PASS' if int(summary['two_block_constraint_region_law_gate_passed']) else 'FAIL'}",
                 "",
                 "Face switches are permitted when the smooth sliding path crosses the two-triangle split of a planar quad. "
                 "The gate therefore requires accepted-state cache hit/match continuity and bounded switch fraction rather "
@@ -327,6 +490,7 @@ def run_validation(
                 f"- totals CSV: `{totals_path.name}`",
                 f"- continuity CSV: `{continuity_path.name}`",
                 f"- path tracking CSV: `{tracking_path.name}`",
+                f"- gate CSV: `{gate_path.name}`",
             ]
         )
         + "\n",

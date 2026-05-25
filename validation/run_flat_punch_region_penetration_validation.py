@@ -38,10 +38,71 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _constraint_region_contact_law_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
 )
-from validation.run_two_block_sliding_region_validation import _contact_samples_to_arrays, _write_csv  # noqa: E402
 
 Row = dict[str, Any]
 DEFAULT_OUT_DIR = ROOT / "results" / "flat_punch_region_penetration_validation"
+
+
+def _write_csv(path: Path, rows: list[Row]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _contact_samples_to_arrays(samples: list[Any]) -> dict[str, np.ndarray]:
+    if not samples:
+        return {
+            "sample_node_ids": np.empty((0, 3), dtype=np.int64),
+            "sample_weights": np.empty((0, 3), dtype=float),
+            "gaps": np.empty(0, dtype=float),
+            "normals": np.empty((0, 3), dtype=float),
+            "areas": np.empty(0, dtype=float),
+            "master_node_ids": np.empty((0, 3), dtype=np.int64),
+            "master_weights": np.empty((0, 3), dtype=float),
+        }
+    slave_width = max(int(np.asarray(sample.node_ids).size) for sample in samples)
+    master_width = max(
+        0 if sample.master_node_ids is None else int(np.asarray(sample.master_node_ids).size)
+        for sample in samples
+    )
+    sample_node_ids = np.zeros((len(samples), slave_width), dtype=np.int64)
+    sample_weights = np.zeros((len(samples), slave_width), dtype=float)
+    master_node_ids = np.zeros((len(samples), master_width), dtype=np.int64)
+    master_weights = np.zeros((len(samples), master_width), dtype=float)
+    gaps = np.zeros(len(samples), dtype=float)
+    normals = np.zeros((len(samples), 3), dtype=float)
+    areas = np.zeros(len(samples), dtype=float)
+    for idx, sample in enumerate(samples):
+        nodes = np.asarray(sample.node_ids, dtype=np.int64).reshape(-1)
+        weights = np.asarray(sample.shape_weights, dtype=float).reshape(-1)
+        sample_node_ids[idx, : nodes.size] = nodes
+        sample_weights[idx, : weights.size] = weights
+        if sample.master_node_ids is not None and sample.master_shape_weights is not None:
+            m_nodes = np.asarray(sample.master_node_ids, dtype=np.int64).reshape(-1)
+            m_weights = np.asarray(sample.master_shape_weights, dtype=float).reshape(-1)
+            master_node_ids[idx, : m_nodes.size] = m_nodes
+            master_weights[idx, : m_weights.size] = m_weights
+        gaps[idx] = float(sample.gap)
+        normal = np.asarray(sample.normal, dtype=float).reshape(3)
+        normal_norm = max(float(np.linalg.norm(normal)), 1.0e-30)
+        normals[idx] = normal / normal_norm
+        areas[idx] = float(sample.area)
+    return {
+        "sample_node_ids": sample_node_ids,
+        "sample_weights": sample_weights,
+        "gaps": gaps,
+        "normals": normals,
+        "areas": areas,
+        "master_node_ids": master_node_ids,
+        "master_weights": master_weights,
+    }
 
 
 def _parse_float_list(text: str) -> tuple[float, ...]:
