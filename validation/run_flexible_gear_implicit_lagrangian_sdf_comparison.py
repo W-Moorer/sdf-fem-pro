@@ -5873,6 +5873,8 @@ def _cropped_pair_model_and_contact(
         master_node_offset=n1,
         quadrature="tri3",
         search_radius=_default_contact_search_radius(pair, target_overclosure=target_overclosure),
+        compiled_batch_projection=True,
+        secondary_path_tracking=True,
     )
     return model, contact
 
@@ -5913,15 +5915,39 @@ def _hard_contact_linearized_gap_jacobian(
     u_linearization: np.ndarray,
     *,
     n_total_dofs: int,
-    constraint_averaging: str = "slave_face",
+    constraint_averaging: str = "slave_node_region_constraint",
 ) -> tuple[list[Any], np.ndarray, np.ndarray, np.ndarray]:
+    averaging = str(constraint_averaging).lower()
+    base_mode, _overclosure_mode = _contact_averaging_modes(averaging)
+    n_nodes = int(n_total_dofs) // 3
+    if 3 * n_nodes != int(n_total_dofs):
+        raise ValueError("n_total_dofs must be divisible by 3")
+    if base_mode in {"slave_node_region", "slave_node"}:
+        arrays = contact.sample_arrays(x_linearization)
+        if arrays is not None:
+            aggregated_arrays = _aggregate_contact_sample_arrays(arrays, averaging)
+            if aggregated_arrays is not None:
+                row_ids, sparse_jacobian = _constraint_region_gap_jacobian_sparse_from_arrays(
+                    aggregated_arrays,
+                    n_nodes=n_nodes,
+                )
+                gap_at_linearization = np.asarray(aggregated_arrays["gaps"], dtype=float).reshape(-1)[row_ids]
+                areas = np.asarray(aggregated_arrays["areas"], dtype=float).reshape(-1)[row_ids]
+                gap_jacobian = np.asarray(sparse_jacobian.toarray(), dtype=float)
+                gap_offset = gap_at_linearization - gap_jacobian @ np.asarray(u_linearization, dtype=float).reshape(-1)
+                samples = _contact_samples_from_arrays(aggregated_arrays, stiffness=float(contact.pressure_stiffness))
+                return samples, gap_offset, gap_jacobian, areas
     samples = list(contact.samples(x_linearization))
+    if base_mode in {"slave_node_region", "slave_node"}:
+        samples = _aggregate_contact_samples(samples, averaging)
     gap_at_linearization, gap_jacobian = hard_contact_gap_jacobian_from_samples(samples, n_total_dofs=int(n_total_dofs))
     areas = np.asarray([float(sample.area) for sample in samples], dtype=float)
-    averaging = str(constraint_averaging).lower()
-    if averaging not in {"none", "slave_face", "surface_patch"}:
-        raise ValueError("constraint_averaging must be 'none', 'slave_face', or 'surface_patch'")
-    if averaging == "surface_patch" and gap_at_linearization.size:
+    if base_mode not in {"none", "slave_face", "surface_patch", "slave_node_region", "slave_node"}:
+        raise ValueError(
+            "constraint_averaging must be 'none', 'slave_face', 'slave_node', 'slave_node_region', "
+            "'surface_patch', or a corresponding *_constraint mode"
+        )
+    if base_mode == "surface_patch" and gap_at_linearization.size:
         groups = _sample_connected_components(samples)
         gap_at_linearization, gap_jacobian, areas = _aggregate_constraint_groups(
             gap_at_linearization,
@@ -5929,7 +5955,7 @@ def _hard_contact_linearized_gap_jacobian(
             areas,
             groups,
         )
-    elif averaging == "slave_face" and gap_at_linearization.size >= 3 and gap_at_linearization.size % 3 == 0:
+    elif base_mode == "slave_face" and gap_at_linearization.size >= 3 and gap_at_linearization.size % 3 == 0:
         groups = [np.arange(start, start + 3, dtype=np.int64) for start in range(0, gap_at_linearization.size, 3)]
         gap_at_linearization, gap_jacobian, areas = _aggregate_constraint_groups(
             gap_at_linearization,
@@ -6155,7 +6181,7 @@ def solve_sfc_cropped_pair_hard_contact(
     max_iterations: int = 6,
     tolerance: float = 1.0e-9,
     hard_enforcement: str = "abaqus_standard_penalty",
-    constraint_averaging: str = "slave_face",
+    constraint_averaging: str = "slave_node_region_constraint",
     pressure_smoothing_factor: float = 4.0,
     hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
     automatic_increment: bool = True,
@@ -7440,7 +7466,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hht-alpha", type=float, default=ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA)
     parser.add_argument("--no-automatic-increment", action="store_true")
     parser.add_argument("--cutback-factor", type=float, default=0.5)
-    parser.add_argument("--constraint-averaging", choices=("none", "slave_face", "surface_patch"), default="slave_face")
+    parser.add_argument(
+        "--constraint-averaging",
+        choices=(
+            "none",
+            "slave_face",
+            "slave_face_constraint",
+            "slave_node",
+            "slave_node_constraint",
+            "slave_node_region",
+            "slave_node_region_constraint",
+            "slave_node_region_participation",
+            "slave_node_region_signed_participation",
+            "surface_patch",
+            "surface_patch_constraint",
+        ),
+        default="slave_node_region_constraint",
+    )
     parser.add_argument("--hard-max-iterations", type=int, default=6)
     parser.add_argument("--linear-solver", choices=("dense", "sparse", "auto"), default="dense")
     parser.add_argument("--run-abaqus", action="store_true", help="Run the generated Abaqus native-contact deck and compare curves.")

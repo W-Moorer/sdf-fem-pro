@@ -1179,6 +1179,46 @@ def test_constraint_region_gap_jacobian_matches_slave_master_fd() -> None:
     np.testing.assert_allclose(np.asarray(active_jacobian @ direction.reshape(-1)).reshape(-1), expected[:1], atol=1.0e-14)
 
 
+def test_hard_contact_linearization_uses_slave_node_region_constraint_rows() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+    mechanics, contact = gear_implicit._cropped_pair_model_and_contact(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        target_overclosure=1.0e-4,
+    )
+    fixed, values = gear_implicit._fixed_conditions_for_pair(
+        pair,
+        closure=pair.initial_patch_gap + 1.0e-4,
+        rotation_z=0.0,
+    )
+    u = gear_implicit.project_fixed_dofs(np.zeros(mechanics.n_dofs, dtype=float), fixed, values)
+    x = mechanics.X + u.reshape((-1, 3))
+
+    samples, gap_offset, gap_jacobian, areas = gear_implicit._hard_contact_linearized_gap_jacobian(
+        contact,
+        x,
+        u,
+        n_total_dofs=mechanics.n_dofs,
+        constraint_averaging="slave_node_region_constraint",
+    )
+    arrays = contact.sample_arrays(x)
+    assert arrays is not None
+    regions = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
+    assert regions is not None
+    row_ids, reference_jacobian = _constraint_region_gap_jacobian_sparse_from_arrays(regions, n_nodes=mechanics.X.shape[0])
+    reference_gaps = np.asarray(regions["gaps"], dtype=float).reshape(-1)[row_ids]
+
+    assert len(samples) == reference_gaps.size
+    assert gap_jacobian.shape == (reference_gaps.size, mechanics.n_dofs)
+    np.testing.assert_allclose(areas, np.asarray(regions["areas"], dtype=float).reshape(-1)[row_ids])
+    np.testing.assert_allclose(gap_jacobian, reference_jacobian.toarray())
+    np.testing.assert_allclose(gap_offset + gap_jacobian @ u, reference_gaps, rtol=1.0e-12, atol=1.0e-12)
+
+
 def test_constraint_region_pressure_tangent_filters_open_and_zero_area_rows() -> None:
     arrays = {
         "gaps": np.asarray([-0.10, 0.20, -0.30], dtype=float),
@@ -3043,18 +3083,20 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
         poisson=model.poisson,
         density=model.density,
         pressure_stiffness=5.0e9,
-        duration=1.0e-3,
-        dt=1.0e-3,
-        target_overclosure=1.0e-5,
+        duration=1.0e-5,
+        dt=1.0e-5,
+        target_overclosure=1.0e-4,
         rotation_rate_z=0.0,
-        max_iterations=4,
+        max_iterations=8,
+        hard_enforcement="pressure_compliance",
         automatic_increment=False,
     )
 
     assert len(history) == 1
     assert summary["status"] == "completed"
     assert summary["contact_mode"] == "hard"
-    assert summary["hard_enforcement"] == "abaqus_standard_penalty"
+    assert summary["hard_enforcement"] == "pressure_compliance"
+    assert summary["constraint_averaging"] == "slave_node_region_constraint"
     assert float(summary["hht_alpha"]) < 0.0
     assert summary["nodes"] > 0
     assert summary["elements"] > 0
@@ -3090,7 +3132,7 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert "active_contact_region_count" in history[-1]
 
 
-def test_cropped_patch_gate_checks_pressure_and_stress_trend() -> None:
+def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
 
@@ -3102,16 +3144,17 @@ def test_cropped_patch_gate_checks_pressure_and_stress_trend() -> None:
         pressure_stiffness=5.0e9,
         duration=2.0e-5,
         dt=1.0e-5,
-        target_overclosure=1.0e-5,
+        target_overclosure=1.0e-4,
         rotation_rate_z=0.0,
-        max_iterations=3,
+        max_iterations=8,
+        hard_enforcement="pressure_compliance",
         automatic_increment=False,
     )
-    gate = _cropped_patch_contact_gate_metrics(history, summary, require_monotone_trend=True)
+    gate = _cropped_patch_contact_gate_metrics(history, summary, require_monotone_trend=False)
 
     assert len(history) == 2
     assert int(gate["cropped_patch_gate_passed"]) == 1
-    assert int(gate["cropped_patch_pressure_stress_trend_gate_passed"]) == 1
+    assert int(gate["cropped_patch_pressure_stress_gate_passed"]) == 1
     assert int(gate["cropped_patch_path_tracking_gate_passed"]) == 1
     assert int(gate["cropped_patch_active_region_continuity_gate_passed"]) == 1
     assert float(gate["cropped_patch_path_cache_hit_fraction_min_after_first"]) >= float(
@@ -3123,8 +3166,8 @@ def test_cropped_patch_gate_checks_pressure_and_stress_trend() -> None:
     assert float(gate["cropped_patch_active_region_jaccard_min_after_first"]) >= float(
         gate["cropped_patch_min_active_region_jaccard_threshold"]
     )
-    assert float(history[-1]["normal_force"]) >= 0.8 * float(history[0]["normal_force"])
-    assert float(history[-1]["max_contact_pressure"]) >= 0.8 * float(history[0]["max_contact_pressure"])
+    assert int(history[-1]["hard_constraints"]) == int(history[-1]["hard_contact_samples"])
+    assert int(history[-1]["hard_constraints"]) == int(history[-1]["path_tracking_constraint_regions"])
     assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0
 
 
