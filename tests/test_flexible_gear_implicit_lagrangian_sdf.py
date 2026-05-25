@@ -25,6 +25,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_active_signature_from_arrays,
     _contact_active_signature_from_samples,
     _contact_node_diagnostics_from_arrays,
+    _contact_active_region_continuity_metrics_from_arrays,
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _contact_patch_representative_length,
@@ -507,6 +508,25 @@ def test_contact_path_tracking_reports_master_face_switch_fraction() -> None:
     assert metrics["contact_path_cache_hit_fraction"] == pytest.approx(1.0)
     assert metrics["contact_path_cache_match_count"] == 1
     assert metrics["contact_path_cache_match_fraction"] == pytest.approx(0.5)
+
+
+def test_contact_active_region_continuity_uses_secondary_constraint_regions() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, -0.02, 0.01, -0.03], dtype=float),
+        "secondary_node_ids": np.asarray([1, 2, 3, 4], dtype=np.int64),
+    }
+    previous = (1, 5)
+
+    metrics, current = _contact_active_region_continuity_metrics_from_arrays(arrays, previous)
+
+    assert current == (1, 2, 4)
+    assert metrics["contact_active_region_continuity_previous_count"] == 2
+    assert metrics["contact_active_region_continuity_current_count"] == 3
+    assert metrics["contact_active_region_continuity_intersection_count"] == 1
+    assert metrics["contact_active_region_new_count"] == 2
+    assert metrics["contact_active_region_dropped_count"] == 1
+    assert metrics["contact_active_region_persistence_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_active_region_jaccard"] == pytest.approx(0.25)
 
 
 def test_penalty_history_reports_contact_energy_and_virtual_work() -> None:
@@ -1107,6 +1127,8 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "source_increment_accepted" in history[-1]
     assert "source_increment_cutback_required" in history[-1]
     assert "source_increment_cutback_candidate_dt" in history[-1]
+    assert "contact_active_region_continuity_current_count" in history[-1]
+    assert "contact_active_region_jaccard" in history[-1]
     manifest = Path(str(summary["sfc_vtk_manifest"]))
     assert manifest.exists()
     text = manifest.read_text(encoding="utf-8")

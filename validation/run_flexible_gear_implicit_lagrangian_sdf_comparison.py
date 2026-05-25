@@ -455,6 +455,63 @@ def _contact_path_tracking_metrics_from_arrays(
     return metrics, face_ids.copy(), current_bary
 
 
+def _contact_active_region_continuity_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    previous_active_region_ids: tuple[int, ...] | None,
+) -> tuple[Row, tuple[int, ...] | None]:
+    """Measure accepted-state active constraint-region continuity.
+
+    This diagnostic compares secondary constraint-region ids before any nodal
+    CPRESS recovery.  It answers whether the active contact patch persists
+    across accepted states, which is the quantity needed before comparing
+    pressure clouds.
+    """
+
+    empty = {
+        "contact_active_region_continuity_previous_count": 0,
+        "contact_active_region_continuity_current_count": 0,
+        "contact_active_region_continuity_intersection_count": 0,
+        "contact_active_region_new_count": 0,
+        "contact_active_region_dropped_count": 0,
+        "contact_active_region_persistence_fraction": 0.0,
+        "contact_active_region_jaccard": 0.0,
+    }
+    if sample_arrays is None:
+        return empty, None
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0:
+        return empty, tuple()
+    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    if secondary_ids.shape != gaps.shape or not np.any(secondary_ids >= 0):
+        region_ids = np.arange(gaps.size, dtype=np.int64)
+    else:
+        region_ids = secondary_ids
+    active_mask = (gaps < 0.0) & (region_ids >= 0)
+    current_ids = tuple(sorted({int(region_id) for region_id in region_ids[active_mask]}))
+    if previous_active_region_ids is None:
+        metrics = dict(empty)
+        metrics["contact_active_region_continuity_current_count"] = int(len(current_ids))
+        return metrics, current_ids
+    previous_set = {int(region_id) for region_id in previous_active_region_ids}
+    current_set = set(current_ids)
+    intersection = previous_set & current_set
+    union = previous_set | current_set
+    previous_count = len(previous_set)
+    current_count = len(current_set)
+    metrics = {
+        "contact_active_region_continuity_previous_count": int(previous_count),
+        "contact_active_region_continuity_current_count": int(current_count),
+        "contact_active_region_continuity_intersection_count": int(len(intersection)),
+        "contact_active_region_new_count": int(len(current_set - previous_set)),
+        "contact_active_region_dropped_count": int(len(previous_set - current_set)),
+        "contact_active_region_persistence_fraction": (
+            float(len(intersection)) / float(previous_count) if previous_count else 0.0
+        ),
+        "contact_active_region_jaccard": float(len(intersection)) / float(len(union)) if union else 1.0,
+    }
+    return metrics, current_ids
+
+
 def _empty_contact_region_integral_metrics() -> Row:
     return {
         "contact_region_count": 0,
@@ -4563,6 +4620,7 @@ def solve_sfc_source_drive_pair(
     contact_aggregation_workspace = _ContactAggregationWorkspace()
     previous_path_master_face_ids: np.ndarray | None = None
     previous_path_master_barycentric: np.ndarray | None = None
+    previous_active_region_ids: tuple[int, ...] | None = None
 
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if (
@@ -4922,6 +4980,12 @@ def solve_sfc_source_drive_pair(
             previous_path_master_face_ids = current_path_master_face_ids
         if current_path_master_barycentric is not None:
             previous_path_master_barycentric = current_path_master_barycentric
+        active_region_continuity_metrics, current_active_region_ids = _contact_active_region_continuity_metrics_from_arrays(
+            last_sample_arrays,
+            previous_active_region_ids,
+        )
+        if current_active_region_ids is not None:
+            previous_active_region_ids = current_active_region_ids
         contact_region_metrics = (
             _contact_region_integral_metrics_from_arrays(last_sample_arrays, stiffness=pressure_stiffness)
             if last_sample_arrays is not None
@@ -5003,6 +5067,7 @@ def solve_sfc_source_drive_pair(
             row.update(contact_region_metrics)
             row.update(contact_tangent_metrics)
             row.update(path_tracking_metrics)
+            row.update(active_region_continuity_metrics)
             rows.append(row)
             timing_history += time.perf_counter() - t_section
         if vtk_due:
@@ -5046,6 +5111,7 @@ def solve_sfc_source_drive_pair(
                 }
             )
             frame_row.update(path_tracking_metrics)
+            frame_row.update(active_region_continuity_metrics)
             frame_row.update(contact_region_metrics)
             frame_row.update(contact_tangent_metrics)
             vtk_manifest_rows.append(frame_row)
