@@ -13,6 +13,7 @@ import argparse
 import csv
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,22 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
 
 Row = dict[str, Any]
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_full_lagrangian_sdf"
+
+PATCH_PREREQUISITE_GATE_KEYS: tuple[str, ...] = (
+    "tooth_patch_region_gate_passed",
+    "tooth_patch_ready_for_cropped_gear_patch",
+    "tooth_patch_constraint_region_law_gate_passed",
+    "tooth_patch_path_tracking_gate_passed",
+    "tooth_patch_contact_total_gate_passed",
+    "cropped_patch_gate_passed",
+    "cropped_patch_pressure_stress_gate_passed",
+    "cropped_patch_path_tracking_gate_passed",
+    "cropped_patch_active_region_continuity_gate_passed",
+    "cropped_patch_contact_total_gate_passed",
+    "cropped_patch_increment_gate_passed",
+    "cropped_patch_constraint_region_tangent_gate_passed",
+    "cropped_patch_active_set_line_search_gate_passed",
+)
 
 CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
     "time",
@@ -112,6 +129,41 @@ def _read_csv_rows(path: Path) -> list[Row]:
         return []
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def load_patch_prerequisite_summary(paths: Sequence[Path]) -> Row:
+    """Load explicit patch-ladder gate evidence for the full-gear entry gate.
+
+    Full-gear validation is not allowed to infer tooth/cropped-patch evidence
+    from the full solve itself.  This helper only accepts already-generated
+    summary CSV files and only forwards the known patch-ladder gate fields.
+    Duplicate gate keys must agree so that a later CSV cannot silently override
+    a failing prerequisite.
+    """
+
+    merged: Row = {}
+    resolved_paths: list[str] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        rows = _read_csv_rows(path)
+        if not rows:
+            raise ValueError(f"patch prerequisite summary is missing or empty: {path}")
+        row = rows[-1]
+        recognized = {key: row[key] for key in PATCH_PREREQUISITE_GATE_KEYS if key in row}
+        if not recognized:
+            raise ValueError(f"patch prerequisite summary has no recognized gate columns: {path}")
+        for key, value in recognized.items():
+            if key in merged and str(merged[key]) != str(value):
+                raise ValueError(f"conflicting patch prerequisite gate `{key}` in {path}")
+            merged[key] = value
+        resolved_paths.append(str(path))
+    if resolved_paths:
+        merged["full_gear_patch_prerequisite_summary_count"] = int(len(resolved_paths))
+        merged["full_gear_patch_prerequisite_summaries"] = ";".join(resolved_paths)
+        merged["full_gear_patch_prerequisite_keys_present"] = ";".join(
+            sorted(k for k in merged if k in PATCH_PREREQUISITE_GATE_KEYS)
+        )
+    return merged
 
 
 def _max_column(rows: list[Row], column: str) -> float:
@@ -1748,6 +1800,7 @@ def run_full_gear(
     source_checkpoint_stride: int = 10,
     export_abaqus_vtk: bool = False,
     abaqus_vtk_manifest: Path | None = None,
+    patch_prerequisite_summaries: Sequence[Path] | None = None,
 ) -> tuple[list[Row], Row]:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = parse_gear_input(source)
@@ -1919,6 +1972,9 @@ def run_full_gear(
     _write_csv(path_tracking_gate_path, [path_tracking_gate])
     summary.update(path_tracking_gate)
     summary["path_tracking_gate"] = str(path_tracking_gate_path)
+    patch_prerequisite_summary = load_patch_prerequisite_summary(patch_prerequisite_summaries or [])
+    if patch_prerequisite_summary:
+        summary.update(patch_prerequisite_summary)
     full_gear_entry_gate = full_gear_entry_gate_metrics(summary)
     full_gear_entry_gate_path = out_dir / "sfc_full_gear_entry_gate.csv"
     _write_csv(full_gear_entry_gate_path, [full_gear_entry_gate])
@@ -2260,6 +2316,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Existing Abaqus VTK manifest to compare against the generated SFC VTK field curves.",
     )
+    parser.add_argument(
+        "--patch-prerequisite-summary",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Patch-ladder summary CSV produced by tooth/cropped validations. "
+            "May be passed multiple times; only recognized prerequisite gate "
+            "columns are forwarded to the full-gear entry gate."
+        ),
+    )
     args = parser.parse_args(argv)
     history, summary = run_full_gear(
         source=args.source,
@@ -2312,6 +2379,7 @@ def main(argv: list[str] | None = None) -> int:
         source_checkpoint_stride=int(args.source_checkpoint_stride),
         export_abaqus_vtk=bool(args.export_abaqus_vtk),
         abaqus_vtk_manifest=args.abaqus_vtk_manifest,
+        patch_prerequisite_summaries=args.patch_prerequisite_summary,
     )
     print((args.out_dir / "full_gear_lagrangian_sdf_summary.md").read_text(encoding="utf-8"))
     return 0 if history and summary.get("status") == "completed" else 1

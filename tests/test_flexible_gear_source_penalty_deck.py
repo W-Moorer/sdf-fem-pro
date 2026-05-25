@@ -14,6 +14,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     constraint_region_tangent_gate_metrics,
     full_gear_evidence_ladder_rows,
     full_gear_entry_gate_metrics,
+    load_patch_prerequisite_summary,
     path_tracking_gate_metrics,
     run_full_gear,
     source_active_set_line_search_gate_metrics,
@@ -286,6 +287,63 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(failed_line_search["full_gear_entry_gate_passed"]) == 0
     assert int(failed_line_search["full_gear_entry_source_active_set_line_search_gate_passed"]) == 0
+
+
+def test_full_gear_patch_prerequisite_summary_loader_feeds_entry_gate(tmp_path: Path) -> None:
+    tooth_summary = tmp_path / "tooth_patch_region_summary.csv"
+    tooth_summary.write_text(
+        "\n".join(
+            [
+                "tooth_patch_region_gate_passed,tooth_patch_ready_for_cropped_gear_patch,"
+                "tooth_patch_path_tracking_gate_passed,unrelated_case_metric",
+                "1,1,1,999",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cropped_summary = tmp_path / "cropped_patch_region_summary.csv"
+    cropped_summary.write_text(
+        "\n".join(
+            [
+                "cropped_patch_gate_passed,cropped_patch_pressure_stress_gate_passed,"
+                "cropped_patch_path_tracking_gate_passed,cropped_patch_active_region_continuity_gate_passed",
+                "1,1,1,1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    patch_evidence = load_patch_prerequisite_summary([tooth_summary, cropped_summary])
+
+    assert int(patch_evidence["full_gear_patch_prerequisite_summary_count"]) == 2
+    assert "unrelated_case_metric" not in patch_evidence
+    assert int(patch_evidence["tooth_patch_region_gate_passed"]) == 1
+    assert int(patch_evidence["cropped_patch_gate_passed"]) == 1
+
+    summary = {
+        **patch_evidence,
+        "source_trial_gate_passed": 1,
+        "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
+        "constraint_region_tangent_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "path_tracking_gate_passed": 1,
+        "path_tracking_continuity_observable": 1,
+        "contact_total_nodal_cpress_deferred": 1,
+        "contact_total_no_nodal_priority_columns": 1,
+        "contact_total_active_contact_present": 1,
+        "contact_total_path_columns_present": 1,
+        "source_convergence_final_time_matches_duration": 1,
+        "source_convergence_no_unstable_or_unconverged_accepted": 1,
+        "source_accepted_increment_count": 10,
+        "sfc_increment_count": 10,
+    }
+
+    gate = full_gear_entry_gate_metrics(summary)
+
+    assert int(gate["full_gear_entry_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_patch_ladder_gate_passed"]) == 1
 
 
 def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
