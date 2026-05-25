@@ -632,6 +632,10 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source secondary line hard distance limit: {summary.get('source_secondary_line_hard_distance_limit', '')}",
         f"- source secondary path tracking: {summary.get('source_secondary_path_tracking', '')}",
         f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
+        f"- source max nonlinear iterations: {summary.get('source_max_iterations', '')}",
+        f"- source converged steps: {summary.get('source_step_converged_count', '')}",
+        f"- source iteration-limit steps: {summary.get('source_iteration_limit_reached_count', '')}",
+        f"- source unstable accepted steps: {summary.get('source_unstable_accepted_count', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
@@ -812,11 +816,11 @@ def run_full_gear(
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_line_hard_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = False,
-    source_contact_active_set_stability: bool = False,
+    source_contact_active_set_stability: bool = True,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
-    source_max_iterations: int = 8,
+    source_max_iterations: int = 16,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -1178,11 +1182,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source-contact-active-set-stability",
+        dest="source_contact_active_set_stability",
         action="store_true",
+        default=True,
         help=(
             "Require one stable active contact signature before accepting a "
             "source-drive nonlinear iteration."
         ),
+    )
+    parser.add_argument(
+        "--no-source-contact-active-set-stability",
+        dest="source_contact_active_set_stability",
+        action="store_false",
+        help="Disable the Abaqus-style source-drive active contact status stability gate for diagnostics.",
     )
     parser.add_argument(
         "--source-contact-footprint-clipping",
@@ -1204,8 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--source-max-iterations",
         type=int,
-        default=8,
-        help="Maximum nonlinear iterations per fixed source-drive time increment.",
+        default=16,
+        help="Maximum nonlinear iterations per fixed source-drive time increment; 16 matches Abaqus/Standard's common equilibrium iteration cap.",
     )
     parser.add_argument(
         "--source-checkpoint",

@@ -266,6 +266,25 @@ def _contact_active_signature_from_samples(samples: list[ContactSample] | None) 
     return tuple(sorted(signature))
 
 
+def _source_contact_active_set_is_stable(
+    active_signature: tuple[tuple[int, ...], ...],
+    previous_active_signature: tuple[tuple[int, ...], ...] | None,
+    *,
+    require_stability: bool,
+) -> bool:
+    """Return the source-drive contact-status stability gate.
+
+    When requested, the first contact evaluation of an increment is not yet
+    stable.  Abaqus/Standard treats open/closed changes as contact-status
+    discontinuities and only accepts after the status has stopped changing
+    across iterations.
+    """
+
+    if not bool(require_stability):
+        return True
+    return previous_active_signature is not None and active_signature == previous_active_signature
+
+
 def _combined_shape_weights(
     node_rows: list[np.ndarray],
     weight_rows: list[np.ndarray],
@@ -3195,6 +3214,9 @@ def _write_source_drive_checkpoint(
     source_sparse_cg_iterations: int,
     source_sparse_cg_base_lu_preconditioner: int,
     source_direct_fallback_count: int,
+    source_step_converged_count: int = 0,
+    source_iteration_limit_reached_count: int = 0,
+    source_unstable_accepted_count: int = 0,
 ) -> None:
     """Persist accepted source-drive state for exact fixed-step continuation."""
 
@@ -3223,6 +3245,9 @@ def _write_source_drive_checkpoint(
                 [int(source_sparse_cg_base_lu_preconditioner)], dtype=np.int64
             ),
             source_direct_fallback_count=np.asarray([int(source_direct_fallback_count)], dtype=np.int64),
+            source_step_converged_count=np.asarray([int(source_step_converged_count)], dtype=np.int64),
+            source_iteration_limit_reached_count=np.asarray([int(source_iteration_limit_reached_count)], dtype=np.int64),
+            source_unstable_accepted_count=np.asarray([int(source_unstable_accepted_count)], dtype=np.int64),
         )
     tmp.replace(path)
 
@@ -3251,6 +3276,13 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
             "source_sparse_cg_iterations": int(data["source_sparse_cg_iterations"][0]),
             "source_sparse_cg_base_lu_preconditioner": int(data["source_sparse_cg_base_lu_preconditioner"][0]),
             "source_direct_fallback_count": int(data["source_direct_fallback_count"][0]),
+            "source_step_converged_count": int(data["source_step_converged_count"][0]) if "source_step_converged_count" in data else 0,
+            "source_iteration_limit_reached_count": (
+                int(data["source_iteration_limit_reached_count"][0]) if "source_iteration_limit_reached_count" in data else 0
+            ),
+            "source_unstable_accepted_count": (
+                int(data["source_unstable_accepted_count"][0]) if "source_unstable_accepted_count" in data else 0
+            ),
         }
 
 
@@ -3267,7 +3299,7 @@ def solve_sfc_source_drive_pair(
     gear2_torque_z: float,
     hht_alpha: float = ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
     tet4_mass_kind: str = "consistent",
-    max_iterations: int = 8,
+    max_iterations: int = 16,
     tolerance: float = 1.0e-9,
     vtk_out_dir: Path | None = None,
     vtk_frame_stride: int = 1,
@@ -3286,7 +3318,7 @@ def solve_sfc_source_drive_pair(
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_line_hard_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = False,
-    source_contact_active_set_stability: bool = False,
+    source_contact_active_set_stability: bool = True,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "linearized_mpc",
     source_rotating_inertia: str = "none",
@@ -3629,6 +3661,9 @@ def solve_sfc_source_drive_pair(
     source_sparse_cg_base_lu_preconditioner = 0
     source_direct_fallback_count = 0
     timing_source_base_lu = 0.0
+    source_step_converged_count = 0
+    source_iteration_limit_reached_count = 0
+    source_unstable_accepted_count = 0
     checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
     start_step = 0
     if bool(resume_source_checkpoint):
@@ -3654,6 +3689,9 @@ def solve_sfc_source_drive_pair(
         source_sparse_cg_iterations = int(checkpoint["source_sparse_cg_iterations"])
         source_sparse_cg_base_lu_preconditioner = int(checkpoint["source_sparse_cg_base_lu_preconditioner"])
         source_direct_fallback_count = int(checkpoint["source_direct_fallback_count"])
+        source_step_converged_count = int(checkpoint.get("source_step_converged_count", 0))
+        source_iteration_limit_reached_count = int(checkpoint.get("source_iteration_limit_reached_count", 0))
+        source_unstable_accepted_count = int(checkpoint.get("source_unstable_accepted_count", 0))
         state = MechanicsState(
             model.X + assembly.expand_displacements(q),
             assembly.expand_displacements(v),
@@ -3825,6 +3863,8 @@ def solve_sfc_source_drive_pair(
         previous_active_signature: tuple[tuple[int, ...], ...] | None = None
         active_set_stable = not bool(source_contact_active_set_stability)
         contact_matches_q_guess = False
+        step_converged = False
+        step_convergence_reason = "iteration_limit"
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
@@ -3843,10 +3883,10 @@ def solve_sfc_source_drive_pair(
                 last_sample_arrays = sample_arrays
                 last_samples = None
                 active_signature = _contact_active_signature_from_arrays(sample_arrays)
-            active_set_stable = (
-                not bool(source_contact_active_set_stability)
-                or previous_active_signature is None
-                or active_signature == previous_active_signature
+            active_set_stable = _source_contact_active_set_is_stable(
+                active_signature,
+                previous_active_signature,
+                require_stability=bool(source_contact_active_set_stability),
             )
             previous_active_signature = active_signature
             contact_matches_q_guess = True
@@ -3944,7 +3984,15 @@ def solve_sfc_source_drive_pair(
             correction_converged = correction_norm <= float(tolerance) * correction_scale
             residual_converged = residual_norm <= max(float(tolerance) * balance_scale, 1.0e-10)
             if correction_converged and residual_converged and active_set_stable:
+                step_converged = True
+                step_convergence_reason = "residual_correction_active_set"
                 break
+            if not residual_converged:
+                step_convergence_reason = "residual"
+            elif not correction_converged:
+                step_convergence_reason = "correction"
+            elif not active_set_stable:
+                step_convergence_reason = "contact_active_set"
             q_guess[free] += correction_free
             contact_matches_q_guess = False
         q_new = _project_reduced_fixed(q_guess, fixed, values)
@@ -3960,18 +4008,23 @@ def solve_sfc_source_drive_pair(
                 last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
                 last_samples = accepted_samples
                 last_sample_arrays = None
-                active_set_stable = (
-                    not bool(source_contact_active_set_stability)
-                    or _contact_active_signature_from_samples(accepted_samples) == previous_active_signature
+                active_set_stable = _source_contact_active_set_is_stable(
+                    _contact_active_signature_from_samples(accepted_samples),
+                    previous_active_signature,
+                    require_stability=bool(source_contact_active_set_stability),
                 )
             else:
                 last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
                 last_sample_arrays = accepted_arrays
                 last_samples = None
-                active_set_stable = (
-                    not bool(source_contact_active_set_stability)
-                    or _contact_active_signature_from_arrays(accepted_arrays) == previous_active_signature
+                active_set_stable = _source_contact_active_set_is_stable(
+                    _contact_active_signature_from_arrays(accepted_arrays),
+                    previous_active_signature,
+                    require_stability=bool(source_contact_active_set_stability),
                 )
+        source_step_converged_count += int(bool(step_converged))
+        source_iteration_limit_reached_count += int(not bool(step_converged) and iteration_count >= max(1, int(max_iterations)))
+        source_unstable_accepted_count += int(bool(source_contact_active_set_stability) and not bool(active_set_stable))
         previous = external - internal_reduced_from_state(q_new) + assembly.reduce_vector(last_contact.force)
         if rotating_inertia == "centripetal":
             previous = previous - centripetal_reduced_from_state(q_new, v_new)
@@ -4024,6 +4077,9 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_acceleration_z": float(a_new[hub2_slice.start + 5]),
                     "gear2_torque_z": float(gear2_torque_z),
                     "contact_active_set_stable": int(bool(active_set_stable)),
+                    "source_step_converged": int(bool(step_converged)),
+                    "source_step_convergence_reason": step_convergence_reason,
+                    "source_iteration_limit_reached": int(not bool(step_converged) and iteration_count >= max(1, int(max_iterations))),
                 }
             )
             if contact_node_diagnostics is not None:
@@ -4095,6 +4151,9 @@ def solve_sfc_source_drive_pair(
                 source_sparse_cg_iterations=source_sparse_cg_iterations,
                 source_sparse_cg_base_lu_preconditioner=source_sparse_cg_base_lu_preconditioner,
                 source_direct_fallback_count=source_direct_fallback_count,
+                source_step_converged_count=source_step_converged_count,
+                source_iteration_limit_reached_count=source_iteration_limit_reached_count,
+                source_unstable_accepted_count=source_unstable_accepted_count,
             )
     wall = time.perf_counter() - start
     summary = {
@@ -4136,6 +4195,10 @@ def solve_sfc_source_drive_pair(
         "source_rotating_inertia": rotating_inertia,
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
+        "source_max_iterations": int(max(1, int(max_iterations))),
+        "source_step_converged_count": int(source_step_converged_count),
+        "source_iteration_limit_reached_count": int(source_iteration_limit_reached_count),
+        "source_unstable_accepted_count": int(source_unstable_accepted_count),
         "sfc_history_frame_stride": int(history_stride),
         "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),

@@ -39,6 +39,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_corotated_visual_state_and_internal,
     _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
+    _source_contact_active_set_is_stable,
     _write_csv,
     _write_abaqus_alignment_deck,
     build_cropped_pair,
@@ -424,6 +425,15 @@ def test_contact_active_signature_detects_status_changes() -> None:
     assert len(signature) == 1
     arrays["gaps"][1] = -0.01
     assert _contact_active_signature_from_arrays(arrays) != signature
+
+
+def test_source_contact_active_set_stability_requires_repeated_signature() -> None:
+    signature = ((1, 2, 3, -1, 4, 5, 6),)
+
+    assert _source_contact_active_set_is_stable(signature, None, require_stability=False)
+    assert not _source_contact_active_set_is_stable(signature, None, require_stability=True)
+    assert _source_contact_active_set_is_stable(signature, signature, require_stability=True)
+    assert not _source_contact_active_set_is_stable(signature, tuple(), require_stability=True)
 
 
 def test_compare_sfc_history_to_abaqus_manifest_outputs_metric_errors(tmp_path: Path) -> None:
