@@ -614,6 +614,23 @@ def _source_active_set_line_search_choice(
     return (1.0 if first_alpha is None else float(first_alpha)), False, int(trial_count)
 
 
+def _source_active_set_stability_after_line_search(
+    active_set_stable: bool,
+    *,
+    line_search_attempted: bool,
+    line_search_stable: bool,
+) -> bool:
+    """Return the active-set gate used by the increment acceptance check.
+
+    If line search is active and every candidate changes the active contact
+    signature, the current Newton correction has an unresolved contact-status
+    discontinuity.  Abaqus-style acceptance must treat that increment as
+    active-set unstable until a later residual evaluation proves otherwise.
+    """
+
+    return bool(active_set_stable) and (not bool(line_search_attempted) or bool(line_search_stable))
+
+
 def _snapshot_contact_tracking_state(contact_geometries: Iterable[Any]) -> list[dict[str, Any]]:
     """Capture path-tracking caches so trial queries cannot become accepted state."""
 
@@ -4411,6 +4428,7 @@ def _write_source_drive_checkpoint(
     source_line_search_trial_count: int = 0,
     source_line_search_reduced_count: int = 0,
     source_line_search_stable_count: int = 0,
+    source_line_search_unstable_count: int = 0,
     source_accepted_contact_response_reuse_count: int = 0,
     source_accepted_contact_response_requery_count: int = 0,
     source_accepted_tracking_commit_count: int = 0,
@@ -4457,6 +4475,7 @@ def _write_source_drive_checkpoint(
             source_line_search_trial_count=np.asarray([int(source_line_search_trial_count)], dtype=np.int64),
             source_line_search_reduced_count=np.asarray([int(source_line_search_reduced_count)], dtype=np.int64),
             source_line_search_stable_count=np.asarray([int(source_line_search_stable_count)], dtype=np.int64),
+            source_line_search_unstable_count=np.asarray([int(source_line_search_unstable_count)], dtype=np.int64),
             source_accepted_contact_response_reuse_count=np.asarray(
                 [int(source_accepted_contact_response_reuse_count)], dtype=np.int64
             ),
@@ -4534,6 +4553,9 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
             ),
             "source_line_search_stable_count": (
                 int(data["source_line_search_stable_count"][0]) if "source_line_search_stable_count" in data else 0
+            ),
+            "source_line_search_unstable_count": (
+                int(data["source_line_search_unstable_count"][0]) if "source_line_search_unstable_count" in data else 0
             ),
             "source_accepted_contact_response_reuse_count": (
                 int(data["source_accepted_contact_response_reuse_count"][0])
@@ -4997,6 +5019,7 @@ def solve_sfc_source_drive_pair(
     source_line_search_trial_count = 0
     source_line_search_reduced_count = 0
     source_line_search_stable_count = 0
+    source_line_search_unstable_count = 0
     source_accepted_contact_response_reuse_count = 0
     source_accepted_contact_response_requery_count = 0
     source_accepted_tracking_commit_count = 0
@@ -5042,6 +5065,7 @@ def solve_sfc_source_drive_pair(
         source_line_search_trial_count = int(checkpoint.get("source_line_search_trial_count", 0))
         source_line_search_reduced_count = int(checkpoint.get("source_line_search_reduced_count", 0))
         source_line_search_stable_count = int(checkpoint.get("source_line_search_stable_count", 0))
+        source_line_search_unstable_count = int(checkpoint.get("source_line_search_unstable_count", 0))
         source_accepted_contact_response_reuse_count = int(
             checkpoint.get("source_accepted_contact_response_reuse_count", 0)
         )
@@ -5312,6 +5336,7 @@ def solve_sfc_source_drive_pair(
         step_line_search_trial_count = 0
         step_line_search_reduced_count = 0
         step_line_search_stable_count = 0
+        step_line_search_unstable_count = 0
         step_line_search_last_alpha = 1.0
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
@@ -5509,6 +5534,7 @@ def solve_sfc_source_drive_pair(
                 and correction_free.size
                 and active_signature is not None
             ):
+                line_search_attempted = True
                 alphas: list[float] = []
                 alpha_value = 1.0
                 while alpha_value >= source_active_set_line_search_min_alpha * (1.0 - 1.0e-12):
@@ -5538,11 +5564,19 @@ def solve_sfc_source_drive_pair(
                 if stable_choice:
                     step_line_search_stable_count += 1
                     source_line_search_stable_count += 1
+                else:
+                    step_line_search_unstable_count += 1
+                    source_line_search_unstable_count += 1
                 if alpha_choice < 1.0 - 1.0e-12:
                     correction_free = float(alpha_choice) * correction_free
                     step_line_search_reduced_count += 1
                     source_line_search_reduced_count += 1
                 step_line_search_last_alpha = float(alpha_choice)
+                active_set_stable = _source_active_set_stability_after_line_search(
+                    active_set_stable,
+                    line_search_attempted=line_search_attempted,
+                    line_search_stable=stable_choice,
+                )
             q_guess[free] += correction_free
         increment_decision = _source_increment_convergence_decision(
             residual_converged=residual_converged,
@@ -5728,6 +5762,7 @@ def solve_sfc_source_drive_pair(
                     "source_line_search_trial_count": int(step_line_search_trial_count),
                     "source_line_search_reduced_count": int(step_line_search_reduced_count),
                     "source_line_search_stable_count": int(step_line_search_stable_count),
+                    "source_line_search_unstable_count": int(step_line_search_unstable_count),
                     "source_line_search_last_alpha": float(step_line_search_last_alpha),
                     "source_accepted_contact_response_reused": int(bool(accepted_reused_response)),
                     "source_accepted_tracking_committed": int(accepted_tracking_committed),
@@ -5793,6 +5828,7 @@ def solve_sfc_source_drive_pair(
                     "source_line_search_trial_count": int(step_line_search_trial_count),
                     "source_line_search_reduced_count": int(step_line_search_reduced_count),
                     "source_line_search_stable_count": int(step_line_search_stable_count),
+                    "source_line_search_unstable_count": int(step_line_search_unstable_count),
                     "source_line_search_last_alpha": float(step_line_search_last_alpha),
                     "source_accepted_contact_response_reused": int(bool(accepted_reused_response)),
                     "source_accepted_tracking_committed": int(accepted_tracking_committed),
@@ -5844,6 +5880,7 @@ def solve_sfc_source_drive_pair(
                 source_line_search_trial_count=source_line_search_trial_count,
                 source_line_search_reduced_count=source_line_search_reduced_count,
                 source_line_search_stable_count=source_line_search_stable_count,
+                source_line_search_unstable_count=source_line_search_unstable_count,
                 source_accepted_contact_response_reuse_count=source_accepted_contact_response_reuse_count,
                 source_accepted_contact_response_requery_count=source_accepted_contact_response_requery_count,
                 source_accepted_tracking_commit_count=source_accepted_tracking_commit_count,
@@ -5917,6 +5954,7 @@ def solve_sfc_source_drive_pair(
         "source_line_search_trial_count": int(source_line_search_trial_count),
         "source_line_search_reduced_count": int(source_line_search_reduced_count),
         "source_line_search_stable_count": int(source_line_search_stable_count),
+        "source_line_search_unstable_count": int(source_line_search_unstable_count),
         "source_accepted_contact_response_reuse_count": int(source_accepted_contact_response_reuse_count),
         "source_accepted_contact_response_requery_count": int(source_accepted_contact_response_requery_count),
         "source_accepted_tracking_commit_count": int(source_accepted_tracking_commit_count),

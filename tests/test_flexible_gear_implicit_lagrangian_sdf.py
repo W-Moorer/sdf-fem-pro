@@ -52,6 +52,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
     _source_active_set_line_search_choice,
+    _source_active_set_stability_after_line_search,
     _source_contact_active_set_is_stable,
     _source_increment_convergence_decision,
     _source_increment_cutback_candidate_dt,
@@ -804,6 +805,29 @@ def test_source_active_set_line_search_reports_unstable_full_step_fallback() -> 
     assert alpha == pytest.approx(1.0)
     assert not stable
     assert trials == 2
+
+
+def test_source_active_set_gate_fails_after_unstable_line_search() -> None:
+    assert _source_active_set_stability_after_line_search(
+        True,
+        line_search_attempted=True,
+        line_search_stable=True,
+    )
+    assert not _source_active_set_stability_after_line_search(
+        True,
+        line_search_attempted=True,
+        line_search_stable=False,
+    )
+    assert _source_active_set_stability_after_line_search(
+        True,
+        line_search_attempted=False,
+        line_search_stable=False,
+    )
+    assert not _source_active_set_stability_after_line_search(
+        False,
+        line_search_attempted=True,
+        line_search_stable=True,
+    )
 
 
 def test_contact_tracking_snapshot_restore_rolls_back_trial_cache_mutation() -> None:
@@ -1560,10 +1584,13 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "source_line_search_trial_count" in history[-1]
     assert "source_line_search_reduced_count" in history[-1]
     assert "source_line_search_stable_count" in history[-1]
+    assert "source_line_search_unstable_count" in history[-1]
     assert "source_accepted_contact_response_reused" in history[-1]
     assert "source_accepted_tracking_committed" in history[-1]
     assert "source_line_search_trial_count" in summary
     assert int(summary["source_line_search_trial_count"]) >= 0
+    assert "source_line_search_unstable_count" in summary
+    assert int(summary["source_line_search_unstable_count"]) >= 0
     assert "source_accepted_contact_response_reuse_count" in summary
     assert "source_accepted_contact_response_requery_count" in summary
     assert "source_accepted_tracking_commit_count" in summary
