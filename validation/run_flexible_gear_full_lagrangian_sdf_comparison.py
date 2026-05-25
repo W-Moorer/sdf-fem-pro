@@ -752,6 +752,10 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "path_tracking_gate_passed",
         default=1 if not bool(active_contact_present) else 0,
     )
+    path_continuity_observable = int(
+        (not bool(active_contact_present))
+        or bool(_row_int_flag(summary, "path_tracking_continuity_observable", default=0))
+    )
     path_columns_present = _row_int_flag(summary, "contact_total_path_columns_present", default=0)
     source_final_time_ok = _row_int_flag(summary, "source_convergence_final_time_matches_duration", default=0)
     no_bad_accepted = _row_int_flag(summary, "source_convergence_no_unstable_or_unconverged_accepted", default=0)
@@ -768,6 +772,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         and bool(tangent_passed)
         and bool(contact_total_passed)
         and bool(path_tracking_passed)
+        and bool(path_continuity_observable)
         and bool(nodal_deferred)
         and bool(no_nodal_priority_columns)
         and bool(path_tracking_ready)
@@ -795,6 +800,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_constraint_region_tangent_gate_passed": int(tangent_passed),
         "full_gear_entry_contact_total_gate_passed": int(contact_total_passed),
         "full_gear_entry_path_tracking_gate_passed": int(path_tracking_passed),
+        "full_gear_entry_path_tracking_continuity_observable": int(path_continuity_observable),
         "full_gear_entry_nodal_cpress_deferred": int(nodal_deferred),
         "full_gear_entry_no_nodal_priority_columns": int(no_nodal_priority_columns),
         "full_gear_entry_active_contact_present": int(active_contact_present),

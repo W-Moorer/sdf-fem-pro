@@ -226,6 +226,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
         "constraint_region_tangent_gate_passed": 1,
         "contact_total_gate_passed": 1,
         "path_tracking_gate_passed": 1,
+        "path_tracking_continuity_observable": 1,
         "contact_total_nodal_cpress_deferred": 1,
         "contact_total_no_nodal_priority_columns": 1,
         "contact_total_active_contact_present": 1,
@@ -264,6 +265,13 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(failed_path["full_gear_entry_gate_passed"]) == 0
     assert int(failed_path["full_gear_entry_path_tracking_gate_passed"]) == 0
+
+    unobservable_path = dict(summary)
+    unobservable_path["path_tracking_continuity_observable"] = 0
+    failed_observable = full_gear_entry_gate_metrics(unobservable_path)
+
+    assert int(failed_observable["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_observable["full_gear_entry_path_tracking_continuity_observable"]) == 0
 
     missing_law = dict(summary)
     missing_law["constraint_region_contact_law_gate_passed"] = 0
