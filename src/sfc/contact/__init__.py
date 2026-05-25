@@ -21,6 +21,13 @@ from .field_contact import (
     triangle_surface_quadrature_cache,
     triangle_surface_quadrature_samples,
 )
+from .constraint_region import (
+    aggregate_contact_sample_arrays,
+    constraint_region_gap_jacobian_sparse_from_arrays,
+    constraint_region_pressure_tangent_scales_from_arrays,
+    contact_averaging_modes,
+    contact_region_integral_metrics_from_arrays,
+)
 from .hard_contact import (
     HardContactSolution,
     hard_contact_gap_jacobian_from_samples,
@@ -76,11 +83,16 @@ __all__ = [
     "UniformTriangleAABBHash",
     "assemble_contact_jacobian",
     "assemble_field_contact_jacobian",
+    "aggregate_contact_sample_arrays",
     "compute_contact_constraints",
     "compute_field_contact_constraints",
+    "constraint_region_gap_jacobian_sparse_from_arrays",
+    "constraint_region_pressure_tangent_scales_from_arrays",
     "contact_constraint_from_sample",
+    "contact_averaging_modes",
     "contact_jacobian_entries",
     "contact_jacobian_row",
+    "contact_region_integral_metrics_from_arrays",
     "field_contact_constraint_from_sample",
     "field_contact_jacobian_entries",
     "field_contact_jacobian_row",

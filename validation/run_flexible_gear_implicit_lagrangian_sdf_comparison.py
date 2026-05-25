@@ -42,6 +42,12 @@ from sfc.contact.hard_contact import (  # noqa: E402
     solve_linear_hard_contact_with_dirichlet,
     solve_linear_hard_contact_with_dirichlet_sparse,
 )
+from sfc.contact.constraint_region import (  # noqa: E402
+    aggregate_contact_sample_arrays as _core_aggregate_contact_sample_arrays,
+    constraint_region_gap_jacobian_sparse_from_arrays as _core_constraint_region_gap_jacobian_sparse_from_arrays,
+    constraint_region_pressure_tangent_scales_from_arrays as _core_constraint_region_pressure_tangent_scales_from_arrays,
+    contact_region_integral_metrics_from_arrays as _core_contact_region_integral_metrics_from_arrays,
+)
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
     ContactSample,
@@ -513,6 +519,8 @@ def _contact_region_integral_metrics_from_arrays(
     stiffness: float,
 ) -> Row:
     """Return region-level force/work/energy metrics before nodal CPRESS checks."""
+
+    return dict(_core_contact_region_integral_metrics_from_arrays(sample_arrays, stiffness=stiffness))
 
     if sample_arrays is None:
         return _empty_contact_region_integral_metrics()
@@ -1344,6 +1352,9 @@ def _aggregate_contact_sample_arrays(
     This keeps the C++/batched query path available for Abaqus-style
     surface-to-surface constraint-region modes.
     """
+
+    if workspace is None and str(mode).lower() in {"none", "slave_node_region_constraint"}:
+        return _core_aggregate_contact_sample_arrays(sample_arrays, mode)
 
     base_mode, overclosure_mode = _contact_averaging_modes(mode)
     if base_mode == "none":
@@ -3773,6 +3784,12 @@ def _constraint_region_gap_jacobian_sparse_from_arrays(
     barycentric weights, region normals, and active status are held fixed.
     """
 
+    return _core_constraint_region_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=n_nodes,
+        active_only=active_only,
+    )
+
     gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
     if active_only:
         row_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
@@ -3822,6 +3839,12 @@ def _constraint_region_pressure_tangent_scales_from_arrays(
     ``equilibrium_scale * k_p * A_region`` for each active region.
     Inactive/open regions have zero pressure-overclosure derivative.
     """
+
+    return _core_constraint_region_pressure_tangent_scales_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
 
     gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
     active_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
