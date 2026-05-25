@@ -40,7 +40,7 @@ def test_secondary_line_alignment_gate_passes_expected_theory_setup(tmp_path: Pa
             {
                 "source_contact_projection": "secondary_line",
                 "source_contact_direction": "secondary_average",
-                "source_contact_averaging": "slave_node_region",
+                "source_contact_averaging": "slave_node_region_constraint",
                 "sfc_dt": 1.0e-5,
             }
         ],
@@ -54,7 +54,7 @@ def test_secondary_line_alignment_gate_passes_expected_theory_setup(tmp_path: Pa
         max_strain_rel=0.10,
         expected_projection="secondary_line",
         expected_direction="secondary_average",
-        expected_averaging="slave_node_region",
+        expected_averaging="slave_node_region_constraint",
         expected_dt=1.0e-5,
     )
 
@@ -84,7 +84,7 @@ def test_secondary_line_alignment_gate_fails_wrong_projection(tmp_path: Path) ->
             {
                 "source_contact_projection": "closest_feature",
                 "source_contact_direction": "secondary_average",
-                "source_contact_averaging": "slave_node_region",
+                "source_contact_averaging": "slave_node_region_constraint",
                 "sfc_dt": 1.0e-5,
             }
         ],
@@ -98,7 +98,7 @@ def test_secondary_line_alignment_gate_fails_wrong_projection(tmp_path: Path) ->
         max_strain_rel=0.10,
         expected_projection="secondary_line",
         expected_direction="secondary_average",
-        expected_averaging="slave_node_region",
+        expected_averaging="slave_node_region_constraint",
         expected_dt=1.0e-5,
     )
 

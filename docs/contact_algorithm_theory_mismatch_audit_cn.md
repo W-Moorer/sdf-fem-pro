@@ -59,7 +59,7 @@ J_master = -N_master n^T
 
 ## 理论缺口 1：点级穿透积分不等于 Abaqus surface-to-surface 约束区域
 
-当前默认路径使用三角面 `tri3` 积分点，之后通过 `slave_node_region_participation` 等模式聚合。这个口径本质上是：
+此前默认路径使用三角面 `tri3` 积分点，之后通过 `slave_node_region_participation` 等模式聚合。这个口径本质上是：
 
 ```text
 先在局部 quadrature/sample 点判断穿透

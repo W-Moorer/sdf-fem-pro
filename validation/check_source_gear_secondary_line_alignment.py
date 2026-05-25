@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-strain-rel", type=float, default=0.10)
     parser.add_argument("--expected-projection", type=str, default="secondary_line")
     parser.add_argument("--expected-direction", type=str, default="secondary_average")
-    parser.add_argument("--expected-averaging", type=str, default="slave_node_region")
+    parser.add_argument("--expected-averaging", type=str, default="slave_node_region_constraint")
     parser.add_argument("--expected-dt", type=float, default=1.0e-5)
     args = parser.parse_args(argv)
 

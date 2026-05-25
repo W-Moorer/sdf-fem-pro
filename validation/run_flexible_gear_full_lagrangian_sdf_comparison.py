@@ -806,7 +806,7 @@ def run_full_gear(
     vtk_frame_stride: int = 1,
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
-    source_contact_averaging: str = "slave_node_region_participation",
+    source_contact_averaging: str = "slave_node_region_constraint",
     source_contact_kinematics: str = "finite_rp_corotated",
     source_contact_normal_filter: str = "opposing",
     source_contact_direction: str = "secondary_average",
@@ -1106,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
             "slave_node_region_signed_participation",
             "surface_patch_signed_participation",
         ),
-        default="slave_node_region_participation",
+        default="slave_node_region_constraint",
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
     )
     parser.add_argument(

@@ -409,6 +409,56 @@ def test_array_signed_participation_matches_object_signed_participation() -> Non
     assert array_response.energy == pytest.approx(object_response.energy)
 
 
+def test_array_constraint_region_pressure_uses_average_gap() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.5, 0.3, 0.2], [0.5, 0.3, 0.2]], dtype=float),
+        "gaps": np.asarray([-0.10, 0.20], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([1.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6]], dtype=np.int64),
+        "master_weights": np.asarray([[0.2, 0.3, 0.5], [0.2, 0.3, 0.5]], dtype=float),
+    }
+
+    pointwise = _aggregate_contact_sample_arrays(arrays, "slave_node_region_participation")
+    region = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
+
+    assert pointwise is not None
+    assert region is not None
+    assert np.any(np.asarray(pointwise["gaps"], dtype=float) < 0.0)
+    assert np.all(np.asarray(region["gaps"], dtype=float) > 0.0)
+
+    pointwise_response = _assemble_contact_arrays_force_only(pointwise, n_nodes=7, stiffness=100.0)
+    region_response = _assemble_contact_arrays_force_only(region, n_nodes=7, stiffness=100.0)
+
+    assert pointwise_response.normal_force > 0.0
+    assert region_response.active_count == 0
+    assert region_response.normal_force == pytest.approx(0.0)
+    assert region_response.energy == pytest.approx(0.0)
+
+
+def test_array_constraint_region_closed_force_from_region_gap() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.5, 0.3, 0.2], [0.5, 0.3, 0.2]], dtype=float),
+        "gaps": np.asarray([-0.30, 0.10], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([1.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6]], dtype=np.int64),
+        "master_weights": np.asarray([[0.2, 0.3, 0.5], [0.2, 0.3, 0.5]], dtype=float),
+    }
+
+    region = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
+
+    assert region is not None
+    np.testing.assert_allclose(np.asarray(region["gaps"], dtype=float), [-0.10, -0.10, -0.10])
+    response = _assemble_contact_arrays_force_only(region, n_nodes=7, stiffness=100.0)
+
+    assert response.active_count == 3
+    assert response.normal_force == pytest.approx(20.0)
+    assert response.energy == pytest.approx(1.0)
+
+
 def test_contact_active_signature_detects_status_changes() -> None:
     arrays = {
         "sample_node_ids": np.asarray([[0, 1, 2], [1, 2, 3]], dtype=np.int64),

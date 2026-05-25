@@ -3308,7 +3308,7 @@ def solve_sfc_source_drive_pair(
     vtk_stem: str = "sfc",
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
-    source_contact_averaging: str = "slave_node_region_participation",
+    source_contact_averaging: str = "slave_node_region_constraint",
     source_contact_kinematics: str = "finite_rp_corotated",
     source_contact_normal_filter: str = "opposing",
     source_contact_direction: str = "secondary_average",
