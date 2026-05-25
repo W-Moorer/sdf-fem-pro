@@ -2145,15 +2145,20 @@ def _default_secondary_contact_tracking_radius(pair: CroppedGearPair, *, target_
     possible main-surface facets.  It must therefore be at least as conservative
     as the hard finite-sliding line-distance gate; otherwise Abaqus-active nodes
     can be lost before the line-distance and closest-feature open/closed gates
-    evaluate the true contact status.  The final accepted contact still uses
-    the mesh-derived line-distance limits, so increasing this candidate radius
-    to the hard gate does not relax contact accuracy.
+    evaluate the true contact status.  It also cannot be narrower than the
+    closest-feature broad-phase tube: on curved finite-sliding interfaces, the
+    secondary normal may intersect a neighboring main facet whose centroid is
+    tangentially farther away than the local line-distance limit.  The final
+    accepted contact still uses the mesh-derived line-distance limits and the
+    closest-feature open/closed guard, so increasing this candidate radius does
+    not relax contact accuracy.
     """
 
     normal_envelope = 2.5 * max(float(pair.initial_patch_gap) + float(target_overclosure), 0.0)
     local_region = max(normal_envelope, _contact_patch_representative_length(pair), 1.0e-4)
     hard_gate = _default_secondary_line_hard_distance_limit(pair, target_overclosure=target_overclosure)
-    return max(local_region, hard_gate)
+    closest_feature_radius = _default_contact_search_radius(pair, target_overclosure=target_overclosure)
+    return max(local_region, hard_gate, closest_feature_radius)
 
 
 def _default_secondary_line_distance_limit(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:

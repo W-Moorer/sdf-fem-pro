@@ -297,6 +297,40 @@ python validation/run_source_gear_vtk_regional_alignment.py \
 
 这说明齿轮当前误差不是“位移积分已经坏掉”或“材料刚度单纯不对”，而是接触建立/释放窗口的 active set 和 pressure/penetration 口径没有对齐。
 
+## 本轮通用修复
+
+本轮进一步修改了：
+
+- `validation/run_flexible_gear_implicit_lagrangian_sdf_comparison.py`
+
+修复内容：
+
+```text
+secondary-normal line projection 的候选半径
+>= closest-feature broad-phase 半径
+```
+
+原因是 secondary-normal line projection 的 `search_radius` 只负责枚举可能主面片，不负责最终接触接受。最终接受仍由：
+
+```text
+mesh-derived line-distance limit
+hard finite-sliding gate
+global closest-feature closed/open guard
+```
+
+决定。因此扩大候选枚举不会降低几何精度，也不会改变最终 gap/normal/payload 的定义；它只避免真实 Abaqus-active 主面片在粗检测阶段被提前过滤。
+
+当前全齿轮默认数值变为：
+
+```text
+closest-feature radius  = 0.0027711314770112426
+secondary tracking radius = 0.0027711314770112426
+secondary line limit = 0.0008633433402562334
+secondary hard line limit = 0.0017266866805124668
+```
+
+也就是说，候选 tube 更保守，但最终 line-hit 接受 tube 仍保持原 mesh-derived 精度口径。
+
 ## 下一步定位顺序
 
 建议按以下顺序继续，不要先调参数：

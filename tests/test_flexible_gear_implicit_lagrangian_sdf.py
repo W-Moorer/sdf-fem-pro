@@ -144,8 +144,9 @@ def test_secondary_contact_tracking_radius_covers_local_constraint_region() -> N
 
     assert closest_radius > 1.0
     assert tracking_radius >= representative
-    assert tracking_radius == pytest.approx(2.0 * representative)
-    assert tracking_radius < closest_radius
+    assert tracking_radius >= 2.0 * representative
+    assert tracking_radius >= closest_radius
+    assert tracking_radius == pytest.approx(closest_radius)
 
 
 def test_source_force_only_contact_response_matches_full_force_response() -> None:
