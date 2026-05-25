@@ -43,10 +43,12 @@ from sfc.contact.hard_contact import (  # noqa: E402
     solve_linear_hard_contact_with_dirichlet_sparse,
 )
 from sfc.contact.constraint_region import (  # noqa: E402
+    active_constraint_region_tangent_data_from_arrays as _core_active_constraint_region_tangent_data_from_arrays,
     aggregate_contact_sample_arrays as _core_aggregate_contact_sample_arrays,
     contact_active_region_continuity_metrics_from_arrays as _core_contact_active_region_continuity_metrics_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays as _core_constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays as _core_constraint_region_pressure_tangent_scales_from_arrays,
+    constraint_region_reduced_gap_jacobian_sparse_from_arrays as _core_constraint_region_reduced_gap_jacobian_sparse_from_arrays,
     constraint_region_tangent_metrics_from_arrays as _core_constraint_region_tangent_metrics_from_arrays,
     contact_path_tracking_metrics_from_arrays as _core_contact_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays as _core_contact_region_integral_metrics_from_arrays,
@@ -3561,43 +3563,13 @@ def _active_reduced_gap_jacobian_sparse_from_arrays(
 ) -> Any:
     """Build active reduced gap Jacobian from batched sample arrays."""
 
-    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
-    active_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
-    T = transformation.tocsr()
-    free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
-    reduced_to_free = np.full(T.shape[1], -1, dtype=np.int64)
-    reduced_to_free[free_cols] = np.arange(free_cols.size, dtype=np.int64)
-    rows: list[int] = []
-    cols: list[int] = []
-    data: list[float] = []
-    slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
-    slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
-    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
-    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
-    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
-    normal_norm = np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)
-    normals = normals / normal_norm[:, None]
-    for out_row, sample_id in enumerate(active_ids):
-        normal = normals[int(sample_id)]
-        for sign, nodes, weights in (
-            (1.0, slave_nodes[int(sample_id)], slave_weights[int(sample_id)]),
-            (-1.0, master_nodes[int(sample_id)], master_weights[int(sample_id)]),
-        ):
-            for node, weight in zip(nodes, weights, strict=True):
-                for component in range(3):
-                    coeff = float(sign) * float(weight) * float(normal[component])
-                    if coeff == 0.0:
-                        continue
-                    full_row = 3 * int(node) + component
-                    start = int(T.indptr[full_row])
-                    stop = int(T.indptr[full_row + 1])
-                    for ptr in range(start, stop):
-                        free_col = int(reduced_to_free[int(T.indices[ptr])])
-                        if free_col >= 0:
-                            rows.append(out_row)
-                            cols.append(free_col)
-                            data.append(coeff * float(T.data[ptr]))
-    return coo_matrix((data, (rows, cols)), shape=(active_ids.size, free_cols.size)).tocsr()
+    _active_ids, reduced_jacobian = _core_constraint_region_reduced_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        transformation=transformation,
+        free=free,
+        active_only=True,
+    )
+    return reduced_jacobian
 
 
 def _constraint_region_gap_jacobian_sparse_from_arrays(
@@ -3709,21 +3681,13 @@ def _active_constraint_region_tangent_data_from_arrays(
     diagnostics all use the same Abaqus-style constraint-region tangent data.
     """
 
-    active_ids, tangent_scale_all = _constraint_region_pressure_tangent_scales_from_arrays(
+    return _core_active_constraint_region_tangent_data_from_arrays(
         sample_arrays,
+        transformation=transformation,
+        free=free,
         pressure_stiffness=pressure_stiffness,
         equilibrium_scale=equilibrium_scale,
     )
-    if active_ids.size == 0:
-        free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
-        return active_ids, coo_matrix((0, free_cols.size), dtype=float).tocsr(), np.empty(0, dtype=float)
-    all_active_ids = np.flatnonzero(np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1) < 0.0).astype(np.int64)
-    j_free_all = _active_reduced_gap_jacobian_sparse_from_arrays(sample_arrays, transformation=transformation, free=free)
-    if not np.array_equal(active_ids, all_active_ids):
-        row_lookup = {int(region_id): int(row) for row, region_id in enumerate(all_active_ids)}
-        keep_rows = np.asarray([row_lookup[int(region_id)] for region_id in active_ids], dtype=np.int64)
-        j_free_all = j_free_all[keep_rows]
-    return active_ids, j_free_all, tangent_scale_all
 
 
 def _constraint_region_tangent_metrics_from_arrays(

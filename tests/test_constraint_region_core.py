@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.sparse import eye
 
 from sfc.contact.constraint_region import (
+    active_constraint_region_tangent_data_from_arrays,
     aggregate_contact_sample_arrays,
     contact_active_region_continuity_metrics_from_arrays,
     constraint_region_contact_tangent_sparse_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays,
+    constraint_region_reduced_contact_tangent_sparse_from_arrays,
+    constraint_region_reduced_gap_jacobian_sparse_from_arrays,
     contact_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays,
     secondary_node_pressure_recovery_from_regions,
@@ -98,6 +102,47 @@ def test_constraint_region_contact_tangent_is_fixed_active_set_jtwj() -> None:
     assert metrics["contact_tangent_active_secondary_node_count"] == 2
     assert metrics["contact_tangent_j_nnz"] == jacobian.nnz
     assert metrics["contact_tangent_matrix_nnz"] == tangent.nnz
+
+
+def test_reduced_constraint_region_tangent_applies_transformation_and_free_dofs() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+    transformation = eye(39, format="csr")
+    free = np.asarray([2, 5, 8, 30, 32, 35], dtype=np.int64)
+
+    full_ids, full_j = constraint_region_gap_jacobian_sparse_from_arrays(regions, n_nodes=13, active_only=True)
+    reduced_ids, reduced_j = constraint_region_reduced_gap_jacobian_sparse_from_arrays(
+        regions,
+        transformation=transformation,
+        free=free,
+    )
+    tangent_ids, tangent_j, scales = active_constraint_region_tangent_data_from_arrays(
+        regions,
+        transformation=transformation,
+        free=free,
+        pressure_stiffness=100.0,
+        equilibrium_scale=0.95,
+    )
+    active_ids, reduced_j2, scales2, tangent, metrics = constraint_region_reduced_contact_tangent_sparse_from_arrays(
+        regions,
+        transformation=transformation,
+        free=free,
+        pressure_stiffness=100.0,
+        equilibrium_scale=0.95,
+    )
+
+    np.testing.assert_array_equal(reduced_ids, full_ids)
+    np.testing.assert_allclose(reduced_j.toarray(), full_j[:, free].toarray())
+    np.testing.assert_array_equal(tangent_ids, reduced_ids)
+    np.testing.assert_allclose(tangent_j.toarray(), reduced_j.toarray())
+    np.testing.assert_allclose(scales, [142.5, 237.5])
+    np.testing.assert_array_equal(active_ids, tangent_ids)
+    np.testing.assert_allclose(reduced_j2.toarray(), tangent_j.toarray())
+    np.testing.assert_allclose(scales2, scales)
+    expected = tangent_j.toarray().T @ (scales[:, None] * tangent_j.toarray())
+    np.testing.assert_allclose(tangent.toarray(), expected)
+    assert metrics["contact_tangent_coordinate_space"] == "reduced_free"
+    assert metrics["contact_tangent_j_nnz"] == tangent_j.nnz
 
 
 def test_secondary_pressure_recovery_uses_region_owner_nodes() -> None:

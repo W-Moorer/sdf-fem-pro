@@ -271,6 +271,100 @@ def constraint_region_contact_tangent_sparse_from_arrays(
     return active_ids, active_j, scales, tangent, metrics
 
 
+def constraint_region_reduced_gap_jacobian_sparse_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    transformation: object,
+    free: np.ndarray,
+    active_only: bool = True,
+) -> tuple[np.ndarray, csr_matrix]:
+    """Return the constraint-region gap Jacobian in reduced free DOFs.
+
+    If full nodal increments satisfy ``du_full = T dq_reduced``, the reduced
+    active gap derivative is exactly ``J_full @ T[:, free]``.  This keeps RP/MPC
+    kinematics, free-DOF filtering, and the constraint-region contact tangent in
+    one shared formulation.
+    """
+
+    transform = transformation.tocsr()
+    if transform.shape[0] % 3 != 0:
+        raise ValueError("constraint-region transformation row count must be a multiple of 3")
+    free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
+    n_nodes = int(transform.shape[0] // 3)
+    row_ids, full_jacobian = constraint_region_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=n_nodes,
+        active_only=active_only,
+    )
+    if free_cols.size == 0:
+        return row_ids, coo_matrix((full_jacobian.shape[0], 0), dtype=float).tocsr()
+    reduced_jacobian = (full_jacobian @ transform[:, free_cols]).tocsr()
+    return row_ids, reduced_jacobian
+
+
+def active_constraint_region_tangent_data_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    transformation: object,
+    free: np.ndarray,
+    pressure_stiffness: float,
+    equilibrium_scale: float,
+) -> tuple[np.ndarray, csr_matrix, np.ndarray]:
+    """Return active region ids, reduced ``J``, and linear penalty scales."""
+
+    active_ids, scales = constraint_region_pressure_tangent_scales_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    all_active_ids, reduced_jacobian = constraint_region_reduced_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        transformation=transformation,
+        free=free,
+        active_only=True,
+    )
+    if active_ids.size == 0:
+        return active_ids, coo_matrix((0, reduced_jacobian.shape[1]), dtype=float).tocsr(), scales
+    if not np.array_equal(active_ids, all_active_ids):
+        row_lookup = {int(region_id): int(row) for row, region_id in enumerate(all_active_ids)}
+        keep_rows = np.asarray([row_lookup[int(region_id)] for region_id in active_ids], dtype=np.int64)
+        reduced_jacobian = reduced_jacobian[keep_rows]
+    return active_ids, reduced_jacobian, scales
+
+
+def constraint_region_reduced_contact_tangent_sparse_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    transformation: object,
+    free: np.ndarray,
+    pressure_stiffness: float,
+    equilibrium_scale: float,
+) -> tuple[np.ndarray, csr_matrix, np.ndarray, csr_matrix, dict[str, float | int | str]]:
+    """Return reduced/free-DOF fixed-active-set contact tangent data."""
+
+    active_ids, reduced_jacobian, scales = active_constraint_region_tangent_data_from_arrays(
+        sample_arrays,
+        transformation=transformation,
+        free=free,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    tangent = (
+        reduced_jacobian.T @ diags(np.asarray(scales, dtype=float), format="csr") @ reduced_jacobian
+        if active_ids.size
+        else coo_matrix((reduced_jacobian.shape[1], reduced_jacobian.shape[1]), dtype=float).tocsr()
+    ).tocsr()
+    metrics = constraint_region_tangent_metrics_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    metrics["contact_tangent_j_nnz"] = int(reduced_jacobian.nnz)
+    metrics["contact_tangent_matrix_nnz"] = int(tangent.nnz)
+    metrics["contact_tangent_coordinate_space"] = "reduced_free"
+    return active_ids, reduced_jacobian, scales, tangent, metrics
+
+
 def constraint_region_tangent_metrics_from_arrays(
     sample_arrays: dict[str, np.ndarray] | None,
     *,
