@@ -124,11 +124,26 @@ def run_validation(
     lateral_shift: float = 0.20,
     pressure_stiffness: float = 6.0e4,
     quadrature: str = "tri3",
+    min_cache_hit_fraction: float = 0.999,
+    min_cache_match_fraction: float = 0.999,
+    min_active_region_jaccard: float = 0.999,
+    max_master_face_switch_fraction: float = 0.60,
+    max_master_barycentric_drift: float = 0.75,
 ) -> tuple[list[Row], Row]:
     """Run the sliding sequence and write region-level validation outputs."""
 
     if int(steps) < 2:
         raise ValueError("steps must be at least 2")
+    if not (0.0 <= float(min_cache_hit_fraction) <= 1.0):
+        raise ValueError("min_cache_hit_fraction must be in [0, 1]")
+    if not (0.0 <= float(min_cache_match_fraction) <= 1.0):
+        raise ValueError("min_cache_match_fraction must be in [0, 1]")
+    if not (0.0 <= float(min_active_region_jaccard) <= 1.0):
+        raise ValueError("min_active_region_jaccard must be in [0, 1]")
+    if not (0.0 <= float(max_master_face_switch_fraction) <= 1.0):
+        raise ValueError("max_master_face_switch_fraction must be in [0, 1]")
+    if float(max_master_barycentric_drift) < 0.0:
+        raise ValueError("max_master_barycentric_drift must be non-negative")
     out_dir.mkdir(parents=True, exist_ok=True)
     model = build_two_block_model(resolution=int(resolution), approach=float(gap) + float(penetration), gap=float(gap))
     lower_nodes = np.asarray(model.nodes[: model.lower_node_count], dtype=float)
@@ -271,11 +286,23 @@ def run_validation(
             if tracking_rows
             else 0.0
         ),
+        "path_tracking_min_cache_hit_threshold": float(min_cache_hit_fraction),
+        "path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
+        "path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
+        "path_tracking_max_face_switch_threshold": float(max_master_face_switch_fraction),
+        "path_tracking_max_barycentric_drift_threshold": float(max_master_barycentric_drift),
         "analysis_wall_seconds": float(wall),
         "totals_csv": str(totals_path),
         "continuity_csv": str(continuity_path),
         "tracking_csv": str(tracking_path),
     }
+    summary["path_tracking_gate_passed"] = int(
+        float(summary["path_cache_hit_fraction_min_after_first"]) >= float(min_cache_hit_fraction)
+        and float(summary["path_cache_match_fraction_min_after_first"]) >= float(min_cache_match_fraction)
+        and float(summary["active_region_jaccard_min"]) >= float(min_active_region_jaccard)
+        and float(summary["master_face_switch_fraction_max"]) <= float(max_master_face_switch_fraction)
+        and float(summary["master_barycentric_drift_max"]) <= float(max_master_barycentric_drift)
+    )
     summary_path.write_text(
         "\n".join(
             [
@@ -290,7 +317,13 @@ def run_validation(
                 f"- minimum active-region Jaccard after first frame: {summary['active_region_jaccard_min']:.12e}",
                 f"- max master-face switch fraction: {summary['master_face_switch_fraction_max']:.12e}",
                 f"- min path-cache hit fraction after first frame: {summary['path_cache_hit_fraction_min_after_first']:.12e}",
+                f"- min path-cache match fraction after first frame: {summary['path_cache_match_fraction_min_after_first']:.12e}",
                 f"- max master-barycentric drift: {summary['master_barycentric_drift_max']:.12e}",
+                f"- accepted-state path tracking gate: {'PASS' if int(summary['path_tracking_gate_passed']) else 'FAIL'}",
+                "",
+                "Face switches are permitted when the smooth sliding path crosses the two-triangle split of a planar quad. "
+                "The gate therefore requires accepted-state cache hit/match continuity and bounded switch fraction rather "
+                "than requiring a fixed triangle id for all frames.",
                 f"- totals CSV: `{totals_path.name}`",
                 f"- continuity CSV: `{continuity_path.name}`",
                 f"- path tracking CSV: `{tracking_path.name}`",
@@ -312,6 +345,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--penetration", type=float, default=0.01)
     parser.add_argument("--lateral-shift", type=float, default=0.20)
     parser.add_argument("--pressure-stiffness", type=float, default=6.0e4)
+    parser.add_argument("--min-cache-hit-fraction", type=float, default=0.999)
+    parser.add_argument("--min-cache-match-fraction", type=float, default=0.999)
+    parser.add_argument("--min-active-region-jaccard", type=float, default=0.999)
+    parser.add_argument("--max-master-face-switch-fraction", type=float, default=0.60)
+    parser.add_argument("--max-master-barycentric-drift", type=float, default=0.75)
     parser.add_argument("--quick", action="store_true", help="Use a smaller deterministic smoke case.")
     args = parser.parse_args(argv)
     steps = 5 if bool(args.quick) else int(args.steps)
@@ -324,6 +362,11 @@ def main(argv: list[str] | None = None) -> int:
         penetration=float(args.penetration),
         lateral_shift=float(args.lateral_shift),
         pressure_stiffness=float(args.pressure_stiffness),
+        min_cache_hit_fraction=float(args.min_cache_hit_fraction),
+        min_cache_match_fraction=float(args.min_cache_match_fraction),
+        min_active_region_jaccard=float(args.min_active_region_jaccard),
+        max_master_face_switch_fraction=float(args.max_master_face_switch_fraction),
+        max_master_barycentric_drift=float(args.max_master_barycentric_drift),
     )
     print((args.out_dir / "two_block_sliding_region_summary.md").read_text(encoding="utf-8"))
     return 0 if rows and summary.get("status") == "completed" else 1

@@ -18,6 +18,12 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert summary["status"] == "completed"
     assert int(summary["constraint_regions_final"]) > 0
     assert float(summary["normal_force_final"]) >= 0.0
+    assert int(summary["path_tracking_gate_passed"]) == 1
+    assert float(summary["active_region_jaccard_min"]) >= float(summary["path_tracking_min_active_region_jaccard_threshold"])
+    assert float(summary["path_cache_hit_fraction_min_after_first"]) >= float(summary["path_tracking_min_cache_hit_threshold"])
+    assert float(summary["path_cache_match_fraction_min_after_first"]) >= float(summary["path_tracking_min_cache_match_threshold"])
+    assert float(summary["master_face_switch_fraction_max"]) <= float(summary["path_tracking_max_face_switch_threshold"])
+    assert float(summary["master_barycentric_drift_max"]) <= float(summary["path_tracking_max_barycentric_drift_threshold"])
 
     totals = tmp_path / "two_block_sliding_contact_totals.csv"
     continuity = tmp_path / "two_block_sliding_region_continuity.csv"
@@ -52,3 +58,6 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert "contact_path_cache_match_fraction" in tracking_rows[0]
     assert "contact_master_barycentric_drift_mean" in tracking_rows[0]
     assert float(summary["path_cache_hit_fraction_min_after_first"]) > 0.0
+
+    report_text = report.read_text(encoding="utf-8")
+    assert "accepted-state path tracking gate: PASS" in report_text
