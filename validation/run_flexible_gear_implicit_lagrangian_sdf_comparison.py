@@ -4280,6 +4280,7 @@ def _write_source_drive_checkpoint(
     path: Path,
     *,
     step: int,
+    time_value: float,
     q: np.ndarray,
     v: np.ndarray,
     a: np.ndarray,
@@ -4311,6 +4312,7 @@ def _write_source_drive_checkpoint(
             handle,
             version=np.asarray([1], dtype=np.int64),
             step=np.asarray([int(step)], dtype=np.int64),
+            time_value=np.asarray([float(time_value)], dtype=float),
             q=np.asarray(q, dtype=float),
             v=np.asarray(v, dtype=float),
             a=np.asarray(a, dtype=float),
@@ -4346,6 +4348,7 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
     with np.load(path, allow_pickle=True) as data:
         return {
             "step": int(data["step"][0]),
+            "time_value": float(data["time_value"][0]) if "time_value" in data else float("nan"),
             "q": np.asarray(data["q"], dtype=float),
             "v": np.asarray(data["v"], dtype=float),
             "a": np.asarray(data["a"], dtype=float),
@@ -4685,6 +4688,8 @@ def solve_sfc_source_drive_pair(
         force, _tangent = internal_reduced_response_from_state(q_reduced, assemble_tangent=False)
         return force
 
+    current_source_step_dt = float(dt)
+
     def centripetal_reduced_from_state(q_reduced: np.ndarray, v_reduced: np.ndarray) -> np.ndarray:
         if rotating_inertia == "none":
             return np.zeros(assembly.n_reduced_dofs, dtype=float)
@@ -4713,7 +4718,7 @@ def solve_sfc_source_drive_pair(
         if rotating_inertia == "finite_kinematic":
             empty = csr_matrix((assembly.n_reduced_dofs, assembly.n_reduced_dofs), dtype=float)
             return np.zeros(assembly.n_reduced_dofs, dtype=float), empty
-        sensitivity = gamma * float(dt) * c0
+        sensitivity = gamma * float(current_source_step_dt) * c0
         return _source_drive_centripetal_reduced_response(
             assembly=assembly,
             mass_matrix=model.mass_matrix,
@@ -4783,13 +4788,16 @@ def solve_sfc_source_drive_pair(
     source_unconverged_accepted_count = 0
     checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
     start_step = 0
+    start_time = 0.0
     if bool(resume_source_checkpoint):
         if checkpoint_path is None:
             raise ValueError("resume_source_checkpoint requires source_checkpoint_path")
         checkpoint = _load_source_drive_checkpoint(checkpoint_path)
         start_step = int(checkpoint["step"])
-        if start_step > steps:
-            raise ValueError("checkpoint step is beyond requested duration")
+        loaded_time = float(checkpoint.get("time_value", np.nan))
+        start_time = loaded_time if np.isfinite(loaded_time) else float(start_step) * float(dt)
+        if start_time > float(duration) + 1.0e-14:
+            raise ValueError("checkpoint time is beyond requested duration")
         q = np.asarray(checkpoint["q"], dtype=float).copy()
         v = np.asarray(checkpoint["v"], dtype=float).copy()
         a = np.asarray(checkpoint["a"], dtype=float).copy()
@@ -4815,7 +4823,7 @@ def solve_sfc_source_drive_pair(
             model.X + assembly.expand_displacements(q),
             assembly.expand_displacements(v),
             assembly.expand_displacements(a),
-            time=float(start_step) * float(dt),
+            time=float(start_time),
         )
         if vtk_enabled and vtk_dir is not None:
             vtk_datasets = [
@@ -4871,6 +4879,7 @@ def solve_sfc_source_drive_pair(
     else:
         K_solve = K_red
     base_matrix = (M_red * c0 + K_solve * scale).tocsr()
+    base_matrix_dt = float(dt)
     base_free = None
     base_lu_cache: list[Any] = [None]
     start = time.perf_counter()
@@ -4971,8 +4980,21 @@ def solve_sfc_source_drive_pair(
             collected = _aggregate_contact_samples(collected, aggregate_mode)
         return collected
 
-    for step in range(start_step + 1, steps + 1):
-        t = step * float(dt)
+    accepted_step = int(start_step)
+    accepted_time = float(start_time)
+    trial_dt = float(dt)
+    while accepted_time < float(duration) - 1.0e-15:
+        step_dt = min(float(trial_dt), float(duration) - float(accepted_time))
+        step = int(accepted_step + 1)
+        t = float(accepted_time + step_dt)
+        current_source_step_dt = float(step_dt)
+        c0 = 1.0 / (beta * float(step_dt) * float(step_dt))
+        if not np.isclose(base_matrix_dt, float(step_dt), rtol=1.0e-14, atol=1.0e-16):
+            base_matrix = (M_red * c0 + K_solve * scale).tocsr()
+            base_matrix_dt = float(step_dt)
+            base_free = None
+            base_preconditioner_lu = None
+            base_lu_cache = [None]
         fixed, values = _source_drive_fixed_reduced_dofs(assembly, time_value=t, omega_z=gear1_angular_velocity_z)
         free = free_dofs(assembly.n_reduced_dofs, fixed)
         if base_free is None:
@@ -4984,7 +5006,7 @@ def solve_sfc_source_drive_pair(
                 except Exception:
                     base_preconditioner_lu = None
                 timing_source_base_lu += time.perf_counter() - t_section
-        q_pred, v_pred, _ = calculix_dynamic_predictor(q, v, a, dt=float(dt), beta=beta, gamma=gamma)
+        q_pred, v_pred, _ = calculix_dynamic_predictor(q, v, a, dt=float(step_dt), beta=beta, gamma=gamma)
         q_guess = _project_reduced_fixed(q_pred, fixed, values)
         residual_norm = np.inf
         iteration_count = 0
@@ -5037,7 +5059,7 @@ def solve_sfc_source_drive_pair(
             contact_red = assembly.reduce_vector(last_contact.force)
             rhs_balance = external - internal_red + contact_red
             a_guess = c0 * (q_guess - q_pred)
-            iteration_velocity = v_pred + gamma * float(dt) * a_guess
+            iteration_velocity = v_pred + gamma * float(step_dt) * a_guess
             centripetal_red, centripetal_tangent = centripetal_reduced_and_tangent_for_iteration(q_guess, iteration_velocity)
             inertia_red, inertia_mass = inertia_reduced_and_mass_for_iteration(q_guess, iteration_velocity, a_guess)
             residual = (
@@ -5181,7 +5203,7 @@ def solve_sfc_source_drive_pair(
         iteration_limited = increment_decision.iteration_limited
         cutback_candidate_dt = (
             _source_increment_cutback_candidate_dt(
-                float(dt),
+                float(step_dt),
                 min_dt=source_min_cutback_dt_value,
                 cutback_factor=source_cutback_factor,
             )
@@ -5189,14 +5211,19 @@ def solve_sfc_source_drive_pair(
             else None
         )
         if increment_decision.cutback_required:
-            raise RuntimeError(
-                "source-drive increment failed Abaqus-style convergence gates "
-                f"at step {step}: reason={step_convergence_reason}, "
-                f"normalized_residual={normalized_residual:.6e}, "
-                f"normalized_correction={normalized_correction:.6e}, "
-                f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}, "
-                f"cutback_candidate_dt={cutback_candidate_dt}"
-            )
+            source_iteration_limit_reached_count += int(bool(increment_decision.iteration_limited))
+            source_cutback_required_count += 1
+            if cutback_candidate_dt is None:
+                raise RuntimeError(
+                    "source-drive increment failed Abaqus-style convergence gates "
+                    f"at step {step}: reason={step_convergence_reason}, "
+                    f"normalized_residual={normalized_residual:.6e}, "
+                    f"normalized_correction={normalized_correction:.6e}, "
+                    f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}, "
+                    "minimum cutback dt reached"
+                )
+            trial_dt = float(cutback_candidate_dt)
+            continue
         increment_gate_row = _source_increment_gate_row(
             residual_converged=residual_converged,
             correction_converged=correction_converged,
@@ -5211,7 +5238,7 @@ def solve_sfc_source_drive_pair(
         )
         q_new = _project_reduced_fixed(q_guess, fixed, values)
         a_new = c0 * (q_new - q_pred)
-        v_new = v_pred + gamma * float(dt) * a_new
+        v_new = v_pred + gamma * float(step_dt) * a_new
         x_new = model.X + assembly.expand_displacements(q_new)
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         if not contact_matches_q_guess:
@@ -5269,8 +5296,11 @@ def solve_sfc_source_drive_pair(
         previous = external - internal_reduced_from_state(q_new) + assembly.reduce_vector(last_contact.force)
         if rotating_inertia == "centripetal":
             previous = previous - centripetal_reduced_from_state(q_new, v_new)
-        history_due = (step % history_stride == 0) or (step == steps)
-        vtk_due = vtk_enabled and vtk_dir is not None and (step % int(vtk_frame_stride) == 0 or step == steps)
+        accepted_step = int(accepted_step + 1)
+        accepted_time = float(t)
+        is_final_step = accepted_time >= float(duration) - 1.0e-15
+        history_due = (accepted_step % history_stride == 0) or is_final_step
+        vtk_due = vtk_enabled and vtk_dir is not None and (accepted_step % int(vtk_frame_stride) == 0 or is_final_step)
         output_state: MechanicsState | None = None
         output_internal: InternalResponse | None = None
         contact_node_diagnostics: dict[str, Any] | None = None
@@ -5317,6 +5347,8 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_velocity_z": float(v_new[hub2_slice.start + 5]),
                     "rp2_angular_acceleration_z": float(a_new[hub2_slice.start + 5]),
                     "gear2_torque_z": float(gear2_torque_z),
+                    "source_step_dt": float(step_dt),
+                    "source_accepted_step": int(accepted_step),
                     "contact_active_set_stable": int(bool(active_set_stable)),
                     "source_step_converged": int(bool(step_converged)),
                 }
@@ -5368,6 +5400,8 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_velocity_z_rad_per_s": float(v_new[hub2_slice.start + 5]),
                     "rp1_angular_acceleration_z_rad_per_s2": float(a_new[assembly.hub_slice(0).start + 5]),
                     "rp2_angular_acceleration_z_rad_per_s2": float(a_new[hub2_slice.start + 5]),
+                    "source_step_dt": float(step_dt),
+                    "source_accepted_step": int(accepted_step),
                 }
             )
             frame_row.update(increment_gate_row)
@@ -5380,10 +5414,12 @@ def solve_sfc_source_drive_pair(
             vtk_frame_index += 1
             timing_vtk += time.perf_counter() - t_section
         q, v, a = q_new, v_new, a_new
-        if checkpoint_path is not None and (step % max(1, int(source_checkpoint_stride)) == 0 or step == steps):
+        trial_dt = min(float(dt), max(source_min_cutback_dt_value, float(step_dt)) * (1.25 if increment_decision.converged else 1.0))
+        if checkpoint_path is not None and (accepted_step % max(1, int(source_checkpoint_stride)) == 0 or is_final_step):
             _write_source_drive_checkpoint(
                 checkpoint_path,
-                step=step,
+                step=accepted_step,
+                time_value=accepted_time,
                 q=q,
                 v=v,
                 a=a,
@@ -5458,6 +5494,8 @@ def solve_sfc_source_drive_pair(
         "source_unstable_accepted_count": int(source_unstable_accepted_count),
         "source_cutback_required_count": int(source_cutback_required_count),
         "source_unconverged_accepted_count": int(source_unconverged_accepted_count),
+        "source_accepted_increment_count": int(accepted_step),
+        "source_final_time": float(accepted_time),
         "sfc_history_frame_stride": int(history_stride),
         "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),

@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, parse_gear_input
+import validation.run_flexible_gear_implicit_lagrangian_sdf_comparison as gear_implicit
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse,
     _active_reduced_gap_jacobian_sparse_from_arrays,
@@ -1364,6 +1365,66 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "SCALARS contact_master_pressure_nodeavg float 1" in vtk_text
     assert "SCALARS contact_penetration_nodeavg float 1" in vtk_text
     assert "SCALARS contact_gap_min_node float 1" in vtk_text
+
+
+def test_source_drive_cutback_retries_without_accepting_failed_trial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+    original_decision = gear_implicit._source_increment_convergence_decision
+    call_count = {"value": 0}
+
+    def scripted_decision(**kwargs):
+        call_count["value"] += 1
+        if call_count["value"] <= 2:
+            return original_decision(
+                residual_converged=False,
+                correction_converged=True,
+                contact_force_increment_converged=True,
+                active_set_stable=True,
+                iteration_count=int(kwargs["max_iterations"]),
+                max_iterations=int(kwargs["max_iterations"]),
+                accept_unconverged=False,
+            )
+        return original_decision(
+            residual_converged=True,
+            correction_converged=True,
+            contact_force_increment_converged=True,
+            active_set_stable=True,
+            iteration_count=1,
+            max_iterations=int(kwargs["max_iterations"]),
+            accept_unconverged=False,
+        )
+
+    monkeypatch.setattr(gear_implicit, "_source_increment_convergence_decision", scripted_decision)
+
+    history, summary = solve_sfc_source_drive_pair(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=1.0e-5,
+        dt=1.0e-5,
+        gear1_angular_velocity_z=model.gear1_angular_velocity_z,
+        gear2_torque_z=model.gear2_torque_z,
+        max_iterations=1,
+        history_frame_stride=1,
+        source_accept_unconverged=False,
+        source_min_cutback_dt=1.0e-7,
+        source_cutback_factor=0.5,
+    )
+
+    assert int(summary["source_cutback_required_count"]) == 1
+    assert int(summary["source_accepted_increment_count"]) == 2
+    assert float(summary["source_final_time"]) == pytest.approx(1.0e-5)
+    assert len(history) == 2
+    assert float(history[0]["time"]) == pytest.approx(5.0e-6)
+    assert float(history[0]["source_step_dt"]) == pytest.approx(5.0e-6)
+    assert float(history[1]["time"]) == pytest.approx(1.0e-5)
+    assert all(int(row["source_increment_accepted"]) == 1 for row in history)
 
 
 def test_source_drive_checkpoint_resume_matches_continuous_short_run(tmp_path: Path) -> None:
