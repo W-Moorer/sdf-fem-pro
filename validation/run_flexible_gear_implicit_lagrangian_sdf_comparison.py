@@ -402,7 +402,7 @@ def _contact_path_tracking_metrics_from_arrays(
         bary = np.asarray(bary_in, dtype=float)
     current_bary = None
     bary_comparable = np.zeros(face_ids.shape, dtype=bool)
-    if bary is not None and bary.shape == (face_ids.size, 3):
+    if bary is not None and bary.ndim == 2 and bary.shape[0] == face_ids.size:
         current_bary = np.asarray(bary, dtype=float).copy()
         previous_bary = None if previous_master_barycentric is None else np.asarray(previous_master_barycentric, dtype=float)
         if previous_bary is not None and previous_bary.shape == current_bary.shape and previous_master_face_ids is not None:
@@ -1201,10 +1201,15 @@ def _aggregate_contact_array_group(
                 best_local = int(np.argmax(np.where(valid_mask, weights_for_face, -np.inf)))
                 representative_local = best_local
                 master_face_id = int(valid_faces[best_local])
-    master_bary = np.full(3, np.nan, dtype=float)
+    master_bary_width = 3
     if master_barycentric is not None and representative_local is not None:
         row_bary = np.asarray(master_barycentric, dtype=float)
-        if row_bary.ndim == 2 and row_bary.shape[0] >= int(np.max(rows)) + 1 and row_bary.shape[1] == 3:
+        if row_bary.ndim == 2 and row_bary.shape[0] >= int(np.max(rows)) + 1:
+            master_bary_width = int(row_bary.shape[1])
+    master_bary = np.full(master_bary_width, np.nan, dtype=float)
+    if master_barycentric is not None and representative_local is not None:
+        row_bary = np.asarray(master_barycentric, dtype=float)
+        if row_bary.ndim == 2 and row_bary.shape[0] >= int(np.max(rows)) + 1 and row_bary.shape[1] == master_bary_width:
             master_bary = row_bary[int(rows[int(representative_local)])].copy()
     secondary_cache_index = -1
     if secondary_cache_indices is not None and representative_local is not None:
@@ -1283,7 +1288,8 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
     normals = np.zeros((len(rows), 3), dtype=float)
     areas = np.zeros(len(rows), dtype=float)
     master_face_ids = np.full(len(rows), -1, dtype=np.int64)
-    master_barycentric = np.full((len(rows), 3), np.nan, dtype=float)
+    master_bary_width = max(int(np.asarray(row.get("master_barycentric", np.full(3, np.nan))).size) for row in rows)
+    master_barycentric = np.full((len(rows), master_bary_width), np.nan, dtype=float)
     secondary_cache_indices = np.full(len(rows), -1, dtype=np.int64)
     secondary_node_ids = np.full(len(rows), -1, dtype=np.int64)
     tracking_cache_hits = np.zeros(len(rows), dtype=bool)
@@ -1302,7 +1308,8 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         normals[index] = np.asarray(row["normal"], dtype=float).reshape(3)
         areas[index] = float(row["area"])
         master_face_ids[index] = int(row.get("master_face_id", -1))
-        master_barycentric[index] = np.asarray(row.get("master_barycentric", np.full(3, np.nan)), dtype=float).reshape(3)
+        bary = np.asarray(row.get("master_barycentric", np.full(master_bary_width, np.nan)), dtype=float).reshape(-1)
+        master_barycentric[index, : bary.size] = bary
         secondary_cache_indices[index] = int(row.get("secondary_cache_index", -1))
         secondary_node_ids[index] = int(row.get("secondary_node_id", -1))
         tracking_cache_hits[index] = bool(row.get("tracking_cache_hit", 0))

@@ -111,16 +111,44 @@ class LagrangianQ4ClosestFeatureOracle:
             raise ValueError("x_current must match master_reference_nodes")
         self.x_current = current
 
-    def query(self, point: np.ndarray) -> QuadrilateralClosestFeaturePayload:
+    def query(
+        self,
+        point: np.ndarray,
+        *,
+        preferred_face_ids: np.ndarray | list[int] | tuple[int, ...] | None = None,
+    ) -> QuadrilateralClosestFeaturePayload:
         x = _as_point(point, "point")
         candidates = self._candidate_ids(x)
         best: QuadrilateralClosestFeaturePayload | None = None
         best_dist2 = np.inf
-        bounds = self._aabb_distance_squared(x, candidates) if candidates.size else np.empty(0, dtype=float)
+        preferred: list[int] = []
+        if preferred_face_ids is not None:
+            n_faces = int(self.master_quads.shape[0])
+            seen: set[int] = set()
+            for raw in np.asarray(preferred_face_ids, dtype=np.int64).reshape(-1):
+                face_id = int(raw)
+                if 0 <= face_id < n_faces and face_id not in seen:
+                    preferred.append(face_id)
+                    seen.add(face_id)
+        candidate_set = {int(face_id) for face_id in np.asarray(candidates, dtype=np.int64).reshape(-1)}
+        for face_id in preferred:
+            if face_id not in candidate_set:
+                candidates = np.concatenate((np.asarray([face_id], dtype=np.int64), candidates))
+                candidate_set.add(face_id)
+        preferred_array = np.asarray(preferred, dtype=np.int64)
+        if preferred_array.size:
+            for candidate in preferred_array:
+                payload = self._query_one(x, int(candidate), candidate_count=int(candidates.size))
+                dist2 = float(np.dot(x - payload.closest_point, x - payload.closest_point))
+                if dist2 < best_dist2:
+                    best = payload
+                    best_dist2 = dist2
+        remaining = np.asarray([int(face_id) for face_id in candidates if int(face_id) not in set(preferred)], dtype=np.int64)
+        bounds = self._aabb_distance_squared(x, remaining) if remaining.size else np.empty(0, dtype=float)
         order = np.argsort(bounds, kind="stable") if bounds.size else np.empty(0, dtype=np.int64)
-        candidates = candidates[order] if order.size else candidates
-        bounds = bounds[order] if order.size else bounds
-        for candidate, bound2 in zip(candidates, bounds, strict=True):
+        ordered = remaining[order] if order.size else remaining
+        ordered_bounds = bounds[order] if order.size else bounds
+        for candidate, bound2 in zip(ordered, ordered_bounds, strict=True):
             if best is not None and float(bound2) > best_dist2 + 1.0e-14:
                 break
             payload = self._query_one(x, int(candidate), candidate_count=int(candidates.size))
@@ -1649,7 +1677,10 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
     quadrature_order: int = 2
     search_radius: float | None = None
     clip_to_master_footprint: bool = False
+    secondary_path_tracking: bool = False
     _oracle: LagrangianQ4ClosestFeatureOracle = field(init=False, repr=False)
+    _secondary_face_cache: np.ndarray | None = field(default=None, init=False, repr=False)
+    _secondary_master_weight_cache: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         slave = np.asarray(self.slave_quads, dtype=np.int64)
@@ -1678,6 +1709,170 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
             master_nodes.copy(),
             search_radius=self.search_radius,
         )
+
+    def clear_secondary_contact_tracking(self) -> None:
+        """Clear accepted-state secondary tracking hints for Q4 contact."""
+
+        self._secondary_face_cache = None
+        self._secondary_master_weight_cache = None
+
+    def _secondary_cache_size(self) -> int:
+        q = int(self.quadrature_order)
+        return int(self.slave_quads.shape[0]) * q * q
+
+    def _ensure_secondary_face_cache(self) -> np.ndarray:
+        size = self._secondary_cache_size()
+        if self._secondary_face_cache is None or self._secondary_face_cache.shape != (size,):
+            self._secondary_face_cache = np.full(size, -1, dtype=np.int64)
+        return self._secondary_face_cache
+
+    def _ensure_secondary_master_weight_cache(self) -> np.ndarray:
+        size = self._secondary_cache_size()
+        if self._secondary_master_weight_cache is None or self._secondary_master_weight_cache.shape != (size, 4):
+            self._secondary_master_weight_cache = np.full((size, 4), np.nan, dtype=float)
+        return self._secondary_master_weight_cache
+
+    def commit_secondary_tracking_from_sample_arrays(self, sample_arrays: dict[str, np.ndarray]) -> int:
+        """Commit Q4 closest-feature tracking payload from an accepted state."""
+
+        if not bool(self.secondary_path_tracking):
+            return 0
+        if "secondary_cache_indices" not in sample_arrays or "master_face_ids" not in sample_arrays:
+            return 0
+        cache_indices = np.asarray(sample_arrays["secondary_cache_indices"], dtype=np.int64).reshape(-1)
+        face_ids = np.asarray(sample_arrays["master_face_ids"], dtype=np.int64).reshape(-1)
+        weights = np.asarray(sample_arrays.get("master_weights", np.empty((0, 4))), dtype=float)
+        if weights.ndim != 2 or weights.shape[0] != face_ids.size:
+            return 0
+        count = min(cache_indices.size, face_ids.size, weights.shape[0])
+        if count == 0:
+            return 0
+        face_cache = self._ensure_secondary_face_cache()
+        weight_cache = self._ensure_secondary_master_weight_cache()
+        committed = 0
+        for index in range(count):
+            cache_index = int(cache_indices[index])
+            face_id = int(face_ids[index])
+            if face_id < 0 or not (0 <= cache_index < face_cache.shape[0]):
+                continue
+            row = np.asarray(weights[index], dtype=float).reshape(-1)
+            if row.size != 4:
+                continue
+            total = float(np.sum(row))
+            if total > 0.0:
+                row = row / total
+            face_cache[cache_index] = face_id
+            weight_cache[cache_index] = row
+            committed += 1
+        return int(committed)
+
+    def sample_arrays(self, x_current: np.ndarray) -> dict[str, np.ndarray]:
+        """Return Q4 closest-feature contact payloads as batched arrays.
+
+        The array path exposes the master Q4 face id, Q4 shape weights, and
+        accepted-state tracking diagnostics needed by the secondary
+        constraint-region contact law.  The query still has an exact fallback:
+        cached faces are only evaluated first, not used as the sole candidate.
+        """
+
+        if bool(self.clip_to_master_footprint):
+            raise NotImplementedError("sample_arrays is not implemented for clipped Q4 footprint integration")
+        X = np.asarray(x_current, dtype=float)
+        if X.ndim != 2 or X.shape[1] != 3:
+            raise ValueError("x_current must have shape (n_nodes, 3)")
+        master_start = int(self.master_node_offset)
+        master_stop = master_start + self.master_reference_nodes.shape[0]
+        if master_stop > X.shape[0]:
+            raise ValueError("master_node_offset places master nodes outside x_current")
+        self._oracle.refit(X[master_start:master_stop])
+        points, weights = np.polynomial.legendre.leggauss(int(self.quadrature_order))
+        sample_node_ids: list[np.ndarray] = []
+        sample_weights: list[np.ndarray] = []
+        gaps: list[float] = []
+        normals: list[np.ndarray] = []
+        areas: list[float] = []
+        master_node_ids: list[np.ndarray] = []
+        master_weights: list[np.ndarray] = []
+        master_face_ids: list[int] = []
+        secondary_cache_indices: list[int] = []
+        cache_hits: list[bool] = []
+        cache_matches: list[bool] = []
+        weight_distances: list[float] = []
+        face_cache = self._ensure_secondary_face_cache()
+        weight_cache = self._ensure_secondary_master_weight_cache()
+        q = int(self.quadrature_order)
+        for face_id, quad in enumerate(self.slave_quads):
+            global_quad = quad + int(self.slave_node_offset)
+            qx = X[global_quad]
+            for a, xi in enumerate(points):
+                for b, eta in enumerate(points):
+                    shape = _q4_shape_functions(float(xi), float(eta))
+                    dshape = _q4_shape_derivatives(float(xi), float(eta))
+                    tangent_xi = dshape[:, 0] @ qx
+                    tangent_eta = dshape[:, 1] @ qx
+                    jac = float(np.linalg.norm(np.cross(tangent_xi, tangent_eta)))
+                    if jac <= 0.0:
+                        continue
+                    cache_index = int(face_id) * q * q + int(a) * q + int(b)
+                    previous_face = int(face_cache[cache_index]) if 0 <= cache_index < face_cache.shape[0] else -1
+                    preferred = [previous_face] if bool(self.secondary_path_tracking) and previous_face >= 0 else None
+                    point = shape @ qx
+                    payload = self._oracle.query(point, preferred_face_ids=preferred)
+                    payload_weights = np.asarray(payload.master_weights, dtype=float).reshape(4)
+                    hit = previous_face >= 0
+                    match = bool(hit and previous_face == int(payload.face_id))
+                    previous_weights = weight_cache[cache_index] if 0 <= cache_index < weight_cache.shape[0] else np.full(4, np.nan)
+                    if np.all(np.isfinite(previous_weights)):
+                        weight_distance = float(np.linalg.norm(payload_weights - previous_weights))
+                    else:
+                        weight_distance = np.nan
+                    sample_node_ids.append(global_quad.copy())
+                    sample_weights.append(shape.copy())
+                    gaps.append(float(payload.gap))
+                    normals.append(payload.normal.copy())
+                    areas.append(float(jac * float(weights[a]) * float(weights[b])))
+                    master_node_ids.append(payload.master_node_ids.astype(np.int64) + master_start)
+                    master_weights.append(payload_weights.copy())
+                    master_face_ids.append(int(payload.face_id))
+                    secondary_cache_indices.append(cache_index)
+                    cache_hits.append(bool(hit))
+                    cache_matches.append(match)
+                    weight_distances.append(weight_distance)
+                    if bool(self.secondary_path_tracking):
+                        face_cache[cache_index] = int(payload.face_id)
+                        total = float(np.sum(payload_weights))
+                        weight_cache[cache_index] = payload_weights / total if total > 0.0 else payload_weights
+        if not gaps:
+            return {
+                "sample_node_ids": np.empty((0, 4), dtype=np.int64),
+                "sample_weights": np.empty((0, 4), dtype=float),
+                "gaps": np.empty(0, dtype=float),
+                "normals": np.empty((0, 3), dtype=float),
+                "areas": np.empty(0, dtype=float),
+                "master_node_ids": np.empty((0, 4), dtype=np.int64),
+                "master_weights": np.empty((0, 4), dtype=float),
+                "master_barycentric": np.empty((0, 4), dtype=float),
+                "master_face_ids": np.empty(0, dtype=np.int64),
+                "secondary_cache_indices": np.empty(0, dtype=np.int64),
+                "tracking_cache_hits": np.empty(0, dtype=bool),
+                "tracking_cache_matches": np.empty(0, dtype=bool),
+                "tracking_barycentric_distances": np.empty(0, dtype=float),
+            }
+        return {
+            "sample_node_ids": np.vstack(sample_node_ids).astype(np.int64, copy=False),
+            "sample_weights": np.vstack(sample_weights).astype(float, copy=False),
+            "gaps": np.asarray(gaps, dtype=float),
+            "normals": np.vstack(normals).astype(float, copy=False),
+            "areas": np.asarray(areas, dtype=float),
+            "master_node_ids": np.vstack(master_node_ids).astype(np.int64, copy=False),
+            "master_weights": np.vstack(master_weights).astype(float, copy=False),
+            "master_barycentric": np.vstack(master_weights).astype(float, copy=False),
+            "master_face_ids": np.asarray(master_face_ids, dtype=np.int64),
+            "secondary_cache_indices": np.asarray(secondary_cache_indices, dtype=np.int64),
+            "tracking_cache_hits": np.asarray(cache_hits, dtype=bool),
+            "tracking_cache_matches": np.asarray(cache_matches, dtype=bool),
+            "tracking_barycentric_distances": np.asarray(weight_distances, dtype=float),
+        }
 
     def samples(self, x_current: np.ndarray):
         X = np.asarray(x_current, dtype=float)
