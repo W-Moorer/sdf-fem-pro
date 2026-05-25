@@ -61,6 +61,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     write_paraview_animation_setup,
 )
 from validation.run_source_gear_vtk_manifest_alignment import align_manifests
+from validation.run_source_gear_vtk_regional_alignment import _active_overlap_metrics
 
 
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
@@ -142,7 +143,8 @@ def test_secondary_contact_tracking_radius_covers_local_constraint_region() -> N
     representative = _contact_patch_representative_length(pair)
 
     assert closest_radius > 1.0
-    assert tracking_radius == pytest.approx(representative)
+    assert tracking_radius >= representative
+    assert tracking_radius == pytest.approx(2.0 * representative)
     assert tracking_radius < closest_radius
 
 
@@ -434,6 +436,19 @@ def test_source_contact_active_set_stability_requires_repeated_signature() -> No
     assert not _source_contact_active_set_is_stable(signature, None, require_stability=True)
     assert _source_contact_active_set_is_stable(signature, signature, require_stability=True)
     assert not _source_contact_active_set_is_stable(signature, tuple(), require_stability=True)
+
+
+def test_active_overlap_metrics_reports_precision_and_recall() -> None:
+    sfc = np.asarray([True, True, False, True, False])
+    abaqus = np.asarray([True, False, True, True, False])
+
+    metrics = _active_overlap_metrics(sfc, abaqus)
+
+    assert metrics["active_intersection_count"] == 2
+    assert metrics["active_sfc_only_count"] == 1
+    assert metrics["active_abaqus_only_count"] == 1
+    assert metrics["active_precision"] == pytest.approx(2.0 / 3.0)
+    assert metrics["active_recall"] == pytest.approx(2.0 / 3.0)
 
 
 def test_compare_sfc_history_to_abaqus_manifest_outputs_metric_errors(tmp_path: Path) -> None:

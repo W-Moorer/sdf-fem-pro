@@ -2141,23 +2141,19 @@ def _default_contact_search_radius(pair: CroppedGearPair, *, target_overclosure:
 def _default_secondary_contact_tracking_radius(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:
     """Return an Abaqus-style secondary contact tracking tube radius.
 
-    Closest-feature SDF queries need a conservative feature-size search radius
-    so the exact nearest surface patch is never pruned.  Abaqus/Standard
-    surface-to-surface contact uses a different semantic: internal contact
-    elements track a local secondary-to-main constraint region and do not let a
-    slave point jump across a large curved patch to a remote tooth flank.  For
-    the secondary-normal line projection path, the broad phase is therefore a
-    contact tracking tube rather than a global closest-feature radius.  The
-    tube must still cover the local contact patch length scale; otherwise a
-    growing overclosure can prune valid main-surface candidates before the
-    exact closest-feature release check has a chance to accept or reject them.
-    This keeps the final projection exact within a local surface-to-surface
-    constraint region while excluding remote grazing intersections by the
-    closest-feature/open-clearance check, not by a case-fitted radius.
+    The secondary-normal line projection uses this radius only to enumerate
+    possible main-surface facets.  It must therefore be at least as conservative
+    as the hard finite-sliding line-distance gate; otherwise Abaqus-active nodes
+    can be lost before the line-distance and closest-feature open/closed gates
+    evaluate the true contact status.  The final accepted contact still uses
+    the mesh-derived line-distance limits, so increasing this candidate radius
+    to the hard gate does not relax contact accuracy.
     """
 
     normal_envelope = 2.5 * max(float(pair.initial_patch_gap) + float(target_overclosure), 0.0)
-    return max(normal_envelope, _contact_patch_representative_length(pair), 1.0e-4)
+    local_region = max(normal_envelope, _contact_patch_representative_length(pair), 1.0e-4)
+    hard_gate = _default_secondary_line_hard_distance_limit(pair, target_overclosure=target_overclosure)
+    return max(local_region, hard_gate)
 
 
 def _default_secondary_line_distance_limit(pair: CroppedGearPair, *, target_overclosure: float = 0.0) -> float:

@@ -151,6 +151,38 @@ def _jaccard(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.count_nonzero(aa & bb) / union)
 
 
+def _active_overlap_metrics(sfc_active: np.ndarray, abaqus_active: np.ndarray) -> dict[str, float | int]:
+    """Return active-mask precision/recall diagnostics.
+
+    Abaqus reports nodal contact status through exported contact fields, while
+    SFC writes node-averaged pressure/penetration/activity.  The overlap
+    metrics do not assume either mask is perfect; they localize whether a
+    stress/pressure mismatch comes from SFC carrying extra nodes, missing
+    Abaqus-active nodes, or both.
+    """
+
+    sfc_mask = np.asarray(sfc_active, dtype=bool)
+    abaqus_mask = np.asarray(abaqus_active, dtype=bool)
+    intersection = sfc_mask & abaqus_mask
+    union = sfc_mask | abaqus_mask
+    sfc_count = int(np.count_nonzero(sfc_mask))
+    abaqus_count = int(np.count_nonzero(abaqus_mask))
+    intersection_count = int(np.count_nonzero(intersection))
+    union_count = int(np.count_nonzero(union))
+    sfc_only = int(np.count_nonzero(sfc_mask & ~abaqus_mask))
+    abaqus_only = int(np.count_nonzero(abaqus_mask & ~sfc_mask))
+    return {
+        "active_intersection_count": intersection_count,
+        "active_union_count": union_count,
+        "active_sfc_only_count": sfc_only,
+        "active_abaqus_only_count": abaqus_only,
+        "active_precision": intersection_count / max(sfc_count, 1),
+        "active_recall": intersection_count / max(abaqus_count, 1),
+        "active_sfc_only_fraction": sfc_only / max(union_count, 1),
+        "active_abaqus_only_fraction": abaqus_only / max(union_count, 1),
+    }
+
+
 def _region_rows(
     *,
     sfc: VTKPointScalars,
@@ -164,6 +196,7 @@ def _region_rows(
         raise ValueError(f"point-count mismatch: SFC={sfc.point_count}, Abaqus={abaqus.point_count}")
     sfc_active = _contact_mask(sfc)
     abaqus_active = _contact_mask(abaqus)
+    active_overlap = _active_overlap_metrics(sfc_active, abaqus_active)
     full = np.ones(sfc.point_count, dtype=bool)
     regions = {
         "full": full,
@@ -211,6 +244,7 @@ def _region_rows(
                     "abaqus_has_contact_field": int(any(name in abaqus.scalars for name in CONTACT_FIELDS)),
                     "sfc_active_node_count": int(np.count_nonzero(sfc_active)),
                     "abaqus_active_node_count": int(np.count_nonzero(abaqus_active)),
+                    **active_overlap,
                     "field_rmse_rel": _rmse_rel(sfc_region, abaqus_region),
                     "field_correlation": _correlation(sfc_region, abaqus_region),
                     "active_jaccard": _jaccard(sfc_active, abaqus_active),
@@ -253,6 +287,7 @@ def _region_rows(
                     "abaqus_has_contact_field": int(any(name in abaqus.scalars for name in CONTACT_FIELDS)),
                     "sfc_active_node_count": int(np.count_nonzero(sfc_active)),
                     "abaqus_active_node_count": int(np.count_nonzero(abaqus_active)),
+                    **active_overlap,
                     "field_rmse_rel": _rmse_rel(sfc_region, abaqus_region),
                     "field_correlation": _correlation(sfc_region, abaqus_region),
                     "active_jaccard": _jaccard(sfc_active, abaqus_active),
@@ -554,6 +589,11 @@ def _write_summary(
     if rows:
         first = rows[0]
         latest = _latest_rows(rows)[0]
+        latest_rows = _latest_rows(rows)
+        latest_active = latest_rows[0]
+        min_jaccard = min(float(row["active_jaccard"]) for row in rows)
+        min_precision = min(float(row["active_precision"]) for row in rows)
+        min_recall = min(float(row["active_recall"]) for row in rows)
         lines.extend(
             [
                 "",
@@ -563,6 +603,15 @@ def _write_summary(
                 f"- Abaqus contact fields present: `{int(latest['abaqus_has_contact_field'])}`",
                 f"- latest SFC active node count: `{int(latest['sfc_active_node_count'])}`",
                 f"- latest Abaqus active node count: `{int(latest['abaqus_active_node_count'])}`",
+                f"- latest active intersection count: `{int(latest_active['active_intersection_count'])}`",
+                f"- latest active SFC-only count: `{int(latest_active['active_sfc_only_count'])}`",
+                f"- latest active Abaqus-only count: `{int(latest_active['active_abaqus_only_count'])}`",
+                f"- latest active precision / recall / Jaccard: "
+                f"`{float(latest_active['active_precision']):.6f}` / "
+                f"`{float(latest_active['active_recall']):.6f}` / "
+                f"`{float(latest_active['active_jaccard']):.6f}`",
+                f"- minimum active precision / recall / Jaccard over sequence: "
+                f"`{min_precision:.6f}` / `{min_recall:.6f}` / `{min_jaccard:.6f}`",
                 f"- latest time difference: `{float(latest['time_difference']):.12e}`",
             ]
         )
