@@ -19,7 +19,14 @@ from validation.run_source_gear_vtk_regional_alignment import (
 )
 
 
-def _write_point_scalar_vtk(path: Path, *, pressure: tuple[float, float], active: tuple[float, float]) -> None:
+def _write_point_scalar_vtk(
+    path: Path,
+    *,
+    pressure: tuple[float, float],
+    active: tuple[float, float],
+    secondary_pressure: tuple[float, float] | None = None,
+    secondary_active: tuple[float, float] | None = None,
+) -> None:
     lines = [
         "# vtk DataFile Version 3.0",
         "test",
@@ -67,6 +74,24 @@ def _write_point_scalar_vtk(path: Path, *, pressure: tuple[float, float], active
         f"{active[0]}",
         f"{active[1]}",
     ]
+    if secondary_pressure is not None:
+        secondary_active = active if secondary_active is None else secondary_active
+        lines.extend(
+            [
+                "SCALARS contact_secondary_pressure_nodeavg float 1",
+                "LOOKUP_TABLE default",
+                f"{secondary_pressure[0]}",
+                f"{secondary_pressure[1]}",
+                "SCALARS contact_secondary_penetration_nodeavg float 1",
+                "LOOKUP_TABLE default",
+                "0.0",
+                "0.0",
+                "SCALARS contact_secondary_active_node float 1",
+                "LOOKUP_TABLE default",
+                f"{secondary_active[0]}",
+                f"{secondary_active[1]}",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
@@ -95,9 +120,33 @@ def test_compare_vtk_pair_reports_active_region_errors(tmp_path: Path) -> None:
     assert active_stress["abaqus_active_node_count"] == 1
     assert active_stress["sfc_active_node_count"] == 0
     assert active_stress["time_difference"] == pytest.approx(0.1)
-    pressure = by_region_metric[("full", "contact_pressure_nodeavg")]
+    pressure = by_region_metric[("full", "contact_secondary_pressure_nodeavg")]
     assert pressure["field_rmse_rel"] == pytest.approx(1.0)
     assert pressure["active_jaccard"] == pytest.approx(0.0)
+
+
+def test_compare_vtk_pair_prefers_sfc_secondary_contact_fields(tmp_path: Path) -> None:
+    sfc = tmp_path / "sfc.vtk"
+    abaqus = tmp_path / "abaqus.vtk"
+    _write_point_scalar_vtk(
+        sfc,
+        pressure=(0.0, 0.0),
+        active=(0.0, 0.0),
+        secondary_pressure=(0.0, 5.0),
+        secondary_active=(0.0, 1.0),
+    )
+    _write_point_scalar_vtk(abaqus, pressure=(0.0, 5.0), active=(0.0, 1.0))
+
+    rows = compare_vtk_pair(sfc_vtk=sfc, abaqus_vtk=abaqus, sfc_time=0.0, abaqus_time=0.0)
+    by_region_metric = {(row["region"], row["metric"]): row for row in rows}
+
+    pressure = by_region_metric[("full", "contact_secondary_pressure_nodeavg")]
+    assert pressure["sfc_has_contact_field"] == 1
+    assert pressure["abaqus_has_contact_field"] == 1
+    assert pressure["sfc_max"] == pytest.approx(5.0)
+    assert pressure["abaqus_max"] == pytest.approx(5.0)
+    assert pressure["max_rel_error"] == pytest.approx(0.0)
+    assert pressure["active_jaccard"] == pytest.approx(1.0)
 
 
 def test_compare_vtk_manifests_pairs_frames_by_time(tmp_path: Path) -> None:
@@ -165,7 +214,7 @@ def test_active_overlap_summary_helpers_ignore_no_contact_duplicates() -> None:
             "pair_index": 1,
             "sfc_time": 1.0e-4,
             "region": "abaqus_active",
-            "metric": "contact_pressure_nodeavg",
+            "metric": "contact_secondary_pressure_nodeavg",
             "p95_rel_error": 0.1,
             "active_union_count": 10,
             "active_jaccard": 0.4,

@@ -33,12 +33,23 @@ CONTACT_FIELDS = (
     "contact_penetration_nodeavg",
     "contact_active_node",
 )
-CONTACT_FIELD_PAIRS = (
-    ("contact_pressure_nodeavg", "contact_pressure_nodeavg", "contact_pressure_nodeavg"),
-    ("contact_penetration_nodeavg", "contact_penetration_nodeavg", "contact_penetration_nodeavg"),
-    ("contact_active_node", "contact_active_node", "contact_active_node"),
+SFC_SECONDARY_CONTACT_FIELDS = (
+    "contact_secondary_pressure_nodeavg",
+    "contact_secondary_penetration_nodeavg",
+    "contact_secondary_active_node",
 )
-REQUIRED_POINT_SCALARS = tuple(sorted({name for pair in FIELD_PAIRS for name in pair[:2]} | set(CONTACT_FIELDS)))
+CONTACT_FIELD_PAIRS = (
+    (("contact_secondary_pressure_nodeavg", "contact_pressure_nodeavg"), "contact_pressure_nodeavg", "contact_secondary_pressure_nodeavg"),
+    (
+        ("contact_secondary_penetration_nodeavg", "contact_penetration_nodeavg"),
+        "contact_penetration_nodeavg",
+        "contact_secondary_penetration_nodeavg",
+    ),
+    (("contact_secondary_active_node", "contact_active_node"), "contact_active_node", "contact_secondary_active_node"),
+)
+REQUIRED_POINT_SCALARS = tuple(
+    sorted({name for pair in FIELD_PAIRS for name in pair[:2]} | set(CONTACT_FIELDS) | set(SFC_SECONDARY_CONTACT_FIELDS))
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,10 +121,21 @@ def _zeros(frame: VTKPointScalars) -> np.ndarray:
     return np.zeros(frame.point_count, dtype=float)
 
 
+def _first_scalar(frame: VTKPointScalars, *names: str) -> np.ndarray | None:
+    for name in names:
+        values = frame.scalars.get(str(name))
+        if values is not None:
+            return values
+    return None
+
+
 def _contact_mask(frame: VTKPointScalars) -> np.ndarray:
-    pressure = frame.scalars.get("contact_pressure_nodeavg", _zeros(frame))
-    penetration = frame.scalars.get("contact_penetration_nodeavg", _zeros(frame))
-    active = frame.scalars.get("contact_active_node", _zeros(frame))
+    pressure = _first_scalar(frame, "contact_secondary_pressure_nodeavg", "contact_pressure_nodeavg")
+    penetration = _first_scalar(frame, "contact_secondary_penetration_nodeavg", "contact_penetration_nodeavg")
+    active = _first_scalar(frame, "contact_secondary_active_node", "contact_active_node")
+    pressure = _zeros(frame) if pressure is None else pressure
+    penetration = _zeros(frame) if penetration is None else penetration
+    active = _zeros(frame) if active is None else active
     return (active > 0.5) | (pressure > 0.0) | (penetration > 0.0)
 
 
@@ -240,7 +262,10 @@ def _region_rows(
                     "mean_abs_error": float(np.mean(diff)) if diff.size else 0.0,
                     "p95_abs_error": _percentile(diff, 95.0),
                     "max_abs_error": float(np.max(diff)) if diff.size else 0.0,
-                    "sfc_has_contact_field": int(any(name in sfc.scalars for name in CONTACT_FIELDS)),
+                    "sfc_has_contact_field": int(
+                        any(name in sfc.scalars for name in CONTACT_FIELDS)
+                        or any(name in sfc.scalars for name in SFC_SECONDARY_CONTACT_FIELDS)
+                    ),
                     "abaqus_has_contact_field": int(any(name in abaqus.scalars for name in CONTACT_FIELDS)),
                     "sfc_active_node_count": int(np.count_nonzero(sfc_active)),
                     "abaqus_active_node_count": int(np.count_nonzero(abaqus_active)),
@@ -250,8 +275,8 @@ def _region_rows(
                     "active_jaccard": _jaccard(sfc_active, abaqus_active),
                 }
             )
-        for sfc_name, abaqus_name, metric_name in CONTACT_FIELD_PAIRS:
-            sfc_values = sfc.scalars.get(sfc_name)
+        for sfc_names, abaqus_name, metric_name in CONTACT_FIELD_PAIRS:
+            sfc_values = _first_scalar(sfc, *sfc_names)
             abaqus_values = abaqus.scalars.get(abaqus_name)
             if sfc_values is None or abaqus_values is None:
                 continue
@@ -283,7 +308,10 @@ def _region_rows(
                     "mean_abs_error": float(np.mean(diff)) if diff.size else 0.0,
                     "p95_abs_error": _percentile(diff, 95.0),
                     "max_abs_error": float(np.max(diff)) if diff.size else 0.0,
-                    "sfc_has_contact_field": int(any(name in sfc.scalars for name in CONTACT_FIELDS)),
+                    "sfc_has_contact_field": int(
+                        any(name in sfc.scalars for name in CONTACT_FIELDS)
+                        or any(name in sfc.scalars for name in SFC_SECONDARY_CONTACT_FIELDS)
+                    ),
                     "abaqus_has_contact_field": int(any(name in abaqus.scalars for name in CONTACT_FIELDS)),
                     "sfc_active_node_count": int(np.count_nonzero(sfc_active)),
                     "abaqus_active_node_count": int(np.count_nonzero(abaqus_active)),
