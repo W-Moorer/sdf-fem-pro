@@ -1448,6 +1448,10 @@ def test_constraint_region_tangent_metrics_use_region_rows() -> None:
 
     assert metrics["contact_tangent_active_region_count"] == 2
     assert metrics["contact_tangent_active_secondary_node_count"] == 1
+    assert metrics["contact_tangent_source"] == "constraint_region_arrays"
+    assert metrics["contact_tangent_gap_jacobian_source"] == "constraint_region_fixed_payload"
+    assert metrics["contact_tangent_pressure_derivative"] == "linear_penalty_active_set"
+    assert metrics["contact_tangent_fixed_active_set"] == 1
     assert metrics["contact_tangent_scale_sum"] == pytest.approx(2.0 * 100.0 * (2.0 + 3.0))
     assert metrics["contact_tangent_scale_max"] == pytest.approx(2.0 * 100.0 * 3.0)
 

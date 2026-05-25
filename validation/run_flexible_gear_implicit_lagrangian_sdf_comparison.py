@@ -3787,6 +3787,11 @@ def _constraint_region_tangent_metrics_from_arrays(
 
     if sample_arrays is None:
         return {
+            "contact_tangent_source": "none",
+            "contact_tangent_gap_jacobian_source": "none",
+            "contact_tangent_pressure_derivative": "none",
+            "contact_tangent_scale_formula": "",
+            "contact_tangent_fixed_active_set": 0,
             "contact_tangent_active_region_count": 0,
             "contact_tangent_active_secondary_node_count": 0,
             "contact_tangent_scale_sum": 0.0,
@@ -3795,6 +3800,11 @@ def _constraint_region_tangent_metrics_from_arrays(
     gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
     if gaps.size == 0:
         return {
+            "contact_tangent_source": "constraint_region_arrays",
+            "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
+            "contact_tangent_pressure_derivative": "linear_penalty_active_set",
+            "contact_tangent_scale_formula": "equilibrium_scale*pressure_stiffness*region_area",
+            "contact_tangent_fixed_active_set": 1,
             "contact_tangent_active_region_count": 0,
             "contact_tangent_active_secondary_node_count": 0,
             "contact_tangent_scale_sum": 0.0,
@@ -3810,6 +3820,11 @@ def _constraint_region_tangent_metrics_from_arrays(
     else:
         active_secondary = np.empty(0, dtype=np.int64)
     return {
+        "contact_tangent_source": "constraint_region_arrays",
+        "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
+        "contact_tangent_pressure_derivative": "linear_penalty_active_set",
+        "contact_tangent_scale_formula": "equilibrium_scale*pressure_stiffness*region_area",
+        "contact_tangent_fixed_active_set": 1,
         "contact_tangent_active_region_count": int(np.count_nonzero(active)),
         "contact_tangent_active_secondary_node_count": int(np.unique(active_secondary).size),
         "contact_tangent_scale_sum": float(np.sum(scales)) if scales.size else 0.0,

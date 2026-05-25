@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
 from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
+    constraint_region_tangent_gate_metrics,
     full_gear_evidence_ladder_rows,
     full_gear_entry_gate_metrics,
     run_full_gear,
@@ -50,6 +51,41 @@ def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
 
     assert int(failed_gate["source_convergence_gate_passed"]) == 0
     assert int(failed_gate["source_convergence_converged_count_matches_accepted"]) == 0
+
+
+def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> None:
+    summary = {
+        "source_constraint_region_tangent_solve_count": 2,
+        "source_constraint_region_tangent_active_rows_sum": 4,
+        "source_constraint_region_tangent_j_nnz_sum": 18,
+        "source_constraint_region_tangent_scale_sum": 12.0,
+    }
+    history = [
+        {
+            "active_contact_region_count": 2,
+            "contact_active_area": 3.0,
+            "contact_region_normal_force": 5.0,
+            "contact_tangent_source": "constraint_region_arrays",
+            "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
+            "contact_tangent_pressure_derivative": "linear_penalty_active_set",
+            "contact_tangent_fixed_active_set": 1,
+            "contact_tangent_active_region_count": 2,
+            "contact_tangent_scale_sum": 6.0,
+            "source_constraint_region_tangent_solve_count": 1,
+        }
+    ]
+
+    gate = constraint_region_tangent_gate_metrics(summary, history)
+
+    assert int(gate["constraint_region_tangent_gate_passed"]) == 1
+    assert int(gate["constraint_region_tangent_row_active_count_ok"]) == 1
+
+    sample_tangent = [dict(history[0])]
+    sample_tangent[0]["contact_tangent_source"] = "sample_arrays"
+    failed = constraint_region_tangent_gate_metrics(summary, sample_tangent)
+
+    assert int(failed["constraint_region_tangent_gate_passed"]) == 0
+    assert int(failed["constraint_region_tangent_row_source_ok"]) == 0
 
 
 def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
@@ -106,6 +142,7 @@ def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
 def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
     summary = {
         "source_convergence_gate_passed": 1,
+        "constraint_region_tangent_gate_passed": 1,
         "contact_total_gate_passed": 1,
         "full_gear_entry_gate_passed": 1,
         "full_gear_entry_ready_for_strict_sync_window": 0,
@@ -422,29 +459,34 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary
+    assert "constraint_region_tangent_gate" in summary
     assert "contact_total_gate" in summary
     assert "full_gear_entry_gate" in summary
     assert "full_gear_evidence_ladder" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
     assert int(summary["source_convergence_gate_passed"]) == 1
+    assert int(summary["constraint_region_tangent_gate_passed"]) == 1
     assert int(summary["contact_total_gate_passed"]) == 1
     assert int(summary["full_gear_entry_gate_passed"]) == 1
     assert int(summary["full_gear_entry_ready_for_strict_sync_window"]) == 0
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
     trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
     convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
+    tangent_gate_csv = tmp_path / "sfc_constraint_region_tangent_gate.csv"
     contact_total_gate_csv = tmp_path / "sfc_contact_total_gate.csv"
     entry_gate_csv = tmp_path / "sfc_full_gear_entry_gate.csv"
     evidence_ladder_csv = tmp_path / "sfc_full_gear_evidence_ladder.csv"
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
     assert convergence_gate_csv.exists()
+    assert tangent_gate_csv.exists()
     assert contact_total_gate_csv.exists()
     assert entry_gate_csv.exists()
     assert evidence_ladder_csv.exists()
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
     assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
+    assert "constraint_region_tangent_gate_passed" in tangent_gate_csv.read_text(encoding="utf-8")
     assert "contact_total_gate_passed" in contact_total_gate_csv.read_text(encoding="utf-8")
     assert "full_gear_entry_gate_passed" in entry_gate_csv.read_text(encoding="utf-8")
     evidence_text = evidence_ladder_csv.read_text(encoding="utf-8")

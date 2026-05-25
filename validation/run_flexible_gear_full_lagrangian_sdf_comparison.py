@@ -417,6 +417,86 @@ def source_convergence_gate_metrics(
     }
 
 
+def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]) -> Row:
+    """Gate fixed-active-set consistent tangent evidence for region contact.
+
+    Active accepted rows must use the constraint-region gap Jacobian, the
+    linear pressure-overclosure derivative, and a source solve that actually
+    exercised the region tangent.  This is intentionally checked before nodal
+    pressure and cloud comparison gates.
+    """
+
+    active_rows: list[Row] = []
+    for row in history_rows:
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        active_area = _finite_row_float(row, "contact_active_area") or 0.0
+        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
+        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
+            active_rows.append(row)
+    active_contact_present = len(active_rows) > 0
+    source_solve_count = _row_int_flag(summary, "source_constraint_region_tangent_solve_count", default=0)
+    source_active_rows = _row_int_flag(summary, "source_constraint_region_tangent_active_rows_sum", default=0)
+    source_j_nnz = _row_int_flag(summary, "source_constraint_region_tangent_j_nnz_sum", default=0)
+    source_scale_sum = _finite_row_float(summary, "source_constraint_region_tangent_scale_sum") or 0.0
+    row_source_ok = True
+    row_jacobian_ok = True
+    row_derivative_ok = True
+    row_fixed_active_ok = True
+    row_active_count_ok = True
+    row_scale_ok = True
+    row_solve_ok = True
+    max_active_count_mismatch = 0
+    for row in active_rows:
+        tangent_active = _row_int_flag(row, "contact_tangent_active_region_count", default=-1)
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        max_active_count_mismatch = max(max_active_count_mismatch, abs(tangent_active - active_regions))
+        row_source_ok = row_source_ok and str(row.get("contact_tangent_source", "")) == "constraint_region_arrays"
+        row_jacobian_ok = (
+            row_jacobian_ok
+            and str(row.get("contact_tangent_gap_jacobian_source", "")) == "constraint_region_fixed_payload"
+        )
+        row_derivative_ok = (
+            row_derivative_ok
+            and str(row.get("contact_tangent_pressure_derivative", "")) == "linear_penalty_active_set"
+        )
+        row_fixed_active_ok = row_fixed_active_ok and _row_int_flag(row, "contact_tangent_fixed_active_set") == 1
+        row_active_count_ok = row_active_count_ok and tangent_active == active_regions
+        row_scale_ok = row_scale_ok and (_finite_row_float(row, "contact_tangent_scale_sum") or 0.0) > 0.0
+        row_solve_ok = row_solve_ok and _row_int_flag(row, "source_constraint_region_tangent_solve_count") > 0
+    summary_tangent_used = (not active_contact_present) or (
+        source_solve_count > 0 and source_active_rows > 0 and source_j_nnz > 0 and source_scale_sum > 0.0
+    )
+    rows_ok = (
+        row_source_ok
+        and row_jacobian_ok
+        and row_derivative_ok
+        and row_fixed_active_ok
+        and row_active_count_ok
+        and row_scale_ok
+        and row_solve_ok
+    )
+    gate_passed = int((not active_contact_present) or (bool(summary_tangent_used) and bool(rows_ok)))
+    return {
+        "constraint_region_tangent_gate_passed": gate_passed,
+        "comparison_stage": "constraint_region_tangent_before_clouds",
+        "constraint_region_tangent_active_contact_present": int(active_contact_present),
+        "constraint_region_tangent_active_history_row_count": int(len(active_rows)),
+        "constraint_region_tangent_summary_used": int(summary_tangent_used),
+        "constraint_region_tangent_row_source_ok": int(row_source_ok),
+        "constraint_region_tangent_row_jacobian_ok": int(row_jacobian_ok),
+        "constraint_region_tangent_row_pressure_derivative_ok": int(row_derivative_ok),
+        "constraint_region_tangent_row_fixed_active_set_ok": int(row_fixed_active_ok),
+        "constraint_region_tangent_row_active_count_ok": int(row_active_count_ok),
+        "constraint_region_tangent_row_scale_ok": int(row_scale_ok),
+        "constraint_region_tangent_row_solve_ok": int(row_solve_ok),
+        "constraint_region_tangent_max_active_count_mismatch": int(max_active_count_mismatch),
+        "constraint_region_tangent_source_solve_count": int(source_solve_count),
+        "constraint_region_tangent_source_active_rows_sum": int(source_active_rows),
+        "constraint_region_tangent_source_j_nnz_sum": int(source_j_nnz),
+        "constraint_region_tangent_source_scale_sum": float(source_scale_sum),
+    }
+
+
 def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 10) -> Row:
     """Gate the full-gear comparison ladder before nodal pressure/cloud checks.
 
@@ -429,6 +509,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
 
     source_trial_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
     source_convergence_passed = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    tangent_passed = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=1)
     contact_total_passed = _row_int_flag(summary, "contact_total_gate_passed", default=0)
     nodal_deferred = _row_int_flag(summary, "contact_total_nodal_cpress_deferred", default=0)
     no_nodal_priority_columns = _row_int_flag(summary, "contact_total_no_nodal_priority_columns", default=0)
@@ -443,6 +524,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     base_gate_passed = int(
         bool(source_trial_passed)
         and bool(source_convergence_passed)
+        and bool(tangent_passed)
         and bool(contact_total_passed)
         and bool(nodal_deferred)
         and bool(no_nodal_priority_columns)
@@ -459,6 +541,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_ready_for_stress_cloud_comparison": strict_sync_ready,
         "full_gear_entry_source_trial_gate_passed": int(source_trial_passed),
         "full_gear_entry_source_convergence_gate_passed": int(source_convergence_passed),
+        "full_gear_entry_constraint_region_tangent_gate_passed": int(tangent_passed),
         "full_gear_entry_contact_total_gate_passed": int(contact_total_passed),
         "full_gear_entry_nodal_cpress_deferred": int(nodal_deferred),
         "full_gear_entry_no_nodal_priority_columns": int(no_nodal_priority_columns),
@@ -488,6 +571,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     """
 
     source_ok = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    tangent_ok = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=0)
     totals_ok = _row_int_flag(summary, "contact_total_gate_passed", default=0)
     entry_ok = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
     strict_ok = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
@@ -496,7 +580,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     animation_metrics_present = _artifact_present(summary, "animation_metric_errors")
     history_metrics_present = _artifact_present(summary, "history_metric_errors")
 
-    region_allowed = int(bool(source_ok) and bool(totals_ok))
+    region_allowed = int(bool(source_ok) and bool(tangent_ok) and bool(totals_ok))
     nodal_allowed = int(
         bool(entry_ok)
         and bool(sfc_manifest_present)
@@ -530,6 +614,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "artifact_path": str(summary.get(artifact_key, "")),
             "blocking_reason": "" if allowed else blocking_reason,
             "source_convergence_gate_passed": int(source_ok),
+            "constraint_region_tangent_gate_passed": int(tangent_ok),
             "contact_total_gate_passed": int(totals_ok),
             "full_gear_entry_gate_passed": int(entry_ok),
             "full_gear_strict_sync_ready": int(strict_ok),
@@ -1148,6 +1233,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source unstable accepted steps: {summary.get('source_unstable_accepted_count', '')}",
         f"- source line-search unstable count: {summary.get('source_line_search_unstable_count', '')}",
         f"- source constraint-region tangent solves: {summary.get('source_constraint_region_tangent_solve_count', '')}",
+        f"- constraint-region tangent gate: {summary.get('constraint_region_tangent_gate_passed', '')}",
         f"- contact-total gate: {summary.get('contact_total_gate_passed', '')}",
         f"- full-gear entry gate: {summary.get('full_gear_entry_gate_passed', '')}",
         "- full-gear strict-sync ready: "
@@ -1181,6 +1267,10 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
     ]
     if summary.get("source_convergence_gate"):
         lines.append(f"- source convergence gate CSV: `{Path(str(summary.get('source_convergence_gate'))).name}`")
+    if summary.get("constraint_region_tangent_gate"):
+        lines.append(
+            f"- constraint-region tangent gate CSV: `{Path(str(summary.get('constraint_region_tangent_gate'))).name}`"
+        )
     if summary.get("contact_total_priority_metrics"):
         lines.append(f"- contact-total priority metrics: `{Path(str(summary.get('contact_total_priority_metrics'))).name}`")
     if summary.get("contact_total_gate"):
@@ -1512,6 +1602,11 @@ def run_full_gear(
     _write_csv(source_convergence_gate_path, [source_convergence_gate])
     summary.update(source_convergence_gate)
     summary["source_convergence_gate"] = str(source_convergence_gate_path)
+    constraint_tangent_gate = constraint_region_tangent_gate_metrics(summary, history)
+    constraint_tangent_gate_path = out_dir / "sfc_constraint_region_tangent_gate.csv"
+    _write_csv(constraint_tangent_gate_path, [constraint_tangent_gate])
+    summary.update(constraint_tangent_gate)
+    summary["constraint_region_tangent_gate"] = str(constraint_tangent_gate_path)
     full_gear_entry_gate = full_gear_entry_gate_metrics(summary)
     full_gear_entry_gate_path = out_dir / "sfc_full_gear_entry_gate.csv"
     _write_csv(full_gear_entry_gate_path, [full_gear_entry_gate])
