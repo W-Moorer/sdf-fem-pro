@@ -35,6 +35,7 @@ from validation.run_calculix_deformable_sdf_contact_validation import build_two_
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  # noqa: E402
     _aggregate_contact_sample_arrays,
     _assemble_contact_arrays_force_only,
+    _constraint_region_contact_law_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
 )
 from validation.run_two_block_sliding_region_validation import _contact_samples_to_arrays, _write_csv  # noqa: E402
@@ -56,6 +57,76 @@ def _flat_punch_positions(reference_nodes: np.ndarray, *, lower_node_count: int,
     x = np.asarray(reference_nodes, dtype=float).copy()
     x[int(lower_node_count) :, 2] -= float(approach)
     return x
+
+
+def flat_punch_rf_penetration_gate_metrics(
+    rows: list[Row],
+    *,
+    max_force_rel_error: float = 1.0e-10,
+    max_energy_rel_error: float = 1.0e-10,
+) -> Row:
+    """Gate the first validation layer before sliding or pressure clouds.
+
+    The flat punch layer is a total-quantity check: RF/penetration, contact
+    virtual work/energy, active area, and region count.  It intentionally does
+    not use nodal CPRESS/COPEN fields.  Active rows must also prove that their
+    force came from secondary constraint regions, not independent quadrature
+    penalties.
+    """
+
+    positive_force_errors = [
+        float(row["normal_force_rel_error"])
+        for row in rows
+        if float(row.get("expected_normal_force", 0.0)) > 0.0
+    ]
+    positive_energy_errors = [
+        float(row["contact_energy_rel_error"])
+        for row in rows
+        if float(row.get("expected_contact_energy", 0.0)) > 0.0
+    ]
+    active_rows = [
+        row
+        for row in rows
+        if int(float(row.get("active_contact_region_count", row.get("active_contact_samples", 0)))) > 0
+        or float(row.get("contact_active_area", 0.0)) > 0.0
+        or float(row.get("normal_force", 0.0)) > 0.0
+    ]
+    no_nodal_clouds = all(int(float(row.get("nodal_cpress_deferred", 0))) == 1 for row in rows)
+    active_area_present = bool(active_rows) and all(float(row.get("contact_active_area", 0.0)) > 0.0 for row in active_rows)
+    region_count_present = bool(rows) and all(int(float(row.get("constraint_regions", 0))) >= 0 for row in rows)
+    law_rows_ok = True
+    for row in active_rows:
+        law_rows_ok = law_rows_ok and str(row.get("contact_constraint_law_source", "")) == "slave_node_region_constraint"
+        law_rows_ok = (
+            law_rows_ok
+            and str(row.get("contact_constraint_open_closed_source", "")) == "signed_area_average_region_gap"
+            and str(row.get("contact_constraint_normal_source", "")) == "area_average_region_normal"
+            and str(row.get("contact_constraint_force_distribution", "")) == "region_area_slave_shape_master_payload"
+            and int(float(row.get("contact_constraint_independent_quadrature_penalty_disabled", 0))) == 1
+        )
+    force_error_max = float(max(positive_force_errors) if positive_force_errors else 0.0)
+    energy_error_max = float(max(positive_energy_errors) if positive_energy_errors else 0.0)
+    force_ok = force_error_max <= float(max_force_rel_error)
+    energy_ok = energy_error_max <= float(max_energy_rel_error)
+    gate_passed = bool(rows) and force_ok and energy_ok and no_nodal_clouds and active_area_present and region_count_present and law_rows_ok
+    return {
+        "flat_punch_rf_penetration_gate_passed": int(gate_passed),
+        "comparison_stage": "flat_punch_rf_penetration_before_sliding_or_clouds",
+        "flat_punch_reference_source": "analytic_linear_pressure_overclosure",
+        "flat_punch_row_count": int(len(rows)),
+        "flat_punch_active_row_count": int(len(active_rows)),
+        "flat_punch_max_normal_force_rel_error": force_error_max,
+        "flat_punch_max_contact_energy_rel_error": energy_error_max,
+        "flat_punch_max_force_rel_error_threshold": float(max_force_rel_error),
+        "flat_punch_max_energy_rel_error_threshold": float(max_energy_rel_error),
+        "flat_punch_force_gate_passed": int(force_ok),
+        "flat_punch_energy_gate_passed": int(energy_ok),
+        "flat_punch_nodal_cpress_deferred": int(no_nodal_clouds),
+        "flat_punch_active_area_present": int(active_area_present),
+        "flat_punch_region_count_present": int(region_count_present),
+        "flat_punch_constraint_region_law_gate_passed": int(law_rows_ok),
+        "flat_punch_ready_for_two_block_sliding": int(gate_passed),
+    }
 
 
 def run_validation(
@@ -102,6 +173,11 @@ def run_validation(
             raise RuntimeError("slave_node_region_constraint aggregation unexpectedly fell back")
         response = _assemble_contact_arrays_force_only(regions, model.nodes.shape[0], stiffness=float(pressure_stiffness))
         region_metrics = _contact_region_integral_metrics_from_arrays(regions, stiffness=float(pressure_stiffness))
+        law_metrics = _constraint_region_contact_law_metrics_from_arrays(
+            regions,
+            arrays,
+            averaging_mode="slave_node_region_constraint",
+        )
         active_area = float(region_metrics["contact_active_area"])
         expected_force = float(pressure_stiffness) * active_area * float(penetration)
         expected_energy = 0.5 * float(pressure_stiffness) * active_area * float(penetration) ** 2
@@ -109,6 +185,9 @@ def run_validation(
         energy_abs_error = abs(float(response.energy) - expected_energy)
         row: Row = {
             "step": int(step),
+            "comparison_stage": "flat_punch_rf_penetration_before_sliding_or_clouds",
+            "nodal_cpress_deferred": 1,
+            "reference_source": "analytic_linear_pressure_overclosure",
             "penetration": float(penetration),
             "raw_quadrature_samples": int(len(samples)),
             "constraint_regions": int(np.asarray(regions["gaps"]).size),
@@ -124,33 +203,31 @@ def run_validation(
             "min_region_gap": float(np.min(np.asarray(regions["gaps"], dtype=float))) if np.asarray(regions["gaps"]).size else 0.0,
         }
         row.update(region_metrics)
+        row.update(law_metrics)
         rows.append(row)
     wall = time.perf_counter() - start
     totals_path = out_dir / "flat_punch_rf_penetration.csv"
+    gate_path = out_dir / "flat_punch_rf_penetration_gate.csv"
     summary_path = out_dir / "flat_punch_region_summary.md"
     summary_csv = out_dir / "flat_punch_region_summary.csv"
     _write_csv(totals_path, rows)
-    positive_force_errors = [
-        float(row["normal_force_rel_error"])
-        for row in rows
-        if float(row["expected_normal_force"]) > 0.0
-    ]
-    positive_energy_errors = [
-        float(row["contact_energy_rel_error"])
-        for row in rows
-        if float(row["expected_contact_energy"]) > 0.0
-    ]
+    gate = flat_punch_rf_penetration_gate_metrics(rows)
+    _write_csv(gate_path, [gate])
     summary: Row = {
         "status": "completed",
         "resolution": int(resolution),
         "penetration_count": int(len(penetrations)),
-        "max_normal_force_rel_error": float(max(positive_force_errors) if positive_force_errors else 0.0),
-        "max_contact_energy_rel_error": float(max(positive_energy_errors) if positive_energy_errors else 0.0),
+        "max_normal_force_rel_error": float(gate["flat_punch_max_normal_force_rel_error"]),
+        "max_contact_energy_rel_error": float(gate["flat_punch_max_contact_energy_rel_error"]),
+        "flat_punch_rf_penetration_gate_passed": int(gate["flat_punch_rf_penetration_gate_passed"]),
+        "flat_punch_ready_for_two_block_sliding": int(gate["flat_punch_ready_for_two_block_sliding"]),
         "active_area_final": float(rows[-1]["contact_active_area"]) if rows else 0.0,
         "normal_force_final": float(rows[-1]["normal_force"]) if rows else 0.0,
         "analysis_wall_seconds": float(wall),
         "totals_csv": str(totals_path),
+        "gate_csv": str(gate_path),
     }
+    summary.update(gate)
     _write_csv(summary_csv, [summary])
     summary_path.write_text(
         "\n".join(
@@ -163,9 +240,13 @@ def run_validation(
                 f"- penetration count: {summary['penetration_count']}",
                 f"- max normal-force relative error: {summary['max_normal_force_rel_error']:.12e}",
                 f"- max contact-energy relative error: {summary['max_contact_energy_rel_error']:.12e}",
+                f"- RF/penetration gate: {'PASS' if int(summary['flat_punch_rf_penetration_gate_passed']) else 'FAIL'}",
+                f"- nodal CPRESS/COPEN deferred: {'yes' if int(summary['flat_punch_nodal_cpress_deferred']) else 'no'}",
+                f"- constraint-region law gate: {'PASS' if int(summary['flat_punch_constraint_region_law_gate_passed']) else 'FAIL'}",
                 f"- final active area: {summary['active_area_final']:.12e}",
                 f"- final normal force: {summary['normal_force_final']:.12e}",
                 f"- totals CSV: `{totals_path.name}`",
+                f"- gate CSV: `{gate_path.name}`",
             ]
         )
         + "\n",
