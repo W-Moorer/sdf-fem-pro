@@ -29,6 +29,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_active_region_continuity_metrics_from_arrays,
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
+    _constraint_region_contact_law_metrics_from_arrays,
     _contact_patch_representative_length,
     _cropped_patch_contact_gate_metrics,
     _constraint_region_gap_jacobian_sparse_from_arrays,
@@ -747,6 +748,44 @@ def test_array_constraint_region_closed_force_from_region_gap() -> None:
     assert response.active_count == 3
     assert response.normal_force == pytest.approx(20.0)
     assert response.energy == pytest.approx(1.0)
+
+
+def test_constraint_region_contact_law_metrics_describe_region_status_and_distribution() -> None:
+    raw = {
+        "gaps": np.asarray([-0.30, 0.10], dtype=float),
+    }
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.5, 0.3, 0.2], [0.5, 0.3, 0.2]], dtype=float),
+        "gaps": np.asarray([-0.30, 0.10], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([1.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6]], dtype=np.int64),
+        "master_weights": np.asarray([[0.2, 0.3, 0.5], [0.2, 0.3, 0.5]], dtype=float),
+    }
+
+    region = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
+    assert region is not None
+    metrics = _constraint_region_contact_law_metrics_from_arrays(
+        region,
+        raw,
+        averaging_mode="slave_node_region_constraint",
+    )
+
+    assert metrics["contact_constraint_law_source"] == "slave_node_region_constraint"
+    assert metrics["contact_constraint_region_source"] == "secondary_node_constraint_region"
+    assert metrics["contact_constraint_open_closed_source"] == "signed_area_average_region_gap"
+    assert metrics["contact_constraint_active_status_source"] == "aggregated_region_gap"
+    assert metrics["contact_constraint_normal_source"] == "area_average_region_normal"
+    assert metrics["contact_constraint_region_area_source"] == "slave_shape_tributary_area"
+    assert metrics["contact_constraint_force_distribution"] == "region_area_slave_shape_master_payload"
+    assert metrics["contact_constraint_raw_sample_count"] == 2
+    assert metrics["contact_constraint_region_count"] == 3
+    assert metrics["contact_constraint_active_region_count"] == 3
+    assert metrics["contact_constraint_secondary_node_regions_present"] == 1
+    assert metrics["contact_constraint_master_payload_present"] == 1
+    assert metrics["contact_constraint_area_positive"] == 1
+    assert metrics["contact_constraint_independent_quadrature_penalty_disabled"] == 1
 
 
 def test_contact_active_signature_detects_status_changes() -> None:

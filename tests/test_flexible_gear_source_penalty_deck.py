@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
 from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
+    constraint_region_contact_law_gate_metrics,
     constraint_region_tangent_gate_metrics,
     full_gear_evidence_ladder_rows,
     full_gear_entry_gate_metrics,
@@ -89,6 +90,42 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
     assert int(failed["constraint_region_tangent_row_source_ok"]) == 0
 
 
+def test_constraint_region_contact_law_gate_rejects_independent_sample_penalty() -> None:
+    history = [
+        {
+            "active_contact_region_count": 2,
+            "contact_active_area": 1.0,
+            "contact_region_normal_force": 5.0,
+            "contact_constraint_law_source": "slave_node_region_constraint",
+            "contact_constraint_open_closed_source": "signed_area_average_region_gap",
+            "contact_constraint_active_status_source": "aggregated_region_gap",
+            "contact_constraint_normal_source": "area_average_region_normal",
+            "contact_constraint_region_area_source": "slave_shape_tributary_area",
+            "contact_constraint_force_distribution": "region_area_slave_shape_master_payload",
+            "contact_constraint_secondary_node_regions_present": 1,
+            "contact_constraint_master_payload_present": 1,
+            "contact_constraint_area_positive": 1,
+            "contact_constraint_independent_quadrature_penalty_disabled": 1,
+            "contact_constraint_raw_sample_count": 8,
+            "contact_constraint_region_count": 2,
+        }
+    ]
+
+    gate = constraint_region_contact_law_gate_metrics(history)
+
+    assert int(gate["constraint_region_contact_law_gate_passed"]) == 1
+    assert float(gate["constraint_region_contact_law_max_raw_to_region_ratio"]) == 4.0
+
+    independent_sample = [dict(history[0])]
+    independent_sample[0]["contact_constraint_law_source"] = "none"
+    independent_sample[0]["contact_constraint_independent_quadrature_penalty_disabled"] = 0
+    failed = constraint_region_contact_law_gate_metrics(independent_sample)
+
+    assert int(failed["constraint_region_contact_law_gate_passed"]) == 0
+    assert int(failed["constraint_region_contact_law_row_law_ok"]) == 0
+    assert int(failed["constraint_region_contact_law_no_independent_quadrature_penalty"]) == 0
+
+
 def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
     history = [
         {
@@ -134,6 +171,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     summary = {
         "source_trial_gate_passed": 1,
         "source_convergence_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "contact_total_gate_passed": 1,
         "path_tracking_gate_passed": 1,
@@ -167,11 +205,19 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     assert int(failed_path["full_gear_entry_gate_passed"]) == 0
     assert int(failed_path["full_gear_entry_path_tracking_gate_passed"]) == 0
 
+    missing_law = dict(summary)
+    missing_law["constraint_region_contact_law_gate_passed"] = 0
+    failed_law = full_gear_entry_gate_metrics(missing_law)
+
+    assert int(failed_law["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_law["full_gear_entry_constraint_region_contact_law_gate_passed"]) == 0
+
 
 def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
     summary = {
         "source_trial_gate_passed": 1,
         "source_convergence_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "contact_total_gate_passed": 1,
         "contact_total_nodal_cpress_deferred": 1,
@@ -194,6 +240,7 @@ def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
 def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
     summary = {
         "source_convergence_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "path_tracking_gate_passed": 1,
         "contact_total_gate_passed": 1,
@@ -217,6 +264,7 @@ def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
 def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
     summary = {
         "source_convergence_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "path_tracking_gate_passed": 1,
         "contact_total_gate_passed": 1,
@@ -514,6 +562,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary
+    assert "constraint_region_contact_law_gate" in summary
     assert "constraint_region_tangent_gate" in summary
     assert "path_tracking_gate" in summary
     assert "contact_total_gate" in summary
@@ -521,6 +570,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "full_gear_evidence_ladder" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
     assert int(summary["source_convergence_gate_passed"]) == 1
+    assert int(summary["constraint_region_contact_law_gate_passed"]) == 1
     assert int(summary["constraint_region_tangent_gate_passed"]) == 1
     assert int(summary["path_tracking_gate_passed"]) == 1
     assert int(summary["contact_total_gate_passed"]) == 1
@@ -529,6 +579,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
     trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
     convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
+    contact_law_gate_csv = tmp_path / "sfc_constraint_region_contact_law_gate.csv"
     tangent_gate_csv = tmp_path / "sfc_constraint_region_tangent_gate.csv"
     path_tracking_gate_csv = tmp_path / "sfc_path_tracking_gate.csv"
     contact_total_gate_csv = tmp_path / "sfc_contact_total_gate.csv"
@@ -537,6 +588,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
     assert convergence_gate_csv.exists()
+    assert contact_law_gate_csv.exists()
     assert tangent_gate_csv.exists()
     assert path_tracking_gate_csv.exists()
     assert contact_total_gate_csv.exists()
@@ -545,6 +597,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
     assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
+    assert "constraint_region_contact_law_gate_passed" in contact_law_gate_csv.read_text(encoding="utf-8")
     assert "constraint_region_tangent_gate_passed" in tangent_gate_csv.read_text(encoding="utf-8")
     assert "path_tracking_gate_passed" in path_tracking_gate_csv.read_text(encoding="utf-8")
     assert "contact_total_gate_passed" in contact_total_gate_csv.read_text(encoding="utf-8")

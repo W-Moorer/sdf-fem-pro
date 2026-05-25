@@ -567,6 +567,92 @@ def _contact_region_integral_metrics_from_samples(samples: list[ContactSample] |
     }
 
 
+def _constraint_region_contact_law_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    raw_sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    averaging_mode: str,
+) -> Row:
+    """Describe the active contact law used by accepted region rows.
+
+    This is a provenance/claim-gate helper, not a separate contact model.  It
+    records whether the accepted response is assembled from secondary
+    constraint regions with signed area-average gap status, area-average
+    normal direction, region area, slave shape-function support, and master
+    closest-feature payload.  Those are the quantities needed before comparing
+    Abaqus-style totals and pressure clouds.
+    """
+
+    mode = str(averaging_mode).lower()
+    try:
+        base_mode, overclosure_mode = _contact_averaging_modes(mode)
+    except ValueError:
+        base_mode, overclosure_mode = "invalid", "invalid"
+    if sample_arrays is None:
+        return {
+            "contact_constraint_law_source": "none",
+            "contact_constraint_region_source": "none",
+            "contact_constraint_open_closed_source": "none",
+            "contact_constraint_active_status_source": "none",
+            "contact_constraint_normal_source": "none",
+            "contact_constraint_region_area_source": "none",
+            "contact_constraint_force_distribution": "none",
+            "contact_constraint_raw_sample_count": (
+                int(np.asarray(raw_sample_arrays.get("gaps", np.empty(0))).size)
+                if raw_sample_arrays is not None
+                else ""
+            ),
+            "contact_constraint_region_count": 0,
+            "contact_constraint_active_region_count": 0,
+            "contact_constraint_secondary_node_regions_present": 0,
+            "contact_constraint_master_payload_present": 0,
+            "contact_constraint_area_positive": 0,
+            "contact_constraint_independent_quadrature_penalty_disabled": 0,
+        }
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    areas = np.asarray(sample_arrays.get("areas", np.empty(0)), dtype=float).reshape(-1)
+    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    master_nodes = np.asarray(sample_arrays.get("master_node_ids", np.empty((0, 0))), dtype=np.int64)
+    master_weights = np.asarray(sample_arrays.get("master_weights", np.empty((0, 0))), dtype=float)
+    raw_count: int | str = ""
+    if raw_sample_arrays is not None:
+        raw_count = int(np.asarray(raw_sample_arrays.get("gaps", np.empty(0))).size)
+    is_constraint_region = base_mode == "slave_node_region" and overclosure_mode == "signed_average"
+    secondary_present = bool(gaps.size == 0 or (secondary_ids.shape == gaps.shape and np.all(secondary_ids >= 0)))
+    if master_nodes.ndim == 2 and master_weights.ndim == 2 and master_nodes.shape == master_weights.shape:
+        weight_sum = np.sum(np.maximum(master_weights, 0.0), axis=1) if master_weights.size else np.empty(0)
+        master_payload_present = bool(gaps.size == 0 or (weight_sum.shape == gaps.shape and np.all(weight_sum > 0.0)))
+    else:
+        master_payload_present = False
+    area_positive = bool(gaps.size == 0 or (areas.shape == gaps.shape and np.all(areas > 0.0)))
+    return {
+        "contact_constraint_law_source": mode,
+        "contact_constraint_region_source": (
+            "secondary_node_constraint_region" if base_mode == "slave_node_region" else base_mode
+        ),
+        "contact_constraint_open_closed_source": (
+            "signed_area_average_region_gap" if overclosure_mode == "signed_average" else overclosure_mode
+        ),
+        "contact_constraint_active_status_source": "aggregated_region_gap" if is_constraint_region else overclosure_mode,
+        "contact_constraint_normal_source": (
+            "area_average_region_normal" if overclosure_mode == "signed_average" else "overclosure_weighted_region_normal"
+        ),
+        "contact_constraint_region_area_source": (
+            "slave_shape_tributary_area" if base_mode == "slave_node_region" else "sample_or_face_area"
+        ),
+        "contact_constraint_force_distribution": (
+            "region_area_slave_shape_master_payload" if is_constraint_region else "sample_area_sample_shape_payload"
+        ),
+        "contact_constraint_raw_sample_count": raw_count,
+        "contact_constraint_region_count": int(gaps.size),
+        "contact_constraint_active_region_count": int(np.count_nonzero(gaps < 0.0)) if gaps.size else 0,
+        "contact_constraint_secondary_node_regions_present": int(secondary_present),
+        "contact_constraint_master_payload_present": int(master_payload_present),
+        "contact_constraint_area_positive": int(area_positive),
+        "contact_constraint_independent_quadrature_penalty_disabled": int(is_constraint_region),
+    }
+
+
 def _source_contact_active_set_is_stable(
     active_signature: tuple[tuple[int, ...], ...],
     previous_active_signature: tuple[tuple[int, ...], ...] | None,
@@ -5722,6 +5808,11 @@ def solve_sfc_source_drive_pair(
             if last_sample_arrays is not None
             else _contact_region_integral_metrics_from_samples(last_samples)
         )
+        contact_law_metrics = _constraint_region_contact_law_metrics_from_arrays(
+            last_sample_arrays,
+            last_raw_sample_arrays,
+            averaging_mode=contact_averaging,
+        )
         contact_tangent_metrics = _constraint_region_tangent_metrics_from_arrays(
             last_sample_arrays,
             pressure_stiffness=pressure_stiffness,
@@ -5804,6 +5895,7 @@ def solve_sfc_source_drive_pair(
             if contact_node_diagnostics is not None:
                 row.update(contact_node_diagnostics.get("metrics", {}))
             row.update(contact_region_metrics)
+            row.update(contact_law_metrics)
             row.update(contact_tangent_metrics)
             row.update(path_tracking_metrics)
             row.update(active_region_continuity_metrics)
@@ -5868,6 +5960,7 @@ def solve_sfc_source_drive_pair(
             frame_row.update(path_tracking_metrics)
             frame_row.update(active_region_continuity_metrics)
             frame_row.update(contact_region_metrics)
+            frame_row.update(contact_law_metrics)
             frame_row.update(contact_tangent_metrics)
             vtk_manifest_rows.append(frame_row)
             vtk_datasets.append((float(t), frame_path))

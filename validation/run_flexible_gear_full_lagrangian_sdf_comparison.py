@@ -75,6 +75,20 @@ CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
     "contact_active_region_continuity_intersection_count",
     "contact_active_region_new_count",
     "contact_active_region_dropped_count",
+    "contact_constraint_law_source",
+    "contact_constraint_region_source",
+    "contact_constraint_open_closed_source",
+    "contact_constraint_active_status_source",
+    "contact_constraint_normal_source",
+    "contact_constraint_region_area_source",
+    "contact_constraint_force_distribution",
+    "contact_constraint_raw_sample_count",
+    "contact_constraint_region_count",
+    "contact_constraint_active_region_count",
+    "contact_constraint_secondary_node_regions_present",
+    "contact_constraint_master_payload_present",
+    "contact_constraint_area_positive",
+    "contact_constraint_independent_quadrature_penalty_disabled",
     "contact_secondary_pressure_recovery_source",
 )
 
@@ -504,6 +518,89 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
     }
 
 
+def constraint_region_contact_law_gate_metrics(history_rows: list[Row]) -> Row:
+    """Gate that accepted active contact uses region constraints, not samples.
+
+    Active accepted rows must prove that open/closed status comes from the
+    signed area-average region gap, that the contact direction is the region
+    average normal, and that forces are distributed through the region area,
+    slave shape-function support, and master closest-feature payload.
+    """
+
+    active_rows: list[Row] = []
+    for row in history_rows:
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        active_area = _finite_row_float(row, "contact_active_area") or 0.0
+        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
+        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
+            active_rows.append(row)
+    active_contact_present = len(active_rows) > 0
+    row_law_ok = True
+    row_gap_ok = True
+    row_normal_ok = True
+    row_distribution_ok = True
+    row_region_area_ok = True
+    row_secondary_ok = True
+    row_master_payload_ok = True
+    row_area_positive_ok = True
+    row_no_independent_sample_penalty_ok = True
+    max_raw_to_region_ratio = 0.0
+    for row in active_rows:
+        row_law_ok = row_law_ok and str(row.get("contact_constraint_law_source", "")) == "slave_node_region_constraint"
+        row_gap_ok = (
+            row_gap_ok
+            and str(row.get("contact_constraint_open_closed_source", "")) == "signed_area_average_region_gap"
+            and str(row.get("contact_constraint_active_status_source", "")) == "aggregated_region_gap"
+        )
+        row_normal_ok = row_normal_ok and str(row.get("contact_constraint_normal_source", "")) == "area_average_region_normal"
+        row_region_area_ok = (
+            row_region_area_ok
+            and str(row.get("contact_constraint_region_area_source", "")) == "slave_shape_tributary_area"
+        )
+        row_distribution_ok = (
+            row_distribution_ok
+            and str(row.get("contact_constraint_force_distribution", "")) == "region_area_slave_shape_master_payload"
+        )
+        row_secondary_ok = row_secondary_ok and _row_int_flag(row, "contact_constraint_secondary_node_regions_present") == 1
+        row_master_payload_ok = row_master_payload_ok and _row_int_flag(row, "contact_constraint_master_payload_present") == 1
+        row_area_positive_ok = row_area_positive_ok and _row_int_flag(row, "contact_constraint_area_positive") == 1
+        row_no_independent_sample_penalty_ok = (
+            row_no_independent_sample_penalty_ok
+            and _row_int_flag(row, "contact_constraint_independent_quadrature_penalty_disabled") == 1
+        )
+        raw_count = _finite_row_float(row, "contact_constraint_raw_sample_count")
+        region_count = _finite_row_float(row, "contact_constraint_region_count")
+        if raw_count is not None and region_count is not None and region_count > 0.0:
+            max_raw_to_region_ratio = max(max_raw_to_region_ratio, float(raw_count) / float(region_count))
+    rows_ok = (
+        row_law_ok
+        and row_gap_ok
+        and row_normal_ok
+        and row_distribution_ok
+        and row_region_area_ok
+        and row_secondary_ok
+        and row_master_payload_ok
+        and row_area_positive_ok
+        and row_no_independent_sample_penalty_ok
+    )
+    return {
+        "constraint_region_contact_law_gate_passed": int((not active_contact_present) or rows_ok),
+        "comparison_stage": "constraint_region_contact_law_before_totals",
+        "constraint_region_contact_law_active_contact_present": int(active_contact_present),
+        "constraint_region_contact_law_active_history_row_count": int(len(active_rows)),
+        "constraint_region_contact_law_row_law_ok": int(row_law_ok),
+        "constraint_region_contact_law_row_gap_status_ok": int(row_gap_ok),
+        "constraint_region_contact_law_row_normal_ok": int(row_normal_ok),
+        "constraint_region_contact_law_row_region_area_ok": int(row_region_area_ok),
+        "constraint_region_contact_law_row_distribution_ok": int(row_distribution_ok),
+        "constraint_region_contact_law_row_secondary_region_ok": int(row_secondary_ok),
+        "constraint_region_contact_law_row_master_payload_ok": int(row_master_payload_ok),
+        "constraint_region_contact_law_row_area_positive_ok": int(row_area_positive_ok),
+        "constraint_region_contact_law_no_independent_quadrature_penalty": int(row_no_independent_sample_penalty_ok),
+        "constraint_region_contact_law_max_raw_to_region_ratio": float(max_raw_to_region_ratio),
+    }
+
+
 def path_tracking_gate_metrics(
     history_rows: list[Row],
     *,
@@ -618,6 +715,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
 
     source_trial_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
     source_convergence_passed = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    contact_law_passed = _row_int_flag(summary, "constraint_region_contact_law_gate_passed", default=1)
     tangent_passed = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=1)
     contact_total_passed = _row_int_flag(summary, "contact_total_gate_passed", default=0)
     nodal_deferred = _row_int_flag(summary, "contact_total_nodal_cpress_deferred", default=0)
@@ -638,6 +736,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     base_gate_passed = int(
         bool(source_trial_passed)
         and bool(source_convergence_passed)
+        and bool(contact_law_passed)
         and bool(tangent_passed)
         and bool(contact_total_passed)
         and bool(path_tracking_passed)
@@ -656,6 +755,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_ready_for_stress_cloud_comparison": strict_sync_ready,
         "full_gear_entry_source_trial_gate_passed": int(source_trial_passed),
         "full_gear_entry_source_convergence_gate_passed": int(source_convergence_passed),
+        "full_gear_entry_constraint_region_contact_law_gate_passed": int(contact_law_passed),
         "full_gear_entry_constraint_region_tangent_gate_passed": int(tangent_passed),
         "full_gear_entry_contact_total_gate_passed": int(contact_total_passed),
         "full_gear_entry_path_tracking_gate_passed": int(path_tracking_passed),
@@ -687,6 +787,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     """
 
     source_ok = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    law_ok = _row_int_flag(summary, "constraint_region_contact_law_gate_passed", default=0)
     tangent_ok = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=0)
     path_ok = _row_int_flag(summary, "path_tracking_gate_passed", default=0)
     totals_ok = _row_int_flag(summary, "contact_total_gate_passed", default=0)
@@ -697,7 +798,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     animation_metrics_present = _artifact_present(summary, "animation_metric_errors")
     history_metrics_present = _artifact_present(summary, "history_metric_errors")
 
-    region_allowed = int(bool(source_ok) and bool(tangent_ok) and bool(path_ok) and bool(totals_ok))
+    region_allowed = int(bool(source_ok) and bool(law_ok) and bool(tangent_ok) and bool(path_ok) and bool(totals_ok))
     nodal_allowed = int(
         bool(entry_ok)
         and bool(sfc_manifest_present)
@@ -731,6 +832,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "artifact_path": str(summary.get(artifact_key, "")),
             "blocking_reason": "" if allowed else blocking_reason,
             "source_convergence_gate_passed": int(source_ok),
+            "constraint_region_contact_law_gate_passed": int(law_ok),
             "constraint_region_tangent_gate_passed": int(tangent_ok),
             "path_tracking_gate_passed": int(path_ok),
             "contact_total_gate_passed": int(totals_ok),
@@ -1351,6 +1453,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source unstable accepted steps: {summary.get('source_unstable_accepted_count', '')}",
         f"- source line-search unstable count: {summary.get('source_line_search_unstable_count', '')}",
         f"- source constraint-region tangent solves: {summary.get('source_constraint_region_tangent_solve_count', '')}",
+        f"- constraint-region contact-law gate: {summary.get('constraint_region_contact_law_gate_passed', '')}",
         f"- constraint-region tangent gate: {summary.get('constraint_region_tangent_gate_passed', '')}",
         f"- accepted-state path tracking gate: {summary.get('path_tracking_gate_passed', '')}",
         f"- contact-total gate: {summary.get('contact_total_gate_passed', '')}",
@@ -1386,6 +1489,10 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
     ]
     if summary.get("source_convergence_gate"):
         lines.append(f"- source convergence gate CSV: `{Path(str(summary.get('source_convergence_gate'))).name}`")
+    if summary.get("constraint_region_contact_law_gate"):
+        lines.append(
+            f"- constraint-region contact-law gate CSV: `{Path(str(summary.get('constraint_region_contact_law_gate'))).name}`"
+        )
     if summary.get("constraint_region_tangent_gate"):
         lines.append(
             f"- constraint-region tangent gate CSV: `{Path(str(summary.get('constraint_region_tangent_gate'))).name}`"
@@ -1723,6 +1830,11 @@ def run_full_gear(
     _write_csv(source_convergence_gate_path, [source_convergence_gate])
     summary.update(source_convergence_gate)
     summary["source_convergence_gate"] = str(source_convergence_gate_path)
+    contact_law_gate = constraint_region_contact_law_gate_metrics(history)
+    contact_law_gate_path = out_dir / "sfc_constraint_region_contact_law_gate.csv"
+    _write_csv(contact_law_gate_path, [contact_law_gate])
+    summary.update(contact_law_gate)
+    summary["constraint_region_contact_law_gate"] = str(contact_law_gate_path)
     constraint_tangent_gate = constraint_region_tangent_gate_metrics(summary, history)
     constraint_tangent_gate_path = out_dir / "sfc_constraint_region_tangent_gate.csv"
     _write_csv(constraint_tangent_gate_path, [constraint_tangent_gate])
