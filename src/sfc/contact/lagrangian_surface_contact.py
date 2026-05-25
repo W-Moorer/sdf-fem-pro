@@ -699,15 +699,23 @@ class LagrangianSDFSurfaceContactGeometry:
                 self.secondary_line_hard_distance_limit is not None
                 and abs_gap > float(self.secondary_line_hard_distance_limit)
             ):
-                if abs_gap < rejected_abs_gap:
-                    rejected_abs_gap = abs_gap
-                    rejected_line = {
-                        "gap": abs_gap,
-                        "normal": contact_normal.copy(),
-                        "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
-                        "master_weights": np.clip(bary, 0.0, 1.0),
-                    }
-                continue
+                closest_payload = self._global_closest_feature_payload(x, master_x, master_faces, cache_key=cache_key)
+                if gap < -1.0e-14 and float(closest_payload["gap"]) <= 1.0e-14:
+                    # Abaqus-style secondary-line tracking should not release
+                    # a large overclosure when the closest current feature is
+                    # also closed.  The hard tube only rejects remote line hits
+                    # over an actually open nearest surface region.
+                    pass
+                else:
+                    if abs_gap < rejected_abs_gap:
+                        rejected_abs_gap = abs_gap
+                        rejected_line = {
+                            "gap": abs_gap,
+                            "normal": contact_normal.copy(),
+                            "master_node_ids": np.asarray(nodes, dtype=np.int64).copy(),
+                            "master_weights": np.clip(bary, 0.0, 1.0),
+                        }
+                    continue
             if (
                 self.secondary_line_distance_limit is not None
                 and abs_gap > float(self.secondary_line_distance_limit)
@@ -1013,7 +1021,15 @@ class LagrangianSDFSurfaceContactGeometry:
             if self.secondary_line_hard_distance_limit is not None:
                 outside_hard = active & (np.abs(gaps) > float(self.secondary_line_hard_distance_limit))
                 if np.any(outside_hard):
-                    gaps[outside_hard] = np.abs(gaps[outside_hard])
+                    outside_active = np.flatnonzero(outside_hard)
+                    outside_local = np.flatnonzero(outside_hard[active])
+                    closed = (
+                        (closest_face_ids[outside_local] >= 0)
+                        & (closest_gaps[outside_local] <= 1.0e-14)
+                    )
+                    release_outside = outside_active[~closed]
+                    if release_outside.size:
+                        gaps[release_outside] = np.abs(gaps[release_outside])
         cache = self._ensure_secondary_face_cache()
         cache[valid_cache_indices] = face_ids
         if bool(self.secondary_path_tracking):

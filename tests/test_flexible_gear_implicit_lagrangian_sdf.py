@@ -979,7 +979,7 @@ def test_secondary_normal_projection_preserves_closed_line_intersection_past_lim
     assert sample.gap == pytest.approx(-0.2)
 
 
-def test_secondary_normal_projection_releases_remote_line_past_hard_limit() -> None:
+def test_secondary_normal_projection_preserves_closed_line_intersection_past_hard_limit() -> None:
     master_nodes = np.asarray(
         [
             [0.0, 0.0, 0.0],
@@ -1012,7 +1012,7 @@ def test_secondary_normal_projection_releases_remote_line_past_hard_limit() -> N
 
     sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
 
-    assert sample.gap == pytest.approx(0.2)
+    assert sample.gap == pytest.approx(-0.2)
 
 
 def test_secondary_line_distance_limit_is_mesh_derived() -> None:
@@ -1059,6 +1059,7 @@ def test_secondary_normal_projection_does_not_overclose_open_closest_feature() -
         search_radius=1.0,
         compiled_batch_projection=False,
         secondary_line_distance_limit=0.01,
+        secondary_line_hard_distance_limit=0.01,
     )
 
     sample = list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))[0]
@@ -1339,7 +1340,7 @@ def test_secondary_normal_projection_sample_arrays_preserve_closed_line_intersec
     assert arrays["gaps"][0] == pytest.approx(-0.2)
 
 
-def test_secondary_normal_projection_sample_arrays_release_remote_line_past_hard_limit() -> None:
+def test_secondary_normal_projection_sample_arrays_preserve_closed_line_past_hard_limit() -> None:
     if not _cpp_projection.secondary_normal_indexed_faces_available():
         pytest.skip("C++ secondary-normal indexed projection backend is unavailable")
     master_nodes = np.asarray(
@@ -1376,7 +1377,7 @@ def test_secondary_normal_projection_sample_arrays_release_remote_line_past_hard
 
     assert arrays is not None
     assert arrays["gaps"].shape == (1,)
-    assert arrays["gaps"][0] == pytest.approx(0.2)
+    assert arrays["gaps"][0] == pytest.approx(-0.2)
 
 
 def test_secondary_normal_projection_sample_arrays_do_not_overclose_open_closest_feature() -> None:
@@ -1412,6 +1413,7 @@ def test_secondary_normal_projection_sample_arrays_do_not_overclose_open_closest
         search_radius=1.0,
         compiled_batch_projection=True,
         secondary_line_distance_limit=0.01,
+        secondary_line_hard_distance_limit=0.01,
     )
 
     arrays = contact.secondary_normal_projection_sample_arrays(np.vstack([master_nodes, slave_nodes]))
