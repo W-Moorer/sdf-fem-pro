@@ -68,6 +68,18 @@ from .hex8 import (
 )
 from .integrator import newmark_beta_step
 from .implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet
+from .increment_control import (
+    AutomaticIncrementEvent,
+    AutomaticIncrementResult,
+    IncrementConvergenceDecision,
+    active_set_line_search_choice,
+    active_set_stability_after_line_search,
+    contact_active_set_is_stable,
+    increment_convergence_decision,
+    increment_cutback_candidate_dt,
+    increment_gate_row,
+    run_automatic_increment_controller,
+)
 from .material import isotropic_linear_elasticity_matrix
 from .rp_mpc import (
     FiniteRotationRigidHubMPC,
@@ -117,6 +129,8 @@ __all__ = [
     "calculix_hht_effective_tangent",
     "assemble_mass_matrix",
     "assemble_stiffness_matrix",
+    "AutomaticIncrementEvent",
+    "AutomaticIncrementResult",
     "evaluate_state",
     "eliminate_fixed_dofs",
     "fixed_dofs_from_node_set",
@@ -131,6 +145,13 @@ __all__ = [
     "hht_step",
     "hht_step_adaptive",
     "hht_step_dirichlet",
+    "IncrementConvergenceDecision",
+    "active_set_line_search_choice",
+    "active_set_stability_after_line_search",
+    "contact_active_set_is_stable",
+    "increment_convergence_decision",
+    "increment_cutback_candidate_dt",
+    "increment_gate_row",
     "hex8_reference_data",
     "C3D8_NATURAL_NODE_COORDS",
     "HEX8_CENTER_NATURAL_GRADIENTS",
@@ -154,6 +175,7 @@ __all__ = [
     "constant_angular_velocity_rotation_history",
     "constant_torque_rotation_history",
     "register_element_backend",
+    "run_automatic_increment_controller",
     "merge_dirichlet_conditions",
     "reduced_hub_rotational_inertia",
     "rotation_matrix_from_vector",

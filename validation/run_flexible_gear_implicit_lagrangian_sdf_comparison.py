@@ -70,6 +70,18 @@ from sfc.fem.calculix_aligned import (  # noqa: E402
     hht_newmark_parameters,
 )
 from sfc.fem.constraints import free_dofs, project_fixed_dofs  # noqa: E402
+from sfc.fem.increment_control import (  # noqa: E402
+    AutomaticIncrementEvent as SourceAutomaticIncrementEvent,
+    AutomaticIncrementResult as SourceAutomaticIncrementResult,
+    IncrementConvergenceDecision as SourceIncrementConvergenceDecision,
+    active_set_line_search_choice as _core_active_set_line_search_choice,
+    active_set_stability_after_line_search as _core_active_set_stability_after_line_search,
+    contact_active_set_is_stable as _core_contact_active_set_is_stable,
+    increment_convergence_decision as _core_increment_convergence_decision,
+    increment_cutback_candidate_dt as _core_increment_cutback_candidate_dt,
+    increment_gate_row as _core_increment_gate_row,
+    run_automatic_increment_controller as _core_run_automatic_increment_controller,
+)
 from sfc.fem.implicit_dirichlet import hht_step_dirichlet, initial_state_dirichlet  # noqa: E402
 from sfc.fem.rp_mpc import RigidHubMPC, build_rigid_hub_reduced_assembly, merge_dirichlet_conditions  # noqa: E402
 from sfc.sdf.material_sdf import MaterialSDF  # noqa: E402
@@ -537,9 +549,11 @@ def _source_contact_active_set_is_stable(
     across iterations.
     """
 
-    if not bool(require_stability):
-        return True
-    return previous_active_signature is not None and active_signature == previous_active_signature
+    return _core_contact_active_set_is_stable(
+        active_signature,
+        previous_active_signature,
+        require_stability=require_stability,
+    )
 
 
 def _source_active_set_line_search_choice(
@@ -558,16 +572,11 @@ def _source_active_set_line_search_choice(
     accepting an unstable state.
     """
 
-    first_alpha: float | None = None
-    trial_count = 0
-    for alpha, signature in candidates:
-        alpha_value = float(alpha)
-        if first_alpha is None:
-            first_alpha = alpha_value
-        trial_count += 1
-        if (not bool(require_stability)) or current_signature is None or signature == current_signature:
-            return alpha_value, True, int(trial_count)
-    return (1.0 if first_alpha is None else float(first_alpha)), False, int(trial_count)
+    return _core_active_set_line_search_choice(
+        current_signature,
+        candidates,
+        require_stability=require_stability,
+    )
 
 
 def _source_active_set_stability_after_line_search(
@@ -584,7 +593,11 @@ def _source_active_set_stability_after_line_search(
     active-set unstable until a later residual evaluation proves otherwise.
     """
 
-    return bool(active_set_stable) and (not bool(line_search_attempted) or bool(line_search_stable))
+    return _core_active_set_stability_after_line_search(
+        active_set_stable,
+        line_search_attempted=line_search_attempted,
+        line_search_stable=line_search_stable,
+    )
 
 
 def _snapshot_contact_tracking_state(contact_geometries: Iterable[Any]) -> list[dict[str, Any]]:
@@ -647,42 +660,6 @@ def _restore_contact_tracking_state(states: list[dict[str, Any]]) -> None:
             )
 
 
-@dataclass(frozen=True, slots=True)
-class SourceIncrementConvergenceDecision:
-    """Abaqus-style source-drive increment acceptance gate."""
-
-    converged: bool
-    reason: str
-    iteration_limited: bool
-    cutback_required: bool
-    accepted: bool
-
-
-@dataclass(frozen=True, slots=True)
-class SourceAutomaticIncrementEvent:
-    """One automatic-increment trial record."""
-
-    trial_index: int
-    start_time: float
-    end_time: float
-    dt: float
-    accepted: bool
-    retry_required: bool
-    cutback_required: bool
-    cutback_candidate_dt: float | None
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class SourceAutomaticIncrementResult:
-    """Automatic-increment controller diagnostics."""
-
-    events: tuple[SourceAutomaticIncrementEvent, ...]
-    accepted_times: tuple[float, ...]
-    cutback_count: int
-    final_time: float
-
-
 def _source_increment_convergence_decision(
     *,
     residual_converged: bool,
@@ -702,37 +679,14 @@ def _source_increment_convergence_decision(
     current iterate as an accepted converged state.
     """
 
-    converged = (
-        bool(residual_converged)
-        and bool(correction_converged)
-        and bool(contact_force_increment_converged)
-        and bool(active_set_stable)
-    )
-    if converged:
-        return SourceIncrementConvergenceDecision(
-            converged=True,
-            reason="residual_correction_contact_force_active_set",
-            iteration_limited=False,
-            cutback_required=False,
-            accepted=True,
-        )
-
-    if not bool(residual_converged):
-        reason = "residual"
-    elif not bool(correction_converged):
-        reason = "correction"
-    elif not bool(contact_force_increment_converged):
-        reason = "contact_force_increment"
-    else:
-        reason = "contact_active_set"
-
-    limited = int(iteration_count) >= max(1, int(max_iterations))
-    return SourceIncrementConvergenceDecision(
-        converged=False,
-        reason=reason,
-        iteration_limited=limited,
-        cutback_required=limited and not bool(accept_unconverged),
-        accepted=bool(accept_unconverged),
+    return _core_increment_convergence_decision(
+        residual_converged=residual_converged,
+        correction_converged=correction_converged,
+        contact_force_increment_converged=contact_force_increment_converged,
+        active_set_stable=active_set_stable,
+        iteration_count=iteration_count,
+        max_iterations=max_iterations,
+        accept_unconverged=accept_unconverged,
     )
 
 
@@ -744,18 +698,11 @@ def _source_increment_cutback_candidate_dt(
 ) -> float | None:
     """Return the next cutback trial increment or ``None`` if at the floor."""
 
-    h = float(current_dt)
-    h_min = float(min_dt)
-    factor = float(cutback_factor)
-    if h <= 0.0:
-        raise ValueError("current_dt must be positive")
-    if h_min <= 0.0:
-        raise ValueError("min_dt must be positive")
-    if not (0.0 < factor < 1.0):
-        raise ValueError("cutback_factor must lie in (0, 1)")
-    if h <= h_min * (1.0 + 1.0e-12):
-        return None
-    return max(h_min, h * factor)
+    return _core_increment_cutback_candidate_dt(
+        current_dt,
+        min_dt=min_dt,
+        cutback_factor=cutback_factor,
+    )
 
 
 def _run_source_automatic_increment_controller(
@@ -774,71 +721,12 @@ def _run_source_automatic_increment_controller(
     state with a smaller increment.
     """
 
-    total = float(duration)
-    h0 = float(initial_dt)
-    h_min = float(min_dt)
-    if total < 0.0:
-        raise ValueError("duration must be non-negative")
-    if h0 <= 0.0:
-        raise ValueError("initial_dt must be positive")
-    if h_min <= 0.0:
-        raise ValueError("min_dt must be positive")
-    if not (0.0 < float(cutback_factor) < 1.0):
-        raise ValueError("cutback_factor must lie in (0, 1)")
-    accepted_time = 0.0
-    trial_dt = min(h0, max(total, h_min)) if total > 0.0 else h0
-    trial_index = 0
-    cutback_count = 0
-    events: list[SourceAutomaticIncrementEvent] = []
-    accepted_times: list[float] = []
-    while accepted_time < total - 1.0e-15:
-        h = min(float(trial_dt), total - accepted_time)
-        trial_index += 1
-        decision = trial(float(accepted_time), float(h), int(trial_index))
-        candidate = (
-            _source_increment_cutback_candidate_dt(
-                h,
-                min_dt=h_min,
-                cutback_factor=float(cutback_factor),
-            )
-            if decision.cutback_required
-            else None
-        )
-        retry_required = bool(decision.cutback_required and candidate is not None)
-        accepted = bool(decision.accepted and not decision.cutback_required)
-        events.append(
-            SourceAutomaticIncrementEvent(
-                trial_index=int(trial_index),
-                start_time=float(accepted_time),
-                end_time=float(accepted_time + h),
-                dt=float(h),
-                accepted=accepted,
-                retry_required=retry_required,
-                cutback_required=bool(decision.cutback_required),
-                cutback_candidate_dt=candidate,
-                reason=str(decision.reason),
-            )
-        )
-        if decision.cutback_required:
-            if candidate is None:
-                raise RuntimeError(
-                    "automatic increment reached minimum dt without satisfying convergence gates"
-                )
-            trial_dt = float(candidate)
-            cutback_count += 1
-            continue
-        if not accepted:
-            raise RuntimeError(
-                "automatic increment trial was neither accepted nor eligible for cutback"
-            )
-        accepted_time += h
-        accepted_times.append(float(accepted_time))
-        trial_dt = min(h0, max(h_min, h * (1.25 if decision.converged else 1.0)))
-    return SourceAutomaticIncrementResult(
-        events=tuple(events),
-        accepted_times=tuple(accepted_times),
-        cutback_count=int(cutback_count),
-        final_time=float(accepted_time),
+    return _core_run_automatic_increment_controller(
+        duration=duration,
+        initial_dt=initial_dt,
+        min_dt=min_dt,
+        cutback_factor=cutback_factor,
+        trial=trial,
     )
 
 
@@ -857,24 +745,19 @@ def _source_increment_gate_row(
 ) -> Row:
     """Return one manifest/history row for Abaqus-style increment gates."""
 
-    return {
-        "source_residual_converged": int(bool(residual_converged)),
-        "source_correction_converged": int(bool(correction_converged)),
-        "source_contact_force_increment_converged": int(bool(contact_force_increment_converged)),
-        "source_active_set_stable": int(bool(active_set_stable)),
-        "source_increment_converged": int(bool(decision.converged)),
-        "source_increment_accepted": int(bool(decision.accepted)),
-        "source_increment_cutback_required": int(bool(decision.cutback_required)),
-        "source_increment_cutback_candidate_dt": (
-            "" if cutback_candidate_dt is None else float(cutback_candidate_dt)
-        ),
-        "source_iteration_limit_reached": int(bool(decision.iteration_limited)),
-        "source_step_convergence_reason": str(decision.reason),
-        "source_normalized_residual": float(normalized_residual),
-        "source_normalized_correction": float(normalized_correction),
-        "source_normalized_contact_force_increment": float(normalized_contact_force_increment),
-        "source_contact_force_increment_norm": float(contact_force_increment_norm),
-    }
+    return _core_increment_gate_row(
+        residual_converged=residual_converged,
+        correction_converged=correction_converged,
+        contact_force_increment_converged=contact_force_increment_converged,
+        active_set_stable=active_set_stable,
+        normalized_residual=normalized_residual,
+        normalized_correction=normalized_correction,
+        normalized_contact_force_increment=normalized_contact_force_increment,
+        contact_force_increment_norm=contact_force_increment_norm,
+        decision=decision,
+        cutback_candidate_dt=cutback_candidate_dt,
+        prefix="source",
+    )
 
 
 def _combined_shape_weights(
