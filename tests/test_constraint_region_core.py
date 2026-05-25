@@ -8,6 +8,7 @@ from sfc.contact.constraint_region import (
     constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays,
     contact_region_integral_metrics_from_arrays,
+    secondary_node_pressure_recovery_from_regions,
 )
 
 
@@ -67,3 +68,28 @@ def test_constraint_region_totals_and_tangent_use_region_rows() -> None:
     assert jacobian.shape == (2, 39)
     assert active_ids.tolist() == [0, 1]
     assert scales == pytest.approx([142.5, 237.5])
+
+
+def test_secondary_pressure_recovery_uses_region_owner_nodes() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+
+    diagnostics = secondary_node_pressure_recovery_from_regions(
+        regions,
+        n_nodes=13,
+        pressure_stiffness=100.0,
+    )
+
+    assert diagnostics is not None
+    fields = diagnostics["fields"]
+    metrics = diagnostics["metrics"]
+    pressure = fields["contact_secondary_pressure_nodeavg"]
+    penetration = fields["contact_secondary_penetration_nodeavg"]
+    active = fields["contact_secondary_active_node"]
+    np.testing.assert_allclose(pressure[:3], [10.0, 2.0, 0.0])
+    np.testing.assert_allclose(penetration[:3], [0.1, 0.02, 0.0])
+    np.testing.assert_allclose(active[:3], [1.0, 1.0, 0.0])
+    assert metrics["active_contact_secondary_node_count"] == 2
+    assert metrics["max_contact_secondary_pressure_nodeavg"] == pytest.approx(10.0)
+    assert metrics["mean_active_contact_secondary_pressure_nodeavg"] == pytest.approx(6.0)
+    assert metrics["contact_secondary_pressure_recovery_source"] == "constraint_region"

@@ -47,6 +47,7 @@ from sfc.contact.constraint_region import (  # noqa: E402
     constraint_region_gap_jacobian_sparse_from_arrays as _core_constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays as _core_constraint_region_pressure_tangent_scales_from_arrays,
     contact_region_integral_metrics_from_arrays as _core_contact_region_integral_metrics_from_arrays,
+    secondary_node_pressure_recovery_from_regions as _core_secondary_node_pressure_recovery_from_regions,
 )
 from sfc.contact.lagrangian_surface_contact import LagrangianSDFSurfaceContactGeometry  # noqa: E402
 from sfc.fem.calculix_aligned import (  # noqa: E402
@@ -2148,11 +2149,7 @@ def _secondary_region_contact_node_diagnostics_from_arrays(
     sample_arrays: dict[str, np.ndarray],
     n_nodes: int,
     *,
-    gaps: np.ndarray,
-    pressures: np.ndarray,
-    penetrations: np.ndarray,
-    areas: np.ndarray,
-    active: np.ndarray,
+    stiffness: float,
 ) -> dict[str, Any] | None:
     """Recover Abaqus-style secondary-node pressure from region constraints.
 
@@ -2162,30 +2159,11 @@ def _secondary_region_contact_node_diagnostics_from_arrays(
     every node participating in the region shape weights.
     """
 
-    if "secondary_node_ids" not in sample_arrays:
-        return None
-    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
-    if secondary_ids.shape != np.asarray(gaps).reshape(-1).shape:
-        return None
-    valid = (secondary_ids >= 0) & (secondary_ids < int(n_nodes))
-    if not np.any(valid):
-        out = _prefixed_contact_node_diagnostics(_empty_contact_node_diagnostics(n_nodes), "secondary")
-        out["metrics"]["contact_secondary_pressure_recovery_source"] = "constraint_region"
-        return out
-    secondary = _new_contact_accumulators(int(n_nodes))
-    _accumulate_contact_nodes(
-        nodes=secondary_ids[valid].reshape((-1, 1)),
-        weights=np.ones((int(np.count_nonzero(valid)), 1), dtype=float),
-        gaps=np.asarray(gaps, dtype=float).reshape(-1)[valid],
-        pressures=np.asarray(pressures, dtype=float).reshape(-1)[valid],
-        penetrations=np.asarray(penetrations, dtype=float).reshape(-1)[valid],
-        areas=np.asarray(areas, dtype=float).reshape(-1)[valid],
-        active=np.asarray(active, dtype=bool).reshape(-1)[valid],
-        **secondary,
+    return _core_secondary_node_pressure_recovery_from_regions(
+        sample_arrays,
+        n_nodes=int(n_nodes),
+        pressure_stiffness=float(stiffness),
     )
-    out = _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(secondary, int(n_nodes)), "secondary")
-    out["metrics"]["contact_secondary_pressure_recovery_source"] = "constraint_region"
-    return out
 
 
 def _promote_secondary_contact_diagnostics_to_legacy(diagnostics: dict[str, Any]) -> None:
@@ -2390,11 +2368,7 @@ def _contact_node_diagnostics_from_arrays(
     secondary_diag = _secondary_region_contact_node_diagnostics_from_arrays(
         sample_arrays,
         count,
-        gaps=gaps,
-        pressures=pressures,
-        penetrations=penetrations,
-        areas=areas,
-        active=active,
+        stiffness=stiffness,
     )
     if secondary_diag is None:
         secondary_diag = _secondary_contact_node_aliases(slave_diag)

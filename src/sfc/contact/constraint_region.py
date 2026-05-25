@@ -242,6 +242,89 @@ def contact_region_integral_metrics_from_arrays(
     }
 
 
+def secondary_node_pressure_recovery_from_regions(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    n_nodes: int,
+    pressure_stiffness: float,
+) -> dict[str, dict[str, np.ndarray | float | int | str]] | None:
+    """Recover Abaqus-style secondary-surface CPRESS/COPEN from regions.
+
+    ``slave_node_region_*`` contact aggregation creates one row per secondary
+    constraint region and stores the owning secondary node in
+    ``secondary_node_ids``.  Abaqus-like pressure output for this path is a
+    region quantity attached to that secondary node; it is not the raw
+    quadrature-sample pressure scattered through every slave shape function.
+
+    Returns ``None`` when the arrays do not carry secondary-region ownership,
+    so callers can fall back to legacy sample-based aliases for non-region
+    contact paths.
+    """
+
+    if sample_arrays is None or "secondary_node_ids" not in sample_arrays:
+        return None
+    count = int(n_nodes)
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    if gaps.shape != secondary_ids.shape:
+        return None
+    areas = np.asarray(sample_arrays.get("areas", np.zeros_like(gaps)), dtype=float).reshape(-1)
+    if areas.shape != gaps.shape:
+        raise ValueError("secondary pressure recovery requires one area per region gap")
+
+    pressure = np.zeros(count, dtype=float)
+    penetration = np.zeros(count, dtype=float)
+    area_weight = np.zeros(count, dtype=float)
+    active_hit = np.zeros(count, dtype=float)
+    gap_min = np.full(count, np.inf, dtype=float)
+
+    valid = (secondary_ids >= 0) & (secondary_ids < count)
+    if np.any(valid):
+        valid_ids = secondary_ids[valid]
+        valid_gaps = gaps[valid]
+        valid_areas = areas[valid]
+        valid_penetration = np.maximum(-valid_gaps, 0.0)
+        valid_pressure = float(pressure_stiffness) * valid_penetration
+        valid_active = valid_penetration > 0.0
+        np.add.at(pressure, valid_ids, valid_areas * valid_pressure)
+        np.add.at(penetration, valid_ids, valid_areas * valid_penetration)
+        np.add.at(area_weight, valid_ids, valid_areas)
+        np.add.at(active_hit, valid_ids, valid_active.astype(float))
+        np.minimum.at(gap_min, valid_ids, valid_gaps)
+
+    nonzero = area_weight > 0.0
+    pressure[nonzero] /= area_weight[nonzero]
+    penetration[nonzero] /= area_weight[nonzero]
+    active_node = (active_hit > 0.0).astype(float)
+    gap = np.zeros(count, dtype=float)
+    finite_gap = np.isfinite(gap_min)
+    gap[finite_gap] = gap_min[finite_gap]
+    active_pressure = pressure[active_node > 0.0]
+    fields = {
+        "contact_secondary_pressure_nodeavg": pressure,
+        "contact_secondary_penetration_nodeavg": penetration,
+        "contact_secondary_active_node": active_node,
+        "contact_secondary_gap_min_node": gap,
+        "contact_secondary_sample_area_weight": area_weight,
+    }
+    metrics: dict[str, float | int | str] = {
+        "active_contact_secondary_node_count": int(np.count_nonzero(active_node)),
+        "max_contact_secondary_pressure_nodeavg": (
+            float(np.max(active_pressure)) if active_pressure.size else 0.0
+        ),
+        "p95_contact_secondary_pressure_nodeavg": _percentile_or_zero(active_pressure, 95.0),
+        "mean_active_contact_secondary_pressure_nodeavg": (
+            float(np.mean(active_pressure)) if active_pressure.size else 0.0
+        ),
+        "max_contact_secondary_penetration_nodeavg": (
+            float(np.max(penetration)) if penetration.size else 0.0
+        ),
+        "min_contact_secondary_gap_node": float(np.min(gap[finite_gap])) if np.any(finite_gap) else 0.0,
+        "contact_secondary_pressure_recovery_source": "constraint_region",
+    }
+    return {"fields": fields, "metrics": metrics}
+
+
 def _expand_to_slave_node_regions(
     sample_nodes: np.ndarray,
     sample_weights: np.ndarray,
@@ -478,6 +561,13 @@ def _empty_contact_region_integral_metrics() -> dict[str, float | int]:
         "contact_max_region_pressure": 0.0,
         "contact_mean_active_region_pressure": 0.0,
     }
+
+
+def _percentile_or_zero(values: np.ndarray, percentile: float) -> float:
+    flat = np.asarray(values, dtype=float).reshape(-1)
+    if flat.size == 0:
+        return 0.0
+    return float(np.percentile(flat, float(percentile)))
 
 
 def _optional_1d(value: object, *, dtype: type) -> np.ndarray | None:

@@ -27,6 +27,7 @@ from .constraint_region import (
     constraint_region_pressure_tangent_scales_from_arrays,
     contact_averaging_modes,
     contact_region_integral_metrics_from_arrays,
+    secondary_node_pressure_recovery_from_regions,
 )
 from .hard_contact import (
     HardContactSolution,
@@ -107,6 +108,7 @@ __all__ = [
     "penalty_contact_response",
     "quadrilateral_master_surface_penalty_response",
     "quadrilateral_surface_quadrature_cache",
+    "secondary_node_pressure_recovery_from_regions",
     "solve_linear_hard_contact_active_set",
     "solve_linear_hard_contact_from_samples",
     "surface_to_surface_field_penalty_response",
