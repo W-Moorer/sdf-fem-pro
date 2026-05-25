@@ -605,6 +605,34 @@ def _source_contact_active_set_is_stable(
     return previous_active_signature is not None and active_signature == previous_active_signature
 
 
+def _source_active_set_line_search_choice(
+    current_signature: tuple[tuple[int, ...], ...] | None,
+    candidates: Iterable[tuple[float, tuple[tuple[int, ...], ...]]],
+    *,
+    require_stability: bool,
+) -> tuple[float, bool, int]:
+    """Choose a correction fraction that preserves the current active set.
+
+    The candidates are tried in caller-provided order, normally full step,
+    half step, quarter step, and so on.  If active-set stability is not
+    required, the first candidate is accepted.  If no candidate preserves the
+    current signature, the first candidate is returned with ``stable=False`` so
+    the outer increment controller can still cut back instead of silently
+    accepting an unstable state.
+    """
+
+    first_alpha: float | None = None
+    trial_count = 0
+    for alpha, signature in candidates:
+        alpha_value = float(alpha)
+        if first_alpha is None:
+            first_alpha = alpha_value
+        trial_count += 1
+        if (not bool(require_stability)) or current_signature is None or signature == current_signature:
+            return alpha_value, True, int(trial_count)
+    return (1.0 if first_alpha is None else float(first_alpha)), False, int(trial_count)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceIncrementConvergenceDecision:
     """Abaqus-style source-drive increment acceptance gate."""
@@ -4302,6 +4330,9 @@ def _write_source_drive_checkpoint(
     source_unstable_accepted_count: int = 0,
     source_cutback_required_count: int = 0,
     source_unconverged_accepted_count: int = 0,
+    source_line_search_trial_count: int = 0,
+    source_line_search_reduced_count: int = 0,
+    source_line_search_stable_count: int = 0,
 ) -> None:
     """Persist accepted source-drive state for exact fixed-step continuation."""
 
@@ -4336,6 +4367,9 @@ def _write_source_drive_checkpoint(
             source_unstable_accepted_count=np.asarray([int(source_unstable_accepted_count)], dtype=np.int64),
             source_cutback_required_count=np.asarray([int(source_cutback_required_count)], dtype=np.int64),
             source_unconverged_accepted_count=np.asarray([int(source_unconverged_accepted_count)], dtype=np.int64),
+            source_line_search_trial_count=np.asarray([int(source_line_search_trial_count)], dtype=np.int64),
+            source_line_search_reduced_count=np.asarray([int(source_line_search_reduced_count)], dtype=np.int64),
+            source_line_search_stable_count=np.asarray([int(source_line_search_stable_count)], dtype=np.int64),
         )
     tmp.replace(path)
 
@@ -4377,6 +4411,15 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
             ),
             "source_unconverged_accepted_count": (
                 int(data["source_unconverged_accepted_count"][0]) if "source_unconverged_accepted_count" in data else 0
+            ),
+            "source_line_search_trial_count": (
+                int(data["source_line_search_trial_count"][0]) if "source_line_search_trial_count" in data else 0
+            ),
+            "source_line_search_reduced_count": (
+                int(data["source_line_search_reduced_count"][0]) if "source_line_search_reduced_count" in data else 0
+            ),
+            "source_line_search_stable_count": (
+                int(data["source_line_search_stable_count"][0]) if "source_line_search_stable_count" in data else 0
             ),
         }
 
@@ -4421,6 +4464,8 @@ def solve_sfc_source_drive_pair(
     source_correction_tolerance: float = 1.0e-2,
     source_contact_force_increment_tolerance: float = 1.0e-2,
     source_accept_unconverged: bool = False,
+    source_active_set_line_search: bool = True,
+    source_active_set_line_search_min_alpha: float = 0.125,
     source_cutback_factor: float = 0.5,
     source_min_cutback_dt: float | None = None,
     source_checkpoint_path: Path | None = None,
@@ -4573,6 +4618,9 @@ def solve_sfc_source_drive_pair(
         raise ValueError("source_correction_tolerance must be positive")
     if source_contact_force_increment_tolerance <= 0.0:
         raise ValueError("source_contact_force_increment_tolerance must be positive")
+    source_active_set_line_search_min_alpha = float(source_active_set_line_search_min_alpha)
+    if not (0.0 < source_active_set_line_search_min_alpha <= 1.0):
+        raise ValueError("source_active_set_line_search_min_alpha must lie in (0, 1]")
     source_cutback_factor = float(source_cutback_factor)
     if not (0.0 < source_cutback_factor < 1.0):
         raise ValueError("source_cutback_factor must lie in (0, 1)")
@@ -4786,6 +4834,9 @@ def solve_sfc_source_drive_pair(
     source_unstable_accepted_count = 0
     source_cutback_required_count = 0
     source_unconverged_accepted_count = 0
+    source_line_search_trial_count = 0
+    source_line_search_reduced_count = 0
+    source_line_search_stable_count = 0
     checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
     start_step = 0
     start_time = 0.0
@@ -4819,6 +4870,9 @@ def solve_sfc_source_drive_pair(
         source_unstable_accepted_count = int(checkpoint.get("source_unstable_accepted_count", 0))
         source_cutback_required_count = int(checkpoint.get("source_cutback_required_count", 0))
         source_unconverged_accepted_count = int(checkpoint.get("source_unconverged_accepted_count", 0))
+        source_line_search_trial_count = int(checkpoint.get("source_line_search_trial_count", 0))
+        source_line_search_reduced_count = int(checkpoint.get("source_line_search_reduced_count", 0))
+        source_line_search_stable_count = int(checkpoint.get("source_line_search_stable_count", 0))
         state = MechanicsState(
             model.X + assembly.expand_displacements(q),
             assembly.expand_displacements(v),
@@ -4980,6 +5034,60 @@ def solve_sfc_source_drive_pair(
             collected = _aggregate_contact_samples(collected, aggregate_mode)
         return collected
 
+    def snapshot_contact_tracking_state() -> list[dict[str, Any]]:
+        states: list[dict[str, Any]] = []
+        for geometry in contact_geometries:
+            oracle = getattr(geometry, "_oracle", None)
+            states.append(
+                {
+                    "geometry": geometry,
+                    "secondary_face_cache": (
+                        None
+                        if getattr(geometry, "_secondary_face_cache", None) is None
+                        else np.asarray(getattr(geometry, "_secondary_face_cache")).copy()
+                    ),
+                    "secondary_barycentric_cache": (
+                        None
+                        if getattr(geometry, "_secondary_barycentric_cache", None) is None
+                        else np.asarray(getattr(geometry, "_secondary_barycentric_cache")).copy()
+                    ),
+                    "oracle": oracle,
+                    "oracle_patch_cache": dict(getattr(oracle, "_patch_cache", {})) if oracle is not None else None,
+                    "oracle_barycentric_cache": (
+                        {
+                            key: np.asarray(value, dtype=float).copy()
+                            for key, value in getattr(oracle, "_barycentric_cache", {}).items()
+                        }
+                        if oracle is not None
+                        else None
+                    ),
+                }
+            )
+        return states
+
+    def restore_contact_tracking_state(states: list[dict[str, Any]]) -> None:
+        for state_row in states:
+            geometry = state_row["geometry"]
+            face_cache = state_row["secondary_face_cache"]
+            bary_cache = state_row["secondary_barycentric_cache"]
+            setattr(geometry, "_secondary_face_cache", None if face_cache is None else np.asarray(face_cache, dtype=np.int64).copy())
+            setattr(
+                geometry,
+                "_secondary_barycentric_cache",
+                None if bary_cache is None else np.asarray(bary_cache, dtype=float).copy(),
+            )
+            oracle = state_row.get("oracle")
+            if oracle is not None:
+                setattr(oracle, "_patch_cache", dict(state_row.get("oracle_patch_cache") or {}))
+                setattr(
+                    oracle,
+                    "_barycentric_cache",
+                    {
+                        key: np.asarray(value, dtype=float).copy()
+                        for key, value in (state_row.get("oracle_barycentric_cache") or {}).items()
+                    },
+                )
+
     accepted_step = int(start_step)
     accepted_time = float(start_time)
     trial_dt = float(dt)
@@ -5026,6 +5134,10 @@ def solve_sfc_source_drive_pair(
         correction_converged = False
         contact_force_increment_converged = False
         previous_iteration_contact_red: np.ndarray | None = None
+        step_line_search_trial_count = 0
+        step_line_search_reduced_count = 0
+        step_line_search_stable_count = 0
+        step_line_search_last_alpha = 1.0
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
@@ -5188,6 +5300,50 @@ def solve_sfc_source_drive_pair(
                 break
             step_convergence_reason = iteration_decision.reason
             previous_iteration_contact_red = contact_red.copy()
+            if (
+                bool(source_active_set_line_search)
+                and bool(source_contact_active_set_stability)
+                and correction_free.size
+                and active_signature is not None
+            ):
+                alphas: list[float] = []
+                alpha_value = 1.0
+                while alpha_value >= source_active_set_line_search_min_alpha * (1.0 - 1.0e-12):
+                    alphas.append(float(alpha_value))
+                    alpha_value *= 0.5
+                if alphas[-1] > source_active_set_line_search_min_alpha * (1.0 + 1.0e-12):
+                    alphas.append(float(source_active_set_line_search_min_alpha))
+                candidates: list[tuple[float, tuple[tuple[int, ...], ...]]] = []
+                for alpha_candidate in alphas:
+                    q_trial = q_guess.copy()
+                    q_trial[free] += float(alpha_candidate) * correction_free
+                    q_trial = _project_reduced_fixed(q_trial, fixed, values)
+                    x_trial_contact = contact_positions_from_reduced(q_trial)
+                    cache_state = snapshot_contact_tracking_state()
+                    try:
+                        trial_arrays = source_sample_arrays(x_trial_contact)
+                        if trial_arrays is None:
+                            trial_signature = _contact_active_signature_from_samples(source_samples(x_trial_contact))
+                        else:
+                            trial_signature = _contact_active_signature_from_arrays(trial_arrays)
+                    finally:
+                        restore_contact_tracking_state(cache_state)
+                    candidates.append((float(alpha_candidate), trial_signature))
+                alpha_choice, stable_choice, line_search_trials = _source_active_set_line_search_choice(
+                    active_signature,
+                    candidates,
+                    require_stability=True,
+                )
+                step_line_search_trial_count += int(line_search_trials)
+                source_line_search_trial_count += int(line_search_trials)
+                if stable_choice:
+                    step_line_search_stable_count += 1
+                    source_line_search_stable_count += 1
+                if alpha_choice < 1.0 - 1.0e-12:
+                    correction_free = float(alpha_choice) * correction_free
+                    step_line_search_reduced_count += 1
+                    source_line_search_reduced_count += 1
+                step_line_search_last_alpha = float(alpha_choice)
             q_guess[free] += correction_free
             contact_matches_q_guess = False
         increment_decision = _source_increment_convergence_decision(
@@ -5349,6 +5505,10 @@ def solve_sfc_source_drive_pair(
                     "gear2_torque_z": float(gear2_torque_z),
                     "source_step_dt": float(step_dt),
                     "source_accepted_step": int(accepted_step),
+                    "source_line_search_trial_count": int(step_line_search_trial_count),
+                    "source_line_search_reduced_count": int(step_line_search_reduced_count),
+                    "source_line_search_stable_count": int(step_line_search_stable_count),
+                    "source_line_search_last_alpha": float(step_line_search_last_alpha),
                     "contact_active_set_stable": int(bool(active_set_stable)),
                     "source_step_converged": int(bool(step_converged)),
                 }
@@ -5402,6 +5562,10 @@ def solve_sfc_source_drive_pair(
                     "rp2_angular_acceleration_z_rad_per_s2": float(a_new[hub2_slice.start + 5]),
                     "source_step_dt": float(step_dt),
                     "source_accepted_step": int(accepted_step),
+                    "source_line_search_trial_count": int(step_line_search_trial_count),
+                    "source_line_search_reduced_count": int(step_line_search_reduced_count),
+                    "source_line_search_stable_count": int(step_line_search_stable_count),
+                    "source_line_search_last_alpha": float(step_line_search_last_alpha),
                 }
             )
             frame_row.update(increment_gate_row)
@@ -5441,6 +5605,9 @@ def solve_sfc_source_drive_pair(
                 source_unstable_accepted_count=source_unstable_accepted_count,
                 source_cutback_required_count=source_cutback_required_count,
                 source_unconverged_accepted_count=source_unconverged_accepted_count,
+                source_line_search_trial_count=source_line_search_trial_count,
+                source_line_search_reduced_count=source_line_search_reduced_count,
+                source_line_search_stable_count=source_line_search_stable_count,
             )
     wall = time.perf_counter() - start
     summary = {
@@ -5487,6 +5654,8 @@ def solve_sfc_source_drive_pair(
         "source_correction_tolerance": float(source_correction_tolerance),
         "source_contact_force_increment_tolerance": float(source_contact_force_increment_tolerance),
         "source_accept_unconverged": bool(source_accept_unconverged),
+        "source_active_set_line_search": bool(source_active_set_line_search),
+        "source_active_set_line_search_min_alpha": float(source_active_set_line_search_min_alpha),
         "source_cutback_factor": float(source_cutback_factor),
         "source_min_cutback_dt": float(source_min_cutback_dt_value),
         "source_step_converged_count": int(source_step_converged_count),
@@ -5496,6 +5665,9 @@ def solve_sfc_source_drive_pair(
         "source_unconverged_accepted_count": int(source_unconverged_accepted_count),
         "source_accepted_increment_count": int(accepted_step),
         "source_final_time": float(accepted_time),
+        "source_line_search_trial_count": int(source_line_search_trial_count),
+        "source_line_search_reduced_count": int(source_line_search_reduced_count),
+        "source_line_search_stable_count": int(source_line_search_stable_count),
         "sfc_history_frame_stride": int(history_stride),
         "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),

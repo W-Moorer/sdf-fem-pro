@@ -50,6 +50,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_drive_corotated_visual_state_and_internal,
     _source_drive_finite_kinematic_inertia_response,
     _source_drive_finite_visual_jacobian,
+    _source_active_set_line_search_choice,
     _source_contact_active_set_is_stable,
     _source_increment_convergence_decision,
     _source_increment_cutback_candidate_dt,
@@ -745,6 +746,39 @@ def test_source_contact_active_set_stability_requires_repeated_signature() -> No
     assert not _source_contact_active_set_is_stable(signature, tuple(), require_stability=True)
 
 
+def test_source_active_set_line_search_prefers_stable_candidate() -> None:
+    current = ((1, 2, 3),)
+    candidates = [
+        (1.0, ((4, 5, 6),)),
+        (0.5, ((4, 5, 6),)),
+        (0.25, current),
+    ]
+
+    alpha, stable, trials = _source_active_set_line_search_choice(
+        current,
+        candidates,
+        require_stability=True,
+    )
+
+    assert alpha == pytest.approx(0.25)
+    assert stable
+    assert trials == 3
+
+
+def test_source_active_set_line_search_reports_unstable_full_step_fallback() -> None:
+    current = ((1, 2, 3),)
+
+    alpha, stable, trials = _source_active_set_line_search_choice(
+        current,
+        [(1.0, ((4, 5, 6),)), (0.5, ((7, 8, 9),))],
+        require_stability=True,
+    )
+
+    assert alpha == pytest.approx(1.0)
+    assert not stable
+    assert trials == 2
+
+
 def test_source_increment_decision_requires_all_abaqus_style_gates() -> None:
     decision = _source_increment_convergence_decision(
         residual_converged=True,
@@ -1343,6 +1377,11 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "source_contact_force_increment_converged" in history[-1]
     assert "source_active_set_stable" in history[-1]
     assert "source_increment_converged" in history[-1]
+    assert "source_line_search_trial_count" in history[-1]
+    assert "source_line_search_reduced_count" in history[-1]
+    assert "source_line_search_stable_count" in history[-1]
+    assert "source_line_search_trial_count" in summary
+    assert int(summary["source_line_search_trial_count"]) >= 0
     assert "contact_active_region_continuity_current_count" in history[-1]
     assert "contact_active_region_jaccard" in history[-1]
     manifest = Path(str(summary["sfc_vtk_manifest"]))
