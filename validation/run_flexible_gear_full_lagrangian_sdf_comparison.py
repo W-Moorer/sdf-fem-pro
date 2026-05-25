@@ -254,6 +254,91 @@ def source_increment_trial_gate_metrics(
     }
 
 
+def source_convergence_gate_metrics(
+    summary: Row,
+    history_rows: list[Row],
+    *,
+    tolerance: float = 1.0e-12,
+) -> Row:
+    """Return the full-run source convergence gate before nodal field checks.
+
+    This gate is deliberately about accepted-state semantics, not cloud-plot
+    agreement: accepted increments must come from converged source trials,
+    unstable/unconverged states must not be accepted, response reuse/requery
+    must cover accepted increments, and active contact should exercise the
+    constraint-region tangent path.
+    """
+
+    accepted_count = _row_int_flag(summary, "source_accepted_increment_count", default=0)
+    expected_count = _row_int_flag(summary, "sfc_increment_count", default=accepted_count)
+    converged_count = _row_int_flag(summary, "source_step_converged_count", default=0)
+    unstable_accepted = _row_int_flag(summary, "source_unstable_accepted_count", default=0)
+    unconverged_accepted = _row_int_flag(summary, "source_unconverged_accepted_count", default=0)
+    rejected_trials = _row_int_flag(summary, "source_rejected_trial_count", default=0)
+    cutback_count = _row_int_flag(summary, "source_cutback_required_count", default=0)
+    trial_gate_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
+    reuse_count = _row_int_flag(summary, "source_accepted_contact_response_reuse_count", default=0)
+    requery_count = _row_int_flag(summary, "source_accepted_contact_response_requery_count", default=0)
+    response_count = reuse_count + requery_count
+    tangent_solve_count = _row_int_flag(summary, "source_constraint_region_tangent_solve_count", default=0)
+    tangent_active_rows = _row_int_flag(summary, "source_constraint_region_tangent_active_rows_sum", default=0)
+    final_active_samples = _row_int_flag(summary, "final_active_contact_samples", default=0)
+    tangent_required = int(final_active_samples > 0 or tangent_active_rows > 0)
+    final_time = _finite_row_float(summary, "source_final_time")
+    target_time = _finite_row_float(summary, "sfc_duration")
+    time_error = 0.0
+    final_time_matches = True
+    if final_time is not None and target_time is not None:
+        time_error = abs(float(final_time) - float(target_time))
+        final_time_matches = time_error <= max(float(tolerance), abs(float(target_time)) * 1.0e-9)
+    history_all_accepted = all(_row_int_flag(row, "source_increment_accepted", default=1) == 1 for row in history_rows)
+    history_step_count = len(history_rows)
+    accepted_count_matches_expected = expected_count <= 0 or accepted_count == expected_count
+    converged_count_matches_accepted = accepted_count <= 0 or converged_count == accepted_count
+    response_count_matches_accepted = response_count == accepted_count or (
+        response_count == 0 and accepted_count == 0
+    )
+    tangent_used_when_required = (not bool(tangent_required)) or tangent_solve_count > 0
+    no_bad_accepted_state = unstable_accepted == 0 and unconverged_accepted == 0
+    gate_passed = int(
+        bool(trial_gate_passed)
+        and bool(history_all_accepted)
+        and bool(accepted_count_matches_expected)
+        and bool(converged_count_matches_accepted)
+        and bool(response_count_matches_accepted)
+        and bool(tangent_used_when_required)
+        and bool(final_time_matches)
+        and bool(no_bad_accepted_state)
+    )
+    return {
+        "source_convergence_gate_passed": gate_passed,
+        "comparison_stage": "source_convergence_before_nodal_cpress",
+        "source_convergence_history_all_accepted": int(history_all_accepted),
+        "source_convergence_accepted_count_matches_expected": int(accepted_count_matches_expected),
+        "source_convergence_converged_count_matches_accepted": int(converged_count_matches_accepted),
+        "source_convergence_response_count_matches_accepted": int(response_count_matches_accepted),
+        "source_convergence_tangent_used_when_required": int(tangent_used_when_required),
+        "source_convergence_final_time_matches_duration": int(final_time_matches),
+        "source_convergence_no_unstable_or_unconverged_accepted": int(no_bad_accepted_state),
+        "source_convergence_trial_gate_passed": int(trial_gate_passed),
+        "source_convergence_history_row_count": int(history_step_count),
+        "source_convergence_expected_increment_count": int(expected_count),
+        "source_convergence_accepted_increment_count": int(accepted_count),
+        "source_convergence_converged_step_count": int(converged_count),
+        "source_convergence_rejected_trial_count": int(rejected_trials),
+        "source_convergence_cutback_required_count": int(cutback_count),
+        "source_convergence_unstable_accepted_count": int(unstable_accepted),
+        "source_convergence_unconverged_accepted_count": int(unconverged_accepted),
+        "source_convergence_response_reuse_count": int(reuse_count),
+        "source_convergence_response_requery_count": int(requery_count),
+        "source_convergence_response_total_count": int(response_count),
+        "source_convergence_tangent_required": int(tangent_required),
+        "source_convergence_tangent_solve_count": int(tangent_solve_count),
+        "source_convergence_tangent_active_rows_sum": int(tangent_active_rows),
+        "source_convergence_final_time_error": float(time_error),
+    }
+
+
 def write_animation_color_ranges(
     out_dir: Path,
     *,
@@ -821,9 +906,12 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source secondary path tracking: {summary.get('source_secondary_path_tracking', '')}",
         f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
         f"- source max nonlinear iterations: {summary.get('source_max_iterations', '')}",
+        f"- source convergence gate: {summary.get('source_convergence_gate_passed', '')}",
         f"- source converged steps: {summary.get('source_step_converged_count', '')}",
         f"- source iteration-limit steps: {summary.get('source_iteration_limit_reached_count', '')}",
         f"- source unstable accepted steps: {summary.get('source_unstable_accepted_count', '')}",
+        f"- source line-search unstable count: {summary.get('source_line_search_unstable_count', '')}",
+        f"- source constraint-region tangent solves: {summary.get('source_constraint_region_tangent_solve_count', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
@@ -850,6 +938,12 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- final rotation about z: {float(summary.get('final_rotation_z_rad', 0.0)):.6e} rad",
         f"- history CSV: `{history_path.name}`",
     ]
+    if summary.get("source_convergence_gate"):
+        lines.append(f"- source convergence gate CSV: `{Path(str(summary.get('source_convergence_gate'))).name}`")
+    if summary.get("contact_total_priority_metrics"):
+        lines.append(f"- contact-total priority metrics: `{Path(str(summary.get('contact_total_priority_metrics'))).name}`")
+    if summary.get("source_increment_trials"):
+        lines.append(f"- source increment trial ledger: `{Path(str(summary.get('source_increment_trials'))).name}`")
     if summary.get("sfc_vtk_pvd"):
         lines.extend(
             [
@@ -1161,6 +1255,11 @@ def run_full_gear(
     contact_total_priority_path = out_dir / "sfc_contact_total_priority_metrics.csv"
     write_contact_total_priority_csv(history, contact_total_priority_path)
     summary["contact_total_priority_metrics"] = str(contact_total_priority_path)
+    source_convergence_gate = source_convergence_gate_metrics(summary, history)
+    source_convergence_gate_path = out_dir / "sfc_source_convergence_gate.csv"
+    _write_csv(source_convergence_gate_path, [source_convergence_gate])
+    summary.update(source_convergence_gate)
+    summary["source_convergence_gate"] = str(source_convergence_gate_path)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
     _write_abaqus_alignment_deck(
         deck_path,

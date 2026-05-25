@@ -9,7 +9,42 @@ if str(ROOT) not in sys.path:
 
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
 from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
-from validation.run_flexible_gear_full_lagrangian_sdf_comparison import run_full_gear
+from validation.run_flexible_gear_full_lagrangian_sdf_comparison import run_full_gear, source_convergence_gate_metrics
+
+
+def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
+    summary = {
+        "sfc_increment_count": 2,
+        "source_accepted_increment_count": 2,
+        "source_step_converged_count": 2,
+        "source_unstable_accepted_count": 0,
+        "source_unconverged_accepted_count": 0,
+        "source_trial_gate_passed": 1,
+        "source_accepted_contact_response_reuse_count": 1,
+        "source_accepted_contact_response_requery_count": 1,
+        "source_constraint_region_tangent_solve_count": 1,
+        "source_constraint_region_tangent_active_rows_sum": 4,
+        "final_active_contact_samples": 4,
+        "source_final_time": 2.0e-5,
+        "sfc_duration": 2.0e-5,
+    }
+    history = [
+        {"time": 1.0e-5, "source_increment_accepted": 1},
+        {"time": 2.0e-5, "source_increment_accepted": 1},
+    ]
+
+    gate = source_convergence_gate_metrics(summary, history)
+
+    assert int(gate["source_convergence_gate_passed"]) == 1
+    assert int(gate["source_convergence_tangent_required"]) == 1
+    assert int(gate["source_convergence_tangent_used_when_required"]) == 1
+
+    failed = dict(summary)
+    failed["source_step_converged_count"] = 1
+    failed_gate = source_convergence_gate_metrics(failed, history)
+
+    assert int(failed_gate["source_convergence_gate_passed"]) == 0
+    assert int(failed_gate["source_convergence_converged_count_matches_accepted"]) == 0
 
 
 def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:
@@ -231,6 +266,15 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                 "sfc_wall_seconds": 0.0,
                 "source_increment_trial_count": 1,
                 "source_rejected_trial_count": 0,
+                "source_accepted_increment_count": 1,
+                "source_step_converged_count": 1,
+                "source_unstable_accepted_count": 0,
+                "source_unconverged_accepted_count": 0,
+                "source_accepted_contact_response_reuse_count": 1,
+                "source_accepted_contact_response_requery_count": 0,
+                "source_constraint_region_tangent_solve_count": 0,
+                "source_constraint_region_tangent_active_rows_sum": 0,
+                "source_final_time": 0.1,
                 "_source_increment_trial_rows": [
                     {
                         "source_trial_index": 1,
@@ -280,10 +324,15 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert captured["source_checkpoint_stride"] == 7
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
+    assert "source_convergence_gate" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
+    assert int(summary["source_convergence_gate_passed"]) == 1
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
     trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
+    convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
+    assert convergence_gate_csv.exists()
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
+    assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
