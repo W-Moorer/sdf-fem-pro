@@ -465,6 +465,7 @@ def compare_sfc_history_to_abaqus_manifest(
         ("mean_equivalent_elastic_strain_nodeavg", "mean_equivalent_elastic_strain_nodeavg"),
         ("active_contact_node_count", "active_contact_node_count"),
         ("max_contact_pressure_nodeavg", "max_contact_pressure_nodeavg"),
+        ("p95_contact_pressure_nodeavg", "p95_contact_pressure_nodeavg"),
         ("mean_active_contact_pressure_nodeavg", "mean_active_contact_pressure_nodeavg"),
     ]
     rows: list[Row] = []
@@ -805,11 +806,11 @@ def run_full_gear(
     vtk_frame_stride: int = 1,
     vtk_include_tensors: bool = True,
     source_stress_postprocess: str = "linear_corotated",
-    source_contact_averaging: str = "none",
-    source_contact_kinematics: str = "linearized_mpc",
-    source_contact_normal_filter: str = "none",
-    source_contact_direction: str = "master",
-    source_contact_projection: str = "closest_feature",
+    source_contact_averaging: str = "slave_node_region_participation",
+    source_contact_kinematics: str = "finite_rp_corotated",
+    source_contact_normal_filter: str = "opposing",
+    source_contact_direction: str = "secondary_average",
+    source_contact_projection: str = "secondary_line",
     source_contact_pair_order: str = "gear2_slave",
     source_contact_search_radius: float | None = None,
     source_secondary_normal_min_projection: float = 0.0,
@@ -818,8 +819,8 @@ def run_full_gear(
     source_secondary_path_tracking: bool = False,
     source_contact_active_set_stability: bool = True,
     source_contact_footprint_clipping: bool = False,
-    source_internal_kinematics: str = "linearized_mpc",
-    source_rotating_inertia: str = "none",
+    source_internal_kinematics: str = "finite_stvk_visual",
+    source_rotating_inertia: str = "finite_kinematic",
     source_max_iterations: int = 16,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
@@ -1105,31 +1106,31 @@ def main(argv: list[str] | None = None) -> int:
             "slave_node_region_signed_participation",
             "surface_patch_signed_participation",
         ),
-        default="none",
+        default="slave_node_region_participation",
         help="Optional source-drive contact constraint averaging for Abaqus-style surface-to-surface penalty diagnostics.",
     )
     parser.add_argument(
         "--source-contact-kinematics",
         choices=("linearized_mpc", "finite_rp_corotated"),
-        default="linearized_mpc",
+        default="finite_rp_corotated",
         help="Kinematic map used to evaluate source-drive contact geometry.",
     )
     parser.add_argument(
         "--source-contact-normal-filter",
         choices=("none", "opposing", "opposing_search"),
-        default="none",
+        default="opposing",
         help="Optional source-drive master/slave normal compatibility filter.",
     )
     parser.add_argument(
         "--source-contact-direction",
         choices=("master", "secondary_average"),
-        default="master",
+        default="secondary_average",
         help="Normal direction used by source-drive surface-to-surface contact constraints.",
     )
     parser.add_argument(
         "--source-contact-projection",
         choices=("closest_feature", "secondary_plane", "secondary_line"),
-        default="closest_feature",
+        default="secondary_line",
         help="Gap projection used with secondary-average contact direction.",
     )
     parser.add_argument(
@@ -1204,13 +1205,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--source-internal-kinematics",
         choices=("linearized_mpc", "corotated_rp", "finite_stvk_visual"),
-        default="linearized_mpc",
+        default="finite_stvk_visual",
         help="Internal elastic residual map for source-drive large RP rotations.",
     )
     parser.add_argument(
         "--source-rotating-inertia",
         choices=("none", "centripetal", "finite_kinematic"),
-        default="none",
+        default="finite_kinematic",
         help="Optional finite-RP inertia residual for source-drive dynamics.",
     )
     parser.add_argument(

@@ -65,6 +65,17 @@ def _float(row: Row, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
+def _relative_error(value: float, reference: float, *, reference_floor: float = 1.0e-12) -> float | str:
+    """Return a relative error only when the reference magnitude is meaningful."""
+
+    ref = abs(float(reference))
+    val = abs(float(value))
+    floor = float(reference_floor)
+    if ref < floor:
+        return 0.0 if val < floor else ""
+    return abs(float(value) - float(reference)) / ref
+
+
 def parse_abaqus_sta_increments(path: Path) -> list[Row]:
     """Parse Abaqus/Standard ``.sta`` increment rows."""
 
@@ -273,7 +284,12 @@ def build_contact_status_diagnostics(
         sfc_p95_strain = _float(sfc, "p95_equivalent_elastic_strain_nodeavg")
         abaqus_p95_strain = _float(abaqus, "p95_equivalent_elastic_strain_nodeavg")
         active_delta = sfc_active - abaqus_active
+        sfc_pressure = _float(sfc, "max_contact_pressure_nodeavg")
         abaqus_pressure = _float(abaqus, "max_contact_pressure_nodeavg")
+        sfc_mean_pressure = _float(sfc, "mean_active_contact_pressure_nodeavg")
+        abaqus_mean_pressure = _float(abaqus, "mean_active_contact_pressure_nodeavg")
+        sfc_min_gap = _float(sfc, "min_contact_gap_node", _float(sfc, "min_gap"))
+        abaqus_min_gap = _float(abaqus, "min_contact_gap_node")
         row = {
             "time": time_value,
             "abaqus_nearest_time": _float(abaqus, "time"),
@@ -293,12 +309,26 @@ def build_contact_status_diagnostics(
             "abaqus_active_contact_node_count": abaqus_active,
             "active_contact_node_count_delta": active_delta,
             "active_contact_node_count_rel_delta": abs(active_delta) / max(abs(abaqus_active), 1.0),
-            "sfc_max_contact_pressure_nodeavg": _float(sfc, "max_contact_pressure_nodeavg"),
+            "sfc_max_contact_pressure_nodeavg": sfc_pressure,
             "abaqus_max_contact_pressure_nodeavg": abaqus_pressure,
-            "sfc_mean_active_contact_pressure_nodeavg": _float(sfc, "mean_active_contact_pressure_nodeavg"),
-            "abaqus_mean_active_contact_pressure_nodeavg": _float(abaqus, "mean_active_contact_pressure_nodeavg"),
-            "sfc_min_contact_gap_node": _float(sfc, "min_contact_gap_node", _float(sfc, "min_gap")),
-            "abaqus_min_contact_gap_node": _float(abaqus, "min_contact_gap_node"),
+            "max_contact_pressure_nodeavg_abs_error": abs(sfc_pressure - abaqus_pressure),
+            "max_contact_pressure_nodeavg_rel_error": _relative_error(
+                sfc_pressure,
+                abaqus_pressure,
+                reference_floor=1.0e-9,
+            ),
+            "sfc_mean_active_contact_pressure_nodeavg": sfc_mean_pressure,
+            "abaqus_mean_active_contact_pressure_nodeavg": abaqus_mean_pressure,
+            "mean_active_contact_pressure_nodeavg_abs_error": abs(sfc_mean_pressure - abaqus_mean_pressure),
+            "mean_active_contact_pressure_nodeavg_rel_error": _relative_error(
+                sfc_mean_pressure,
+                abaqus_mean_pressure,
+                reference_floor=1.0e-9,
+            ),
+            "sfc_min_contact_gap_node": sfc_min_gap,
+            "abaqus_min_contact_gap_node": abaqus_min_gap,
+            "min_contact_gap_node_abs_error": abs(sfc_min_gap - abaqus_min_gap),
+            "min_contact_gap_node_rel_error": _relative_error(sfc_min_gap, abaqus_min_gap, reference_floor=1.0e-12),
             "sfc_p95_von_mises_nodeavg": sfc_p95_stress,
             "abaqus_p95_von_mises_nodeavg": abaqus_p95_stress,
             "p95_von_mises_nodeavg_rel_error": abs(sfc_p95_stress - abaqus_p95_stress) / max(abs(abaqus_p95_stress), 1.0e-30),
@@ -321,6 +351,9 @@ def _max_row(rows: list[Row], key: str) -> Row | None:
 def write_summary(path: Path, rows: list[Row], *, sfc_history: Path, abaqus_manifest: Path, abaqus_sta: Path | None) -> None:
     p95_row = _max_row(rows, "p95_von_mises_nodeavg_rel_error")
     active_row = _max_row(rows, "active_contact_node_count_rel_delta")
+    max_pressure_row = _max_row(rows, "max_contact_pressure_nodeavg_rel_error")
+    mean_pressure_row = _max_row(rows, "mean_active_contact_pressure_nodeavg_rel_error")
+    min_gap_row = _max_row(rows, "min_contact_gap_node_rel_error")
     release_rows = [row for row in rows if int(row.get("release_stage_mismatch", 0))]
     increments = parse_abaqus_sta_increments(abaqus_sta) if abaqus_sta is not None and abaqus_sta.exists() else []
     msg_path = Path(abaqus_sta).with_suffix(".msg") if abaqus_sta is not None else None
@@ -370,6 +403,18 @@ def write_summary(path: Path, rows: list[Row], *, sfc_history: Path, abaqus_mani
     if active_row is not None:
         lines.append(
             f"- max active-count relative delta: `{100.0 * _float(active_row, 'active_contact_node_count_rel_delta'):.3f}%` at `t={_float(active_row, 'time'):.8g}`"
+        )
+    if max_pressure_row is not None:
+        lines.append(
+            f"- max peak-pressure relative error: `{100.0 * _float(max_pressure_row, 'max_contact_pressure_nodeavg_rel_error'):.3f}%` at `t={_float(max_pressure_row, 'time'):.8g}`"
+        )
+    if mean_pressure_row is not None:
+        lines.append(
+            f"- max active-mean-pressure relative error: `{100.0 * _float(mean_pressure_row, 'mean_active_contact_pressure_nodeavg_rel_error'):.3f}%` at `t={_float(mean_pressure_row, 'time'):.8g}`"
+        )
+    if min_gap_row is not None:
+        lines.append(
+            f"- max minimum-gap relative error: `{100.0 * _float(min_gap_row, 'min_contact_gap_node_rel_error'):.3f}%` at `t={_float(min_gap_row, 'time'):.8g}`"
         )
     lines.extend(
         [
