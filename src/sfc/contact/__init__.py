@@ -51,6 +51,12 @@ from .tracking_state import (
     run_contact_tracking_trial,
     snapshot_contact_tracking_state,
 )
+from .validation_gates import (
+    CONTACT_TOTAL_PATH_COLUMNS,
+    CONTACT_TOTAL_REQUIRED_COLUMNS,
+    NODAL_CONTACT_DIAGNOSTIC_COLUMNS,
+    contact_total_priority_gate_metrics,
+)
 from .jacobian import (
     assemble_contact_jacobian,
     contact_jacobian_entries,
@@ -82,6 +88,8 @@ from .sdf_geometry import DynamicSurfaceSDFContactGeometry
 __all__ = [
     "ContactConstraint",
     "ContactBackendResult",
+    "CONTACT_TOTAL_PATH_COLUMNS",
+    "CONTACT_TOTAL_REQUIRED_COLUMNS",
     "ConstraintRegionContactResponse",
     "DynamicSurfaceSDFContactGeometry",
     "FieldContactConstraint",
@@ -95,6 +103,7 @@ __all__ = [
     "LagrangianSDFContactOracle",
     "LagrangianSDFSurfaceContactGeometry",
     "LagrangianSDFQueryResult",
+    "NODAL_CONTACT_DIAGNOSTIC_COLUMNS",
     "SurfaceQuadratureCache",
     "PenaltyContactBackend",
     "SurfaceSample",
@@ -121,6 +130,7 @@ __all__ = [
     "contact_jacobian_row",
     "contact_path_tracking_metrics_from_arrays",
     "contact_region_integral_metrics_from_arrays",
+    "contact_total_priority_gate_metrics",
     "field_contact_constraint_from_sample",
     "field_contact_jacobian_entries",
     "field_contact_jacobian_row",

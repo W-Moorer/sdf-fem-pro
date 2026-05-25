@@ -26,6 +26,9 @@ if str(SRC) not in sys.path:
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from sfc.contact.validation_gates import (  # noqa: E402
+    contact_total_priority_gate_metrics as _core_contact_total_priority_gate_metrics,
+)
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, GearInputModel, GearMesh, parse_gear_input  # noqa: E402
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  # noqa: E402
     ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
@@ -161,73 +164,7 @@ def _row_has_value(row: Row, key: str) -> bool:
 def contact_total_priority_gate_metrics(priority_rows: list[Row]) -> Row:
     """Gate for total contact quantities before nodal CPRESS/COPEN checks."""
 
-    active_rows: list[Row] = []
-    for row in priority_rows:
-        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
-        active_area = _finite_row_float(row, "contact_active_area") or 0.0
-        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
-        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
-            active_rows.append(row)
-    required_total_columns = (
-        "contact_region_normal_force",
-        "contact_region_virtual_work",
-        "contact_region_energy",
-        "contact_active_area",
-        "active_contact_region_count",
-    )
-    required_path_columns = (
-        "contact_path_cache_hit_fraction",
-        "contact_path_cache_match_fraction",
-        "contact_master_face_switch_fraction",
-    )
-    has_rows = len(priority_rows) > 0
-    nodal_deferred = all(_row_int_flag(row, "nodal_cpress_deferred", default=0) == 1 for row in priority_rows)
-    no_nodal_columns = all(
-        not _row_has_value(row, column)
-        for row in priority_rows
-        for column in NODAL_CONTACT_DIAGNOSTIC_COLUMNS
-    )
-    total_columns_present = True
-    path_columns_present = True
-    secondary_pressure_from_region = True
-    force_consistent = True
-    max_force_mismatch = 0.0
-    for row in active_rows:
-        total_columns_present = total_columns_present and all(_row_has_value(row, key) for key in required_total_columns)
-        path_columns_present = path_columns_present and all(_row_has_value(row, key) for key in required_path_columns)
-        secondary_pressure_from_region = (
-            secondary_pressure_from_region
-            and str(row.get("contact_secondary_pressure_recovery_source", "")) == "constraint_region"
-        )
-        normal_force = _finite_row_float(row, "normal_force")
-        region_force = _finite_row_float(row, "contact_region_normal_force")
-        if normal_force is not None and region_force is not None:
-            mismatch = abs(float(normal_force) - float(region_force))
-            scale = max(1.0, abs(float(normal_force)), abs(float(region_force)))
-            max_force_mismatch = max(max_force_mismatch, mismatch / scale)
-            force_consistent = force_consistent and mismatch <= 1.0e-6 * scale
-    active_contact_present = len(active_rows) > 0
-    active_total_gate = (not active_contact_present) or (
-        total_columns_present
-        and path_columns_present
-        and secondary_pressure_from_region
-        and force_consistent
-    )
-    gate_passed = int(has_rows and nodal_deferred and no_nodal_columns and active_total_gate)
-    return {
-        "contact_total_gate_passed": gate_passed,
-        "comparison_stage": "region_totals_before_nodal_cpress",
-        "contact_total_row_count": int(len(priority_rows)),
-        "contact_total_active_row_count": int(len(active_rows)),
-        "contact_total_active_contact_present": int(active_contact_present),
-        "contact_total_nodal_cpress_deferred": int(nodal_deferred),
-        "contact_total_no_nodal_priority_columns": int(no_nodal_columns),
-        "contact_total_required_columns_present": int(total_columns_present),
-        "contact_total_path_columns_present": int(path_columns_present),
-        "contact_total_secondary_pressure_recovery_from_region": int(secondary_pressure_from_region),
-        "contact_total_force_consistency_passed": int(force_consistent),
-        "contact_total_force_relative_mismatch_max": float(max_force_mismatch),
-    }
+    return dict(_core_contact_total_priority_gate_metrics(priority_rows))
 
 
 def _finite_row_float(row: Row, *keys: str) -> float | None:
