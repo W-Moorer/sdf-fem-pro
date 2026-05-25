@@ -3393,6 +3393,83 @@ def _active_reduced_gap_jacobian_sparse_from_arrays(
     return coo_matrix((data, (rows, cols)), shape=(active_ids.size, free_cols.size)).tocsr()
 
 
+def _constraint_region_gap_jacobian_sparse_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    n_nodes: int,
+    active_only: bool = False,
+) -> tuple[np.ndarray, Any]:
+    """Return the full-space gap Jacobian for constraint-region rows.
+
+    Each row follows the fixed-payload surface-to-surface region gap
+
+    ``dg = sum_i Ns_i n^T dxs_i - sum_a Nm_a n^T dxm_a``.
+
+    This is the explicit derivative used by the fixed-active-set contact
+    tangent.  It is separate from SDF querying: closest-feature ids,
+    barycentric weights, region normals, and active status are held fixed.
+    """
+
+    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
+    if active_only:
+        row_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
+    else:
+        row_ids = np.arange(gaps.size, dtype=np.int64)
+    n_total_dofs = 3 * int(n_nodes)
+    if row_ids.size == 0:
+        return row_ids, coo_matrix((0, n_total_dofs), dtype=float).tocsr()
+    slave_nodes = np.asarray(sample_arrays["sample_node_ids"], dtype=np.int64)
+    slave_weights = np.asarray(sample_arrays["sample_weights"], dtype=float)
+    master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
+    master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    normal_norm = np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)
+    normals = normals / normal_norm[:, None]
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for out_row, sample_id in enumerate(row_ids):
+        normal = normals[int(sample_id)]
+        for sign, nodes, weights in (
+            (1.0, slave_nodes[int(sample_id)], slave_weights[int(sample_id)]),
+            (-1.0, master_nodes[int(sample_id)], master_weights[int(sample_id)]),
+        ):
+            for node, weight in zip(nodes, weights, strict=True):
+                if int(node) < 0 or int(node) >= int(n_nodes):
+                    continue
+                for component in range(3):
+                    coeff = float(sign) * float(weight) * float(normal[component])
+                    if coeff == 0.0:
+                        continue
+                    rows.append(out_row)
+                    cols.append(3 * int(node) + component)
+                    data.append(coeff)
+    return row_ids, coo_matrix((data, (rows, cols)), shape=(row_ids.size, n_total_dofs)).tocsr()
+
+
+def _constraint_region_pressure_tangent_scales_from_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    pressure_stiffness: float,
+    equilibrium_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return active rows and ``d(A p)/dg`` magnitudes for linear penalty.
+
+    With ``p = k_p <-g>_+`` and fixed active set, the residual tangent uses
+    ``equilibrium_scale * k_p * A_region`` for each active region.
+    Inactive/open regions have zero pressure-overclosure derivative.
+    """
+
+    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
+    active_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
+    if active_ids.size == 0:
+        return active_ids, np.empty(0, dtype=float)
+    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
+    scales = float(equilibrium_scale) * float(pressure_stiffness) * areas[active_ids]
+    positive = scales > 0.0
+    return active_ids[positive], scales[positive]
+
+
 def _active_constraint_region_tangent_data_from_arrays(
     sample_arrays: dict[str, np.ndarray],
     *,
@@ -3413,19 +3490,21 @@ def _active_constraint_region_tangent_data_from_arrays(
     diagnostics all use the same Abaqus-style constraint-region tangent data.
     """
 
-    gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
-    active_ids = np.flatnonzero(gaps < 0.0).astype(np.int64)
+    active_ids, tangent_scale_all = _constraint_region_pressure_tangent_scales_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
     if active_ids.size == 0:
         free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
         return active_ids, coo_matrix((0, free_cols.size), dtype=float).tocsr(), np.empty(0, dtype=float)
-    areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
-    tangent_scale_all = float(equilibrium_scale) * float(pressure_stiffness) * areas[active_ids]
-    positive = tangent_scale_all > 0.0
-    if not np.any(positive):
-        free_cols = np.asarray(free, dtype=np.int64).reshape(-1)
-        return active_ids[:0], coo_matrix((0, free_cols.size), dtype=float).tocsr(), np.empty(0, dtype=float)
+    all_active_ids = np.flatnonzero(np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1) < 0.0).astype(np.int64)
     j_free_all = _active_reduced_gap_jacobian_sparse_from_arrays(sample_arrays, transformation=transformation, free=free)
-    return active_ids[positive], j_free_all[positive], tangent_scale_all[positive]
+    if not np.array_equal(active_ids, all_active_ids):
+        row_lookup = {int(region_id): int(row) for row, region_id in enumerate(all_active_ids)}
+        keep_rows = np.asarray([row_lookup[int(region_id)] for region_id in active_ids], dtype=np.int64)
+        j_free_all = j_free_all[keep_rows]
+    return active_ids, j_free_all, tangent_scale_all
 
 
 def _constraint_region_tangent_metrics_from_arrays(

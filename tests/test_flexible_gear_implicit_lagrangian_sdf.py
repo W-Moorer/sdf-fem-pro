@@ -29,6 +29,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _contact_patch_representative_length,
+    _constraint_region_gap_jacobian_sparse_from_arrays,
+    _constraint_region_pressure_tangent_scales_from_arrays,
     _constraint_region_tangent_metrics_from_arrays,
     _contact_samples_from_arrays,
     _default_contact_search_radius,
@@ -939,6 +941,101 @@ def test_constraint_region_tangent_matches_fixed_active_force_difference() -> No
     predicted = -np.asarray(j_free.T @ (tangent_scale * np.asarray(j_free @ du, dtype=float)), dtype=float).reshape(-1)
 
     np.testing.assert_allclose(actual, predicted, rtol=1.0e-11, atol=1.0e-11)
+
+
+def test_constraint_region_gap_jacobian_matches_slave_master_fd() -> None:
+    normal = np.asarray([0.0, 3.0, 4.0], dtype=float)
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [1, 2, 4]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.2, 0.5, 0.3], [0.1, 0.2, 0.7]], dtype=float),
+        "gaps": np.asarray([-0.10, 0.20], dtype=float),
+        "normals": np.asarray([normal, normal], dtype=float),
+        "areas": np.asarray([2.0, 3.0], dtype=float),
+        "master_node_ids": np.asarray([[3, 5, 5], [3, 5, 5]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.2, 0.0], [0.4, 0.6, 0.0]], dtype=float),
+    }
+    n_nodes = 6
+    row_ids, jacobian = _constraint_region_gap_jacobian_sparse_from_arrays(arrays, n_nodes=n_nodes)
+    active_ids, active_jacobian = _constraint_region_gap_jacobian_sparse_from_arrays(
+        arrays,
+        n_nodes=n_nodes,
+        active_only=True,
+    )
+    direction = np.asarray(
+        [
+            [0.01, -0.02, 0.03],
+            [-0.04, 0.05, -0.06],
+            [0.07, -0.08, 0.09],
+            [-0.01, 0.02, -0.03],
+            [0.04, -0.05, 0.06],
+            [-0.07, 0.08, -0.09],
+        ],
+        dtype=float,
+    )
+    unit_normal = normal / np.linalg.norm(normal)
+    base_x = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.5],
+            [1.0, 1.0, 0.0],
+            [0.5, 0.5, -0.5],
+        ],
+        dtype=float,
+    )
+
+    def region_gap_from_positions(x: np.ndarray) -> np.ndarray:
+        values = []
+        for row in range(2):
+            slave_point = sum(
+                float(weight) * np.asarray(x[int(node)], dtype=float)
+                for node, weight in zip(arrays["sample_node_ids"][row], arrays["sample_weights"][row], strict=True)
+            )
+            master_point = sum(
+                float(weight) * np.asarray(x[int(node)], dtype=float)
+                for node, weight in zip(arrays["master_node_ids"][row], arrays["master_weights"][row], strict=True)
+            )
+            values.append(float(unit_normal @ (slave_point - master_point)))
+        return np.asarray(values, dtype=float)
+
+    eps = 1.0e-6
+    expected = (region_gap_from_positions(base_x + eps * direction) - region_gap_from_positions(base_x - eps * direction)) / (2.0 * eps)
+
+    np.testing.assert_array_equal(row_ids, [0, 1])
+    np.testing.assert_array_equal(active_ids, [0])
+    np.testing.assert_allclose(np.asarray(jacobian @ direction.reshape(-1)).reshape(-1), expected, atol=1.0e-14)
+    np.testing.assert_allclose(np.asarray(active_jacobian @ direction.reshape(-1)).reshape(-1), expected[:1], atol=1.0e-14)
+
+
+def test_constraint_region_pressure_tangent_filters_open_and_zero_area_rows() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, 0.20, -0.30], dtype=float),
+        "areas": np.asarray([2.0, 5.0, 0.0], dtype=float),
+        "sample_node_ids": np.asarray([[0], [1], [2]], dtype=np.int64),
+        "sample_weights": np.ones((3, 1), dtype=float),
+        "master_node_ids": np.asarray([[3], [3], [3]], dtype=np.int64),
+        "master_weights": np.ones((3, 1), dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0]] * 3, dtype=float),
+    }
+
+    active_ids, scales = _constraint_region_pressure_tangent_scales_from_arrays(
+        arrays,
+        pressure_stiffness=100.0,
+        equilibrium_scale=2.0,
+    )
+    tangent_ids, _j_free, tangent_scales = _active_constraint_region_tangent_data_from_arrays(
+        arrays,
+        transformation=identity(12, format="csr"),
+        free=np.arange(12, dtype=np.int64),
+        pressure_stiffness=100.0,
+        equilibrium_scale=2.0,
+    )
+
+    np.testing.assert_array_equal(active_ids, [0])
+    np.testing.assert_allclose(scales, [400.0])
+    np.testing.assert_array_equal(tangent_ids, [0])
+    np.testing.assert_allclose(tangent_scales, [400.0])
 
 
 def test_constraint_region_tangent_metrics_use_region_rows() -> None:
