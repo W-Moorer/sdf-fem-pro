@@ -2022,6 +2022,8 @@ def _secondary_contact_node_aliases(slave_diagnostics: dict[str, Any]) -> dict[s
     Abaqus reports CPRESS/COPEN on the secondary side for a contact pair.  SFC
     keeps the older ``slave`` names for backward compatibility and mirrors the
     same arrays/metrics under ``secondary`` for direct manifest comparison.
+    This is a fallback for non-region contact paths; Abaqus-style
+    surface-to-surface evidence must use ``constraint_region`` recovery.
     """
 
     fields: dict[str, Any] = {}
@@ -2034,6 +2036,7 @@ def _secondary_contact_node_aliases(slave_diagnostics: dict[str, Any]) -> dict[s
             metrics[key.replace("_contact_slave_", "_contact_secondary_")] = value
         elif key.startswith("active_contact_slave_"):
             metrics[key.replace("active_contact_slave_", "active_contact_secondary_")] = value
+    metrics["contact_secondary_pressure_recovery_source"] = "slave_sample_alias"
     return {"fields": fields, "metrics": metrics}
 
 
@@ -2062,7 +2065,9 @@ def _secondary_region_contact_node_diagnostics_from_arrays(
         return None
     valid = (secondary_ids >= 0) & (secondary_ids < int(n_nodes))
     if not np.any(valid):
-        return _prefixed_contact_node_diagnostics(_empty_contact_node_diagnostics(n_nodes), "secondary")
+        out = _prefixed_contact_node_diagnostics(_empty_contact_node_diagnostics(n_nodes), "secondary")
+        out["metrics"]["contact_secondary_pressure_recovery_source"] = "constraint_region"
+        return out
     secondary = _new_contact_accumulators(int(n_nodes))
     _accumulate_contact_nodes(
         nodes=secondary_ids[valid].reshape((-1, 1)),
@@ -2074,7 +2079,9 @@ def _secondary_region_contact_node_diagnostics_from_arrays(
         active=np.asarray(active, dtype=bool).reshape(-1)[valid],
         **secondary,
     )
-    return _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(secondary, int(n_nodes)), "secondary")
+    out = _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(secondary, int(n_nodes)), "secondary")
+    out["metrics"]["contact_secondary_pressure_recovery_source"] = "constraint_region"
+    return out
 
 
 def _promote_secondary_contact_diagnostics_to_legacy(diagnostics: dict[str, Any]) -> None:
@@ -2108,6 +2115,8 @@ def _promote_secondary_contact_diagnostics_to_legacy(diagnostics: dict[str, Any]
     ):
         if old in metrics:
             metrics[new] = metrics[old]
+    if "contact_secondary_pressure_recovery_source" in metrics:
+        metrics["contact_pressure_recovery_source"] = metrics["contact_secondary_pressure_recovery_source"]
 
 
 def _new_contact_accumulators(n_nodes: int) -> dict[str, np.ndarray]:

@@ -68,6 +68,7 @@ CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
     "contact_path_cache_hit_fraction",
     "contact_path_cache_match_fraction",
     "contact_master_face_switch_fraction",
+    "contact_secondary_pressure_recovery_source",
 )
 
 NODAL_CONTACT_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
@@ -167,11 +168,16 @@ def contact_total_priority_gate_metrics(priority_rows: list[Row]) -> Row:
     )
     total_columns_present = True
     path_columns_present = True
+    secondary_pressure_from_region = True
     force_consistent = True
     max_force_mismatch = 0.0
     for row in active_rows:
         total_columns_present = total_columns_present and all(_row_has_value(row, key) for key in required_total_columns)
         path_columns_present = path_columns_present and all(_row_has_value(row, key) for key in required_path_columns)
+        secondary_pressure_from_region = (
+            secondary_pressure_from_region
+            and str(row.get("contact_secondary_pressure_recovery_source", "")) == "constraint_region"
+        )
         normal_force = _finite_row_float(row, "normal_force")
         region_force = _finite_row_float(row, "contact_region_normal_force")
         if normal_force is not None and region_force is not None:
@@ -180,7 +186,12 @@ def contact_total_priority_gate_metrics(priority_rows: list[Row]) -> Row:
             max_force_mismatch = max(max_force_mismatch, mismatch / scale)
             force_consistent = force_consistent and mismatch <= 1.0e-6 * scale
     active_contact_present = len(active_rows) > 0
-    active_total_gate = (not active_contact_present) or (total_columns_present and path_columns_present and force_consistent)
+    active_total_gate = (not active_contact_present) or (
+        total_columns_present
+        and path_columns_present
+        and secondary_pressure_from_region
+        and force_consistent
+    )
     gate_passed = int(has_rows and nodal_deferred and no_nodal_columns and active_total_gate)
     return {
         "contact_total_gate_passed": gate_passed,
@@ -192,6 +203,7 @@ def contact_total_priority_gate_metrics(priority_rows: list[Row]) -> Row:
         "contact_total_no_nodal_priority_columns": int(no_nodal_columns),
         "contact_total_required_columns_present": int(total_columns_present),
         "contact_total_path_columns_present": int(path_columns_present),
+        "contact_total_secondary_pressure_recovery_from_region": int(secondary_pressure_from_region),
         "contact_total_force_consistency_passed": int(force_consistent),
         "contact_total_force_relative_mismatch_max": float(max_force_mismatch),
     }

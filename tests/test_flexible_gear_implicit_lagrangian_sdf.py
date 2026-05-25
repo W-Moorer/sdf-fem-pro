@@ -480,6 +480,8 @@ def test_contact_pressure_recovery_exposes_secondary_surface_aliases() -> None:
     assert metrics["max_contact_secondary_pressure_nodeavg"] == pytest.approx(metrics["max_contact_slave_pressure_nodeavg"])
     assert metrics["active_contact_node_count"] == metrics["active_contact_secondary_node_count"]
     assert metrics["max_contact_pressure_nodeavg"] == pytest.approx(metrics["max_contact_secondary_pressure_nodeavg"])
+    assert metrics["contact_secondary_pressure_recovery_source"] == "slave_sample_alias"
+    assert metrics["contact_pressure_recovery_source"] == "slave_sample_alias"
 
 
 def test_contact_pressure_recovery_uses_secondary_region_nodes_when_available() -> None:
@@ -502,6 +504,8 @@ def test_contact_pressure_recovery_uses_secondary_region_nodes_when_available() 
     assert secondary_pressure[1] == pytest.approx(10.0)
     assert secondary_pressure[2] == pytest.approx(0.0)
     assert diagnostics["metrics"]["active_contact_secondary_node_count"] == 1
+    assert diagnostics["metrics"]["contact_secondary_pressure_recovery_source"] == "constraint_region"
+    assert diagnostics["metrics"]["contact_pressure_recovery_source"] == "constraint_region"
     np.testing.assert_allclose(diagnostics["fields"]["contact_pressure_nodeavg"], secondary_pressure)
     assert diagnostics["fields"]["contact_slave_pressure_nodeavg"][0] > 0.0
     assert diagnostics["fields"]["contact_master_pressure_nodeavg"][4] > 0.0
@@ -1096,6 +1100,7 @@ def test_contact_total_priority_csv_defers_nodal_pressure(tmp_path: Path) -> Non
                 "contact_active_area": 3.0,
                 "active_contact_region_count": 4,
                 "contact_path_cache_hit_fraction": 1.0,
+                "contact_secondary_pressure_recovery_source": "constraint_region",
                 "max_contact_secondary_pressure_nodeavg": 99.0,
                 "active_contact_secondary_node_count": 5,
             }
@@ -1113,6 +1118,7 @@ def test_contact_total_priority_csv_defers_nodal_pressure(tmp_path: Path) -> Non
     assert "max_contact_secondary_pressure_nodeavg" not in rows[0]
     assert "active_contact_secondary_node_count" not in rows[0]
     assert "max_contact_secondary_pressure_nodeavg" in rows[0]["deferred_nodal_contact_columns"]
+    assert rows[0]["contact_secondary_pressure_recovery_source"] == "constraint_region"
 
 
 def test_contact_total_priority_gate_requires_totals_before_nodal_pressure(tmp_path: Path) -> None:
@@ -1130,6 +1136,7 @@ def test_contact_total_priority_gate_requires_totals_before_nodal_pressure(tmp_p
                 "contact_path_cache_hit_fraction": 1.0,
                 "contact_path_cache_match_fraction": 1.0,
                 "contact_master_face_switch_fraction": 0.0,
+                "contact_secondary_pressure_recovery_source": "constraint_region",
                 "max_contact_secondary_pressure_nodeavg": 99.0,
             }
         ],
@@ -1143,6 +1150,7 @@ def test_contact_total_priority_gate_requires_totals_before_nodal_pressure(tmp_p
     assert int(gate["contact_total_active_contact_present"]) == 1
     assert int(gate["contact_total_nodal_cpress_deferred"]) == 1
     assert int(gate["contact_total_no_nodal_priority_columns"]) == 1
+    assert int(gate["contact_total_secondary_pressure_recovery_from_region"]) == 1
 
     missing_path = [dict(rows[0])]
     missing_path[0].pop("contact_path_cache_hit_fraction", None)
@@ -1150,6 +1158,13 @@ def test_contact_total_priority_gate_requires_totals_before_nodal_pressure(tmp_p
 
     assert int(failed["contact_total_gate_passed"]) == 0
     assert int(failed["contact_total_path_columns_present"]) == 0
+
+    sample_alias = [dict(rows[0])]
+    sample_alias[0]["contact_secondary_pressure_recovery_source"] = "slave_sample_alias"
+    failed_source = contact_total_priority_gate_metrics(sample_alias)
+
+    assert int(failed_source["contact_total_gate_passed"]) == 0
+    assert int(failed_source["contact_total_secondary_pressure_recovery_from_region"]) == 0
 
 
 def test_active_reduced_gap_jacobian_matches_full_projection() -> None:
