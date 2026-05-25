@@ -3482,11 +3482,13 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert "p95_equivalent_elastic_strain_nodeavg" in history[-1]
     assert float(history[-1]["p95_von_mises_nodeavg"]) >= 0.0
     assert float(history[-1]["p95_equivalent_elastic_strain_nodeavg"]) >= 0.0
-    assert int(summary["cropped_patch_gate_passed"]) == 1
+    assert int(summary["cropped_patch_gate_passed"]) == 0
+    assert summary["cropped_patch_gate_reason"] == "path_tracking_discontinuous"
     assert int(summary["cropped_patch_convergence_gate_passed"]) == 1
     assert int(summary["cropped_patch_contact_response_gate_passed"]) == 1
     assert int(summary["cropped_patch_pressure_stress_gate_passed"]) == 1
-    assert int(summary["cropped_patch_path_tracking_gate_passed"]) == 1
+    assert int(summary["cropped_patch_path_tracking_gate_passed"]) == 0
+    assert int(summary["cropped_patch_path_tracking_continuity_observable"]) == 0
     assert int(summary["cropped_patch_active_region_continuity_gate_passed"]) == 1
     assert int(summary["cropped_patch_contact_total_gate_passed"]) == 1
     assert int(summary["cropped_patch_increment_gate_passed"]) == 1
@@ -3551,6 +3553,7 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(gate["cropped_patch_gate_passed"]) == 1
     assert int(gate["cropped_patch_pressure_stress_gate_passed"]) == 1
     assert int(gate["cropped_patch_path_tracking_gate_passed"]) == 1
+    assert int(gate["cropped_patch_path_tracking_continuity_observable"]) == 1
     assert int(gate["cropped_patch_active_region_continuity_gate_passed"]) == 1
     assert int(gate["cropped_patch_contact_total_gate_passed"]) == 1
     assert int(gate["cropped_patch_increment_gate_passed"]) == 1

@@ -6948,6 +6948,7 @@ def _cropped_patch_contact_gate_metrics(
             "cropped_patch_pressure_stress_trend_gate_passed": 0,
             "cropped_patch_path_tracking_gate_passed": 0,
             "cropped_patch_active_region_continuity_gate_passed": 0,
+            "cropped_patch_path_tracking_continuity_observable": 0,
         }
     final = rows[-1]
     finite_keys = [
@@ -7020,6 +7021,13 @@ def _cropped_patch_contact_gate_metrics(
                 break
     tracking_rows = rows[1:] if len(rows) > 1 else []
     has_path_metrics = any("contact_path_cache_hit_fraction" in row for row in tracking_rows)
+    active_contact_present = any(
+        int(row.get("active_contact_region_count", 0)) > 0
+        or float(row.get("contact_active_area", 0.0)) > 0.0
+        or float(row.get("normal_force", 0.0)) > 0.0
+        for row in rows
+    )
+    path_continuity_observable = bool((not active_contact_present) or (tracking_rows and has_path_metrics))
     path_cache_hit_min = (
         float(min(float(row.get("contact_path_cache_hit_fraction", 0.0)) for row in tracking_rows))
         if tracking_rows and has_path_metrics
@@ -7046,7 +7054,8 @@ def _cropped_patch_contact_gate_metrics(
         else 1.0
     )
     path_tracking_ok = bool(
-        path_cache_hit_min >= float(min_path_cache_hit_fraction)
+        path_continuity_observable
+        and path_cache_hit_min >= float(min_path_cache_hit_fraction)
         and path_cache_match_min >= float(min_path_cache_match_fraction)
         and face_switch_max <= float(max_master_face_switch_fraction)
         and barycentric_drift_max <= float(max_master_barycentric_drift)
@@ -7101,6 +7110,7 @@ def _cropped_patch_contact_gate_metrics(
         "cropped_patch_pressure_stress_trend_gate_passed": int(bool(trend_ok)),
         "cropped_patch_path_tracking_gate_passed": int(bool(path_tracking_ok)),
         "cropped_patch_active_region_continuity_gate_passed": int(bool(active_region_ok)),
+        "cropped_patch_path_tracking_continuity_observable": int(path_continuity_observable),
         "cropped_patch_min_active_samples_threshold": int(min_active_samples),
         "cropped_patch_trend_ratio_floor": float(trend_ratio_floor),
         "cropped_patch_path_cache_hit_fraction_min_after_first": float(path_cache_hit_min),
