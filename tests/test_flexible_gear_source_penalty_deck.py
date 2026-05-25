@@ -535,6 +535,12 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                 "source_accepted_contact_response_requery_count": 0,
                 "source_constraint_region_tangent_solve_count": 0,
                 "source_constraint_region_tangent_active_rows_sum": 0,
+                "tooth_patch_region_gate_passed": 1,
+                "tooth_patch_ready_for_cropped_gear_patch": 1,
+                "cropped_patch_gate_passed": 1,
+                "cropped_patch_pressure_stress_gate_passed": 1,
+                "cropped_patch_path_tracking_gate_passed": 1,
+                "cropped_patch_active_region_continuity_gate_passed": 1,
                 "source_final_time": 0.1,
                 "_source_increment_trial_rows": [
                     {

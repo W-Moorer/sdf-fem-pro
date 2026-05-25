@@ -128,3 +128,23 @@ def test_nonlinear_hht_backend_zero_load_has_no_motion() -> None:
     assert np.allclose(result.state.v, 0.0)
     assert np.allclose(result.state.a, 0.0)
     assert np.allclose(result.previous_static_residual, 0.0, atol=1.0e-10)
+
+
+def test_nonlinear_hht_backend_exposes_adaptive_increment_counts() -> None:
+    model = _single_tet_mechanics_model()
+    backend = NonlinearHHTAnalysis(
+        alpha=0.0,
+        adaptive_increments=True,
+        acceptance_policy="relative_correction",
+        min_dt=2.5e-4,
+    )
+    state, previous = backend.initial_state(model, gravity=0.0, dt=1.0e-3)
+
+    result = backend.step(model, state, previous, dt=1.0e-3, gravity=0.0)
+
+    assert np.allclose(result.state.x, model.X)
+    assert result.accepted_increment_count >= 1
+    assert result.cutback_count == 0
+    assert result.attempted_increment_count >= result.accepted_increment_count
+    assert result.min_accepted_increment > 0.0
+    assert result.max_accepted_increment >= result.min_accepted_increment

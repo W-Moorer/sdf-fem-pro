@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from sfc.fem.calculix_aligned import (
+    AdaptiveHHTConvergenceError,
     ContactSample,
     ContactResponse,
     InternalResponse,
@@ -26,6 +27,7 @@ from sfc.fem.calculix_aligned import (
     calculix_hht_effective_tangent,
     hht_newmark_parameters,
     hht_step,
+    hht_step_adaptive,
     initial_state,
     static_force_state,
     static_residual_and_tangent,
@@ -504,3 +506,57 @@ def test_calculix_multicriteria_rejects_unstable_contact_force_increment() -> No
     assert not unstable.accepted_by_calculix_style
     assert stable.contact_force_increment_ok
     assert stable.accepted_by_calculix_style
+
+
+def test_adaptive_hht_accepts_converged_increment() -> None:
+    model = _block_model()
+    contact = EmptyContactGeometry()
+    state, previous = initial_state(model, contact, gravity=9.81, dt=0.001, alpha=-0.05)
+
+    result = hht_step_adaptive(
+        model,
+        state,
+        previous,
+        contact,
+        dt=0.001,
+        gravity=9.81,
+        alpha=-0.05,
+        acceptance_policy="relative_correction",
+        min_dt=0.00025,
+    )
+
+    assert result.state.time == pytest.approx(state.time + 0.001)
+    assert result.accepted_increment_count >= 1
+    assert result.cutback_count == 0
+    assert result.min_accepted_increment > 0.0
+    assert all(event.accepted for event in result.events)
+
+
+def test_adaptive_hht_cutback_restores_failed_trial_contact_state() -> None:
+    model = _block_model()
+    contact = _StatefulEmptyContactGeometry()
+    state, previous = initial_state(model, contact, gravity=9.81, dt=0.001, alpha=-0.05)
+    contact.lifecycle.active_springs.clear()
+    contact.lifecycle.events.clear()
+
+    with pytest.raises(AdaptiveHHTConvergenceError) as exc_info:
+        hht_step_adaptive(
+            model,
+            state,
+            previous,
+            contact,
+            dt=0.001,
+            gravity=9.81,
+            alpha=-0.05,
+            max_iterations=1,
+            acceptance_policy="calculix_multicriteria",
+            min_dt=0.00025,
+            cutback_factor=0.5,
+        )
+
+    events = exc_info.value.events
+    assert [event.dt for event in events] == pytest.approx([0.001, 0.0005, 0.00025])
+    assert all(not event.accepted for event in events)
+    assert events[-1].cutback_dt == pytest.approx(0.00025)
+    assert contact.lifecycle.active_springs == {}
+    assert contact.lifecycle.events == []

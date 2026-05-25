@@ -292,6 +292,45 @@ class StepDiagnostics:
     newton_acceptance_metrics: list[NewtonAcceptanceMetrics] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class AdaptiveHHTCutbackEvent:
+    """One attempted HHT increment in the adaptive cutback controller."""
+
+    start_time: float
+    dt: float
+    attempt: int
+    accepted: bool
+    reason: str
+    cutback_dt: float
+    newton_iterations: int
+    residual_norm: float
+    contact_force_increment_ratio: float
+    active_contact_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptiveHHTStepResult:
+    """Result of advancing a requested time span with cutback subincrements."""
+
+    state: MechanicsState
+    previous_static_residual: np.ndarray
+    diagnostics: StepDiagnostics
+    events: tuple[AdaptiveHHTCutbackEvent, ...]
+    accepted_increment_count: int
+    cutback_count: int
+    attempted_increment_count: int
+    min_accepted_increment: float
+    max_accepted_increment: float
+
+
+class AdaptiveHHTConvergenceError(RuntimeError):
+    """Raised when adaptive HHT cutback reaches ``min_dt`` without convergence."""
+
+    def __init__(self, message: str, events: Iterable[AdaptiveHHTCutbackEvent]) -> None:
+        super().__init__(message)
+        self.events = tuple(events)
+
+
 def hht_newmark_parameters(alpha: float) -> tuple[float, float]:
     """Return HHT/Newmark ``beta`` and ``gamma`` for Abaqus/CalculiX alpha syntax."""
 
@@ -1005,6 +1044,135 @@ def hht_step(
         gravity=gravity,
     )
     return next_state, accepted_static_state.calculix_rhs_balance, diagnostics
+
+
+def hht_step_adaptive(
+    model: MechanicsModel,
+    state: MechanicsState,
+    previous_static_residual: np.ndarray,
+    contact_geometry: ContactGeometry,
+    *,
+    dt: float,
+    gravity: float,
+    alpha: float = -0.05,
+    max_iterations: int = 12,
+    tolerance: float = 1.0e-10,
+    acceptance_policy: str = "calculix_multicriteria",
+    min_dt: float | None = None,
+    cutback_factor: float = 0.5,
+    max_attempts: int = 64,
+) -> AdaptiveHHTStepResult:
+    """Advance ``dt`` using Abaqus-style accepted increments and cutbacks.
+
+    The fixed-step :func:`hht_step` still performs one Newton solve.  This
+    wrapper adds the missing increment controller: a trial increment is accepted
+    only if the selected Newton acceptance policy reports convergence. Failed
+    trials restore the contact state, cut back the time increment, and retry
+    from the last accepted state.  No unconverged trial is accepted.
+    """
+
+    target_dt = float(dt)
+    if target_dt <= 0.0:
+        raise ValueError("dt must be positive")
+    cutback = float(cutback_factor)
+    if not (0.0 < cutback < 1.0):
+        raise ValueError("cutback_factor must lie in (0, 1)")
+    minimum_dt = target_dt * 1.0e-6 if min_dt is None else float(min_dt)
+    if minimum_dt <= 0.0:
+        raise ValueError("min_dt must be positive")
+    if minimum_dt > target_dt:
+        raise ValueError("min_dt must not exceed dt")
+
+    current_state = state
+    current_previous = np.asarray(previous_static_residual, dtype=float).copy()
+    elapsed = 0.0
+    trial_dt = target_dt
+    events: list[AdaptiveHHTCutbackEvent] = []
+    accepted_increments: list[float] = []
+    cutback_count = 0
+    attempt = 0
+    last_diagnostics: StepDiagnostics | None = None
+
+    while elapsed < target_dt - 1.0e-15:
+        if attempt >= int(max_attempts):
+            raise AdaptiveHHTConvergenceError(
+                "adaptive HHT exceeded max_attempts before completing the requested increment",
+                events,
+            )
+        h = min(float(trial_dt), target_dt - elapsed)
+        snapshot = _snapshot_contact_state(contact_geometry)
+        attempt += 1
+        next_state, next_previous, diagnostics = hht_step(
+            model,
+            current_state,
+            current_previous,
+            contact_geometry,
+            dt=h,
+            gravity=gravity,
+            alpha=alpha,
+            max_iterations=max_iterations,
+            tolerance=tolerance,
+            acceptance_policy=acceptance_policy,
+        )
+        accepted = _hht_diagnostics_accepted(diagnostics, acceptance_policy=acceptance_policy)
+        metric = diagnostics.newton_acceptance_metrics[-1] if diagnostics.newton_acceptance_metrics else None
+        event = AdaptiveHHTCutbackEvent(
+            start_time=float(current_state.time),
+            dt=float(h),
+            attempt=int(attempt),
+            accepted=bool(accepted),
+            reason=str(diagnostics.newton_acceptance_reason or (metric.reason if metric is not None else "")),
+            cutback_dt=float(max(minimum_dt, h * cutback)) if not accepted else 0.0,
+            newton_iterations=int(diagnostics.newton_iterations),
+            residual_norm=float(diagnostics.newton_residual_norm),
+            contact_force_increment_ratio=(
+                float(metric.contact_force_increment_ratio) if metric is not None else 0.0
+            ),
+            active_contact_count=int(metric.active_contact_count) if metric is not None else int(diagnostics.contact.active_count),
+        )
+        events.append(event)
+        if accepted:
+            current_state = next_state
+            current_previous = np.asarray(next_previous, dtype=float).copy()
+            last_diagnostics = diagnostics
+            accepted_increments.append(float(h))
+            elapsed += float(h)
+            trial_dt = min(target_dt - elapsed, max(float(h) / cutback, minimum_dt)) if elapsed < target_dt - 1.0e-15 else float(h)
+            continue
+        _restore_contact_state(contact_geometry, snapshot)
+        if h <= minimum_dt * (1.0 + 1.0e-12):
+            raise AdaptiveHHTConvergenceError(
+                f"adaptive HHT failed to converge at minimum dt={minimum_dt:g}",
+                events,
+            )
+        trial_dt = max(minimum_dt, float(h) * cutback)
+        cutback_count += 1
+
+    if last_diagnostics is None:
+        last_diagnostics = evaluate_state(model, current_state, contact_geometry, gravity=gravity, assemble_tangent=True)
+    return AdaptiveHHTStepResult(
+        state=current_state,
+        previous_static_residual=current_previous,
+        diagnostics=last_diagnostics,
+        events=tuple(events),
+        accepted_increment_count=len(accepted_increments),
+        cutback_count=int(cutback_count),
+        attempted_increment_count=int(attempt),
+        min_accepted_increment=min(accepted_increments, default=0.0),
+        max_accepted_increment=max(accepted_increments, default=0.0),
+    )
+
+
+def _hht_diagnostics_accepted(diagnostics: StepDiagnostics, *, acceptance_policy: str) -> bool:
+    if str(acceptance_policy) == "relative_correction":
+        return str(diagnostics.newton_acceptance_reason) == "relative_correction"
+    if str(acceptance_policy) == "calculix_multicriteria":
+        return bool(
+            diagnostics.newton_acceptance_metrics
+            and diagnostics.newton_acceptance_metrics[-1].accepted_by_calculix_style
+            and str(diagnostics.newton_acceptance_reason) != "iteration_limit"
+        )
+    raise ValueError("acceptance_policy must be 'relative_correction' or 'calculix_multicriteria'")
 
 
 def _snapshot_contact_state(contact_geometry: ContactGeometry) -> Any:

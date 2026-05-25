@@ -17,6 +17,7 @@ from sfc.fem.calculix_aligned import (
     StepDiagnostics,
     evaluate_state,
     hht_step,
+    hht_step_adaptive,
     initial_state,
     static_force_state,
 )
@@ -57,6 +58,11 @@ class NonlinearDynamicStepResult:
     state: MechanicsState
     previous_static_residual: np.ndarray
     diagnostics: StepDiagnostics
+    accepted_increment_count: int = 1
+    cutback_count: int = 0
+    attempted_increment_count: int = 1
+    min_accepted_increment: float = 0.0
+    max_accepted_increment: float = 0.0
 
 
 def _as_fixed_values(
@@ -170,6 +176,10 @@ class NonlinearHHTAnalysis:
     max_iterations: int = 12
     tolerance: float = 1.0e-10
     acceptance_policy: str = "relative_correction"
+    adaptive_increments: bool = False
+    min_dt: float | None = None
+    cutback_factor: float = 0.5
+    max_attempts: int = 64
     name: str = "nonlinear_hht"
 
     def initial_state(
@@ -206,6 +216,32 @@ class NonlinearHHTAnalysis:
         """Advance one nonlinear implicit HHT/Newmark step."""
 
         geometry = NoContactGeometry() if contact_geometry is None else contact_geometry
+        if bool(self.adaptive_increments):
+            result = hht_step_adaptive(
+                model,
+                state,
+                previous_static_residual,
+                geometry,
+                dt=float(dt),
+                gravity=float(gravity),
+                alpha=float(self.alpha),
+                max_iterations=int(self.max_iterations),
+                tolerance=float(self.tolerance),
+                acceptance_policy=self.acceptance_policy,
+                min_dt=self.min_dt,
+                cutback_factor=float(self.cutback_factor),
+                max_attempts=int(self.max_attempts),
+            )
+            return NonlinearDynamicStepResult(
+                state=result.state,
+                previous_static_residual=result.previous_static_residual,
+                diagnostics=result.diagnostics,
+                accepted_increment_count=int(result.accepted_increment_count),
+                cutback_count=int(result.cutback_count),
+                attempted_increment_count=int(result.attempted_increment_count),
+                min_accepted_increment=float(result.min_accepted_increment),
+                max_accepted_increment=float(result.max_accepted_increment),
+            )
         next_state, next_previous, diagnostics = hht_step(
             model,
             state,
@@ -222,6 +258,11 @@ class NonlinearHHTAnalysis:
             state=next_state,
             previous_static_residual=next_previous,
             diagnostics=diagnostics,
+            accepted_increment_count=1,
+            cutback_count=0,
+            attempted_increment_count=1,
+            min_accepted_increment=float(dt),
+            max_accepted_increment=float(dt),
         )
 
 

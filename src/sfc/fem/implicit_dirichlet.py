@@ -83,6 +83,7 @@ def hht_step_dirichlet(
     _restore_contact_state(contact_geometry, previous_contact_snapshot)
     previous_ram: float | None = None
     previous_active_count: int | None = None
+    previous_contact_force: np.ndarray | None = None
 
     for iteration in range(max(1, int(max_iterations))):
         _begin_contact_newton_iteration(contact_geometry, iteration + 1)
@@ -126,12 +127,14 @@ def hht_step_dirichlet(
             previous_energy=previous_energy,
             previous_ram=previous_ram,
             previous_active_count=previous_active_count,
+            previous_contact_force=previous_contact_force,
             iteration=iteration_count,
             gravity=gravity,
         )
         acceptance_metrics.append(metric)
         previous_ram = metric.ram
         previous_active_count = metric.active_contact_count
+        previous_contact_force = np.asarray(trial_diagnostics.contact.force, dtype=float).reshape(-1).copy()
         relative_correction_accept = np.linalg.norm(correction_free) <= tolerance * max(1.0, float(np.linalg.norm(u_guess[free])))
         if acceptance_policy == "relative_correction" and relative_correction_accept:
             acceptance_reason = "relative_correction"

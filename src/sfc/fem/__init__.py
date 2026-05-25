@@ -7,6 +7,9 @@ from .assembler import (
 )
 from .body import DeformableBody
 from .calculix_aligned import (
+    AdaptiveHHTConvergenceError,
+    AdaptiveHHTCutbackEvent,
+    AdaptiveHHTStepResult,
     ContactGeometry,
     ContactResponse,
     ContactSample,
@@ -27,6 +30,7 @@ from .calculix_aligned import (
     evaluate_state,
     hht_newmark_parameters,
     hht_step,
+    hht_step_adaptive,
     initial_state,
     static_force_state,
     static_residual_and_tangent,
@@ -90,6 +94,9 @@ __all__ = [
     "DeformableBody",
     "DeformationMapEvaluation",
     "FEMDeformationMap",
+    "AdaptiveHHTConvergenceError",
+    "AdaptiveHHTCutbackEvent",
+    "AdaptiveHHTStepResult",
     "ContactGeometry",
     "ContactResponse",
     "ContactSample",
@@ -122,6 +129,7 @@ __all__ = [
     "get_element_backend",
     "hht_newmark_parameters",
     "hht_step",
+    "hht_step_adaptive",
     "hht_step_dirichlet",
     "hex8_reference_data",
     "C3D8_NATURAL_NODE_COORDS",
