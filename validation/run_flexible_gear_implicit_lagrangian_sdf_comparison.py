@@ -3946,6 +3946,12 @@ def _solve_reduced_penalty_sparse_cg_correction_from_arrays(
     )
     if tangent_scale.size == 0:
         return None
+    if stats is not None:
+        stats["contact_tangent_source"] = "constraint_region_arrays"
+        stats["contact_tangent_active_region_count"] = int(tangent_scale.size)
+        stats["contact_tangent_j_nnz"] = int(j_free.nnz)
+        stats["contact_tangent_scale_sum"] = float(np.sum(tangent_scale))
+        stats["contact_tangent_scale_max"] = float(np.max(tangent_scale))
     return _solve_penalty_cg_correction_sparse(
         base_matrix_free=base_matrix_free,
         rhs=rhs,
@@ -4408,6 +4414,12 @@ def _write_source_drive_checkpoint(
     source_accepted_contact_response_reuse_count: int = 0,
     source_accepted_contact_response_requery_count: int = 0,
     source_accepted_tracking_commit_count: int = 0,
+    source_constraint_region_tangent_solve_count: int = 0,
+    source_constraint_region_tangent_active_rows_sum: int = 0,
+    source_constraint_region_tangent_active_rows_max: int = 0,
+    source_constraint_region_tangent_j_nnz_sum: int = 0,
+    source_constraint_region_tangent_scale_sum: float = 0.0,
+    source_constraint_region_tangent_scale_max: float = 0.0,
 ) -> None:
     """Persist accepted source-drive state for exact fixed-step continuation."""
 
@@ -4453,6 +4465,24 @@ def _write_source_drive_checkpoint(
             ),
             source_accepted_tracking_commit_count=np.asarray(
                 [int(source_accepted_tracking_commit_count)], dtype=np.int64
+            ),
+            source_constraint_region_tangent_solve_count=np.asarray(
+                [int(source_constraint_region_tangent_solve_count)], dtype=np.int64
+            ),
+            source_constraint_region_tangent_active_rows_sum=np.asarray(
+                [int(source_constraint_region_tangent_active_rows_sum)], dtype=np.int64
+            ),
+            source_constraint_region_tangent_active_rows_max=np.asarray(
+                [int(source_constraint_region_tangent_active_rows_max)], dtype=np.int64
+            ),
+            source_constraint_region_tangent_j_nnz_sum=np.asarray(
+                [int(source_constraint_region_tangent_j_nnz_sum)], dtype=np.int64
+            ),
+            source_constraint_region_tangent_scale_sum=np.asarray(
+                [float(source_constraint_region_tangent_scale_sum)], dtype=float
+            ),
+            source_constraint_region_tangent_scale_max=np.asarray(
+                [float(source_constraint_region_tangent_scale_max)], dtype=float
             ),
         )
     tmp.replace(path)
@@ -4519,6 +4549,36 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
                 int(data["source_accepted_tracking_commit_count"][0])
                 if "source_accepted_tracking_commit_count" in data
                 else 0
+            ),
+            "source_constraint_region_tangent_solve_count": (
+                int(data["source_constraint_region_tangent_solve_count"][0])
+                if "source_constraint_region_tangent_solve_count" in data
+                else 0
+            ),
+            "source_constraint_region_tangent_active_rows_sum": (
+                int(data["source_constraint_region_tangent_active_rows_sum"][0])
+                if "source_constraint_region_tangent_active_rows_sum" in data
+                else 0
+            ),
+            "source_constraint_region_tangent_active_rows_max": (
+                int(data["source_constraint_region_tangent_active_rows_max"][0])
+                if "source_constraint_region_tangent_active_rows_max" in data
+                else 0
+            ),
+            "source_constraint_region_tangent_j_nnz_sum": (
+                int(data["source_constraint_region_tangent_j_nnz_sum"][0])
+                if "source_constraint_region_tangent_j_nnz_sum" in data
+                else 0
+            ),
+            "source_constraint_region_tangent_scale_sum": (
+                float(data["source_constraint_region_tangent_scale_sum"][0])
+                if "source_constraint_region_tangent_scale_sum" in data
+                else 0.0
+            ),
+            "source_constraint_region_tangent_scale_max": (
+                float(data["source_constraint_region_tangent_scale_max"][0])
+                if "source_constraint_region_tangent_scale_max" in data
+                else 0.0
             ),
         }
 
@@ -4940,6 +5000,12 @@ def solve_sfc_source_drive_pair(
     source_accepted_contact_response_reuse_count = 0
     source_accepted_contact_response_requery_count = 0
     source_accepted_tracking_commit_count = 0
+    source_constraint_region_tangent_solve_count = 0
+    source_constraint_region_tangent_active_rows_sum = 0
+    source_constraint_region_tangent_active_rows_max = 0
+    source_constraint_region_tangent_j_nnz_sum = 0
+    source_constraint_region_tangent_scale_sum = 0.0
+    source_constraint_region_tangent_scale_max = 0.0
     checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
     start_step = 0
     start_time = 0.0
@@ -4983,6 +5049,22 @@ def solve_sfc_source_drive_pair(
             checkpoint.get("source_accepted_contact_response_requery_count", 0)
         )
         source_accepted_tracking_commit_count = int(checkpoint.get("source_accepted_tracking_commit_count", 0))
+        source_constraint_region_tangent_solve_count = int(
+            checkpoint.get("source_constraint_region_tangent_solve_count", 0)
+        )
+        source_constraint_region_tangent_active_rows_sum = int(
+            checkpoint.get("source_constraint_region_tangent_active_rows_sum", 0)
+        )
+        source_constraint_region_tangent_active_rows_max = int(
+            checkpoint.get("source_constraint_region_tangent_active_rows_max", 0)
+        )
+        source_constraint_region_tangent_j_nnz_sum = int(checkpoint.get("source_constraint_region_tangent_j_nnz_sum", 0))
+        source_constraint_region_tangent_scale_sum = float(
+            checkpoint.get("source_constraint_region_tangent_scale_sum", 0.0)
+        )
+        source_constraint_region_tangent_scale_max = float(
+            checkpoint.get("source_constraint_region_tangent_scale_max", 0.0)
+        )
         state = MechanicsState(
             model.X + assembly.expand_displacements(q),
             assembly.expand_displacements(v),
@@ -5222,6 +5304,10 @@ def solve_sfc_source_drive_pair(
         residual_converged = False
         correction_converged = False
         contact_force_increment_converged = False
+        step_constraint_region_tangent_solve_count = 0
+        step_constraint_region_tangent_active_rows_max = 0
+        step_constraint_region_tangent_j_nnz_sum = 0
+        step_constraint_region_tangent_scale_max = 0.0
         previous_iteration_contact_red: np.ndarray | None = None
         step_line_search_trial_count = 0
         step_line_search_reduced_count = 0
@@ -5347,6 +5433,33 @@ def solve_sfc_source_drive_pair(
                     source_sparse_cg_iterations += int(cg_stats.get("iterations", 0))
                     if str(cg_stats.get("preconditioner", "")) == "base_lu":
                         source_sparse_cg_base_lu_preconditioner += 1
+                    if str(cg_stats.get("contact_tangent_source", "")) == "constraint_region_arrays":
+                        active_rows = int(cg_stats.get("contact_tangent_active_region_count", 0))
+                        j_nnz = int(cg_stats.get("contact_tangent_j_nnz", 0))
+                        scale_sum_value = float(cg_stats.get("contact_tangent_scale_sum", 0.0))
+                        scale_max_value = float(cg_stats.get("contact_tangent_scale_max", 0.0))
+                        source_constraint_region_tangent_solve_count += 1
+                        source_constraint_region_tangent_active_rows_sum += active_rows
+                        source_constraint_region_tangent_active_rows_max = max(
+                            source_constraint_region_tangent_active_rows_max,
+                            active_rows,
+                        )
+                        source_constraint_region_tangent_j_nnz_sum += j_nnz
+                        source_constraint_region_tangent_scale_sum += scale_sum_value
+                        source_constraint_region_tangent_scale_max = max(
+                            source_constraint_region_tangent_scale_max,
+                            scale_max_value,
+                        )
+                        step_constraint_region_tangent_solve_count += 1
+                        step_constraint_region_tangent_active_rows_max = max(
+                            step_constraint_region_tangent_active_rows_max,
+                            active_rows,
+                        )
+                        step_constraint_region_tangent_j_nnz_sum += j_nnz
+                        step_constraint_region_tangent_scale_max = max(
+                            step_constraint_region_tangent_scale_max,
+                            scale_max_value,
+                        )
             timing_linear += time.perf_counter() - t_section
             iteration_count = iteration
             correction_norm = float(np.linalg.norm(correction_free))
@@ -5618,6 +5731,12 @@ def solve_sfc_source_drive_pair(
                     "source_line_search_last_alpha": float(step_line_search_last_alpha),
                     "source_accepted_contact_response_reused": int(bool(accepted_reused_response)),
                     "source_accepted_tracking_committed": int(accepted_tracking_committed),
+                    "source_constraint_region_tangent_solve_count": int(step_constraint_region_tangent_solve_count),
+                    "source_constraint_region_tangent_active_rows_max": int(
+                        step_constraint_region_tangent_active_rows_max
+                    ),
+                    "source_constraint_region_tangent_j_nnz_sum": int(step_constraint_region_tangent_j_nnz_sum),
+                    "source_constraint_region_tangent_scale_max": float(step_constraint_region_tangent_scale_max),
                     "contact_active_set_stable": int(bool(active_set_stable)),
                     "source_step_converged": int(bool(step_converged)),
                 }
@@ -5677,6 +5796,12 @@ def solve_sfc_source_drive_pair(
                     "source_line_search_last_alpha": float(step_line_search_last_alpha),
                     "source_accepted_contact_response_reused": int(bool(accepted_reused_response)),
                     "source_accepted_tracking_committed": int(accepted_tracking_committed),
+                    "source_constraint_region_tangent_solve_count": int(step_constraint_region_tangent_solve_count),
+                    "source_constraint_region_tangent_active_rows_max": int(
+                        step_constraint_region_tangent_active_rows_max
+                    ),
+                    "source_constraint_region_tangent_j_nnz_sum": int(step_constraint_region_tangent_j_nnz_sum),
+                    "source_constraint_region_tangent_scale_max": float(step_constraint_region_tangent_scale_max),
                 }
             )
             frame_row.update(increment_gate_row)
@@ -5722,6 +5847,12 @@ def solve_sfc_source_drive_pair(
                 source_accepted_contact_response_reuse_count=source_accepted_contact_response_reuse_count,
                 source_accepted_contact_response_requery_count=source_accepted_contact_response_requery_count,
                 source_accepted_tracking_commit_count=source_accepted_tracking_commit_count,
+                source_constraint_region_tangent_solve_count=source_constraint_region_tangent_solve_count,
+                source_constraint_region_tangent_active_rows_sum=source_constraint_region_tangent_active_rows_sum,
+                source_constraint_region_tangent_active_rows_max=source_constraint_region_tangent_active_rows_max,
+                source_constraint_region_tangent_j_nnz_sum=source_constraint_region_tangent_j_nnz_sum,
+                source_constraint_region_tangent_scale_sum=source_constraint_region_tangent_scale_sum,
+                source_constraint_region_tangent_scale_max=source_constraint_region_tangent_scale_max,
             )
     wall = time.perf_counter() - start
     summary = {
@@ -5789,6 +5920,12 @@ def solve_sfc_source_drive_pair(
         "source_accepted_contact_response_reuse_count": int(source_accepted_contact_response_reuse_count),
         "source_accepted_contact_response_requery_count": int(source_accepted_contact_response_requery_count),
         "source_accepted_tracking_commit_count": int(source_accepted_tracking_commit_count),
+        "source_constraint_region_tangent_solve_count": int(source_constraint_region_tangent_solve_count),
+        "source_constraint_region_tangent_active_rows_sum": int(source_constraint_region_tangent_active_rows_sum),
+        "source_constraint_region_tangent_active_rows_max": int(source_constraint_region_tangent_active_rows_max),
+        "source_constraint_region_tangent_j_nnz_sum": int(source_constraint_region_tangent_j_nnz_sum),
+        "source_constraint_region_tangent_scale_sum": float(source_constraint_region_tangent_scale_sum),
+        "source_constraint_region_tangent_scale_max": float(source_constraint_region_tangent_scale_max),
         "sfc_history_frame_stride": int(history_stride),
         "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),

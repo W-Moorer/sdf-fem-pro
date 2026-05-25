@@ -59,6 +59,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _snapshot_contact_tracking_state,
     _restore_contact_tracking_state,
     _run_source_automatic_increment_controller,
+    _solve_reduced_penalty_sparse_cg_correction_from_arrays,
     _penalty_history_row,
     _write_csv,
     _write_abaqus_alignment_deck,
@@ -1172,6 +1173,54 @@ def test_constraint_region_tangent_matches_fixed_active_force_difference() -> No
     np.testing.assert_allclose(actual, -np.asarray(base.tangent @ du, dtype=float), rtol=1.0e-11, atol=1.0e-11)
 
 
+def test_sparse_cg_array_path_reports_constraint_region_tangent_use() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0], [1]], dtype=np.int64),
+        "sample_weights": np.ones((2, 1), dtype=float),
+        "gaps": np.asarray([-0.10, 0.20], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]], dtype=float),
+        "areas": np.asarray([2.0, 3.0], dtype=float),
+        "master_node_ids": np.asarray([[2], [2]], dtype=np.int64),
+        "master_weights": np.ones((2, 1), dtype=float),
+    }
+    n_dofs = 9
+    base = identity(n_dofs, format="csr")
+    free = np.arange(n_dofs, dtype=np.int64)
+    residual = np.zeros(n_dofs, dtype=float)
+    residual[[2, 8]] = [-1.0, 0.5]
+    stats: dict[str, object] = {}
+
+    correction = _solve_reduced_penalty_sparse_cg_correction_from_arrays(
+        base_matrix_free=base,
+        residual_free=residual,
+        sample_arrays=arrays,
+        transformation=identity(n_dofs, format="csr"),
+        free=free,
+        equilibrium_scale=1.0,
+        pressure_stiffness=100.0,
+        tolerance=1.0e-10,
+        stats=stats,
+        base_lu=None,
+    )
+    active_ids, j_free, tangent_scale = _active_constraint_region_tangent_data_from_arrays(
+        arrays,
+        transformation=identity(n_dofs, format="csr"),
+        free=free,
+        pressure_stiffness=100.0,
+        equilibrium_scale=1.0,
+    )
+    explicit = base.toarray() + j_free.toarray().T @ (tangent_scale[:, None] * j_free.toarray())
+    expected = np.linalg.solve(explicit, -residual)
+
+    assert correction is not None
+    np.testing.assert_allclose(correction, expected, rtol=1.0e-9, atol=1.0e-9)
+    assert stats["contact_tangent_source"] == "constraint_region_arrays"
+    assert int(stats["contact_tangent_active_region_count"]) == int(active_ids.size)
+    assert int(stats["contact_tangent_j_nnz"]) == int(j_free.nnz)
+    assert float(stats["contact_tangent_scale_sum"]) == pytest.approx(float(np.sum(tangent_scale)))
+    assert float(stats["contact_tangent_scale_max"]) == pytest.approx(float(np.max(tangent_scale)))
+
+
 def test_constraint_region_gap_jacobian_matches_slave_master_fd() -> None:
     normal = np.asarray([0.0, 3.0, 4.0], dtype=float)
     arrays = {
@@ -1518,6 +1567,16 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "source_accepted_contact_response_reuse_count" in summary
     assert "source_accepted_contact_response_requery_count" in summary
     assert "source_accepted_tracking_commit_count" in summary
+    assert "source_constraint_region_tangent_solve_count" in summary
+    assert "source_constraint_region_tangent_active_rows_sum" in summary
+    assert "source_constraint_region_tangent_active_rows_max" in summary
+    assert "source_constraint_region_tangent_j_nnz_sum" in summary
+    assert "source_constraint_region_tangent_scale_sum" in summary
+    assert "source_constraint_region_tangent_scale_max" in summary
+    assert "source_constraint_region_tangent_solve_count" in history[-1]
+    assert "source_constraint_region_tangent_active_rows_max" in history[-1]
+    assert "source_constraint_region_tangent_j_nnz_sum" in history[-1]
+    assert "source_constraint_region_tangent_scale_max" in history[-1]
     assert (
         int(summary["source_accepted_contact_response_reuse_count"])
         + int(summary["source_accepted_contact_response_requery_count"])
