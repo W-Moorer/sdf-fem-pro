@@ -63,6 +63,9 @@ from sfc.contact.tracking_state import (  # noqa: E402
     run_contact_tracking_trial as _core_run_contact_tracking_trial,
     snapshot_contact_tracking_state as _core_snapshot_contact_tracking_state,
 )
+from sfc.contact.validation_gates import (  # noqa: E402
+    contact_total_priority_gate_metrics as _core_contact_total_priority_gate_metrics,
+)
 from sfc.fem.calculix_aligned import (  # noqa: E402
     ContactSample,
     ContactResponse,
@@ -6390,10 +6393,20 @@ def solve_sfc_cropped_pair_hard_contact(
             tracking_regions,
             stiffness=float(effective_pressure_stiffness),
         )
+        secondary_pressure_diagnostics = (
+            None
+            if tracking_regions is None
+            else _secondary_region_contact_node_diagnostics_from_arrays(
+                tracking_regions,
+                model.n_nodes,
+                stiffness=float(effective_pressure_stiffness),
+            )
+        )
         previous_active_region_ids = current_active_region_ids
         active = np.asarray(solution.active, dtype=bool)
         multipliers = np.asarray(solution.multipliers, dtype=float)
-        active_force = float(np.sum(multipliers[active])) if multipliers.size else 0.0
+        active_multiplier_sum = float(np.sum(multipliers[active])) if multipliers.size else 0.0
+        active_force = float(contact_region_metrics.get("contact_region_normal_force", active_multiplier_sum))
         contact_pressure = np.zeros_like(multipliers)
         if multipliers.size and constraint_areas.size == multipliers.size:
             contact_pressure = multipliers / np.maximum(constraint_areas, 1.0e-30)
@@ -6460,7 +6473,7 @@ def solve_sfc_cropped_pair_hard_contact(
             "min_gap": float(np.min(raw_gaps)) if raw_gaps.size else 0.0,
             "linearized_min_gap": float(np.min(solution.gaps)) if solution.gaps.size else 0.0,
             "normal_force": active_force,
-            "contact_multiplier_sum": active_force,
+            "contact_multiplier_sum": active_multiplier_sum,
             "max_contact_pressure": max_contact_pressure,
             "max_displacement_norm": float(np.max(np.linalg.norm(disp, axis=1))),
             "p95_von_mises": float(np.percentile(internal.von_mises, 95.0)) if internal.von_mises.size else 0.0,
@@ -6499,6 +6512,13 @@ def solve_sfc_cropped_pair_hard_contact(
         row.update(path_tracking_metrics)
         row.update(active_region_metrics)
         row.update(contact_region_metrics)
+        row["nodal_cpress_deferred"] = 1
+        if secondary_pressure_diagnostics is not None:
+            source = secondary_pressure_diagnostics.get("metrics", {}).get(
+                "contact_secondary_pressure_recovery_source",
+                "constraint_region",
+            )
+            row["contact_secondary_pressure_recovery_source"] = str(source)
         row["path_tracking_constraint_regions"] = (
             int(np.asarray(tracking_regions["gaps"], dtype=float).size) if tracking_regions is not None else 0
         )
@@ -6592,9 +6612,12 @@ def _cropped_patch_contact_gate_metrics(
 
     rows = list(history)
     if not rows:
+        total_gate = _core_contact_total_priority_gate_metrics([])
         return {
+            **total_gate,
             "cropped_patch_gate_passed": 0,
             "cropped_patch_gate_reason": "empty_history",
+            "cropped_patch_contact_total_gate_passed": 0,
             "cropped_patch_convergence_gate_passed": 0,
             "cropped_patch_contact_response_gate_passed": 0,
             "cropped_patch_pressure_stress_gate_passed": 0,
@@ -6673,7 +6696,17 @@ def _cropped_patch_contact_gate_metrics(
         and barycentric_drift_max <= float(max_master_barycentric_drift)
     )
     active_region_ok = bool(active_jaccard_min >= float(min_active_region_jaccard))
-    passed = bool(convergence_ok and contact_ok and pressure_stress_ok and trend_ok and path_tracking_ok and active_region_ok)
+    total_gate = _core_contact_total_priority_gate_metrics(rows)
+    contact_total_ok = int(total_gate.get("contact_total_gate_passed", 0)) == 1
+    passed = bool(
+        convergence_ok
+        and contact_ok
+        and pressure_stress_ok
+        and trend_ok
+        and path_tracking_ok
+        and active_region_ok
+        and contact_total_ok
+    )
     reason = "passed"
     if not convergence_ok:
         reason = "hard_contact_not_converged"
@@ -6687,9 +6720,13 @@ def _cropped_patch_contact_gate_metrics(
         reason = "path_tracking_discontinuous"
     elif not active_region_ok:
         reason = "active_region_discontinuous"
+    elif not contact_total_ok:
+        reason = "contact_total_priority_gate_failed"
     return {
+        **total_gate,
         "cropped_patch_gate_passed": int(passed),
         "cropped_patch_gate_reason": reason,
+        "cropped_patch_contact_total_gate_passed": int(bool(contact_total_ok)),
         "cropped_patch_convergence_gate_passed": int(bool(convergence_ok)),
         "cropped_patch_contact_response_gate_passed": int(bool(contact_ok)),
         "cropped_patch_pressure_stress_gate_passed": int(bool(pressure_stress_ok)),

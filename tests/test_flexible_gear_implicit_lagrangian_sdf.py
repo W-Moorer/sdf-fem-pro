@@ -3463,6 +3463,12 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert int(summary["cropped_patch_pressure_stress_gate_passed"]) == 1
     assert int(summary["cropped_patch_path_tracking_gate_passed"]) == 1
     assert int(summary["cropped_patch_active_region_continuity_gate_passed"]) == 1
+    assert int(summary["cropped_patch_contact_total_gate_passed"]) == 1
+    assert int(summary["contact_total_gate_passed"]) == 1
+    assert int(summary["contact_total_secondary_pressure_recovery_from_region"]) == 1
+    assert int(history[-1]["nodal_cpress_deferred"]) == 1
+    assert history[-1]["contact_secondary_pressure_recovery_source"] == "constraint_region"
+    assert "max_contact_secondary_pressure_nodeavg" not in history[-1]
     assert "contact_active_master_face_count" in history[-1]
     assert "active_contact_region_count" in history[-1]
 
@@ -3492,6 +3498,11 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(gate["cropped_patch_pressure_stress_gate_passed"]) == 1
     assert int(gate["cropped_patch_path_tracking_gate_passed"]) == 1
     assert int(gate["cropped_patch_active_region_continuity_gate_passed"]) == 1
+    assert int(gate["cropped_patch_contact_total_gate_passed"]) == 1
+    assert int(gate["contact_total_gate_passed"]) == 1
+    assert int(gate["contact_total_nodal_cpress_deferred"]) == 1
+    assert int(gate["contact_total_no_nodal_priority_columns"]) == 1
+    assert int(gate["contact_total_secondary_pressure_recovery_from_region"]) == 1
     assert float(gate["cropped_patch_path_cache_hit_fraction_min_after_first"]) >= float(
         gate["cropped_patch_min_path_cache_hit_threshold"]
     )
@@ -3503,6 +3514,9 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     )
     assert int(history[-1]["hard_constraints"]) == int(history[-1]["hard_contact_samples"])
     assert int(history[-1]["hard_constraints"]) == int(history[-1]["path_tracking_constraint_regions"])
+    assert int(history[-1]["nodal_cpress_deferred"]) == 1
+    assert history[-1]["contact_secondary_pressure_recovery_source"] == "constraint_region"
+    assert "max_contact_secondary_pressure_nodeavg" not in history[-1]
     assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0
 
 
