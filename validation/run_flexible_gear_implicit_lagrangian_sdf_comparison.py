@@ -1816,6 +1816,39 @@ def _secondary_region_contact_node_diagnostics_from_arrays(
     return _prefixed_contact_node_diagnostics(_finalize_contact_accumulators(secondary, int(n_nodes)), "secondary")
 
 
+def _promote_secondary_contact_diagnostics_to_legacy(diagnostics: dict[str, Any]) -> None:
+    """Use secondary-region recovery as the legacy CPRESS/COPEN alias.
+
+    Abaqus contact output for a contact pair is reported on the secondary
+    surface.  SFC keeps ``contact_slave_*`` and ``contact_master_*`` fields for
+    diagnostics, but the long-standing unqualified ``contact_pressure_nodeavg``
+    compatibility fields should therefore mirror the secondary constraint
+    region, not the slave+master scatter total.
+    """
+
+    fields = diagnostics.setdefault("fields", {})
+    for old, new in (
+        ("contact_secondary_pressure_nodeavg", "contact_pressure_nodeavg"),
+        ("contact_secondary_penetration_nodeavg", "contact_penetration_nodeavg"),
+        ("contact_secondary_active_node", "contact_active_node"),
+        ("contact_secondary_gap_min_node", "contact_gap_min_node"),
+        ("contact_secondary_sample_area_weight", "contact_sample_area_weight"),
+    ):
+        if old in fields:
+            fields[new] = np.asarray(fields[old], dtype=float).copy()
+    metrics = diagnostics.setdefault("metrics", {})
+    for old, new in (
+        ("active_contact_secondary_node_count", "active_contact_node_count"),
+        ("max_contact_secondary_pressure_nodeavg", "max_contact_pressure_nodeavg"),
+        ("p95_contact_secondary_pressure_nodeavg", "p95_contact_pressure_nodeavg"),
+        ("mean_active_contact_secondary_pressure_nodeavg", "mean_active_contact_pressure_nodeavg"),
+        ("max_contact_secondary_penetration_nodeavg", "max_contact_penetration_nodeavg"),
+        ("min_contact_secondary_gap_node", "min_contact_gap_node"),
+    ):
+        if old in metrics:
+            metrics[new] = metrics[old]
+
+
 def _new_contact_accumulators(n_nodes: int) -> dict[str, np.ndarray]:
     count = int(n_nodes)
     return {
@@ -1993,6 +2026,7 @@ def _contact_node_diagnostics_from_arrays(
         secondary_diag = _secondary_contact_node_aliases(slave_diag)
     diagnostics["fields"].update(secondary_diag["fields"])
     diagnostics["metrics"].update(secondary_diag["metrics"])
+    _promote_secondary_contact_diagnostics_to_legacy(diagnostics)
     return diagnostics
 
 
@@ -2069,6 +2103,7 @@ def _contact_node_diagnostics_from_samples(samples: Iterable[Any] | None, n_node
     secondary_diag = _secondary_contact_node_aliases(slave_diag)
     diagnostics["fields"].update(secondary_diag["fields"])
     diagnostics["metrics"].update(secondary_diag["metrics"])
+    _promote_secondary_contact_diagnostics_to_legacy(diagnostics)
     return diagnostics
 
 

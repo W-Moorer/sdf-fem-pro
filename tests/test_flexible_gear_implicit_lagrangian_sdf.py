@@ -438,8 +438,13 @@ def test_contact_pressure_recovery_exposes_secondary_surface_aliases() -> None:
     metrics = diagnostics["metrics"]
     np.testing.assert_allclose(fields["contact_secondary_pressure_nodeavg"], fields["contact_slave_pressure_nodeavg"])
     np.testing.assert_allclose(fields["contact_secondary_penetration_nodeavg"], fields["contact_slave_penetration_nodeavg"])
+    np.testing.assert_allclose(fields["contact_pressure_nodeavg"], fields["contact_secondary_pressure_nodeavg"])
+    np.testing.assert_allclose(fields["contact_penetration_nodeavg"], fields["contact_secondary_penetration_nodeavg"])
+    np.testing.assert_allclose(fields["contact_active_node"], fields["contact_secondary_active_node"])
     assert metrics["active_contact_secondary_node_count"] == metrics["active_contact_slave_node_count"]
     assert metrics["max_contact_secondary_pressure_nodeavg"] == pytest.approx(metrics["max_contact_slave_pressure_nodeavg"])
+    assert metrics["active_contact_node_count"] == metrics["active_contact_secondary_node_count"]
+    assert metrics["max_contact_pressure_nodeavg"] == pytest.approx(metrics["max_contact_secondary_pressure_nodeavg"])
 
 
 def test_contact_pressure_recovery_uses_secondary_region_nodes_when_available() -> None:
@@ -462,6 +467,11 @@ def test_contact_pressure_recovery_uses_secondary_region_nodes_when_available() 
     assert secondary_pressure[1] == pytest.approx(10.0)
     assert secondary_pressure[2] == pytest.approx(0.0)
     assert diagnostics["metrics"]["active_contact_secondary_node_count"] == 1
+    np.testing.assert_allclose(diagnostics["fields"]["contact_pressure_nodeavg"], secondary_pressure)
+    assert diagnostics["fields"]["contact_slave_pressure_nodeavg"][0] > 0.0
+    assert diagnostics["fields"]["contact_master_pressure_nodeavg"][4] > 0.0
+    assert diagnostics["metrics"]["active_contact_node_count"] == 1
+    assert diagnostics["metrics"]["max_contact_pressure_nodeavg"] == pytest.approx(10.0)
 
 
 def test_contact_region_integral_metrics_report_force_work_energy_area() -> None:
@@ -1140,6 +1150,9 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "max_contact_pressure_nodeavg" in text
     vtk_text = (vtk_dir / "sfc_0001.vtk").read_text(encoding="ascii")
     assert "SCALARS contact_pressure_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_secondary_pressure_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_secondary_penetration_nodeavg float 1" in vtk_text
+    assert "SCALARS contact_secondary_active_node float 1" in vtk_text
     assert "SCALARS contact_slave_pressure_nodeavg float 1" in vtk_text
     assert "SCALARS contact_master_pressure_nodeavg float 1" in vtk_text
     assert "SCALARS contact_penetration_nodeavg float 1" in vtk_text
