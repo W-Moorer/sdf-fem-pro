@@ -1025,6 +1025,11 @@ def run_full_gear(
         summary["gear2_torque_z"] = float(model.gear2_torque_z)
     history_path = out_dir / "sfc_full_gear_lagrangian_sdf_history.csv"
     _write_csv(history_path, history)
+    source_increment_trial_rows = summary.pop("_source_increment_trial_rows", None)
+    if isinstance(source_increment_trial_rows, list):
+        trial_path = out_dir / "sfc_source_increment_trials.csv"
+        _write_csv(trial_path, source_increment_trial_rows)
+        summary["source_increment_trials"] = str(trial_path)
     contact_total_priority_path = out_dir / "sfc_contact_total_priority_metrics.csv"
     write_contact_total_priority_csv(history, contact_total_priority_path)
     summary["contact_total_priority_metrics"] = str(contact_total_priority_path)

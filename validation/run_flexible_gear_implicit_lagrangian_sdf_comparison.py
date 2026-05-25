@@ -4860,6 +4860,7 @@ def solve_sfc_source_drive_pair(
     vtk_static_blocks = _build_sfc_tet4_vtk_static_blocks(model, element_object_ids) if vtk_enabled else None
     postprocess_label = str(source_stress_postprocess)
     rows: list[Row] = []
+    source_increment_trial_rows: list[Row] = []
     vtk_frame_index = 1
     timing_residual = 0.0
     timing_linear = 0.0
@@ -5095,6 +5096,7 @@ def solve_sfc_source_drive_pair(
     while accepted_time < float(duration) - 1.0e-15:
         step_dt = min(float(trial_dt), float(duration) - float(accepted_time))
         step = int(accepted_step + 1)
+        trial_index = int(len(source_increment_trial_rows) + 1)
         t = float(accepted_time + step_dt)
         current_source_step_dt = float(step_dt)
         c0 = 1.0 / (beta * float(step_dt) * float(step_dt))
@@ -5360,6 +5362,30 @@ def solve_sfc_source_drive_pair(
             if increment_decision.cutback_required
             else None
         )
+        increment_gate_row = _source_increment_gate_row(
+            residual_converged=residual_converged,
+            correction_converged=correction_converged,
+            contact_force_increment_converged=contact_force_increment_converged,
+            active_set_stable=active_set_stable,
+            normalized_residual=normalized_residual,
+            normalized_correction=normalized_correction,
+            normalized_contact_force_increment=normalized_contact_force_increment,
+            contact_force_increment_norm=contact_force_increment_norm,
+            decision=increment_decision,
+            cutback_candidate_dt=cutback_candidate_dt,
+        )
+        source_increment_trial_rows.append(
+            {
+                "source_trial_index": trial_index,
+                "source_trial_candidate_step": int(step),
+                "source_trial_start_time": float(accepted_time),
+                "source_trial_end_time": float(t),
+                "source_trial_dt": float(step_dt),
+                "source_trial_accepted": int(bool(increment_decision.accepted and not increment_decision.cutback_required)),
+                "source_trial_retry_required": int(bool(increment_decision.cutback_required and cutback_candidate_dt is not None)),
+                **increment_gate_row,
+            }
+        )
         if increment_decision.cutback_required:
             source_iteration_limit_reached_count += int(bool(increment_decision.iteration_limited))
             source_cutback_required_count += 1
@@ -5374,18 +5400,6 @@ def solve_sfc_source_drive_pair(
                 )
             trial_dt = float(cutback_candidate_dt)
             continue
-        increment_gate_row = _source_increment_gate_row(
-            residual_converged=residual_converged,
-            correction_converged=correction_converged,
-            contact_force_increment_converged=contact_force_increment_converged,
-            active_set_stable=active_set_stable,
-            normalized_residual=normalized_residual,
-            normalized_correction=normalized_correction,
-            normalized_contact_force_increment=normalized_contact_force_increment,
-            contact_force_increment_norm=contact_force_increment_norm,
-            decision=increment_decision,
-            cutback_candidate_dt=cutback_candidate_dt,
-        )
         q_new = _project_reduced_fixed(q_guess, fixed, values)
         a_new = c0 * (q_new - q_pred)
         v_new = v_pred + gamma * float(step_dt) * a_new
@@ -5658,6 +5672,10 @@ def solve_sfc_source_drive_pair(
         "source_cutback_required_count": int(source_cutback_required_count),
         "source_unconverged_accepted_count": int(source_unconverged_accepted_count),
         "source_accepted_increment_count": int(accepted_step),
+        "source_increment_trial_count": int(len(source_increment_trial_rows)),
+        "source_rejected_trial_count": int(
+            sum(1 for row in source_increment_trial_rows if int(row.get("source_trial_accepted", 0)) == 0)
+        ),
         "source_final_time": float(accepted_time),
         "source_line_search_trial_count": int(source_line_search_trial_count),
         "source_line_search_reduced_count": int(source_line_search_reduced_count),
@@ -5680,6 +5698,7 @@ def solve_sfc_source_drive_pair(
         "source_checkpoint_path": "" if checkpoint_path is None else str(checkpoint_path),
         "source_checkpoint_stride": int(max(1, int(source_checkpoint_stride))),
         "status": "completed",
+        "_source_increment_trial_rows": source_increment_trial_rows,
     }
     if vtk_enabled and vtk_dir is not None:
         pvd_path = vtk_dir / f"{vtk_stem}.pvd"

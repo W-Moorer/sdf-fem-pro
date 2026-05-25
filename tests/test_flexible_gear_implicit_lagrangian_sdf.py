@@ -1567,12 +1567,22 @@ def test_source_drive_cutback_retries_without_accepting_failed_trial(
 
     assert int(summary["source_cutback_required_count"]) == 1
     assert int(summary["source_accepted_increment_count"]) == 2
+    assert int(summary["source_increment_trial_count"]) == 3
+    assert int(summary["source_rejected_trial_count"]) == 1
     assert float(summary["source_final_time"]) == pytest.approx(1.0e-5)
     assert len(history) == 2
     assert float(history[0]["time"]) == pytest.approx(5.0e-6)
     assert float(history[0]["source_step_dt"]) == pytest.approx(5.0e-6)
     assert float(history[1]["time"]) == pytest.approx(1.0e-5)
     assert all(int(row["source_increment_accepted"]) == 1 for row in history)
+    trial_rows = summary["_source_increment_trial_rows"]
+    assert [int(row["source_trial_accepted"]) for row in trial_rows] == [0, 1, 1]
+    assert int(trial_rows[0]["source_trial_retry_required"]) == 1
+    assert float(trial_rows[0]["source_trial_start_time"]) == pytest.approx(0.0)
+    assert float(trial_rows[0]["source_trial_end_time"]) == pytest.approx(1.0e-5)
+    assert float(trial_rows[0]["source_increment_cutback_candidate_dt"]) == pytest.approx(5.0e-6)
+    assert float(trial_rows[1]["source_trial_end_time"]) == pytest.approx(history[0]["time"])
+    assert float(trial_rows[2]["source_trial_end_time"]) == pytest.approx(history[1]["time"])
 
 
 def test_source_drive_checkpoint_resume_matches_continuous_short_run(tmp_path: Path) -> None:
