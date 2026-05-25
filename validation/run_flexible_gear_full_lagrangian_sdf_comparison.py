@@ -68,6 +68,13 @@ CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
     "contact_path_cache_hit_fraction",
     "contact_path_cache_match_fraction",
     "contact_master_face_switch_fraction",
+    "contact_master_barycentric_drift_mean",
+    "contact_master_barycentric_drift_max",
+    "contact_active_region_continuity_previous_count",
+    "contact_active_region_continuity_current_count",
+    "contact_active_region_continuity_intersection_count",
+    "contact_active_region_new_count",
+    "contact_active_region_dropped_count",
     "contact_secondary_pressure_recovery_source",
 )
 
@@ -497,6 +504,108 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
     }
 
 
+def path_tracking_gate_metrics(
+    history_rows: list[Row],
+    *,
+    min_cache_hit_fraction: float = 0.95,
+    min_cache_match_fraction: float = 0.0,
+    min_active_region_jaccard: float = 0.25,
+    min_active_region_persistence: float = 0.25,
+    max_master_face_switch_fraction: float = 0.85,
+    max_master_barycentric_drift: float = 1.50,
+) -> Row:
+    """Gate accepted-state master-payload path tracking before cloud checks.
+
+    The full-gear validation must prove that each accepted secondary
+    constraint region carries a coherent previous master face/barycentric
+    payload.  This gate evaluates only accepted history rows and intentionally
+    sits before nodal CPRESS/COPEN cloud comparison.  A single active row is
+    reported as not yet continuity-observable; multi-row active contact must
+    retain high cache-hit continuity, bounded face switching, bounded
+    barycentric drift on same-face samples, and persistent active regions.
+    """
+
+    active_rows: list[Row] = []
+    for row in history_rows:
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        active_area = _finite_row_float(row, "contact_active_area") or 0.0
+        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
+        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
+            active_rows.append(row)
+    active_contact_present = len(active_rows) > 0
+    tracking_rows = active_rows[1:] if len(active_rows) > 1 else []
+    required_columns = (
+        "contact_path_cache_hit_fraction",
+        "contact_path_cache_match_fraction",
+        "contact_master_face_switch_fraction",
+        "contact_active_region_jaccard",
+        "contact_active_region_persistence_fraction",
+        "contact_master_barycentric_drift_max",
+    )
+    columns_present = all(_row_has_value(row, key) for row in tracking_rows for key in required_columns)
+    continuity_observable = len(tracking_rows) > 0
+    if tracking_rows and columns_present:
+        cache_hit_min = min(float(row["contact_path_cache_hit_fraction"]) for row in tracking_rows)
+        cache_match_min = min(float(row["contact_path_cache_match_fraction"]) for row in tracking_rows)
+        face_switch_max = max(float(row["contact_master_face_switch_fraction"]) for row in tracking_rows)
+        active_jaccard_min = min(float(row["contact_active_region_jaccard"]) for row in tracking_rows)
+        active_persistence_min = min(float(row["contact_active_region_persistence_fraction"]) for row in tracking_rows)
+        barycentric_drift_max = max(float(row["contact_master_barycentric_drift_max"]) for row in tracking_rows)
+    else:
+        cache_hit_min = 1.0 if not active_contact_present else 0.0
+        cache_match_min = 1.0 if not active_contact_present else 0.0
+        face_switch_max = 0.0
+        active_jaccard_min = 1.0 if not active_contact_present else 0.0
+        active_persistence_min = 1.0 if not active_contact_present else 0.0
+        barycentric_drift_max = 0.0
+    cache_hit_ok = cache_hit_min >= float(min_cache_hit_fraction)
+    cache_match_ok = cache_match_min >= float(min_cache_match_fraction)
+    face_switch_ok = face_switch_max <= float(max_master_face_switch_fraction)
+    active_jaccard_ok = active_jaccard_min >= float(min_active_region_jaccard)
+    active_persistence_ok = active_persistence_min >= float(min_active_region_persistence)
+    barycentric_ok = barycentric_drift_max <= float(max_master_barycentric_drift)
+    if not active_contact_present:
+        gate_passed = 1
+    elif not continuity_observable:
+        gate_passed = 1
+    else:
+        gate_passed = int(
+            columns_present
+            and cache_hit_ok
+            and cache_match_ok
+            and face_switch_ok
+            and active_jaccard_ok
+            and active_persistence_ok
+            and barycentric_ok
+        )
+    return {
+        "path_tracking_gate_passed": int(gate_passed),
+        "comparison_stage": "accepted_state_path_tracking_before_nodal_cpress",
+        "path_tracking_active_contact_present": int(active_contact_present),
+        "path_tracking_active_history_row_count": int(len(active_rows)),
+        "path_tracking_continuity_observable": int(continuity_observable),
+        "path_tracking_required_columns_present": int(columns_present),
+        "path_tracking_cache_hit_gate_passed": int(cache_hit_ok),
+        "path_tracking_cache_match_gate_passed": int(cache_match_ok),
+        "path_tracking_face_switch_gate_passed": int(face_switch_ok),
+        "path_tracking_active_region_jaccard_gate_passed": int(active_jaccard_ok),
+        "path_tracking_active_region_persistence_gate_passed": int(active_persistence_ok),
+        "path_tracking_barycentric_drift_gate_passed": int(barycentric_ok),
+        "path_tracking_cache_hit_fraction_min_after_first_active": float(cache_hit_min),
+        "path_tracking_cache_match_fraction_min_after_first_active": float(cache_match_min),
+        "path_tracking_master_face_switch_fraction_max_after_first_active": float(face_switch_max),
+        "path_tracking_active_region_jaccard_min_after_first_active": float(active_jaccard_min),
+        "path_tracking_active_region_persistence_min_after_first_active": float(active_persistence_min),
+        "path_tracking_master_barycentric_drift_max_after_first_active": float(barycentric_drift_max),
+        "path_tracking_min_cache_hit_threshold": float(min_cache_hit_fraction),
+        "path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
+        "path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
+        "path_tracking_min_active_region_persistence_threshold": float(min_active_region_persistence),
+        "path_tracking_max_master_face_switch_threshold": float(max_master_face_switch_fraction),
+        "path_tracking_max_master_barycentric_drift_threshold": float(max_master_barycentric_drift),
+    }
+
+
 def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 10) -> Row:
     """Gate the full-gear comparison ladder before nodal pressure/cloud checks.
 
@@ -514,6 +623,11 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     nodal_deferred = _row_int_flag(summary, "contact_total_nodal_cpress_deferred", default=0)
     no_nodal_priority_columns = _row_int_flag(summary, "contact_total_no_nodal_priority_columns", default=0)
     active_contact_present = _row_int_flag(summary, "contact_total_active_contact_present", default=0)
+    path_tracking_passed = _row_int_flag(
+        summary,
+        "path_tracking_gate_passed",
+        default=1 if not bool(active_contact_present) else 0,
+    )
     path_columns_present = _row_int_flag(summary, "contact_total_path_columns_present", default=0)
     source_final_time_ok = _row_int_flag(summary, "source_convergence_final_time_matches_duration", default=0)
     no_bad_accepted = _row_int_flag(summary, "source_convergence_no_unstable_or_unconverged_accepted", default=0)
@@ -526,6 +640,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         and bool(source_convergence_passed)
         and bool(tangent_passed)
         and bool(contact_total_passed)
+        and bool(path_tracking_passed)
         and bool(nodal_deferred)
         and bool(no_nodal_priority_columns)
         and bool(path_tracking_ready)
@@ -543,6 +658,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_source_convergence_gate_passed": int(source_convergence_passed),
         "full_gear_entry_constraint_region_tangent_gate_passed": int(tangent_passed),
         "full_gear_entry_contact_total_gate_passed": int(contact_total_passed),
+        "full_gear_entry_path_tracking_gate_passed": int(path_tracking_passed),
         "full_gear_entry_nodal_cpress_deferred": int(nodal_deferred),
         "full_gear_entry_no_nodal_priority_columns": int(no_nodal_priority_columns),
         "full_gear_entry_active_contact_present": int(active_contact_present),
@@ -572,6 +688,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
 
     source_ok = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
     tangent_ok = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=0)
+    path_ok = _row_int_flag(summary, "path_tracking_gate_passed", default=0)
     totals_ok = _row_int_flag(summary, "contact_total_gate_passed", default=0)
     entry_ok = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
     strict_ok = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
@@ -580,7 +697,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     animation_metrics_present = _artifact_present(summary, "animation_metric_errors")
     history_metrics_present = _artifact_present(summary, "history_metric_errors")
 
-    region_allowed = int(bool(source_ok) and bool(tangent_ok) and bool(totals_ok))
+    region_allowed = int(bool(source_ok) and bool(tangent_ok) and bool(path_ok) and bool(totals_ok))
     nodal_allowed = int(
         bool(entry_ok)
         and bool(sfc_manifest_present)
@@ -615,6 +732,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "blocking_reason": "" if allowed else blocking_reason,
             "source_convergence_gate_passed": int(source_ok),
             "constraint_region_tangent_gate_passed": int(tangent_ok),
+            "path_tracking_gate_passed": int(path_ok),
             "contact_total_gate_passed": int(totals_ok),
             "full_gear_entry_gate_passed": int(entry_ok),
             "full_gear_strict_sync_ready": int(strict_ok),
@@ -1234,6 +1352,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source line-search unstable count: {summary.get('source_line_search_unstable_count', '')}",
         f"- source constraint-region tangent solves: {summary.get('source_constraint_region_tangent_solve_count', '')}",
         f"- constraint-region tangent gate: {summary.get('constraint_region_tangent_gate_passed', '')}",
+        f"- accepted-state path tracking gate: {summary.get('path_tracking_gate_passed', '')}",
         f"- contact-total gate: {summary.get('contact_total_gate_passed', '')}",
         f"- full-gear entry gate: {summary.get('full_gear_entry_gate_passed', '')}",
         "- full-gear strict-sync ready: "
@@ -1271,6 +1390,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         lines.append(
             f"- constraint-region tangent gate CSV: `{Path(str(summary.get('constraint_region_tangent_gate'))).name}`"
         )
+    if summary.get("path_tracking_gate"):
+        lines.append(f"- accepted-state path tracking gate CSV: `{Path(str(summary.get('path_tracking_gate'))).name}`")
     if summary.get("contact_total_priority_metrics"):
         lines.append(f"- contact-total priority metrics: `{Path(str(summary.get('contact_total_priority_metrics'))).name}`")
     if summary.get("contact_total_gate"):
@@ -1607,6 +1728,11 @@ def run_full_gear(
     _write_csv(constraint_tangent_gate_path, [constraint_tangent_gate])
     summary.update(constraint_tangent_gate)
     summary["constraint_region_tangent_gate"] = str(constraint_tangent_gate_path)
+    path_tracking_gate = path_tracking_gate_metrics(history)
+    path_tracking_gate_path = out_dir / "sfc_path_tracking_gate.csv"
+    _write_csv(path_tracking_gate_path, [path_tracking_gate])
+    summary.update(path_tracking_gate)
+    summary["path_tracking_gate"] = str(path_tracking_gate_path)
     full_gear_entry_gate = full_gear_entry_gate_metrics(summary)
     full_gear_entry_gate_path = out_dir / "sfc_full_gear_entry_gate.csv"
     _write_csv(full_gear_entry_gate_path, [full_gear_entry_gate])
