@@ -6476,7 +6476,102 @@ def solve_sfc_cropped_pair_hard_contact(
         "timing_reaction_diagnostics_seconds": float(timing_reaction_diagnostics),
         "status": "completed",
     }
+    summary.update(_cropped_patch_contact_gate_metrics(rows, summary, require_monotone_trend=False))
     return rows, summary
+
+
+def _cropped_patch_contact_gate_metrics(
+    history: list[Row],
+    summary: Row,
+    *,
+    min_active_samples: int = 1,
+    trend_ratio_floor: float = 0.80,
+    require_monotone_trend: bool = False,
+) -> Row:
+    """Return cropped-patch contact sanity gates before full-gear escalation.
+
+    This gate is intentionally local to the SFC cropped-patch layer.  It checks
+    that the HARD-contact solve converged, that a nonzero active contact region
+    exists, and that pressure/stress/strain measures are finite and nonnegative.
+    When ``require_monotone_trend`` is enabled, a multi-step normal compression
+    sequence must not lose pressure, stress, or strain trend relative to the
+    first accepted step.
+    """
+
+    rows = list(history)
+    if not rows:
+        return {
+            "cropped_patch_gate_passed": 0,
+            "cropped_patch_gate_reason": "empty_history",
+            "cropped_patch_convergence_gate_passed": 0,
+            "cropped_patch_contact_response_gate_passed": 0,
+            "cropped_patch_pressure_stress_gate_passed": 0,
+            "cropped_patch_pressure_stress_trend_gate_passed": 0,
+        }
+    final = rows[-1]
+    finite_keys = [
+        "normal_force",
+        "max_contact_pressure",
+        "p95_von_mises_nodeavg",
+        "p95_equivalent_elastic_strain_nodeavg",
+        "min_gap",
+        "linearized_min_gap",
+    ]
+    finite_ok = all(np.isfinite(float(row.get(key, 0.0))) for row in rows for key in finite_keys)
+    convergence_ok = (
+        str(summary.get("status", "")) == "completed"
+        and str(summary.get("contact_mode", "")) == "hard"
+        and int(summary.get("final_hard_outer_converged", 0)) == 1
+        and all(int(row.get("hard_outer_converged", 0)) == 1 for row in rows)
+    )
+    contact_ok = (
+        int(final.get("active_contact_samples", 0)) >= int(min_active_samples)
+        and float(final.get("normal_force", 0.0)) >= 0.0
+        and float(final.get("max_contact_pressure", 0.0)) >= 0.0
+        and int(final.get("hard_constraints", 0)) >= int(min_active_samples)
+    )
+    pressure_stress_ok = (
+        finite_ok
+        and float(final.get("max_contact_pressure", 0.0)) > 0.0
+        and float(final.get("p95_von_mises_nodeavg", final.get("p95_von_mises", 0.0))) > 0.0
+        and float(final.get("p95_equivalent_elastic_strain_nodeavg", final.get("p95_equivalent_elastic_strain", 0.0))) > 0.0
+    )
+    trend_ok = True
+    if bool(require_monotone_trend) and len(rows) > 1:
+        first = rows[0]
+        for key in ("normal_force", "max_contact_pressure", "p95_von_mises_nodeavg", "p95_equivalent_elastic_strain_nodeavg"):
+            first_value = max(float(first.get(key, 0.0)), 1.0e-30)
+            final_value = float(final.get(key, 0.0))
+            if final_value < float(trend_ratio_floor) * first_value:
+                trend_ok = False
+                break
+    passed = bool(convergence_ok and contact_ok and pressure_stress_ok and trend_ok)
+    reason = "passed"
+    if not convergence_ok:
+        reason = "hard_contact_not_converged"
+    elif not contact_ok:
+        reason = "missing_active_contact_response"
+    elif not pressure_stress_ok:
+        reason = "invalid_pressure_stress_strain_response"
+    elif not trend_ok:
+        reason = "pressure_stress_trend_regressed"
+    return {
+        "cropped_patch_gate_passed": int(passed),
+        "cropped_patch_gate_reason": reason,
+        "cropped_patch_convergence_gate_passed": int(bool(convergence_ok)),
+        "cropped_patch_contact_response_gate_passed": int(bool(contact_ok)),
+        "cropped_patch_pressure_stress_gate_passed": int(bool(pressure_stress_ok)),
+        "cropped_patch_pressure_stress_trend_gate_passed": int(bool(trend_ok)),
+        "cropped_patch_min_active_samples_threshold": int(min_active_samples),
+        "cropped_patch_trend_ratio_floor": float(trend_ratio_floor),
+        "cropped_patch_final_max_contact_pressure": float(final.get("max_contact_pressure", 0.0)),
+        "cropped_patch_final_p95_von_mises_nodeavg": float(
+            final.get("p95_von_mises_nodeavg", final.get("p95_von_mises", 0.0))
+        ),
+        "cropped_patch_final_p95_equivalent_elastic_strain_nodeavg": float(
+            final.get("p95_equivalent_elastic_strain_nodeavg", final.get("p95_equivalent_elastic_strain", 0.0))
+        ),
+    }
 
 
 def _write_abaqus_alignment_deck(
@@ -7134,6 +7229,10 @@ def write_summary(
         f"- final opposing RP reaction norm: {summary.get('final_opposing_rp_force_norm', 0.0):.6e}",
         f"- final hard outer iterations: {summary.get('final_hard_outer_iterations', '')}",
         f"- final hard outer converged: {summary.get('final_hard_outer_converged', '')}",
+        f"- cropped patch contact gate: {'PASS' if int(summary.get('cropped_patch_gate_passed', 0)) else 'FAIL'} ({summary.get('cropped_patch_gate_reason', '')})",
+        f"- cropped patch final max pressure: {float(summary.get('cropped_patch_final_max_contact_pressure', 0.0)):.6e}",
+        f"- cropped patch final p95 von Mises nodeavg: {float(summary.get('cropped_patch_final_p95_von_mises_nodeavg', 0.0)):.6e}",
+        f"- cropped patch final p95 equivalent strain nodeavg: {float(summary.get('cropped_patch_final_p95_equivalent_elastic_strain_nodeavg', 0.0)):.6e}",
         f"- history CSV: `{history_path.name}`",
         f"- optional Abaqus alignment deck: `{deck_path.name}`",
     ]

@@ -30,6 +30,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _contact_patch_representative_length,
+    _cropped_patch_contact_gate_metrics,
     _constraint_region_gap_jacobian_sparse_from_arrays,
     _constraint_region_pressure_tangent_scales_from_arrays,
     _constraint_region_tangent_metrics_from_arrays,
@@ -3079,6 +3080,37 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert "p95_equivalent_elastic_strain_nodeavg" in history[-1]
     assert float(history[-1]["p95_von_mises_nodeavg"]) >= 0.0
     assert float(history[-1]["p95_equivalent_elastic_strain_nodeavg"]) >= 0.0
+    assert int(summary["cropped_patch_gate_passed"]) == 1
+    assert int(summary["cropped_patch_convergence_gate_passed"]) == 1
+    assert int(summary["cropped_patch_contact_response_gate_passed"]) == 1
+    assert int(summary["cropped_patch_pressure_stress_gate_passed"]) == 1
+
+
+def test_cropped_patch_gate_checks_pressure_and_stress_trend() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+
+    history, summary = solve_sfc_cropped_pair_hard_contact(
+        pair,
+        young=model.young,
+        poisson=model.poisson,
+        density=model.density,
+        pressure_stiffness=5.0e9,
+        duration=2.0e-5,
+        dt=1.0e-5,
+        target_overclosure=1.0e-5,
+        rotation_rate_z=0.0,
+        max_iterations=3,
+        automatic_increment=False,
+    )
+    gate = _cropped_patch_contact_gate_metrics(history, summary, require_monotone_trend=True)
+
+    assert len(history) == 2
+    assert int(gate["cropped_patch_gate_passed"]) == 1
+    assert int(gate["cropped_patch_pressure_stress_trend_gate_passed"]) == 1
+    assert float(history[-1]["normal_force"]) >= 0.8 * float(history[0]["normal_force"])
+    assert float(history[-1]["max_contact_pressure"]) >= 0.8 * float(history[0]["max_contact_pressure"])
+    assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0
 
 
 def test_cropped_gear_hard_contact_supports_surface_patch_constraint_averaging() -> None:
