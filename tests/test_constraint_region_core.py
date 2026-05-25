@@ -6,6 +6,7 @@ import pytest
 from sfc.contact.constraint_region import (
     aggregate_contact_sample_arrays,
     contact_active_region_continuity_metrics_from_arrays,
+    constraint_region_contact_tangent_sparse_from_arrays,
     constraint_region_gap_jacobian_sparse_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays,
     contact_path_tracking_metrics_from_arrays,
@@ -70,6 +71,33 @@ def test_constraint_region_totals_and_tangent_use_region_rows() -> None:
     assert jacobian.shape == (2, 39)
     assert active_ids.tolist() == [0, 1]
     assert scales == pytest.approx([142.5, 237.5])
+
+
+def test_constraint_region_contact_tangent_is_fixed_active_set_jtwj() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+
+    active_ids, jacobian, scales, tangent, metrics = constraint_region_contact_tangent_sparse_from_arrays(
+        regions,
+        n_nodes=13,
+        pressure_stiffness=100.0,
+        equilibrium_scale=0.95,
+    )
+
+    dense_j = jacobian.toarray()
+    expected = dense_j.T @ (scales[:, None] * dense_j)
+    assert active_ids.tolist() == [0, 1]
+    assert scales == pytest.approx([142.5, 237.5])
+    np.testing.assert_allclose(tangent.toarray(), expected)
+    np.testing.assert_allclose(tangent.toarray(), tangent.toarray().T)
+    assert metrics["contact_tangent_source"] == "constraint_region_arrays"
+    assert metrics["contact_tangent_gap_jacobian_source"] == "constraint_region_fixed_payload"
+    assert metrics["contact_tangent_pressure_derivative"] == "linear_penalty_active_set"
+    assert metrics["contact_tangent_fixed_active_set"] == 1
+    assert metrics["contact_tangent_active_region_count"] == 2
+    assert metrics["contact_tangent_active_secondary_node_count"] == 2
+    assert metrics["contact_tangent_j_nnz"] == jacobian.nnz
+    assert metrics["contact_tangent_matrix_nnz"] == tangent.nnz
 
 
 def test_secondary_pressure_recovery_uses_region_owner_nodes() -> None:

@@ -10,7 +10,7 @@ node-to-surface penalty sample.
 from __future__ import annotations
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 
 
 def contact_averaging_modes(mode: str) -> tuple[str, str]:
@@ -206,6 +206,115 @@ def constraint_region_pressure_tangent_scales_from_arrays(
     scales = float(equilibrium_scale) * float(pressure_stiffness) * areas[active_ids]
     positive = scales > 0.0
     return active_ids[positive], scales[positive]
+
+
+def constraint_region_contact_tangent_sparse_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    n_nodes: int,
+    pressure_stiffness: float,
+    equilibrium_scale: float = 1.0,
+) -> tuple[np.ndarray, csr_matrix, np.ndarray, csr_matrix, dict[str, float | int | str]]:
+    """Return the fixed-active-set constraint-region contact tangent.
+
+    For region gap rows ``g`` and linear penalty pressure
+    ``p = k_p <-g>_+``, the active-set tangent uses the fixed closest-feature
+    payload derivative
+
+    ``K_c = J.T @ diag(equilibrium_scale * k_p * A_region) @ J``.
+
+    The returned sparse ``J`` is the full-space derivative of region gap with
+    respect to nodal coordinates; it includes positive slave coefficients and
+    negative master coefficients.  Open regions and non-positive area scales
+    are excluded from the active rows.
+    """
+
+    n_total_dofs = 3 * int(n_nodes)
+    if sample_arrays is None:
+        empty_j = coo_matrix((0, n_total_dofs), dtype=float).tocsr()
+        empty_k = coo_matrix((n_total_dofs, n_total_dofs), dtype=float).tocsr()
+        return np.empty(0, dtype=np.int64), empty_j, np.empty(0, dtype=float), empty_k, constraint_region_tangent_metrics_from_arrays(
+            None,
+            pressure_stiffness=pressure_stiffness,
+            equilibrium_scale=equilibrium_scale,
+        )
+    active_ids, scales = constraint_region_pressure_tangent_scales_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    all_active_ids, active_j = constraint_region_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=n_nodes,
+        active_only=True,
+    )
+    if active_ids.size == 0:
+        empty_j = coo_matrix((0, n_total_dofs), dtype=float).tocsr()
+        empty_k = coo_matrix((n_total_dofs, n_total_dofs), dtype=float).tocsr()
+        return active_ids, empty_j, scales, empty_k, constraint_region_tangent_metrics_from_arrays(
+            sample_arrays,
+            pressure_stiffness=pressure_stiffness,
+            equilibrium_scale=equilibrium_scale,
+        )
+    if not np.array_equal(active_ids, all_active_ids):
+        row_lookup = {int(region_id): int(row) for row, region_id in enumerate(all_active_ids)}
+        keep_rows = np.asarray([row_lookup[int(region_id)] for region_id in active_ids], dtype=np.int64)
+        active_j = active_j[keep_rows]
+    tangent = (active_j.T @ diags(np.asarray(scales, dtype=float), format="csr") @ active_j).tocsr()
+    metrics = constraint_region_tangent_metrics_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    metrics["contact_tangent_j_nnz"] = int(active_j.nnz)
+    metrics["contact_tangent_matrix_nnz"] = int(tangent.nnz)
+    return active_ids, active_j, scales, tangent, metrics
+
+
+def constraint_region_tangent_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    pressure_stiffness: float,
+    equilibrium_scale: float = 1.0,
+) -> dict[str, float | int | str]:
+    """Return scalar diagnostics for the active constraint-region tangent."""
+
+    if sample_arrays is None:
+        return {
+            "contact_tangent_source": "none",
+            "contact_tangent_gap_jacobian_source": "none",
+            "contact_tangent_pressure_derivative": "none",
+            "contact_tangent_scale_formula": "",
+            "contact_tangent_fixed_active_set": 0,
+            "contact_tangent_active_region_count": 0,
+            "contact_tangent_active_secondary_node_count": 0,
+            "contact_tangent_scale_sum": 0.0,
+            "contact_tangent_scale_max": 0.0,
+        }
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    active = gaps < 0.0
+    active_ids, scales = constraint_region_pressure_tangent_scales_from_arrays(
+        sample_arrays,
+        pressure_stiffness=pressure_stiffness,
+        equilibrium_scale=equilibrium_scale,
+    )
+    secondary_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    if secondary_ids.shape == gaps.shape and active_ids.size:
+        active_secondary = secondary_ids[active_ids]
+        active_secondary = active_secondary[active_secondary >= 0]
+    else:
+        active_secondary = np.empty(0, dtype=np.int64)
+    return {
+        "contact_tangent_source": "constraint_region_arrays",
+        "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
+        "contact_tangent_pressure_derivative": "linear_penalty_active_set",
+        "contact_tangent_scale_formula": "equilibrium_scale*pressure_stiffness*region_area",
+        "contact_tangent_fixed_active_set": 1,
+        "contact_tangent_active_region_count": int(np.count_nonzero(active)),
+        "contact_tangent_active_secondary_node_count": int(np.unique(active_secondary).size),
+        "contact_tangent_scale_sum": float(np.sum(scales)) if scales.size else 0.0,
+        "contact_tangent_scale_max": float(np.max(scales)) if scales.size else 0.0,
+    }
 
 
 def contact_region_integral_metrics_from_arrays(
