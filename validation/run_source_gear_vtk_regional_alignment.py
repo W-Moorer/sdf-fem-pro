@@ -531,6 +531,50 @@ def _max_p95_rows(rows: list[Row]) -> list[Row]:
     return list(selected.values())
 
 
+def _unique_active_overlap_rows(rows: list[Row]) -> list[Row]:
+    """Return one active-overlap diagnostic row for each paired contact frame."""
+
+    selected: dict[tuple[str, str], Row] = {}
+    for row in rows:
+        if int(row.get("active_union_count", 0)) <= 0:
+            continue
+        key = (str(row.get("pair_index", "")), f"{float(row['sfc_time']):.17g}")
+        if key not in selected:
+            selected[key] = row
+    return sorted(selected.values(), key=lambda row: (float(row["sfc_time"]), str(row.get("pair_index", ""))))
+
+
+def _worst_active_overlap_rows(rows: list[Row], *, limit: int = 6) -> list[Row]:
+    """Return contact frames with the weakest active-mask overlap."""
+
+    active_rows = _unique_active_overlap_rows(rows)
+    return sorted(
+        active_rows,
+        key=lambda row: (
+            float(row["active_jaccard"]),
+            float(row["active_recall"]),
+            float(row["active_precision"]),
+            float(row["sfc_time"]),
+        ),
+    )[: max(int(limit), 0)]
+
+
+def _stress_error_context_rows(rows: list[Row]) -> list[Row]:
+    """Return worst stress/strain rows with active-mask context attached."""
+
+    target_metrics = {"von_mises_nodeavg", "equivalent_elastic_strain_nodeavg", "strain_norm_nodeavg"}
+    target_regions = {"full", "abaqus_active", "active_union"}
+    selected: dict[tuple[str, str], Row] = {}
+    for row in rows:
+        if str(row["metric"]) not in target_metrics or str(row["region"]) not in target_regions:
+            continue
+        key = (str(row["region"]), str(row["metric"]))
+        previous = selected.get(key)
+        if previous is None or float(row["p95_rel_error"]) > float(previous["p95_rel_error"]):
+            selected[key] = row
+    return sorted(selected.values(), key=lambda row: float(row["p95_rel_error"]), reverse=True)
+
+
 def _write_summary(
     path: Path,
     rows: list[Row],
@@ -587,13 +631,14 @@ def _write_summary(
             )
         )
     if rows:
-        first = rows[0]
         latest = _latest_rows(rows)[0]
         latest_rows = _latest_rows(rows)
         latest_active = latest_rows[0]
-        min_jaccard = min(float(row["active_jaccard"]) for row in rows)
-        min_precision = min(float(row["active_precision"]) for row in rows)
-        min_recall = min(float(row["active_recall"]) for row in rows)
+        active_rows = _unique_active_overlap_rows(rows)
+        active_scope = active_rows if active_rows else rows
+        min_jaccard = min(float(row["active_jaccard"]) for row in active_scope)
+        min_precision = min(float(row["active_precision"]) for row in active_scope)
+        min_recall = min(float(row["active_recall"]) for row in active_scope)
         lines.extend(
             [
                 "",
@@ -615,6 +660,58 @@ def _write_summary(
                 f"- latest time difference: `{float(latest['time_difference']):.12e}`",
             ]
         )
+        worst_active = _worst_active_overlap_rows(rows)
+        if worst_active:
+            lines.extend(
+                [
+                    "",
+                    "## Worst Active-Mask Overlap Frames",
+                    "",
+                    "| time | SFC active | Abaqus active | intersection | SFC-only | Abaqus-only | precision | recall | Jaccard |",
+                    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for row in worst_active:
+                lines.append(
+                    "| {time:.12g} | {sfc} | {abaqus} | {intersection} | {sfc_only} | {abaqus_only} | "
+                    "{precision:.6f} | {recall:.6f} | {jaccard:.6f} |".format(
+                        time=float(row["sfc_time"]),
+                        sfc=int(row["sfc_active_node_count"]),
+                        abaqus=int(row["abaqus_active_node_count"]),
+                        intersection=int(row["active_intersection_count"]),
+                        sfc_only=int(row["active_sfc_only_count"]),
+                        abaqus_only=int(row["active_abaqus_only_count"]),
+                        precision=float(row["active_precision"]),
+                        recall=float(row["active_recall"]),
+                        jaccard=float(row["active_jaccard"]),
+                    )
+                )
+        context_rows = _stress_error_context_rows(rows)
+        if context_rows:
+            lines.extend(
+                [
+                    "",
+                    "## Stress/Strain Error Active-Set Context",
+                    "",
+                    "| region | metric | time | p95 rel. error | SFC active | Abaqus active | precision | recall | Jaccard |",
+                    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for row in context_rows:
+                lines.append(
+                    "| {region} | {metric} | {time:.12g} | {p95:.3f}% | {sfc} | {abaqus} | "
+                    "{precision:.6f} | {recall:.6f} | {jaccard:.6f} |".format(
+                        region=row["region"],
+                        metric=row["metric"],
+                        time=float(row["sfc_time"]),
+                        p95=100.0 * float(row["p95_rel_error"]),
+                        sfc=int(row["sfc_active_node_count"]),
+                        abaqus=int(row["abaqus_active_node_count"]),
+                        precision=float(row["active_precision"]),
+                        recall=float(row["active_recall"]),
+                        jaccard=float(row["active_jaccard"]),
+                    )
+                )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

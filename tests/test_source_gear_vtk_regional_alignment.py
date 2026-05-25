@@ -9,7 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from validation.run_source_gear_vtk_regional_alignment import compare_vtk_manifests, compare_vtk_pair, read_vtk_point_scalars
+from validation.run_source_gear_vtk_regional_alignment import (
+    _stress_error_context_rows,
+    _unique_active_overlap_rows,
+    _worst_active_overlap_rows,
+    compare_vtk_manifests,
+    compare_vtk_pair,
+    read_vtk_point_scalars,
+)
 
 
 def _write_point_scalar_vtk(path: Path, *, pressure: tuple[float, float], active: tuple[float, float]) -> None:
@@ -123,3 +130,61 @@ def test_compare_vtk_manifests_pairs_frames_by_time(tmp_path: Path) -> None:
     assert len(rows) == 2 * 4 * 7
     assert {row["pair_index"] for row in rows} == {0, 1}
     assert max(abs(float(row["time_difference"])) for row in rows) < 1.0e-9
+
+
+def test_active_overlap_summary_helpers_ignore_no_contact_duplicates() -> None:
+    rows = [
+        {
+            "pair_index": 0,
+            "sfc_time": 0.0,
+            "region": "full",
+            "metric": "von_mises_nodeavg",
+            "p95_rel_error": 0.0,
+            "active_union_count": 0,
+            "active_jaccard": 1.0,
+            "active_recall": 1.0,
+            "active_precision": 1.0,
+        },
+        {
+            "pair_index": 1,
+            "sfc_time": 1.0e-4,
+            "region": "full",
+            "metric": "von_mises_nodeavg",
+            "p95_rel_error": 0.2,
+            "active_union_count": 10,
+            "active_jaccard": 0.4,
+            "active_recall": 0.5,
+            "active_precision": 0.6,
+            "sfc_active_node_count": 6,
+            "abaqus_active_node_count": 8,
+            "active_intersection_count": 4,
+            "active_sfc_only_count": 2,
+            "active_abaqus_only_count": 4,
+        },
+        {
+            "pair_index": 1,
+            "sfc_time": 1.0e-4,
+            "region": "abaqus_active",
+            "metric": "contact_pressure_nodeavg",
+            "p95_rel_error": 0.1,
+            "active_union_count": 10,
+            "active_jaccard": 0.4,
+            "active_recall": 0.5,
+            "active_precision": 0.6,
+            "sfc_active_node_count": 6,
+            "abaqus_active_node_count": 8,
+            "active_intersection_count": 4,
+            "active_sfc_only_count": 2,
+            "active_abaqus_only_count": 4,
+        },
+    ]
+
+    unique = _unique_active_overlap_rows(rows)
+    worst = _worst_active_overlap_rows(rows)
+    context = _stress_error_context_rows(rows)
+
+    assert len(unique) == 1
+    assert unique[0]["sfc_time"] == pytest.approx(1.0e-4)
+    assert worst == unique
+    assert len(context) == 1
+    assert context[0]["metric"] == "von_mises_nodeavg"
