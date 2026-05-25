@@ -410,6 +410,48 @@ class LagrangianSDFSurfaceContactGeometry:
                 bary = bary / total
             bary_cache[int(cache_index)] = bary
 
+    def commit_secondary_tracking_from_sample_arrays(self, sample_arrays: dict[str, np.ndarray]) -> int:
+        """Commit secondary path-tracking payload from an accepted query.
+
+        Trial contact queries often run under a snapshot/restore guard so a
+        failed Newton iteration or cutback cannot mutate the accepted tracking
+        state.  When such a trial is accepted, this method commits the exact
+        closest-feature payload carried by that trial without re-running the
+        projection query.
+        """
+
+        if not bool(self.secondary_path_tracking):
+            return 0
+        if "secondary_cache_indices" not in sample_arrays or "master_face_ids" not in sample_arrays:
+            return 0
+        cache_indices = np.asarray(sample_arrays["secondary_cache_indices"], dtype=np.int64).reshape(-1)
+        face_ids = np.asarray(sample_arrays["master_face_ids"], dtype=np.int64).reshape(-1)
+        bary = sample_arrays.get("master_barycentric", sample_arrays.get("master_weights"))
+        if bary is None:
+            return 0
+        barycentric = np.asarray(bary, dtype=float)
+        if barycentric.ndim != 2 or barycentric.shape[1] != 3:
+            return 0
+        count = min(cache_indices.size, face_ids.size, barycentric.shape[0])
+        if count == 0:
+            return 0
+        face_cache = self._ensure_secondary_face_cache()
+        bary_cache = self._ensure_secondary_barycentric_cache()
+        committed = 0
+        for index in range(count):
+            cache_index = int(cache_indices[index])
+            face_id = int(face_ids[index])
+            if face_id < 0 or not (0 <= cache_index < face_cache.shape[0]):
+                continue
+            weights = np.asarray(barycentric[index], dtype=float).reshape(3)
+            total = float(np.sum(weights))
+            if total > 0.0:
+                weights = weights / total
+            face_cache[cache_index] = face_id
+            bary_cache[cache_index] = weights
+            committed += 1
+        return int(committed)
+
     def samples(self, x_current: np.ndarray):
         if bool(self.clip_to_master_footprint):
             yield from self._clipped_samples(x_current)
@@ -1073,6 +1115,7 @@ class LagrangianSDFSurfaceContactGeometry:
             "master_weights": master_bary,
             "master_barycentric": master_bary,
             "master_face_ids": np.asarray(face_ids, dtype=np.int64),
+            "secondary_cache_indices": np.asarray(valid_cache_indices, dtype=np.int64),
             "tracking_cache_hits": tracking_cache_hits.astype(bool, copy=False),
             "tracking_cache_matches": tracking_cache_matches.astype(bool, copy=False),
             "tracking_barycentric_distances": tracking_barycentric_distances,
@@ -1462,6 +1505,7 @@ class LagrangianSDFSurfaceContactGeometry:
                 )
             bary_cache[cache_indices] = normalized
             tracking_payload = {
+                "secondary_cache_indices": np.asarray(cache_indices, dtype=np.int64),
                 "tracking_cache_hits": tracking_cache_hits.astype(bool, copy=False),
                 "tracking_cache_matches": tracking_cache_matches.astype(bool, copy=False),
                 "tracking_barycentric_distances": tracking_barycentric_distances,
@@ -1880,6 +1924,7 @@ def _empty_sample_arrays() -> dict[str, np.ndarray]:
         "master_weights": np.empty((0, 3), dtype=float),
         "master_barycentric": np.empty((0, 3), dtype=float),
         "master_face_ids": np.empty(0, dtype=np.int64),
+        "secondary_cache_indices": np.empty(0, dtype=np.int64),
         "tracking_cache_hits": np.empty(0, dtype=bool),
         "tracking_cache_matches": np.empty(0, dtype=bool),
         "tracking_barycentric_distances": np.empty(0, dtype=float),

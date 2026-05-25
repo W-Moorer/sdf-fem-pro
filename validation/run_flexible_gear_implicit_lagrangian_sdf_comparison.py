@@ -1003,6 +1003,7 @@ def _aggregate_contact_array_group(
     master_weights: np.ndarray,
     master_barycentric: np.ndarray | None,
     master_face_ids: np.ndarray | None,
+    secondary_cache_indices: np.ndarray | None,
     secondary_node_id: int | None,
     tracking_cache_hits: np.ndarray | None,
     tracking_cache_matches: np.ndarray | None,
@@ -1102,6 +1103,12 @@ def _aggregate_contact_array_group(
         row_bary = np.asarray(master_barycentric, dtype=float)
         if row_bary.ndim == 2 and row_bary.shape[0] >= int(np.max(rows)) + 1 and row_bary.shape[1] == 3:
             master_bary = row_bary[int(rows[int(representative_local)])].copy()
+    secondary_cache_index = -1
+    if secondary_cache_indices is not None and representative_local is not None:
+        cache_ids = np.asarray(secondary_cache_indices, dtype=np.int64).reshape(-1)
+        source_row = int(rows[int(representative_local)])
+        if cache_ids.size > source_row:
+            secondary_cache_index = int(cache_ids[source_row])
     tracking_hit = False
     if tracking_cache_hits is not None:
         row_hits = np.asarray(tracking_cache_hits, dtype=bool).reshape(-1)
@@ -1135,6 +1142,7 @@ def _aggregate_contact_array_group(
         "master_weights": master_w,
         "master_barycentric": master_bary,
         "master_face_id": int(master_face_id),
+        "secondary_cache_index": int(secondary_cache_index),
         "secondary_node_id": int(-1 if secondary_node_id is None else secondary_node_id),
         "tracking_cache_hit": int(tracking_hit),
         "tracking_cache_match": int(tracking_match),
@@ -1156,6 +1164,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
             "master_weights": np.empty((0, 0), dtype=float),
             "master_barycentric": np.empty((0, 3), dtype=float),
             "master_face_ids": np.empty(0, dtype=np.int64),
+            "secondary_cache_indices": np.empty(0, dtype=np.int64),
             "secondary_node_ids": np.empty(0, dtype=np.int64),
             "tracking_cache_hits": np.empty(0, dtype=bool),
             "tracking_cache_matches": np.empty(0, dtype=bool),
@@ -1172,6 +1181,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
     areas = np.zeros(len(rows), dtype=float)
     master_face_ids = np.full(len(rows), -1, dtype=np.int64)
     master_barycentric = np.full((len(rows), 3), np.nan, dtype=float)
+    secondary_cache_indices = np.full(len(rows), -1, dtype=np.int64)
     secondary_node_ids = np.full(len(rows), -1, dtype=np.int64)
     tracking_cache_hits = np.zeros(len(rows), dtype=bool)
     tracking_cache_matches = np.zeros(len(rows), dtype=bool)
@@ -1190,6 +1200,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         areas[index] = float(row["area"])
         master_face_ids[index] = int(row.get("master_face_id", -1))
         master_barycentric[index] = np.asarray(row.get("master_barycentric", np.full(3, np.nan)), dtype=float).reshape(3)
+        secondary_cache_indices[index] = int(row.get("secondary_cache_index", -1))
         secondary_node_ids[index] = int(row.get("secondary_node_id", -1))
         tracking_cache_hits[index] = bool(row.get("tracking_cache_hit", 0))
         tracking_cache_matches[index] = bool(row.get("tracking_cache_match", 0))
@@ -1204,6 +1215,7 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
         "master_weights": master_weights,
         "master_barycentric": master_barycentric,
         "master_face_ids": master_face_ids,
+        "secondary_cache_indices": secondary_cache_indices,
         "secondary_node_ids": secondary_node_ids,
         "tracking_cache_hits": tracking_cache_hits,
         "tracking_cache_matches": tracking_cache_matches,
@@ -1253,6 +1265,12 @@ def _aggregate_contact_sample_arrays(
         if master_face_ids_in is None
         else np.asarray(master_face_ids_in, dtype=np.int64).reshape(-1)
     )
+    secondary_cache_indices_in = sample_arrays.get("secondary_cache_indices")
+    secondary_cache_indices = (
+        None
+        if secondary_cache_indices_in is None
+        else np.asarray(secondary_cache_indices_in, dtype=np.int64).reshape(-1)
+    )
     expanded_sample_nodes = sample_nodes
     expanded_sample_weights = sample_weights
     expanded_gaps = gaps
@@ -1262,6 +1280,7 @@ def _aggregate_contact_sample_arrays(
     expanded_master_weights = master_weights
     expanded_master_barycentric = master_barycentric
     expanded_master_face_ids = master_face_ids
+    expanded_secondary_cache_indices = secondary_cache_indices
     tracking_cache_hits_in = sample_arrays.get("tracking_cache_hits")
     tracking_cache_matches_in = sample_arrays.get("tracking_cache_matches")
     tracking_cache_hits = None if tracking_cache_hits_in is None else np.asarray(tracking_cache_hits_in, dtype=bool).reshape(-1)
@@ -1344,6 +1363,9 @@ def _aggregate_contact_sample_arrays(
                     expanded_master_weights = master_weights[source_rows]
                     expanded_master_barycentric = None if master_barycentric is None else master_barycentric[source_rows]
                     expanded_master_face_ids = None if master_face_ids is None else master_face_ids[source_rows]
+                    expanded_secondary_cache_indices = (
+                        None if secondary_cache_indices is None else secondary_cache_indices[source_rows]
+                    )
                     expanded_tracking_cache_hits = None if tracking_cache_hits is None else tracking_cache_hits[source_rows]
                     expanded_tracking_cache_matches = (
                         None if tracking_cache_matches is None else tracking_cache_matches[source_rows]
@@ -1361,6 +1383,9 @@ def _aggregate_contact_sample_arrays(
                     expanded_master_weights = np.empty((0, master_weights.shape[1]), dtype=float)
                     expanded_master_barycentric = None if master_barycentric is None else np.empty((0, 3), dtype=float)
                     expanded_master_face_ids = None if master_face_ids is None else np.empty(0, dtype=np.int64)
+                    expanded_secondary_cache_indices = (
+                        None if secondary_cache_indices is None else np.empty(0, dtype=np.int64)
+                    )
                     expanded_tracking_cache_hits = None if tracking_cache_hits is None else np.empty(0, dtype=bool)
                     expanded_tracking_cache_matches = (
                         None if tracking_cache_matches is None else np.empty(0, dtype=bool)
@@ -1423,6 +1448,7 @@ def _aggregate_contact_sample_arrays(
                     "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
                     "master_barycentric": np.empty((0, 3), dtype=float),
                     "master_face_ids": np.empty(0, dtype=np.int64),
+                    "secondary_cache_indices": np.empty(0, dtype=np.int64),
                     "secondary_node_ids": np.empty(0, dtype=np.int64),
                     "tracking_cache_hits": np.empty(0, dtype=bool),
                     "tracking_cache_matches": np.empty(0, dtype=bool),
@@ -1441,6 +1467,9 @@ def _aggregate_contact_sample_arrays(
             expanded_master_weights = master_weights[source_rows].copy()
             expanded_master_barycentric = None if master_barycentric is None else master_barycentric[source_rows].copy()
             expanded_master_face_ids = None if master_face_ids is None else master_face_ids[source_rows].copy()
+            expanded_secondary_cache_indices = (
+                None if secondary_cache_indices is None else secondary_cache_indices[source_rows].copy()
+            )
             expanded_tracking_cache_hits = None if tracking_cache_hits is None else tracking_cache_hits[source_rows].copy()
             expanded_tracking_cache_matches = (
                 None if tracking_cache_matches is None else tracking_cache_matches[source_rows].copy()
@@ -1474,6 +1503,7 @@ def _aggregate_contact_sample_arrays(
                 "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
                 "master_barycentric": np.empty((0, 3), dtype=float),
                 "master_face_ids": np.empty(0, dtype=np.int64),
+                "secondary_cache_indices": np.empty(0, dtype=np.int64),
                 "secondary_node_ids": np.empty(0, dtype=np.int64),
                 "tracking_cache_hits": np.empty(0, dtype=bool),
                 "tracking_cache_matches": np.empty(0, dtype=bool),
@@ -1493,6 +1523,7 @@ def _aggregate_contact_sample_arrays(
             master_weights=expanded_master_weights,
             master_barycentric=expanded_master_barycentric,
             master_face_ids=expanded_master_face_ids,
+            secondary_cache_indices=expanded_secondary_cache_indices,
             secondary_node_id=int(group_secondary_node_ids[int(group_index)]),
             tracking_cache_hits=expanded_tracking_cache_hits,
             tracking_cache_matches=expanded_tracking_cache_matches,
@@ -4374,6 +4405,9 @@ def _write_source_drive_checkpoint(
     source_line_search_trial_count: int = 0,
     source_line_search_reduced_count: int = 0,
     source_line_search_stable_count: int = 0,
+    source_accepted_contact_response_reuse_count: int = 0,
+    source_accepted_contact_response_requery_count: int = 0,
+    source_accepted_tracking_commit_count: int = 0,
 ) -> None:
     """Persist accepted source-drive state for exact fixed-step continuation."""
 
@@ -4411,6 +4445,15 @@ def _write_source_drive_checkpoint(
             source_line_search_trial_count=np.asarray([int(source_line_search_trial_count)], dtype=np.int64),
             source_line_search_reduced_count=np.asarray([int(source_line_search_reduced_count)], dtype=np.int64),
             source_line_search_stable_count=np.asarray([int(source_line_search_stable_count)], dtype=np.int64),
+            source_accepted_contact_response_reuse_count=np.asarray(
+                [int(source_accepted_contact_response_reuse_count)], dtype=np.int64
+            ),
+            source_accepted_contact_response_requery_count=np.asarray(
+                [int(source_accepted_contact_response_requery_count)], dtype=np.int64
+            ),
+            source_accepted_tracking_commit_count=np.asarray(
+                [int(source_accepted_tracking_commit_count)], dtype=np.int64
+            ),
         )
     tmp.replace(path)
 
@@ -4461,6 +4504,21 @@ def _load_source_drive_checkpoint(path: Path) -> dict[str, Any]:
             ),
             "source_line_search_stable_count": (
                 int(data["source_line_search_stable_count"][0]) if "source_line_search_stable_count" in data else 0
+            ),
+            "source_accepted_contact_response_reuse_count": (
+                int(data["source_accepted_contact_response_reuse_count"][0])
+                if "source_accepted_contact_response_reuse_count" in data
+                else 0
+            ),
+            "source_accepted_contact_response_requery_count": (
+                int(data["source_accepted_contact_response_requery_count"][0])
+                if "source_accepted_contact_response_requery_count" in data
+                else 0
+            ),
+            "source_accepted_tracking_commit_count": (
+                int(data["source_accepted_tracking_commit_count"][0])
+                if "source_accepted_tracking_commit_count" in data
+                else 0
             ),
         }
 
@@ -4879,6 +4937,9 @@ def solve_sfc_source_drive_pair(
     source_line_search_trial_count = 0
     source_line_search_reduced_count = 0
     source_line_search_stable_count = 0
+    source_accepted_contact_response_reuse_count = 0
+    source_accepted_contact_response_requery_count = 0
+    source_accepted_tracking_commit_count = 0
     checkpoint_path = Path(source_checkpoint_path) if source_checkpoint_path is not None else None
     start_step = 0
     start_time = 0.0
@@ -4915,6 +4976,13 @@ def solve_sfc_source_drive_pair(
         source_line_search_trial_count = int(checkpoint.get("source_line_search_trial_count", 0))
         source_line_search_reduced_count = int(checkpoint.get("source_line_search_reduced_count", 0))
         source_line_search_stable_count = int(checkpoint.get("source_line_search_stable_count", 0))
+        source_accepted_contact_response_reuse_count = int(
+            checkpoint.get("source_accepted_contact_response_reuse_count", 0)
+        )
+        source_accepted_contact_response_requery_count = int(
+            checkpoint.get("source_accepted_contact_response_requery_count", 0)
+        )
+        source_accepted_tracking_commit_count = int(checkpoint.get("source_accepted_tracking_commit_count", 0))
         state = MechanicsState(
             model.X + assembly.expand_displacements(q),
             assembly.expand_displacements(v),
@@ -4985,7 +5053,7 @@ def solve_sfc_source_drive_pair(
     previous_path_master_barycentric: np.ndarray | None = None
     previous_active_region_ids: tuple[int, ...] | None = None
 
-    def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
+    def source_sample_arrays_raw(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if (
             len(contact_geometries) != 1
             or bool(source_contact_footprint_clipping)
@@ -5002,24 +5070,23 @@ def solve_sfc_source_drive_pair(
                     x_contact,
                     dot_threshold=secondary_dot_threshold,
                 )
-                if arrays is not None and contact_averaging != "none":
-                    return _aggregate_contact_sample_arrays(
-                        arrays,
-                        contact_averaging,
-                        workspace=contact_aggregation_workspace,
-                    )
                 return arrays
             return None
         if contact_normal_filter != "none":
             return None
-        arrays = contact_geometries[0].sample_arrays(x_contact)
-        if arrays is not None and contact_averaging != "none":
+        return contact_geometries[0].sample_arrays(x_contact)
+
+    def aggregate_source_sample_arrays(raw_arrays: dict[str, np.ndarray] | None) -> dict[str, np.ndarray] | None:
+        if raw_arrays is not None and contact_averaging != "none":
             return _aggregate_contact_sample_arrays(
-                arrays,
+                raw_arrays,
                 contact_averaging,
                 workspace=contact_aggregation_workspace,
             )
-        return arrays
+        return raw_arrays
+
+    def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
+        return aggregate_source_sample_arrays(source_sample_arrays_raw(x_contact))
 
     def source_samples(x_contact: np.ndarray) -> list[Any]:
         collected: list[Any] = []
@@ -5083,6 +5150,25 @@ def solve_sfc_source_drive_pair(
         finally:
             _restore_contact_tracking_state(cache_state)
 
+    def source_sample_arrays_trial_with_raw(
+        x_contact: np.ndarray,
+    ) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray] | None]:
+        cache_state = _snapshot_contact_tracking_state(contact_geometries)
+        try:
+            raw_arrays = source_sample_arrays_raw(x_contact)
+            return raw_arrays, aggregate_source_sample_arrays(raw_arrays)
+        finally:
+            _restore_contact_tracking_state(cache_state)
+
+    def commit_accepted_tracking_from_raw(raw_arrays: dict[str, np.ndarray] | None) -> int:
+        if raw_arrays is None or len(contact_geometries) != 1:
+            return 0
+        geometry = contact_geometries[0]
+        commit = getattr(geometry, "commit_secondary_tracking_from_sample_arrays", None)
+        if commit is None:
+            return 0
+        return int(commit(raw_arrays))
+
     def source_samples_trial(x_contact: np.ndarray) -> list[Any]:
         cache_state = _snapshot_contact_tracking_state(contact_geometries)
         try:
@@ -5122,6 +5208,7 @@ def solve_sfc_source_drive_pair(
         residual_norm = np.inf
         iteration_count = 0
         last_contact = contact0
+        last_raw_sample_arrays: dict[str, np.ndarray] | None = None
         last_sample_arrays: dict[str, np.ndarray] | None = None
         last_samples: list[Any] | None = None
         previous_active_signature: tuple[tuple[int, ...], ...] | None = None
@@ -5145,16 +5232,18 @@ def solve_sfc_source_drive_pair(
             x_guess = model.X + assembly.expand_displacements(q_guess)
             x_contact = contact_positions_from_reduced(q_guess)
             t_section = time.perf_counter()
-            sample_arrays = source_sample_arrays_trial(x_contact)
+            raw_sample_arrays, sample_arrays = source_sample_arrays_trial_with_raw(x_contact)
             if sample_arrays is None:
                 samples = source_samples_trial(x_contact)
                 last_contact = _assemble_contact_response_force_only(samples, model.n_nodes)
                 last_samples = samples
+                last_raw_sample_arrays = None
                 last_sample_arrays = None
                 active_signature = _contact_active_signature_from_samples(samples)
             else:
                 samples = []
                 last_contact = _assemble_contact_arrays_force_only(sample_arrays, model.n_nodes, stiffness=pressure_stiffness)
+                last_raw_sample_arrays = raw_sample_arrays
                 last_sample_arrays = sample_arrays
                 last_samples = None
                 active_signature = _contact_active_signature_from_arrays(sample_arrays)
@@ -5407,7 +5496,16 @@ def solve_sfc_source_drive_pair(
         state = MechanicsState(x_new, assembly.expand_displacements(v_new), assembly.expand_displacements(a_new), time=t)
         # Commit path-tracking caches only after the increment is accepted.
         accepted_contact_x = contact_positions_from_reduced(q_new)
-        accepted_arrays = source_sample_arrays(accepted_contact_x)
+        accepted_reused_response = bool(increment_decision.converged and last_sample_arrays is not None)
+        if accepted_reused_response:
+            accepted_arrays = last_sample_arrays
+            source_accepted_contact_response_reuse_count += 1
+            accepted_tracking_committed = commit_accepted_tracking_from_raw(last_raw_sample_arrays)
+            source_accepted_tracking_commit_count += accepted_tracking_committed
+        else:
+            accepted_arrays = source_sample_arrays(accepted_contact_x)
+            accepted_tracking_committed = 0
+            source_accepted_contact_response_requery_count += 1
         if accepted_arrays is None:
             accepted_samples = source_samples(accepted_contact_x)
             last_contact = _assemble_contact_response_force_only(accepted_samples, model.n_nodes)
@@ -5419,7 +5517,8 @@ def solve_sfc_source_drive_pair(
                 require_stability=bool(source_contact_active_set_stability),
             )
         else:
-            last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
+            if not accepted_reused_response:
+                last_contact = _assemble_contact_arrays_force_only(accepted_arrays, model.n_nodes, stiffness=pressure_stiffness)
             last_sample_arrays = accepted_arrays
             last_samples = None
             active_set_stable = _source_contact_active_set_is_stable(
@@ -5517,6 +5616,8 @@ def solve_sfc_source_drive_pair(
                     "source_line_search_reduced_count": int(step_line_search_reduced_count),
                     "source_line_search_stable_count": int(step_line_search_stable_count),
                     "source_line_search_last_alpha": float(step_line_search_last_alpha),
+                    "source_accepted_contact_response_reused": int(bool(accepted_reused_response)),
+                    "source_accepted_tracking_committed": int(accepted_tracking_committed),
                     "contact_active_set_stable": int(bool(active_set_stable)),
                     "source_step_converged": int(bool(step_converged)),
                 }
@@ -5574,6 +5675,8 @@ def solve_sfc_source_drive_pair(
                     "source_line_search_reduced_count": int(step_line_search_reduced_count),
                     "source_line_search_stable_count": int(step_line_search_stable_count),
                     "source_line_search_last_alpha": float(step_line_search_last_alpha),
+                    "source_accepted_contact_response_reused": int(bool(accepted_reused_response)),
+                    "source_accepted_tracking_committed": int(accepted_tracking_committed),
                 }
             )
             frame_row.update(increment_gate_row)
@@ -5616,6 +5719,9 @@ def solve_sfc_source_drive_pair(
                 source_line_search_trial_count=source_line_search_trial_count,
                 source_line_search_reduced_count=source_line_search_reduced_count,
                 source_line_search_stable_count=source_line_search_stable_count,
+                source_accepted_contact_response_reuse_count=source_accepted_contact_response_reuse_count,
+                source_accepted_contact_response_requery_count=source_accepted_contact_response_requery_count,
+                source_accepted_tracking_commit_count=source_accepted_tracking_commit_count,
             )
     wall = time.perf_counter() - start
     summary = {
@@ -5680,6 +5786,9 @@ def solve_sfc_source_drive_pair(
         "source_line_search_trial_count": int(source_line_search_trial_count),
         "source_line_search_reduced_count": int(source_line_search_reduced_count),
         "source_line_search_stable_count": int(source_line_search_stable_count),
+        "source_accepted_contact_response_reuse_count": int(source_accepted_contact_response_reuse_count),
+        "source_accepted_contact_response_requery_count": int(source_accepted_contact_response_requery_count),
+        "source_accepted_tracking_commit_count": int(source_accepted_tracking_commit_count),
         "sfc_history_frame_stride": int(history_stride),
         "sfc_history_row_count": int(len(rows)),
         "reduced_dofs": int(assembly.n_reduced_dofs),

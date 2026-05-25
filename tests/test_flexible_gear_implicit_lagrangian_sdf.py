@@ -431,6 +431,27 @@ def test_array_constraint_region_carries_master_face_ids() -> None:
     assert set(np.asarray(aggregated["secondary_node_ids"], dtype=np.int64).tolist()).issubset({0, 1, 2, 3})
 
 
+def test_array_constraint_region_carries_secondary_cache_index() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1]], dtype=float),
+        "gaps": np.asarray([-0.01, -0.02], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([1.0, 2.0], dtype=float),
+        "master_node_ids": np.asarray([[3, 4, 5], [3, 4, 5]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.1, 0.1], [0.2, 0.6, 0.2]], dtype=float),
+        "master_barycentric": np.asarray([[0.8, 0.1, 0.1], [0.2, 0.6, 0.2]], dtype=float),
+        "master_face_ids": np.asarray([7, 9], dtype=np.int64),
+        "secondary_cache_indices": np.asarray([11, 12], dtype=np.int64),
+    }
+
+    aggregated = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
+
+    assert aggregated is not None
+    assert "secondary_cache_indices" in aggregated
+    assert set(np.asarray(aggregated["secondary_cache_indices"], dtype=np.int64).tolist()).issubset({11, 12})
+
+
 def test_contact_pressure_recovery_exposes_secondary_surface_aliases() -> None:
     arrays = {
         "sample_node_ids": np.asarray([[0, 1, 2], [1, 2, 3]], dtype=np.int64),
@@ -1490,8 +1511,17 @@ def test_cropped_gear_source_drive_path_advances_rp_rotation(tmp_path: Path) -> 
     assert "source_line_search_trial_count" in history[-1]
     assert "source_line_search_reduced_count" in history[-1]
     assert "source_line_search_stable_count" in history[-1]
+    assert "source_accepted_contact_response_reused" in history[-1]
+    assert "source_accepted_tracking_committed" in history[-1]
     assert "source_line_search_trial_count" in summary
     assert int(summary["source_line_search_trial_count"]) >= 0
+    assert "source_accepted_contact_response_reuse_count" in summary
+    assert "source_accepted_contact_response_requery_count" in summary
+    assert "source_accepted_tracking_commit_count" in summary
+    assert (
+        int(summary["source_accepted_contact_response_reuse_count"])
+        + int(summary["source_accepted_contact_response_requery_count"])
+    ) == int(summary["source_accepted_increment_count"])
     assert "contact_active_region_continuity_current_count" in history[-1]
     assert "contact_active_region_jaccard" in history[-1]
     manifest = Path(str(summary["sfc_vtk_manifest"]))
@@ -2220,6 +2250,42 @@ def test_secondary_path_tracking_batch_keeps_previous_anchor_face() -> None:
     assert arrays is not None
     assert arrays["master_node_ids"][0].tolist() == [0, 1, 2]
     assert arrays["gaps"][0] == pytest.approx(-0.010)
+
+
+def test_secondary_tracking_commit_from_sample_arrays_updates_cache_without_query() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.009],
+            [1.0, 0.0, -0.009],
+            [0.0, 1.0, -0.009],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        secondary_path_tracking=True,
+    )
+    arrays = {
+        "secondary_cache_indices": np.asarray([0], dtype=np.int64),
+        "master_face_ids": np.asarray([1], dtype=np.int64),
+        "master_barycentric": np.asarray([[0.2, 0.3, 0.5]], dtype=float),
+    }
+
+    committed = contact.commit_secondary_tracking_from_sample_arrays(arrays)
+
+    assert committed == 1
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [1])
+    np.testing.assert_allclose(contact._ensure_secondary_barycentric_cache()[0], [0.2, 0.3, 0.5])
 
 
 def test_secondary_normal_projection_sample_arrays_preserve_closed_line_intersection_past_limit() -> None:
