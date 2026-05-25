@@ -226,8 +226,8 @@ def test_source_force_only_contact_response_matches_full_force_response() -> Non
     assert batched.normal_force == pytest.approx(full.normal_force)
     assert fast.energy == pytest.approx(full.energy)
     assert batched.energy == pytest.approx(full.energy)
-    assert fast.tangent.nnz == 0
-    assert batched.tangent.nnz == 0
+    np.testing.assert_allclose(fast.tangent.toarray(), full.tangent.toarray())
+    np.testing.assert_allclose(batched.tangent.toarray(), full.tangent.toarray())
 
 
 def test_slave_face_contact_averaging_combines_tri3_samples_without_tuning() -> None:
@@ -1112,6 +1112,9 @@ def test_constraint_region_tangent_matches_fixed_active_force_difference() -> No
     predicted = -np.asarray(j_free.T @ (tangent_scale * np.asarray(j_free @ du, dtype=float)), dtype=float).reshape(-1)
 
     np.testing.assert_allclose(actual, predicted, rtol=1.0e-11, atol=1.0e-11)
+    expected_tangent = np.asarray(j_free.T @ (tangent_scale[:, None] * j_free.toarray()))
+    np.testing.assert_allclose(base.tangent.toarray(), expected_tangent, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(actual, -np.asarray(base.tangent @ du, dtype=float), rtol=1.0e-11, atol=1.0e-11)
 
 
 def test_constraint_region_gap_jacobian_matches_slave_master_fd() -> None:

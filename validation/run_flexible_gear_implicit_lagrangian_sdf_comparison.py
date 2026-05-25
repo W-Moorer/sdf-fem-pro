@@ -148,55 +148,17 @@ DEFAULT_PRESSURE_STIFFNESS = 5.0e9
 
 
 def _assemble_contact_response_force_only(samples: Iterable[Any], n_nodes: int) -> ContactResponse:
-    """Assemble penalty contact force/diagnostics without the tangent blocks."""
+    """Assemble penalty contact response while preserving the tangent.
 
-    force = np.zeros((int(n_nodes), 3), dtype=float)
-    min_gap = np.inf
-    max_penetration = 0.0
-    active_count = 0
-    normal_force = 0.0
-    energy = 0.0
-    for sample in samples:
-        gap = float(sample.gap)
-        min_gap = min(min_gap, gap)
-        penetration = max(-gap, 0.0)
-        if penetration <= 0.0:
-            continue
-        node_ids = np.asarray(sample.node_ids, dtype=np.int64)
-        weights = np.asarray(sample.shape_weights, dtype=float)
-        normal = np.asarray(sample.normal, dtype=float)
-        normal /= max(float(np.linalg.norm(normal)), 1.0e-30)
-        area = float(sample.area)
-        stiffness = float(sample.stiffness)
-        lam = stiffness * area * penetration
-        master_ids = (
-            np.asarray(sample.master_node_ids, dtype=np.int64)
-            if sample.master_node_ids is not None
-            else np.empty((0,), dtype=np.int64)
-        )
-        master_weights = (
-            np.asarray(sample.master_shape_weights, dtype=float)
-            if sample.master_shape_weights is not None
-            else np.empty((0,), dtype=float)
-        )
-        if master_ids.size != master_weights.size:
-            raise ValueError("master_node_ids and master_shape_weights must have the same length")
-        active_count += 1
-        normal_force += lam
-        max_penetration = max(max_penetration, penetration)
-        energy += 0.5 * stiffness * area * penetration * penetration
-        for local, node in enumerate(node_ids):
-            force[int(node)] += weights[local] * lam * normal
-        for local, node in enumerate(master_ids):
-            force[int(node)] -= master_weights[local] * lam * normal
-    if not np.isfinite(min_gap):
-        min_gap = 0.0
-    tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
-    return ContactResponse(force, tangent, float(min_gap), float(max_penetration), active_count, float(normal_force), float(energy))
+    The historical name is kept for callers, but the accepted-state response
+    now carries the same fixed-active-set tangent used by the Newton correction.
+    """
+
+    return assemble_contact_response(list(samples), int(n_nodes))
 
 
 def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_nodes: int, *, stiffness: float) -> ContactResponse:
-    """Assemble contact force/diagnostics from batched sample arrays."""
+    """Assemble contact force, diagnostics, and fixed-active-set tangent."""
 
     gaps = np.asarray(sample_arrays["gaps"], dtype=float).reshape(-1)
     force = np.zeros((int(n_nodes), 3), dtype=float)
@@ -220,7 +182,22 @@ def _assemble_contact_arrays_force_only(sample_arrays: dict[str, np.ndarray], n_
             np.add.at(force, slave_nodes[:, local], slave_weights[:, local, None] * active_vectors)
         for local in range(master_nodes.shape[1]):
             np.add.at(force, master_nodes[:, local], -master_weights[:, local, None] * active_vectors)
-    tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
+    active_ids, gap_jacobian = _constraint_region_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=int(n_nodes),
+        active_only=True,
+    )
+    if active_ids.size:
+        tangent_scales = float(stiffness) * areas[active_ids]
+        positive = tangent_scales > 0.0
+        if np.any(positive):
+            j_active = gap_jacobian[positive]
+            scaled_j = j_active.multiply(tangent_scales[positive][:, None])
+            tangent = (j_active.T @ scaled_j).tocsr()
+        else:
+            tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
+    else:
+        tangent = csr_matrix((3 * int(n_nodes), 3 * int(n_nodes)), dtype=float)
     return ContactResponse(
         force,
         tangent,
