@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -616,6 +616,31 @@ class SourceIncrementConvergenceDecision:
     accepted: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SourceAutomaticIncrementEvent:
+    """One automatic-increment trial record."""
+
+    trial_index: int
+    start_time: float
+    end_time: float
+    dt: float
+    accepted: bool
+    retry_required: bool
+    cutback_required: bool
+    cutback_candidate_dt: float | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAutomaticIncrementResult:
+    """Automatic-increment controller diagnostics."""
+
+    events: tuple[SourceAutomaticIncrementEvent, ...]
+    accepted_times: tuple[float, ...]
+    cutback_count: int
+    final_time: float
+
+
 def _source_increment_convergence_decision(
     *,
     residual_converged: bool,
@@ -689,6 +714,90 @@ def _source_increment_cutback_candidate_dt(
     if h <= h_min * (1.0 + 1.0e-12):
         return None
     return max(h_min, h * factor)
+
+
+def _run_source_automatic_increment_controller(
+    *,
+    duration: float,
+    initial_dt: float,
+    min_dt: float,
+    cutback_factor: float,
+    trial: Callable[[float, float, int], SourceIncrementConvergenceDecision],
+) -> SourceAutomaticIncrementResult:
+    """Run an Abaqus-style accept/cutback scheduler for trial increments.
+
+    The callback performs one nonlinear trial from ``start_time`` over ``dt``.
+    Only trials whose convergence decision is accepted advance the accepted
+    time.  Failed trials request cutback and are retried from the same accepted
+    state with a smaller increment.
+    """
+
+    total = float(duration)
+    h0 = float(initial_dt)
+    h_min = float(min_dt)
+    if total < 0.0:
+        raise ValueError("duration must be non-negative")
+    if h0 <= 0.0:
+        raise ValueError("initial_dt must be positive")
+    if h_min <= 0.0:
+        raise ValueError("min_dt must be positive")
+    if not (0.0 < float(cutback_factor) < 1.0):
+        raise ValueError("cutback_factor must lie in (0, 1)")
+    accepted_time = 0.0
+    trial_dt = min(h0, max(total, h_min)) if total > 0.0 else h0
+    trial_index = 0
+    cutback_count = 0
+    events: list[SourceAutomaticIncrementEvent] = []
+    accepted_times: list[float] = []
+    while accepted_time < total - 1.0e-15:
+        h = min(float(trial_dt), total - accepted_time)
+        trial_index += 1
+        decision = trial(float(accepted_time), float(h), int(trial_index))
+        candidate = (
+            _source_increment_cutback_candidate_dt(
+                h,
+                min_dt=h_min,
+                cutback_factor=float(cutback_factor),
+            )
+            if decision.cutback_required
+            else None
+        )
+        retry_required = bool(decision.cutback_required and candidate is not None)
+        accepted = bool(decision.accepted and not decision.cutback_required)
+        events.append(
+            SourceAutomaticIncrementEvent(
+                trial_index=int(trial_index),
+                start_time=float(accepted_time),
+                end_time=float(accepted_time + h),
+                dt=float(h),
+                accepted=accepted,
+                retry_required=retry_required,
+                cutback_required=bool(decision.cutback_required),
+                cutback_candidate_dt=candidate,
+                reason=str(decision.reason),
+            )
+        )
+        if decision.cutback_required:
+            if candidate is None:
+                raise RuntimeError(
+                    "automatic increment reached minimum dt without satisfying convergence gates"
+                )
+            trial_dt = float(candidate)
+            cutback_count += 1
+            continue
+        if not accepted:
+            raise RuntimeError(
+                "automatic increment trial was neither accepted nor eligible for cutback"
+            )
+        accepted_time += h
+        accepted_times.append(float(accepted_time))
+        trial_dt = min(h0, max(h_min, h * (1.25 if decision.converged else 1.0)))
+    return SourceAutomaticIncrementResult(
+        events=tuple(events),
+        accepted_times=tuple(accepted_times),
+        cutback_count=int(cutback_count),
+        final_time=float(accepted_time),
+    )
 
 
 def _source_increment_gate_row(

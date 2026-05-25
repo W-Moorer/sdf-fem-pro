@@ -53,6 +53,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _source_increment_convergence_decision,
     _source_increment_cutback_candidate_dt,
     _source_increment_gate_row,
+    _run_source_automatic_increment_controller,
     _penalty_history_row,
     _write_csv,
     _write_abaqus_alignment_deck,
@@ -833,6 +834,72 @@ def test_source_increment_gate_row_records_all_acceptance_gates() -> None:
     assert row["source_increment_cutback_required"] == 1
     assert row["source_step_convergence_reason"] == "correction"
     assert row["source_increment_cutback_candidate_dt"] == pytest.approx(5.0e-6)
+
+
+def test_source_automatic_increment_controller_retries_without_accepting_failed_trial() -> None:
+    calls: list[tuple[float, float, int]] = []
+
+    def trial(start: float, h: float, index: int):
+        calls.append((start, h, index))
+        if index == 1:
+            return _source_increment_convergence_decision(
+                residual_converged=False,
+                correction_converged=True,
+                contact_force_increment_converged=True,
+                active_set_stable=True,
+                iteration_count=4,
+                max_iterations=4,
+                accept_unconverged=False,
+            )
+        return _source_increment_convergence_decision(
+            residual_converged=True,
+            correction_converged=True,
+            contact_force_increment_converged=True,
+            active_set_stable=True,
+            iteration_count=2,
+            max_iterations=4,
+            accept_unconverged=False,
+        )
+
+    result = _run_source_automatic_increment_controller(
+        duration=1.0,
+        initial_dt=1.0,
+        min_dt=0.125,
+        cutback_factor=0.5,
+        trial=trial,
+    )
+
+    assert calls[0] == pytest.approx((0.0, 1.0, 1))
+    assert calls[1] == pytest.approx((0.0, 0.5, 2))
+    assert result.events[0].accepted == 0
+    assert result.events[0].retry_required == 1
+    assert result.events[0].cutback_candidate_dt == pytest.approx(0.5)
+    assert result.accepted_times[0] == pytest.approx(0.5)
+    assert result.accepted_times[-1] == pytest.approx(1.0)
+    assert result.cutback_count == 1
+    assert result.final_time == pytest.approx(1.0)
+
+
+def test_source_automatic_increment_controller_errors_at_minimum_dt() -> None:
+    def trial(_start: float, _h: float, _index: int):
+        return _source_increment_convergence_decision(
+            residual_converged=False,
+            correction_converged=True,
+            contact_force_increment_converged=True,
+            active_set_stable=True,
+            iteration_count=3,
+            max_iterations=3,
+            accept_unconverged=False,
+        )
+
+    with pytest.raises(RuntimeError, match="minimum dt"):
+        _run_source_automatic_increment_controller(
+            duration=1.0,
+            initial_dt=0.25,
+            min_dt=0.25,
+            cutback_factor=0.5,
+            trial=trial,
+        )
 
 
 def test_active_overlap_metrics_reports_precision_and_recall() -> None:
