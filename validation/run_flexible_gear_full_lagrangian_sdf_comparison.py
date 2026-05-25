@@ -375,6 +375,76 @@ def source_convergence_gate_metrics(
     }
 
 
+def source_active_set_line_search_gate_metrics(summary: Row, history_rows: list[Row]) -> Row:
+    """Gate active-set line-search and accepted tracking before full gear use."""
+
+    active_rows: list[Row] = []
+    for row in history_rows:
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        active_area = _finite_row_float(row, "contact_active_area") or 0.0
+        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
+        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
+            active_rows.append(row)
+    active_contact_present = bool(active_rows) or _row_int_flag(summary, "final_active_contact_samples", default=0) > 0
+    line_search_enabled = str(summary.get("source_active_set_line_search", "true")).lower() == "true"
+    stability_enabled = str(summary.get("source_contact_active_set_stability", "true")).lower() == "true"
+    summary_unstable = _row_int_flag(summary, "source_line_search_unstable_count", default=0)
+    summary_trials = _row_int_flag(summary, "source_line_search_trial_count", default=0)
+    summary_commit = _row_int_flag(summary, "source_accepted_tracking_commit_count", default=0)
+    row_columns_present = all(
+        all(
+            key in row
+            for key in (
+                "source_line_search_trial_count",
+                "source_line_search_reduced_count",
+                "source_line_search_stable_count",
+                "source_line_search_unstable_count",
+                "source_line_search_last_alpha",
+                "source_accepted_tracking_committed",
+            )
+        )
+        for row in history_rows
+    )
+    row_unstable_ok = all(_row_int_flag(row, "source_line_search_unstable_count", default=0) == 0 for row in history_rows)
+    row_alpha_ok = all(
+        0.0 < (_finite_row_float(row, "source_line_search_last_alpha") or 1.0) <= 1.0 for row in history_rows
+    )
+    row_commit_ok = (not active_contact_present) or any(
+        _row_int_flag(row, "source_accepted_tracking_committed", default=0) > 0 for row in active_rows
+    )
+    summary_commit_ok = (not active_contact_present) or summary_commit > 0
+    summary_trials_ok = (not active_contact_present) or summary_trials > 0 or not bool(line_search_enabled)
+    gate_passed = int(
+        bool(line_search_enabled)
+        and bool(stability_enabled)
+        and summary_unstable == 0
+        and bool(row_columns_present)
+        and bool(row_unstable_ok)
+        and bool(row_alpha_ok)
+        and bool(row_commit_ok)
+        and bool(summary_commit_ok)
+        and bool(summary_trials_ok)
+    )
+    return {
+        "source_active_set_line_search_gate_passed": gate_passed,
+        "comparison_stage": "active_set_line_search_before_full_gear_sync",
+        "source_active_set_line_search_active_contact_present": int(active_contact_present),
+        "source_active_set_line_search_enabled": int(bool(line_search_enabled)),
+        "source_active_set_stability_enabled": int(bool(stability_enabled)),
+        "source_active_set_line_search_summary_unstable_count": int(summary_unstable),
+        "source_active_set_line_search_summary_trial_count": int(summary_trials),
+        "source_active_set_line_search_summary_commit_count": int(summary_commit),
+        "source_active_set_line_search_row_columns_present": int(row_columns_present),
+        "source_active_set_line_search_row_unstable_ok": int(row_unstable_ok),
+        "source_active_set_line_search_row_alpha_ok": int(row_alpha_ok),
+        "source_active_set_line_search_row_commit_ok": int(row_commit_ok),
+        "source_active_set_line_search_summary_commit_ok": int(summary_commit_ok),
+        "source_active_set_line_search_summary_trials_ok": int(summary_trials_ok),
+        "source_active_set_line_search_history_row_count": int(len(history_rows)),
+        "source_active_set_line_search_active_history_row_count": int(len(active_rows)),
+    }
+
+
 def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]) -> Row:
     """Gate fixed-active-set consistent tangent evidence for region contact.
 
@@ -652,6 +722,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
 
     source_trial_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
     source_convergence_passed = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    source_line_search_passed = _row_int_flag(summary, "source_active_set_line_search_gate_passed", default=0)
     contact_law_passed = _row_int_flag(summary, "constraint_region_contact_law_gate_passed", default=1)
     tangent_passed = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=1)
     contact_total_passed = _row_int_flag(summary, "contact_total_gate_passed", default=0)
@@ -692,6 +763,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         bool(patch_ladder_passed)
         and bool(source_trial_passed)
         and bool(source_convergence_passed)
+        and bool(source_line_search_passed)
         and bool(contact_law_passed)
         and bool(tangent_passed)
         and bool(contact_total_passed)
@@ -718,6 +790,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_cropped_patch_active_region_continuity_gate_passed": int(cropped_active_region_passed),
         "full_gear_entry_source_trial_gate_passed": int(source_trial_passed),
         "full_gear_entry_source_convergence_gate_passed": int(source_convergence_passed),
+        "full_gear_entry_source_active_set_line_search_gate_passed": int(source_line_search_passed),
         "full_gear_entry_constraint_region_contact_law_gate_passed": int(contact_law_passed),
         "full_gear_entry_constraint_region_tangent_gate_passed": int(tangent_passed),
         "full_gear_entry_contact_total_gate_passed": int(contact_total_passed),
@@ -751,6 +824,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
 
     patch_ladder_ok = _row_int_flag(summary, "full_gear_entry_patch_ladder_gate_passed", default=0)
     source_ok = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    line_search_ok = _row_int_flag(summary, "source_active_set_line_search_gate_passed", default=0)
     law_ok = _row_int_flag(summary, "constraint_region_contact_law_gate_passed", default=0)
     tangent_ok = _row_int_flag(summary, "constraint_region_tangent_gate_passed", default=0)
     path_ok = _row_int_flag(summary, "path_tracking_gate_passed", default=0)
@@ -765,6 +839,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     region_allowed = int(
         bool(patch_ladder_ok)
         and bool(source_ok)
+        and bool(line_search_ok)
         and bool(law_ok)
         and bool(tangent_ok)
         and bool(path_ok)
@@ -803,6 +878,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "artifact_path": str(summary.get(artifact_key, "")),
             "blocking_reason": "" if allowed else blocking_reason,
             "source_convergence_gate_passed": int(source_ok),
+            "source_active_set_line_search_gate_passed": int(line_search_ok),
             "constraint_region_contact_law_gate_passed": int(law_ok),
             "constraint_region_tangent_gate_passed": int(tangent_ok),
             "path_tracking_gate_passed": int(path_ok),
@@ -1429,6 +1505,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
         f"- source max nonlinear iterations: {summary.get('source_max_iterations', '')}",
         f"- source convergence gate: {summary.get('source_convergence_gate_passed', '')}",
+        f"- source active-set line-search gate: {summary.get('source_active_set_line_search_gate_passed', '')}",
         f"- source converged steps: {summary.get('source_step_converged_count', '')}",
         f"- source iteration-limit steps: {summary.get('source_iteration_limit_reached_count', '')}",
         f"- source unstable accepted steps: {summary.get('source_unstable_accepted_count', '')}",
@@ -1470,6 +1547,11 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
     ]
     if summary.get("source_convergence_gate"):
         lines.append(f"- source convergence gate CSV: `{Path(str(summary.get('source_convergence_gate'))).name}`")
+    if summary.get("source_active_set_line_search_gate"):
+        lines.append(
+            "- source active-set line-search gate CSV: "
+            f"`{Path(str(summary.get('source_active_set_line_search_gate'))).name}`"
+        )
     if summary.get("constraint_region_contact_law_gate"):
         lines.append(
             f"- constraint-region contact-law gate CSV: `{Path(str(summary.get('constraint_region_contact_law_gate'))).name}`"
@@ -1811,6 +1893,11 @@ def run_full_gear(
     _write_csv(source_convergence_gate_path, [source_convergence_gate])
     summary.update(source_convergence_gate)
     summary["source_convergence_gate"] = str(source_convergence_gate_path)
+    source_line_search_gate = source_active_set_line_search_gate_metrics(summary, history)
+    source_line_search_gate_path = out_dir / "sfc_source_active_set_line_search_gate.csv"
+    _write_csv(source_line_search_gate_path, [source_line_search_gate])
+    summary.update(source_line_search_gate)
+    summary["source_active_set_line_search_gate"] = str(source_line_search_gate_path)
     contact_law_gate = constraint_region_contact_law_gate_metrics(history)
     contact_law_gate_path = out_dir / "sfc_constraint_region_contact_law_gate.csv"
     _write_csv(contact_law_gate_path, [contact_law_gate])

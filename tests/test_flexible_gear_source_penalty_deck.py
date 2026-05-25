@@ -16,6 +16,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     full_gear_entry_gate_metrics,
     path_tracking_gate_metrics,
     run_full_gear,
+    source_active_set_line_search_gate_metrics,
     source_convergence_gate_metrics,
 )
 
@@ -53,6 +54,49 @@ def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
 
     assert int(failed_gate["source_convergence_gate_passed"]) == 0
     assert int(failed_gate["source_convergence_converged_count_matches_accepted"]) == 0
+
+
+def test_source_active_set_line_search_gate_requires_stable_accepted_tracking() -> None:
+    summary = {
+        "source_active_set_line_search": True,
+        "source_contact_active_set_stability": True,
+        "source_line_search_trial_count": 4,
+        "source_line_search_unstable_count": 0,
+        "source_accepted_tracking_commit_count": 2,
+        "final_active_contact_samples": 2,
+    }
+    history = [
+        {
+            "active_contact_region_count": 2,
+            "contact_active_area": 1.0,
+            "contact_region_normal_force": 5.0,
+            "source_line_search_trial_count": 2,
+            "source_line_search_reduced_count": 1,
+            "source_line_search_stable_count": 1,
+            "source_line_search_unstable_count": 0,
+            "source_line_search_last_alpha": 0.5,
+            "source_accepted_tracking_committed": 2,
+        }
+    ]
+
+    gate = source_active_set_line_search_gate_metrics(summary, history)
+
+    assert int(gate["source_active_set_line_search_gate_passed"]) == 1
+    assert int(gate["source_active_set_line_search_row_commit_ok"]) == 1
+
+    unstable_history = [dict(history[0])]
+    unstable_history[0]["source_line_search_unstable_count"] = 1
+    failed_unstable = source_active_set_line_search_gate_metrics(summary, unstable_history)
+
+    assert int(failed_unstable["source_active_set_line_search_gate_passed"]) == 0
+    assert int(failed_unstable["source_active_set_line_search_row_unstable_ok"]) == 0
+
+    missing_commit = dict(summary)
+    missing_commit["source_accepted_tracking_commit_count"] = 0
+    failed_commit = source_active_set_line_search_gate_metrics(missing_commit, history)
+
+    assert int(failed_commit["source_active_set_line_search_gate_passed"]) == 0
+    assert int(failed_commit["source_active_set_line_search_summary_commit_ok"]) == 0
 
 
 def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> None:
@@ -177,6 +221,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
         "cropped_patch_active_region_continuity_gate_passed": 1,
         "source_trial_gate_passed": 1,
         "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "contact_total_gate_passed": 1,
@@ -195,6 +240,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(gate["full_gear_entry_gate_passed"]) == 1
     assert int(gate["full_gear_entry_patch_ladder_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_source_active_set_line_search_gate_passed"]) == 1
     assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 1
     assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 1
 
@@ -226,6 +272,13 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     assert int(failed_law["full_gear_entry_gate_passed"]) == 0
     assert int(failed_law["full_gear_entry_constraint_region_contact_law_gate_passed"]) == 0
 
+    missing_line_search = dict(summary)
+    missing_line_search["source_active_set_line_search_gate_passed"] = 0
+    failed_line_search = full_gear_entry_gate_metrics(missing_line_search)
+
+    assert int(failed_line_search["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_line_search["full_gear_entry_source_active_set_line_search_gate_passed"]) == 0
+
 
 def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
     summary = {
@@ -237,6 +290,7 @@ def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
         "cropped_patch_active_region_continuity_gate_passed": 1,
         "source_trial_gate_passed": 1,
         "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "contact_total_gate_passed": 1,
@@ -261,6 +315,7 @@ def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
     summary = {
         "full_gear_entry_patch_ladder_gate_passed": 1,
         "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "path_tracking_gate_passed": 1,
@@ -287,6 +342,7 @@ def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
     summary = {
         "full_gear_entry_patch_ladder_gate_passed": 1,
         "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
         "constraint_region_contact_law_gate_passed": 1,
         "constraint_region_tangent_gate_passed": 1,
         "path_tracking_gate_passed": 1,
@@ -515,7 +571,17 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         captured["source_stress_postprocess"] = str(kwargs["source_stress_postprocess"])
         captured["source_checkpoint_stride"] = int(kwargs["source_checkpoint_stride"])
         return (
-            [{"time": 0.1}],
+            [
+                {
+                    "time": 0.1,
+                    "source_line_search_trial_count": 0,
+                    "source_line_search_reduced_count": 0,
+                    "source_line_search_stable_count": 0,
+                    "source_line_search_unstable_count": 0,
+                    "source_line_search_last_alpha": 1.0,
+                    "source_accepted_tracking_committed": 0,
+                }
+            ],
             {
                 "status": "completed",
                 "nodes": 2,
@@ -533,6 +599,13 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                 "source_unconverged_accepted_count": 0,
                 "source_accepted_contact_response_reuse_count": 1,
                 "source_accepted_contact_response_requery_count": 0,
+                "source_active_set_line_search": True,
+                "source_contact_active_set_stability": True,
+                "source_line_search_trial_count": 0,
+                "source_line_search_reduced_count": 0,
+                "source_line_search_stable_count": 0,
+                "source_line_search_unstable_count": 0,
+                "source_accepted_tracking_commit_count": 0,
                 "source_constraint_region_tangent_solve_count": 0,
                 "source_constraint_region_tangent_active_rows_sum": 0,
                 "tooth_patch_region_gate_passed": 1,
@@ -592,6 +665,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary
+    assert "source_active_set_line_search_gate" in summary
     assert "constraint_region_contact_law_gate" in summary
     assert "constraint_region_tangent_gate" in summary
     assert "path_tracking_gate" in summary
@@ -600,6 +674,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "full_gear_evidence_ladder" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
     assert int(summary["source_convergence_gate_passed"]) == 1
+    assert int(summary["source_active_set_line_search_gate_passed"]) == 1
     assert int(summary["constraint_region_contact_law_gate_passed"]) == 1
     assert int(summary["constraint_region_tangent_gate_passed"]) == 1
     assert int(summary["path_tracking_gate_passed"]) == 1
@@ -609,6 +684,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
     trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
     convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
+    line_search_gate_csv = tmp_path / "sfc_source_active_set_line_search_gate.csv"
     contact_law_gate_csv = tmp_path / "sfc_constraint_region_contact_law_gate.csv"
     tangent_gate_csv = tmp_path / "sfc_constraint_region_tangent_gate.csv"
     path_tracking_gate_csv = tmp_path / "sfc_path_tracking_gate.csv"
@@ -618,6 +694,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
     assert convergence_gate_csv.exists()
+    assert line_search_gate_csv.exists()
     assert contact_law_gate_csv.exists()
     assert tangent_gate_csv.exists()
     assert path_tracking_gate_csv.exists()
@@ -627,6 +704,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
     assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
+    assert "source_active_set_line_search_gate_passed" in line_search_gate_csv.read_text(encoding="utf-8")
     assert "constraint_region_contact_law_gate_passed" in contact_law_gate_csv.read_text(encoding="utf-8")
     assert "constraint_region_tangent_gate_passed" in tangent_gate_csv.read_text(encoding="utf-8")
     assert "path_tracking_gate_passed" in path_tracking_gate_csv.read_text(encoding="utf-8")
