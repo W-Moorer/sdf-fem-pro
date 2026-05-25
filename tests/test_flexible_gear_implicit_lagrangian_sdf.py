@@ -15,6 +15,7 @@ from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE,
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (
     _active_reduced_gap_jacobian_sparse,
     _active_reduced_gap_jacobian_sparse_from_arrays,
+    _ContactAggregationWorkspace,
     _aggregate_contact_samples,
     _aggregate_contact_sample_arrays,
     _assemble_contact_arrays_force_only,
@@ -382,6 +383,37 @@ def test_array_participation_matches_object_participation() -> None:
     assert array_response.normal_force == pytest.approx(object_response.normal_force)
     assert array_response.energy == pytest.approx(object_response.energy)
     assert _contact_active_signature_from_arrays(array_samples) == _contact_active_signature_from_samples(object_samples)
+
+
+def test_array_region_workspace_reuses_topology_without_freezing_payload() -> None:
+    arrays = {
+        "sample_node_ids": np.asarray([[0, 1, 2], [0, 1, 2], [1, 2, 3]], dtype=np.int64),
+        "sample_weights": np.asarray([[0.7, 0.2, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]], dtype=float),
+        "gaps": np.asarray([-0.20, -0.05, 0.03], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([2.0, 3.0, 1.0], dtype=float),
+        "master_node_ids": np.asarray([[4, 5, 6], [4, 5, 6], [5, 6, 7]], dtype=np.int64),
+        "master_weights": np.asarray([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.2, 0.6]], dtype=float),
+    }
+    changed_payload = {key: np.asarray(value).copy() for key, value in arrays.items()}
+    changed_payload["gaps"] = np.asarray([-0.10, -0.02, -0.04], dtype=float)
+    changed_payload["master_weights"] = np.asarray(
+        [[0.6, 0.3, 0.1], [0.2, 0.7, 0.1], [0.1, 0.4, 0.5]],
+        dtype=float,
+    )
+    workspace = _ContactAggregationWorkspace()
+
+    first = _aggregate_contact_sample_arrays(arrays, "slave_node_region_participation", workspace=workspace)
+    second = _aggregate_contact_sample_arrays(changed_payload, "slave_node_region_participation", workspace=workspace)
+    reference = _aggregate_contact_sample_arrays(changed_payload, "slave_node_region_participation")
+
+    assert first is not None
+    assert second is not None
+    assert reference is not None
+    assert workspace.misses == 1
+    assert workspace.hits == 1
+    for key in ("sample_node_ids", "sample_weights", "gaps", "normals", "areas", "master_node_ids", "master_weights"):
+        np.testing.assert_allclose(np.asarray(second[key]), np.asarray(reference[key]))
 
 
 def test_array_signed_participation_matches_object_signed_participation() -> None:

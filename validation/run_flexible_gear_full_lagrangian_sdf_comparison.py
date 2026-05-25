@@ -822,6 +822,10 @@ def run_full_gear(
     source_internal_kinematics: str = "finite_stvk_visual",
     source_rotating_inertia: str = "finite_kinematic",
     source_max_iterations: int = 16,
+    source_residual_tolerance: float = 5.0e-3,
+    source_correction_tolerance: float = 1.0e-2,
+    source_contact_force_increment_tolerance: float = 1.0e-2,
+    source_accept_unconverged: bool = False,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -882,6 +886,10 @@ def run_full_gear(
             source_contact_footprint_clipping=bool(source_contact_footprint_clipping),
             source_internal_kinematics=str(source_internal_kinematics),
             source_rotating_inertia=str(source_rotating_inertia),
+            source_residual_tolerance=float(source_residual_tolerance),
+            source_correction_tolerance=float(source_correction_tolerance),
+            source_contact_force_increment_tolerance=float(source_contact_force_increment_tolerance),
+            source_accept_unconverged=bool(source_accept_unconverged),
             source_checkpoint_path=source_checkpoint_path,
             resume_source_checkpoint=bool(resume_source_checkpoint),
             source_checkpoint_stride=int(source_checkpoint_stride),
@@ -1221,6 +1229,29 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum nonlinear iterations per fixed source-drive time increment; 16 matches Abaqus/Standard's common equilibrium iteration cap.",
     )
     parser.add_argument(
+        "--source-residual-tolerance",
+        type=float,
+        default=5.0e-3,
+        help="Abaqus-style normalized residual gate for source-drive equilibrium iterations.",
+    )
+    parser.add_argument(
+        "--source-correction-tolerance",
+        type=float,
+        default=1.0e-2,
+        help="Abaqus-style normalized displacement-correction gate for source-drive equilibrium iterations.",
+    )
+    parser.add_argument(
+        "--source-contact-force-increment-tolerance",
+        type=float,
+        default=1.0e-2,
+        help="Abaqus-style normalized contact-force increment gate for source-drive equilibrium iterations.",
+    )
+    parser.add_argument(
+        "--source-accept-unconverged",
+        action="store_true",
+        help="Diagnostic compatibility mode: accept source-drive increments that hit the iteration limit.",
+    )
+    parser.add_argument(
         "--source-checkpoint",
         type=Path,
         default=None,
@@ -1280,6 +1311,10 @@ def main(argv: list[str] | None = None) -> int:
         source_internal_kinematics=str(args.source_internal_kinematics),
         source_rotating_inertia=str(args.source_rotating_inertia),
         source_max_iterations=int(args.source_max_iterations),
+        source_residual_tolerance=float(args.source_residual_tolerance),
+        source_correction_tolerance=float(args.source_correction_tolerance),
+        source_contact_force_increment_tolerance=float(args.source_contact_force_increment_tolerance),
+        source_accept_unconverged=bool(args.source_accept_unconverged),
         source_checkpoint_path=args.source_checkpoint,
         resume_source_checkpoint=bool(args.resume_source_checkpoint),
         source_checkpoint_stride=int(args.source_checkpoint_stride),

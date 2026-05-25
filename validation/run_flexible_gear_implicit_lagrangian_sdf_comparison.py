@@ -83,6 +83,61 @@ class SFCVTKStaticBlocks:
     cell_types_block: str
     object_id_block: str
 
+
+@dataclass(slots=True)
+class _ContactAggregationWorkspace:
+    """Reusable topology workspace for source-drive contact-region averaging.
+
+    The cache stores only discrete region membership and row-expansion maps.
+    Current gaps, normals, areas, and closest-feature payload values are still
+    recomputed from the latest geometry on every residual evaluation.
+    """
+
+    mode: str = ""
+    base_mode: str = ""
+    sample_nodes: np.ndarray | None = None
+    positive_weights: np.ndarray | None = None
+    group_indices: list[list[int]] | None = None
+    source_rows: np.ndarray | None = None
+    source_locals: np.ndarray | None = None
+    slave_node_one_hot: np.ndarray | None = None
+    hits: int = 0
+    misses: int = 0
+
+    def matches(self, *, mode: str, base_mode: str, sample_nodes: np.ndarray, sample_weights: np.ndarray) -> bool:
+        """Return true when the cached contact-region topology is reusable."""
+
+        if self.mode != str(mode) or self.base_mode != str(base_mode):
+            return False
+        if self.sample_nodes is None or self.positive_weights is None:
+            return False
+        nodes = np.asarray(sample_nodes, dtype=np.int64)
+        positive = np.asarray(sample_weights, dtype=float) > 0.0
+        return bool(np.array_equal(self.sample_nodes, nodes) and np.array_equal(self.positive_weights, positive))
+
+    def store(
+        self,
+        *,
+        mode: str,
+        base_mode: str,
+        sample_nodes: np.ndarray,
+        sample_weights: np.ndarray,
+        group_indices: list[list[int]],
+        source_rows: np.ndarray | None = None,
+        source_locals: np.ndarray | None = None,
+        slave_node_one_hot: np.ndarray | None = None,
+    ) -> None:
+        """Replace cached contact-region topology."""
+
+        self.mode = str(mode)
+        self.base_mode = str(base_mode)
+        self.sample_nodes = np.asarray(sample_nodes, dtype=np.int64).copy()
+        self.positive_weights = (np.asarray(sample_weights, dtype=float) > 0.0).copy()
+        self.group_indices = [list(map(int, rows)) for rows in group_indices]
+        self.source_rows = None if source_rows is None else np.asarray(source_rows, dtype=np.int64).copy()
+        self.source_locals = None if source_locals is None else np.asarray(source_locals, dtype=np.int64).copy()
+        self.slave_node_one_hot = None if slave_node_one_hot is None else np.asarray(slave_node_one_hot, dtype=float).copy()
+
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_implicit_lagrangian_sdf"
 DEFAULT_PRESSURE_STIFFNESS = 5.0e9
 
@@ -516,7 +571,12 @@ def _pack_aggregated_contact_rows(rows: list[dict[str, np.ndarray | float]]) -> 
     }
 
 
-def _aggregate_contact_sample_arrays(sample_arrays: dict[str, np.ndarray], mode: str) -> dict[str, np.ndarray] | None:
+def _aggregate_contact_sample_arrays(
+    sample_arrays: dict[str, np.ndarray],
+    mode: str,
+    *,
+    workspace: _ContactAggregationWorkspace | None = None,
+) -> dict[str, np.ndarray] | None:
     """Aggregate contact sample arrays without object conversion.
 
     This keeps the C++/batched query path available for Abaqus-style
@@ -541,8 +601,6 @@ def _aggregate_contact_sample_arrays(sample_arrays: dict[str, np.ndarray], mode:
     areas = np.asarray(sample_arrays["areas"], dtype=float).reshape(-1)
     master_nodes = np.asarray(sample_arrays["master_node_ids"], dtype=np.int64)
     master_weights = np.asarray(sample_arrays["master_weights"], dtype=float)
-    groups: dict[tuple[int, ...] | int, list[int]] = {}
-    order: list[tuple[int, ...] | int] = []
     expanded_sample_nodes = sample_nodes
     expanded_sample_weights = sample_weights
     expanded_gaps = gaps
@@ -550,47 +608,152 @@ def _aggregate_contact_sample_arrays(sample_arrays: dict[str, np.ndarray], mode:
     expanded_areas = areas
     expanded_master_nodes = master_nodes
     expanded_master_weights = master_weights
+    group_indices: list[list[int]]
+    cache_hit = bool(
+        workspace is not None
+        and workspace.matches(
+            mode=str(mode),
+            base_mode=base_mode,
+            sample_nodes=sample_nodes,
+            sample_weights=sample_weights,
+        )
+        and workspace.group_indices is not None
+    )
     if base_mode == "slave_face":
-        for idx, nodes in enumerate(sample_nodes):
-            key = tuple(int(v) for v in np.asarray(nodes, dtype=np.int64).reshape(-1))
-            if key not in groups:
-                groups[key] = []
-                order.append(key)
-            groups[key].append(int(idx))
-    else:
-        row_nodes: list[np.ndarray] = []
-        row_weights: list[np.ndarray] = []
-        row_gaps: list[float] = []
-        row_normals: list[np.ndarray] = []
-        row_areas: list[float] = []
-        row_master_nodes: list[np.ndarray] = []
-        row_master_weights: list[np.ndarray] = []
-        for idx in range(gaps.size):
-            nodes = np.asarray(sample_nodes[idx], dtype=np.int64).reshape(-1)
-            weights = np.asarray(sample_weights[idx], dtype=float).reshape(-1)
-            for local, (node, weight) in enumerate(zip(nodes, weights, strict=True)):
-                tributary = float(areas[idx]) * max(float(weight), 0.0)
-                if tributary <= 0.0:
-                    continue
-                if base_mode == "slave_node":
-                    shape = np.zeros_like(weights, dtype=float)
-                    shape[int(local)] = 1.0
-                else:
-                    shape = weights.copy()
-                expanded_index = len(row_gaps)
-                row_nodes.append(nodes.copy())
-                row_weights.append(shape)
-                row_gaps.append(float(gaps[idx]))
-                row_normals.append(normals[idx].copy())
-                row_areas.append(tributary)
-                row_master_nodes.append(np.asarray(master_nodes[idx], dtype=np.int64).reshape(-1).copy())
-                row_master_weights.append(np.asarray(master_weights[idx], dtype=float).reshape(-1).copy())
-                key = int(node)
+        if cache_hit:
+            group_indices = [list(rows) for rows in workspace.group_indices or []]
+            if workspace is not None:
+                workspace.hits += 1
+        else:
+            groups: dict[tuple[int, ...], list[int]] = {}
+            order: list[tuple[int, ...]] = []
+            for idx, nodes in enumerate(sample_nodes):
+                key = tuple(int(v) for v in np.asarray(nodes, dtype=np.int64).reshape(-1))
                 if key not in groups:
                     groups[key] = []
                     order.append(key)
-                groups[key].append(expanded_index)
-        if not row_gaps:
+                groups[key].append(int(idx))
+            group_indices = [groups[key] for key in order]
+            if workspace is not None:
+                workspace.misses += 1
+                workspace.store(
+                    mode=str(mode),
+                    base_mode=base_mode,
+                    sample_nodes=sample_nodes,
+                    sample_weights=sample_weights,
+                    group_indices=group_indices,
+                )
+    else:
+        if cache_hit:
+            if (
+                workspace is None
+                or workspace.source_rows is None
+                or workspace.source_locals is None
+                or workspace.group_indices is None
+            ):
+                cache_hit = False
+            else:
+                source_rows = workspace.source_rows
+                source_locals = workspace.source_locals
+                group_indices = [list(rows) for rows in workspace.group_indices]
+                if source_rows.size:
+                    expanded_sample_nodes = sample_nodes[source_rows]
+                    if base_mode == "slave_node":
+                        expanded_sample_weights = np.asarray(workspace.slave_node_one_hot, dtype=float).copy()
+                    else:
+                        expanded_sample_weights = sample_weights[source_rows].copy()
+                    expanded_gaps = gaps[source_rows]
+                    expanded_normals = normals[source_rows]
+                    local_weights = np.maximum(sample_weights[source_rows, source_locals], 0.0)
+                    expanded_areas = areas[source_rows] * local_weights
+                    expanded_master_nodes = master_nodes[source_rows]
+                    expanded_master_weights = master_weights[source_rows]
+                else:
+                    expanded_sample_nodes = np.empty((0, sample_nodes.shape[1]), dtype=np.int64)
+                    expanded_sample_weights = np.empty((0, sample_weights.shape[1]), dtype=float)
+                    expanded_gaps = np.empty(0, dtype=float)
+                    expanded_normals = np.empty((0, 3), dtype=float)
+                    expanded_areas = np.empty(0, dtype=float)
+                    expanded_master_nodes = np.empty((0, master_nodes.shape[1]), dtype=np.int64)
+                    expanded_master_weights = np.empty((0, master_weights.shape[1]), dtype=float)
+                workspace.hits += 1
+        if not cache_hit:
+            groups: dict[int, list[int]] = {}
+            order: list[int] = []
+            source_rows_list: list[int] = []
+            source_locals_list: list[int] = []
+            one_hot_rows: list[np.ndarray] = []
+            expanded_index = 0
+            for idx in range(gaps.size):
+                nodes = np.asarray(sample_nodes[idx], dtype=np.int64).reshape(-1)
+                weights = np.asarray(sample_weights[idx], dtype=float).reshape(-1)
+                for local, (node, weight) in enumerate(zip(nodes, weights, strict=True)):
+                    tributary = float(areas[idx]) * max(float(weight), 0.0)
+                    if tributary <= 0.0:
+                        continue
+                    source_rows_list.append(int(idx))
+                    source_locals_list.append(int(local))
+                    if base_mode == "slave_node":
+                        shape = np.zeros_like(weights, dtype=float)
+                        shape[int(local)] = 1.0
+                        one_hot_rows.append(shape)
+                    key = int(node)
+                    if key not in groups:
+                        groups[key] = []
+                        order.append(key)
+                    groups[key].append(expanded_index)
+                    expanded_index += 1
+            source_rows = np.asarray(source_rows_list, dtype=np.int64)
+            source_locals = np.asarray(source_locals_list, dtype=np.int64)
+            group_indices = [groups[key] for key in order]
+            if source_rows.size == 0:
+                if workspace is not None:
+                    workspace.misses += 1
+                    workspace.store(
+                        mode=str(mode),
+                        base_mode=base_mode,
+                        sample_nodes=sample_nodes,
+                        sample_weights=sample_weights,
+                        group_indices=[],
+                        source_rows=source_rows,
+                        source_locals=source_locals,
+                        slave_node_one_hot=np.empty((0, sample_weights.shape[1]), dtype=float),
+                    )
+                return {
+                    "sample_node_ids": np.empty((0, sample_nodes.shape[1]), dtype=np.int64),
+                    "sample_weights": np.empty((0, sample_weights.shape[1]), dtype=float),
+                    "gaps": np.empty(0, dtype=float),
+                    "normals": np.empty((0, 3), dtype=float),
+                    "areas": np.empty(0, dtype=float),
+                    "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
+                    "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
+                }
+            expanded_sample_nodes = sample_nodes[source_rows].copy()
+            if base_mode == "slave_node":
+                expanded_sample_weights = np.vstack(one_hot_rows).astype(float, copy=False)
+            else:
+                expanded_sample_weights = sample_weights[source_rows].copy()
+            expanded_gaps = gaps[source_rows]
+            expanded_normals = normals[source_rows]
+            local_weights = np.maximum(sample_weights[source_rows, source_locals], 0.0)
+            expanded_areas = areas[source_rows] * local_weights
+            expanded_master_nodes = master_nodes[source_rows].copy()
+            expanded_master_weights = master_weights[source_rows].copy()
+            if workspace is not None:
+                workspace.misses += 1
+                workspace.store(
+                    mode=str(mode),
+                    base_mode=base_mode,
+                    sample_nodes=sample_nodes,
+                    sample_weights=sample_weights,
+                    group_indices=group_indices,
+                    source_rows=source_rows,
+                    source_locals=source_locals,
+                    slave_node_one_hot=(
+                        expanded_sample_weights if base_mode == "slave_node" else None
+                    ),
+                )
+        if expanded_gaps.size == 0:
             return {
                 "sample_node_ids": np.empty((0, sample_nodes.shape[1]), dtype=np.int64),
                 "sample_weights": np.empty((0, sample_weights.shape[1]), dtype=float),
@@ -600,16 +763,9 @@ def _aggregate_contact_sample_arrays(sample_arrays: dict[str, np.ndarray], mode:
                 "master_node_ids": np.empty((0, master_nodes.shape[1]), dtype=np.int64),
                 "master_weights": np.empty((0, master_weights.shape[1]), dtype=float),
             }
-        expanded_sample_nodes = np.vstack(row_nodes).astype(np.int64, copy=False)
-        expanded_sample_weights = np.vstack(row_weights).astype(float, copy=False)
-        expanded_gaps = np.asarray(row_gaps, dtype=float)
-        expanded_normals = np.vstack(row_normals).astype(float, copy=False)
-        expanded_areas = np.asarray(row_areas, dtype=float)
-        expanded_master_nodes = np.vstack(row_master_nodes).astype(np.int64, copy=False)
-        expanded_master_weights = np.vstack(row_master_weights).astype(float, copy=False)
     aggregated = [
         _aggregate_contact_array_group(
-            groups[key],
+            rows,
             sample_nodes=expanded_sample_nodes,
             sample_weights=expanded_sample_weights,
             gaps=expanded_gaps,
@@ -619,7 +775,7 @@ def _aggregate_contact_sample_arrays(sample_arrays: dict[str, np.ndarray], mode:
             master_weights=expanded_master_weights,
             overclosure_mode=overclosure_mode,
         )
-        for key in order
+        for rows in group_indices
     ]
     return _pack_aggregated_contact_rows(aggregated)
 
@@ -3323,6 +3479,10 @@ def solve_sfc_source_drive_pair(
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "finite_stvk_visual",
     source_rotating_inertia: str = "finite_kinematic",
+    source_residual_tolerance: float = 5.0e-3,
+    source_correction_tolerance: float = 1.0e-2,
+    source_contact_force_increment_tolerance: float = 1.0e-2,
+    source_accept_unconverged: bool = True,
     source_checkpoint_path: Path | None = None,
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
@@ -3464,6 +3624,15 @@ def solve_sfc_source_drive_pair(
     rotating_inertia = str(source_rotating_inertia).lower()
     if rotating_inertia not in {"none", "centripetal", "finite_kinematic"}:
         raise ValueError("source_rotating_inertia must be 'none', 'centripetal', or 'finite_kinematic'")
+    source_residual_tolerance = float(source_residual_tolerance)
+    source_correction_tolerance = float(source_correction_tolerance)
+    source_contact_force_increment_tolerance = float(source_contact_force_increment_tolerance)
+    if source_residual_tolerance <= 0.0:
+        raise ValueError("source_residual_tolerance must be positive")
+    if source_correction_tolerance <= 0.0:
+        raise ValueError("source_correction_tolerance must be positive")
+    if source_contact_force_increment_tolerance <= 0.0:
+        raise ValueError("source_contact_force_increment_tolerance must be positive")
     beta, gamma = hht_newmark_parameters(float(hht_alpha))
     scale = 1.0 + float(hht_alpha)
     steps = max(1, int(round(float(duration) / float(dt))))
@@ -3757,6 +3926,7 @@ def solve_sfc_source_drive_pair(
     base_lu_cache: list[Any] = [None]
     start = time.perf_counter()
     base_preconditioner_lu: Any | None = None
+    contact_aggregation_workspace = _ContactAggregationWorkspace()
 
     def source_sample_arrays(x_contact: np.ndarray) -> dict[str, np.ndarray] | None:
         if (
@@ -3776,14 +3946,22 @@ def solve_sfc_source_drive_pair(
                     dot_threshold=secondary_dot_threshold,
                 )
                 if arrays is not None and contact_averaging != "none":
-                    return _aggregate_contact_sample_arrays(arrays, contact_averaging)
+                    return _aggregate_contact_sample_arrays(
+                        arrays,
+                        contact_averaging,
+                        workspace=contact_aggregation_workspace,
+                    )
                 return arrays
             return None
         if contact_normal_filter != "none":
             return None
         arrays = contact_geometries[0].sample_arrays(x_contact)
         if arrays is not None and contact_averaging != "none":
-            return _aggregate_contact_sample_arrays(arrays, contact_averaging)
+            return _aggregate_contact_sample_arrays(
+                arrays,
+                contact_averaging,
+                workspace=contact_aggregation_workspace,
+            )
         return arrays
 
     def source_samples(x_contact: np.ndarray) -> list[Any]:
@@ -3866,6 +4044,12 @@ def solve_sfc_source_drive_pair(
         contact_matches_q_guess = False
         step_converged = False
         step_convergence_reason = "iteration_limit"
+        contact_force_increment_norm = np.inf
+        normalized_residual = np.inf
+        normalized_correction = np.inf
+        normalized_contact_force_increment = np.inf
+        contact_force_increment_converged = False
+        previous_iteration_contact_red: np.ndarray | None = None
         for iteration in range(1, max(1, int(max_iterations)) + 1):
             q_guess = _project_reduced_fixed(q_guess, fixed, values)
             x_guess = model.X + assembly.expand_displacements(q_guess)
@@ -3920,11 +4104,23 @@ def solve_sfc_source_drive_pair(
                     stiffness_for_iteration = internal_tangent_red if internal_tangent_red is not None else K_solve
                     current_base = (inertia_mass * c0 + stiffness_for_iteration * scale).tocsr()
                     current_base_free = current_base[free[:, None], free].tocsr()
-                    current_base_lu = None
+                    current_base_lu = (
+                        base_preconditioner_lu
+                        if base_preconditioner_lu is not None
+                        and base_free is not None
+                        and current_base_free.shape == base_free.shape
+                        else None
+                    )
                 elif internal_tangent_red is not None and free.size:
                     current_base = (M_red * c0 + internal_tangent_red * scale).tocsr()
                     current_base_free = current_base[free[:, None], free].tocsr()
-                    current_base_lu = None
+                    current_base_lu = (
+                        base_preconditioner_lu
+                        if base_preconditioner_lu is not None
+                        and base_free is not None
+                        and current_base_free.shape == base_free.shape
+                        else None
+                    )
                 if rotating_inertia != "none" and base_free is not None:
                     if rotating_inertia == "centripetal":
                         current_base_free = (base_free + scale * centripetal_tangent[free[:, None], free]).tocsr()
@@ -3982,20 +4178,49 @@ def solve_sfc_source_drive_pair(
                 float(np.linalg.norm(rhs_balance[free])) if free.size else 1.0,
                 float(np.linalg.norm(inertia_red[free])) if free.size else 1.0,
             )
-            correction_converged = correction_norm <= float(tolerance) * correction_scale
-            residual_converged = residual_norm <= max(float(tolerance) * balance_scale, 1.0e-10)
-            if correction_converged and residual_converged and active_set_stable:
+            normalized_residual = residual_norm / balance_scale
+            normalized_correction = correction_norm / correction_scale
+            if previous_iteration_contact_red is None:
+                contact_force_increment_norm = np.inf
+                normalized_contact_force_increment = np.inf
+                contact_force_increment_converged = last_contact.active_count == 0
+            else:
+                contact_force_increment_norm = float(np.linalg.norm(contact_red - previous_iteration_contact_red))
+                contact_force_scale = max(
+                    1.0,
+                    float(np.linalg.norm(contact_red)),
+                    float(np.linalg.norm(previous_iteration_contact_red)),
+                )
+                normalized_contact_force_increment = contact_force_increment_norm / contact_force_scale
+                contact_force_increment_converged = (
+                    normalized_contact_force_increment <= source_contact_force_increment_tolerance
+                )
+            correction_converged = normalized_correction <= source_correction_tolerance
+            residual_converged = normalized_residual <= source_residual_tolerance
+            if correction_converged and residual_converged and active_set_stable and contact_force_increment_converged:
                 step_converged = True
-                step_convergence_reason = "residual_correction_active_set"
+                step_convergence_reason = "residual_correction_contact_force_active_set"
                 break
             if not residual_converged:
                 step_convergence_reason = "residual"
             elif not correction_converged:
                 step_convergence_reason = "correction"
+            elif not contact_force_increment_converged:
+                step_convergence_reason = "contact_force_increment"
             elif not active_set_stable:
                 step_convergence_reason = "contact_active_set"
+            previous_iteration_contact_red = contact_red.copy()
             q_guess[free] += correction_free
             contact_matches_q_guess = False
+        iteration_limited = (not bool(step_converged)) and iteration_count >= max(1, int(max_iterations))
+        if iteration_limited and not bool(source_accept_unconverged):
+            raise RuntimeError(
+                "source-drive increment failed Abaqus-style convergence gates "
+                f"at step {step}: reason={step_convergence_reason}, "
+                f"normalized_residual={normalized_residual:.6e}, "
+                f"normalized_correction={normalized_correction:.6e}, "
+                f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}"
+            )
         q_new = _project_reduced_fixed(q_guess, fixed, values)
         a_new = c0 * (q_new - q_pred)
         v_new = v_pred + gamma * float(dt) * a_new
@@ -4081,6 +4306,10 @@ def solve_sfc_source_drive_pair(
                     "source_step_converged": int(bool(step_converged)),
                     "source_step_convergence_reason": step_convergence_reason,
                     "source_iteration_limit_reached": int(not bool(step_converged) and iteration_count >= max(1, int(max_iterations))),
+                    "source_normalized_residual": float(normalized_residual),
+                    "source_normalized_correction": float(normalized_correction),
+                    "source_normalized_contact_force_increment": float(normalized_contact_force_increment),
+                    "source_contact_force_increment_norm": float(contact_force_increment_norm),
                 }
             )
             if contact_node_diagnostics is not None:
@@ -4197,6 +4426,10 @@ def solve_sfc_source_drive_pair(
         "source_initial_acceleration": "abaqus_zero_dynamic_step",
         "source_initial_hht_history": "zero_previous_step_balance",
         "source_max_iterations": int(max(1, int(max_iterations))),
+        "source_residual_tolerance": float(source_residual_tolerance),
+        "source_correction_tolerance": float(source_correction_tolerance),
+        "source_contact_force_increment_tolerance": float(source_contact_force_increment_tolerance),
+        "source_accept_unconverged": bool(source_accept_unconverged),
         "source_step_converged_count": int(source_step_converged_count),
         "source_iteration_limit_reached_count": int(source_iteration_limit_reached_count),
         "source_unstable_accepted_count": int(source_unstable_accepted_count),
@@ -4212,6 +4445,8 @@ def solve_sfc_source_drive_pair(
         "source_sparse_cg_iterations": int(source_sparse_cg_iterations),
         "source_sparse_cg_base_lu_preconditioner": int(source_sparse_cg_base_lu_preconditioner),
         "source_direct_fallback_count": int(source_direct_fallback_count),
+        "source_contact_aggregation_workspace_hits": int(contact_aggregation_workspace.hits),
+        "source_contact_aggregation_workspace_misses": int(contact_aggregation_workspace.misses),
         "source_resume_from_step": int(start_step),
         "source_checkpoint_path": "" if checkpoint_path is None else str(checkpoint_path),
         "source_checkpoint_stride": int(max(1, int(source_checkpoint_stride))),
