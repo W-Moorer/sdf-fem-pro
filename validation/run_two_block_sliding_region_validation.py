@@ -37,6 +37,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _aggregate_contact_sample_arrays,
     _assemble_contact_arrays_force_only,
     _contact_active_region_continuity_metrics_from_arrays,
+    _contact_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
 )
 
@@ -142,10 +143,12 @@ def run_validation(
         master_node_offset=0,
         quadrature=str(quadrature),
         search_radius=float(gap) + abs(float(penetration)) + abs(float(lateral_shift)) + 0.25,
-        compiled_batch_projection=False,
+        compiled_batch_projection=True,
         secondary_path_tracking=True,
     )
     previous_active_regions: tuple[int, ...] | None = None
+    previous_master_face_ids: np.ndarray | None = None
+    previous_master_barycentric: np.ndarray | None = None
     rows: list[Row] = []
     start = time.perf_counter()
     for step in range(int(steps)):
@@ -157,13 +160,25 @@ def run_validation(
             approach=float(gap) + float(penetration),
             lateral_shift=shift,
         )
-        samples = list(contact.samples(x))
-        arrays = _contact_samples_to_arrays(samples)
+        arrays = contact.secondary_normal_projection_sample_arrays(x)
+        if arrays is None:
+            samples = list(contact.samples(x))
+            arrays = _contact_samples_to_arrays(samples)
+        raw_sample_count = int(np.asarray(arrays.get("gaps", np.empty(0)), dtype=float).size)
         regions = _aggregate_contact_sample_arrays(arrays, "slave_node_region_constraint")
         if regions is None:
             raise RuntimeError("slave_node_region_constraint aggregation unexpectedly fell back")
         response = _assemble_contact_arrays_force_only(regions, model.nodes.shape[0], stiffness=float(pressure_stiffness))
         region_metrics = _contact_region_integral_metrics_from_arrays(regions, stiffness=float(pressure_stiffness))
+        path_metrics, current_master_face_ids, current_master_barycentric = _contact_path_tracking_metrics_from_arrays(
+            regions,
+            previous_master_face_ids,
+            previous_master_barycentric,
+        )
+        if current_master_face_ids is not None:
+            previous_master_face_ids = current_master_face_ids
+        if current_master_barycentric is not None:
+            previous_master_barycentric = current_master_barycentric
         continuity, current_active_regions = _contact_active_region_continuity_metrics_from_arrays(
             regions,
             previous_active_regions,
@@ -174,7 +189,7 @@ def run_validation(
             "time": float(alpha),
             "lateral_shift": float(shift),
             "normal_penetration": float(penetration),
-            "raw_quadrature_samples": int(len(samples)),
+            "raw_quadrature_samples": raw_sample_count,
             "constraint_regions": int(np.asarray(regions["gaps"]).size),
             "active_contact_samples": int(response.active_count),
             "normal_force": float(response.normal_force),
@@ -183,11 +198,13 @@ def run_validation(
             "min_region_gap": float(np.min(np.asarray(regions["gaps"], dtype=float))) if np.asarray(regions["gaps"]).size else 0.0,
         }
         row.update(region_metrics)
+        row.update(path_metrics)
         row.update(continuity)
         rows.append(row)
     wall = time.perf_counter() - start
     totals_path = out_dir / "two_block_sliding_contact_totals.csv"
     continuity_path = out_dir / "two_block_sliding_region_continuity.csv"
+    tracking_path = out_dir / "two_block_sliding_path_tracking.csv"
     summary_path = out_dir / "two_block_sliding_region_summary.md"
     _write_csv(totals_path, rows)
     continuity_keys = [
@@ -205,6 +222,25 @@ def run_validation(
         "contact_active_region_jaccard",
     ]
     _write_csv(continuity_path, [{key: row.get(key, "") for key in continuity_keys} for row in rows])
+    tracking_keys = [
+        "step",
+        "time",
+        "lateral_shift",
+        "contact_active_master_face_count",
+        "contact_master_face_unique_count",
+        "contact_master_face_tracking_comparable_count",
+        "contact_master_face_switch_count",
+        "contact_master_face_switch_fraction",
+        "contact_path_cache_hit_count",
+        "contact_path_cache_hit_fraction",
+        "contact_path_cache_match_count",
+        "contact_path_cache_match_fraction",
+        "contact_master_barycentric_tracking_comparable_count",
+        "contact_master_barycentric_drift_mean",
+        "contact_master_barycentric_drift_max",
+    ]
+    _write_csv(tracking_path, [{key: row.get(key, "") for key in tracking_keys} for row in rows])
+    tracking_rows = rows[1:] if len(rows) > 1 else rows
     summary: Row = {
         "status": "completed",
         "steps": int(steps),
@@ -215,9 +251,30 @@ def run_validation(
         "normal_force_final": float(rows[-1]["normal_force"]) if rows else 0.0,
         "contact_energy_final": float(rows[-1]["contact_energy"]) if rows else 0.0,
         "active_region_jaccard_min": float(min(float(row["contact_active_region_jaccard"]) for row in rows[1:])) if len(rows) > 1 else 1.0,
+        "master_face_switch_fraction_max": (
+            float(max(float(row["contact_master_face_switch_fraction"]) for row in tracking_rows))
+            if tracking_rows
+            else 0.0
+        ),
+        "path_cache_hit_fraction_min_after_first": (
+            float(min(float(row["contact_path_cache_hit_fraction"]) for row in rows[1:]))
+            if len(rows) > 1
+            else 0.0
+        ),
+        "path_cache_match_fraction_min_after_first": (
+            float(min(float(row["contact_path_cache_match_fraction"]) for row in rows[1:]))
+            if len(rows) > 1
+            else 0.0
+        ),
+        "master_barycentric_drift_max": (
+            float(max(float(row["contact_master_barycentric_drift_max"]) for row in tracking_rows))
+            if tracking_rows
+            else 0.0
+        ),
         "analysis_wall_seconds": float(wall),
         "totals_csv": str(totals_path),
         "continuity_csv": str(continuity_path),
+        "tracking_csv": str(tracking_path),
     }
     summary_path.write_text(
         "\n".join(
@@ -231,8 +288,12 @@ def run_validation(
                 f"- final normal force: {summary['normal_force_final']:.12e}",
                 f"- final contact energy: {summary['contact_energy_final']:.12e}",
                 f"- minimum active-region Jaccard after first frame: {summary['active_region_jaccard_min']:.12e}",
+                f"- max master-face switch fraction: {summary['master_face_switch_fraction_max']:.12e}",
+                f"- min path-cache hit fraction after first frame: {summary['path_cache_hit_fraction_min_after_first']:.12e}",
+                f"- max master-barycentric drift: {summary['master_barycentric_drift_max']:.12e}",
                 f"- totals CSV: `{totals_path.name}`",
                 f"- continuity CSV: `{continuity_path.name}`",
+                f"- path tracking CSV: `{tracking_path.name}`",
             ]
         )
         + "\n",

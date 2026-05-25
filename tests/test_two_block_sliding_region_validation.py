@@ -21,9 +21,11 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
 
     totals = tmp_path / "two_block_sliding_contact_totals.csv"
     continuity = tmp_path / "two_block_sliding_region_continuity.csv"
+    tracking = tmp_path / "two_block_sliding_path_tracking.csv"
     report = tmp_path / "two_block_sliding_region_summary.md"
     assert totals.exists()
     assert continuity.exists()
+    assert tracking.exists()
     assert report.exists()
 
     with totals.open(newline="", encoding="utf-8") as handle:
@@ -33,9 +35,20 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert "contact_region_energy" in total_rows[0]
     assert "contact_active_area" in total_rows[0]
     assert "contact_active_region_jaccard" in total_rows[0]
+    assert "contact_master_face_switch_fraction" in total_rows[0]
+    assert "contact_path_cache_hit_fraction" in total_rows[0]
+    assert "contact_master_barycentric_drift_max" in total_rows[0]
 
     with continuity.open(newline="", encoding="utf-8") as handle:
         continuity_rows = list(csv.DictReader(handle))
     assert len(continuity_rows) == 5
     assert "contact_active_region_persistence_fraction" in continuity_rows[0]
     assert "contact_active_region_jaccard" in continuity_rows[0]
+
+    with tracking.open(newline="", encoding="utf-8") as handle:
+        tracking_rows = list(csv.DictReader(handle))
+    assert len(tracking_rows) == 5
+    assert "contact_master_face_switch_count" in tracking_rows[0]
+    assert "contact_path_cache_match_fraction" in tracking_rows[0]
+    assert "contact_master_barycentric_drift_mean" in tracking_rows[0]
+    assert float(summary["path_cache_hit_fraction_min_after_first"]) > 0.0
