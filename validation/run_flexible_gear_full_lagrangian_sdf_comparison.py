@@ -405,6 +405,62 @@ def source_convergence_gate_metrics(
     }
 
 
+def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 10) -> Row:
+    """Gate the full-gear comparison ladder before nodal pressure/cloud checks.
+
+    The first paper-facing comparison for the full-gear path must be based on
+    accepted source increments and region-integrated contact totals.  Nodal
+    CPRESS/COPEN and stress cloud comparisons are allowed only after this gate
+    confirms that convergence, cutback/trial authority, contact totals, and
+    path-tracking diagnostics are all present in the accepted history.
+    """
+
+    source_trial_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
+    source_convergence_passed = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
+    contact_total_passed = _row_int_flag(summary, "contact_total_gate_passed", default=0)
+    nodal_deferred = _row_int_flag(summary, "contact_total_nodal_cpress_deferred", default=0)
+    no_nodal_priority_columns = _row_int_flag(summary, "contact_total_no_nodal_priority_columns", default=0)
+    active_contact_present = _row_int_flag(summary, "contact_total_active_contact_present", default=0)
+    path_columns_present = _row_int_flag(summary, "contact_total_path_columns_present", default=0)
+    source_final_time_ok = _row_int_flag(summary, "source_convergence_final_time_matches_duration", default=0)
+    no_bad_accepted = _row_int_flag(summary, "source_convergence_no_unstable_or_unconverged_accepted", default=0)
+    accepted_count = _row_int_flag(summary, "source_accepted_increment_count", default=0)
+    expected_count = _row_int_flag(summary, "sfc_increment_count", default=accepted_count)
+    strict_sync_min_steps_met = int(accepted_count >= int(min_strict_sync_steps))
+    path_tracking_ready = int((not bool(active_contact_present)) or bool(path_columns_present))
+    base_gate_passed = int(
+        bool(source_trial_passed)
+        and bool(source_convergence_passed)
+        and bool(contact_total_passed)
+        and bool(nodal_deferred)
+        and bool(no_nodal_priority_columns)
+        and bool(path_tracking_ready)
+        and bool(source_final_time_ok)
+        and bool(no_bad_accepted)
+    )
+    strict_sync_ready = int(bool(base_gate_passed) and bool(strict_sync_min_steps_met))
+    return {
+        "full_gear_entry_gate_passed": base_gate_passed,
+        "full_gear_entry_stage": "region_totals_before_nodal_cpress_and_clouds",
+        "full_gear_entry_ready_for_nodal_contact_outputs": base_gate_passed,
+        "full_gear_entry_ready_for_strict_sync_window": strict_sync_ready,
+        "full_gear_entry_ready_for_stress_cloud_comparison": strict_sync_ready,
+        "full_gear_entry_source_trial_gate_passed": int(source_trial_passed),
+        "full_gear_entry_source_convergence_gate_passed": int(source_convergence_passed),
+        "full_gear_entry_contact_total_gate_passed": int(contact_total_passed),
+        "full_gear_entry_nodal_cpress_deferred": int(nodal_deferred),
+        "full_gear_entry_no_nodal_priority_columns": int(no_nodal_priority_columns),
+        "full_gear_entry_active_contact_present": int(active_contact_present),
+        "full_gear_entry_path_tracking_ready": int(path_tracking_ready),
+        "full_gear_entry_final_time_matches_duration": int(source_final_time_ok),
+        "full_gear_entry_no_bad_accepted_state": int(no_bad_accepted),
+        "full_gear_entry_accepted_increment_count": int(accepted_count),
+        "full_gear_entry_expected_increment_count": int(expected_count),
+        "full_gear_entry_min_strict_sync_steps": int(min_strict_sync_steps),
+        "full_gear_entry_strict_sync_min_steps_met": int(strict_sync_min_steps_met),
+    }
+
+
 def write_animation_color_ranges(
     out_dir: Path,
     *,
@@ -979,6 +1035,9 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source line-search unstable count: {summary.get('source_line_search_unstable_count', '')}",
         f"- source constraint-region tangent solves: {summary.get('source_constraint_region_tangent_solve_count', '')}",
         f"- contact-total gate: {summary.get('contact_total_gate_passed', '')}",
+        f"- full-gear entry gate: {summary.get('full_gear_entry_gate_passed', '')}",
+        "- full-gear strict-sync ready: "
+        f"{summary.get('full_gear_entry_ready_for_strict_sync_window', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
         f"- source rotating inertia: {summary.get('source_rotating_inertia', '')}",
@@ -1011,6 +1070,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         lines.append(f"- contact-total priority metrics: `{Path(str(summary.get('contact_total_priority_metrics'))).name}`")
     if summary.get("contact_total_gate"):
         lines.append(f"- contact-total gate CSV: `{Path(str(summary.get('contact_total_gate'))).name}`")
+    if summary.get("full_gear_entry_gate"):
+        lines.append(f"- full-gear entry gate CSV: `{Path(str(summary.get('full_gear_entry_gate'))).name}`")
     if summary.get("source_increment_trials"):
         lines.append(f"- source increment trial ledger: `{Path(str(summary.get('source_increment_trials'))).name}`")
     if summary.get("sfc_vtk_pvd"):
@@ -1334,6 +1395,11 @@ def run_full_gear(
     _write_csv(source_convergence_gate_path, [source_convergence_gate])
     summary.update(source_convergence_gate)
     summary["source_convergence_gate"] = str(source_convergence_gate_path)
+    full_gear_entry_gate = full_gear_entry_gate_metrics(summary)
+    full_gear_entry_gate_path = out_dir / "sfc_full_gear_entry_gate.csv"
+    _write_csv(full_gear_entry_gate_path, [full_gear_entry_gate])
+    summary.update(full_gear_entry_gate)
+    summary["full_gear_entry_gate"] = str(full_gear_entry_gate_path)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
     _write_abaqus_alignment_deck(
         deck_path,

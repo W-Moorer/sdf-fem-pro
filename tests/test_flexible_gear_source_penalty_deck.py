@@ -9,7 +9,11 @@ if str(ROOT) not in sys.path:
 
 from validation.prepare_flexible_gear_source_penalty_deck import prepare_source_penalty_deck_text
 from validation.run_flexible_gear_source_penalty_abaqus import write_source_penalty_summary
-from validation.run_flexible_gear_full_lagrangian_sdf_comparison import run_full_gear, source_convergence_gate_metrics
+from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
+    full_gear_entry_gate_metrics,
+    run_full_gear,
+    source_convergence_gate_metrics,
+)
 
 
 def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
@@ -45,6 +49,57 @@ def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
 
     assert int(failed_gate["source_convergence_gate_passed"]) == 0
     assert int(failed_gate["source_convergence_converged_count_matches_accepted"]) == 0
+
+
+def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
+    summary = {
+        "source_trial_gate_passed": 1,
+        "source_convergence_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "contact_total_nodal_cpress_deferred": 1,
+        "contact_total_no_nodal_priority_columns": 1,
+        "contact_total_active_contact_present": 1,
+        "contact_total_path_columns_present": 1,
+        "source_convergence_final_time_matches_duration": 1,
+        "source_convergence_no_unstable_or_unconverged_accepted": 1,
+        "source_accepted_increment_count": 10,
+        "sfc_increment_count": 10,
+    }
+
+    gate = full_gear_entry_gate_metrics(summary)
+
+    assert int(gate["full_gear_entry_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 1
+    assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 1
+
+    missing_totals = dict(summary)
+    missing_totals["contact_total_gate_passed"] = 0
+    failed = full_gear_entry_gate_metrics(missing_totals)
+
+    assert int(failed["full_gear_entry_gate_passed"]) == 0
+    assert int(failed["full_gear_entry_ready_for_stress_cloud_comparison"]) == 0
+
+
+def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
+    summary = {
+        "source_trial_gate_passed": 1,
+        "source_convergence_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "contact_total_nodal_cpress_deferred": 1,
+        "contact_total_no_nodal_priority_columns": 1,
+        "contact_total_active_contact_present": 0,
+        "contact_total_path_columns_present": 0,
+        "source_convergence_final_time_matches_duration": 1,
+        "source_convergence_no_unstable_or_unconverged_accepted": 1,
+        "source_accepted_increment_count": 1,
+        "sfc_increment_count": 1,
+    }
+
+    gate = full_gear_entry_gate_metrics(summary)
+
+    assert int(gate["full_gear_entry_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_strict_sync_min_steps_met"]) == 0
+    assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 0
 
 
 def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:
@@ -326,18 +381,24 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary
     assert "contact_total_gate" in summary
+    assert "full_gear_entry_gate" in summary
     assert int(summary["source_trial_gate_passed"]) == 1
     assert int(summary["source_convergence_gate_passed"]) == 1
     assert int(summary["contact_total_gate_passed"]) == 1
+    assert int(summary["full_gear_entry_gate_passed"]) == 1
+    assert int(summary["full_gear_entry_ready_for_strict_sync_window"]) == 0
     trial_csv = tmp_path / "sfc_source_increment_trials.csv"
     trial_gate_csv = tmp_path / "sfc_source_increment_trial_gate.csv"
     convergence_gate_csv = tmp_path / "sfc_source_convergence_gate.csv"
     contact_total_gate_csv = tmp_path / "sfc_contact_total_gate.csv"
+    entry_gate_csv = tmp_path / "sfc_full_gear_entry_gate.csv"
     assert trial_csv.exists()
     assert trial_gate_csv.exists()
     assert convergence_gate_csv.exists()
     assert contact_total_gate_csv.exists()
+    assert entry_gate_csv.exists()
     assert "source_trial_accepted" in trial_csv.read_text(encoding="utf-8")
     assert "source_trial_gate_passed" in trial_gate_csv.read_text(encoding="utf-8")
     assert "source_convergence_gate_passed" in convergence_gate_csv.read_text(encoding="utf-8")
     assert "contact_total_gate_passed" in contact_total_gate_csv.read_text(encoding="utf-8")
+    assert "full_gear_entry_gate_passed" in entry_gate_csv.read_text(encoding="utf-8")
