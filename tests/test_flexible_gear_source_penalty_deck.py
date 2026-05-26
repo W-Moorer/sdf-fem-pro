@@ -190,6 +190,13 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
             "contact_tangent_source": "constraint_region_arrays",
             "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
             "contact_tangent_pressure_derivative": "linear_penalty_active_set",
+            "contact_tangent_pressure_scale_filter": "gap_negative_and_region_area_positive",
+            "contact_tangent_pressure_positive_scale_count": 2,
+            "contact_tangent_slave_gap_derivative_source": "secondary_region_shape_weights_times_normal",
+            "contact_tangent_master_gap_derivative_source": "master_payload_weights_times_negative_normal",
+            "contact_tangent_slave_gap_derivative_nnz": 9,
+            "contact_tangent_master_gap_derivative_nnz": 9,
+            "contact_tangent_slave_master_gap_derivative_present": 1,
             "contact_tangent_sign_convention": "d(-contact_force)/du",
             "contact_tangent_fixed_active_set": 1,
             "contact_tangent_active_region_count": 2,
@@ -207,6 +214,8 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
 
     assert int(gate["constraint_region_tangent_gate_passed"]) == 1
     assert int(gate["constraint_region_tangent_row_active_count_ok"]) == 1
+    assert int(gate["constraint_region_tangent_row_slave_gap_derivative_ok"]) == 1
+    assert int(gate["constraint_region_tangent_row_master_gap_derivative_ok"]) == 1
     assert int(gate["constraint_region_tangent_row_sign_convention_ok"]) == 1
     assert int(gate["constraint_region_tangent_row_fd_present"]) == 1
     assert int(gate["constraint_region_tangent_row_fd_passed_ok"]) == 1
@@ -231,6 +240,13 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
 
     assert int(failed_fd_gate["constraint_region_tangent_gate_passed"]) == 0
     assert int(failed_fd_gate["constraint_region_tangent_row_fd_passed_ok"]) == 0
+
+    missing_master = [dict(history[0])]
+    missing_master[0]["contact_tangent_master_gap_derivative_nnz"] = 0
+    failed_master = constraint_region_tangent_gate_metrics(summary, missing_master)
+
+    assert int(failed_master["constraint_region_tangent_gate_passed"]) == 0
+    assert int(failed_master["constraint_region_tangent_row_master_gap_derivative_ok"]) == 0
 
 
 def test_constraint_region_contact_law_gate_rejects_independent_sample_penalty() -> None:

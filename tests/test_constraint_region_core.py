@@ -101,6 +101,14 @@ def test_constraint_region_contact_tangent_is_fixed_active_set_jtwj() -> None:
     assert metrics["contact_tangent_source"] == "constraint_region_arrays"
     assert metrics["contact_tangent_gap_jacobian_source"] == "constraint_region_fixed_payload"
     assert metrics["contact_tangent_pressure_derivative"] == "linear_penalty_active_set"
+    assert metrics["contact_tangent_pressure_scale_filter"] == "gap_negative_and_region_area_positive"
+    assert metrics["contact_tangent_pressure_active_gap_count"] == 2
+    assert metrics["contact_tangent_pressure_positive_scale_count"] == 2
+    assert metrics["contact_tangent_slave_gap_derivative_source"] == "secondary_region_shape_weights_times_normal"
+    assert metrics["contact_tangent_master_gap_derivative_source"] == "master_payload_weights_times_negative_normal"
+    assert metrics["contact_tangent_slave_gap_derivative_nnz"] > 0
+    assert metrics["contact_tangent_master_gap_derivative_nnz"] > 0
+    assert metrics["contact_tangent_slave_master_gap_derivative_present"] == 1
     assert metrics["contact_tangent_sign_convention"] == "d(-contact_force)/du"
     assert metrics["contact_tangent_fixed_active_set"] == 1
     assert metrics["contact_tangent_active_region_count"] == 2

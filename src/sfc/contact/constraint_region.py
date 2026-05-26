@@ -613,6 +613,14 @@ def constraint_region_tangent_metrics_from_arrays(
             "contact_tangent_pressure_derivative": "none",
             "contact_tangent_sign_convention": "",
             "contact_tangent_scale_formula": "",
+            "contact_tangent_pressure_active_gap_count": 0,
+            "contact_tangent_pressure_positive_scale_count": 0,
+            "contact_tangent_pressure_scale_filter": "",
+            "contact_tangent_slave_gap_derivative_source": "",
+            "contact_tangent_master_gap_derivative_source": "",
+            "contact_tangent_slave_gap_derivative_nnz": 0,
+            "contact_tangent_master_gap_derivative_nnz": 0,
+            "contact_tangent_slave_master_gap_derivative_present": 0,
             "contact_tangent_fixed_active_set": 0,
             "contact_tangent_active_region_count": 0,
             "contact_tangent_active_secondary_node_count": 0,
@@ -632,18 +640,67 @@ def constraint_region_tangent_metrics_from_arrays(
         active_secondary = active_secondary[active_secondary >= 0]
     else:
         active_secondary = np.empty(0, dtype=np.int64)
+    slave_derivative_nnz = _weighted_normal_derivative_nnz(
+        sample_arrays,
+        node_key="sample_node_ids",
+        weight_key="sample_weights",
+        row_ids=active_ids,
+    )
+    master_derivative_nnz = _weighted_normal_derivative_nnz(
+        sample_arrays,
+        node_key="master_node_ids",
+        weight_key="master_weights",
+        row_ids=active_ids,
+    )
     return {
         "contact_tangent_source": "constraint_region_arrays",
         "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
         "contact_tangent_pressure_derivative": "linear_penalty_active_set",
         "contact_tangent_sign_convention": "d(-contact_force)/du",
         "contact_tangent_scale_formula": "equilibrium_scale*pressure_stiffness*region_area",
+        "contact_tangent_pressure_active_gap_count": int(np.count_nonzero(active)),
+        "contact_tangent_pressure_positive_scale_count": int(active_ids.size),
+        "contact_tangent_pressure_scale_filter": "gap_negative_and_region_area_positive",
+        "contact_tangent_slave_gap_derivative_source": "secondary_region_shape_weights_times_normal",
+        "contact_tangent_master_gap_derivative_source": "master_payload_weights_times_negative_normal",
+        "contact_tangent_slave_gap_derivative_nnz": int(slave_derivative_nnz),
+        "contact_tangent_master_gap_derivative_nnz": int(master_derivative_nnz),
+        "contact_tangent_slave_master_gap_derivative_present": int(
+            active_ids.size == 0 or (slave_derivative_nnz > 0 and master_derivative_nnz > 0)
+        ),
         "contact_tangent_fixed_active_set": 1,
         "contact_tangent_active_region_count": int(np.count_nonzero(active)),
         "contact_tangent_active_secondary_node_count": int(np.unique(active_secondary).size),
         "contact_tangent_scale_sum": float(np.sum(scales)) if scales.size else 0.0,
         "contact_tangent_scale_max": float(np.max(scales)) if scales.size else 0.0,
     }
+
+
+def _weighted_normal_derivative_nnz(
+    sample_arrays: dict[str, np.ndarray],
+    *,
+    node_key: str,
+    weight_key: str,
+    row_ids: np.ndarray,
+) -> int:
+    if row_ids.size == 0:
+        return 0
+    if node_key not in sample_arrays or weight_key not in sample_arrays or "normals" not in sample_arrays:
+        return 0
+    nodes = np.asarray(sample_arrays[node_key], dtype=np.int64)
+    weights = np.asarray(sample_arrays[weight_key], dtype=float)
+    normals = np.asarray(sample_arrays["normals"], dtype=float).reshape((-1, 3))
+    normals /= np.maximum(np.linalg.norm(normals, axis=1), 1.0e-30)[:, None]
+    count = 0
+    for row_id in np.asarray(row_ids, dtype=np.int64).reshape(-1):
+        if int(row_id) < 0 or int(row_id) >= nodes.shape[0]:
+            continue
+        normal = normals[int(row_id)]
+        for node, weight in zip(nodes[int(row_id)], weights[int(row_id)], strict=True):
+            if int(node) < 0 or float(weight) == 0.0:
+                continue
+            count += int(np.count_nonzero(float(weight) * normal))
+    return int(count)
 
 
 def contact_region_integral_metrics_from_arrays(
