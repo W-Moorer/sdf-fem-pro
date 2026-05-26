@@ -641,6 +641,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
 
     def fake_parse(_source: Path):
         class Model:
+            np = __import__("numpy")
             young = 1.0
             poisson = 0.25
             density = 1.0
@@ -651,11 +652,18 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
             contact_pressure_overclosure = "LINEAR"
             gear1_angular_velocity_z = 2.0
             gear2_torque_z = 3.0
+            rp1 = np.asarray([0.0, 0.0, 0.0], dtype=float)
+            rp2 = np.asarray([0.0, 0.0, 0.0], dtype=float)
+            gear1 = type("Gear", (), {"nodes": np.asarray([[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]], dtype=float)})()
+            gear2 = type("Gear", (), {"nodes": np.asarray([[2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [2.0, 0.0, 1.0]], dtype=float)})()
+            gear1_contact_faces = np.asarray([[0, 1, 2]], dtype=int)
+            gear2_contact_faces = np.asarray([[0, 1, 2]], dtype=int)
 
         return Model()
 
     def fake_build(*_args, **_kwargs):
         captured["effective_active_faces_per_body"] = int(_kwargs["active_faces_per_body"])
+        captured["active_patch_sweep_radius"] = float(_kwargs["active_patch_sweep_radius"])
 
         class Patch:
             nodes = __import__("numpy").zeros((1, 3))
@@ -770,11 +778,13 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert captured["history_frame_stride"] == 3
     assert captured["source_stress_postprocess"] == "finite_stvk_visual"
     assert captured["source_checkpoint_stride"] == 7
-    assert captured["effective_active_faces_per_body"] == 0
+    assert captured["effective_active_faces_per_body"] == 16
+    assert captured["active_patch_sweep_radius"] > 0.0
     assert int(summary["requested_active_faces_per_body"]) == 16
-    assert int(summary["effective_active_faces_per_body"]) == 0
+    assert int(summary["effective_active_faces_per_body"]) == 16
     assert int(summary["source_dynamic_contact_window"]) == 1
     assert int(summary["source_dynamic_contact_window_applied"]) == 1
+    assert float(summary["source_dynamic_contact_window_sweep_radius"]) > 0.0
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary

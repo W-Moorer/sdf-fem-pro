@@ -1454,9 +1454,16 @@ def _nearest_ids(tree: cKDTree, point: np.ndarray, *, k: int, count: int) -> np.
     return np.asarray(tree.query(point, k=query_count)[1], dtype=np.int64).reshape(-1)
 
 
-def _radius_expanded_ids(centroids: np.ndarray, seed: np.ndarray, base_ids: np.ndarray, *, radius_factor: float) -> np.ndarray:
+def _radius_expanded_ids(
+    centroids: np.ndarray,
+    seed: np.ndarray,
+    base_ids: np.ndarray,
+    *,
+    radius_factor: float,
+    extra_radius: float = 0.0,
+) -> np.ndarray:
     ids = np.asarray(base_ids, dtype=np.int64).reshape(-1)
-    if float(radius_factor) <= 1.0 or ids.size == 0:
+    if (float(radius_factor) <= 1.0 and float(extra_radius) <= 0.0) or ids.size == 0:
         return np.unique(ids)
     offsets = np.linalg.norm(centroids[ids] - seed, axis=1)
     base_radius = float(np.max(offsets)) if offsets.size else 0.0
@@ -1464,7 +1471,7 @@ def _radius_expanded_ids(centroids: np.ndarray, seed: np.ndarray, base_ids: np.n
         distances = np.linalg.norm(centroids - seed, axis=1)
         positive = distances[distances > 0.0]
         base_radius = float(np.min(positive)) if positive.size else 0.0
-    radius = max(base_radius * float(radius_factor), base_radius)
+    radius = max(base_radius * float(radius_factor), base_radius) + max(float(extra_radius), 0.0)
     expanded = np.flatnonzero(np.linalg.norm(centroids - seed, axis=1) <= radius + 1.0e-12)
     return np.unique(np.concatenate([ids, expanded.astype(np.int64)]))
 
@@ -1474,6 +1481,7 @@ def _nearest_active_surface_ids(
     *,
     active_faces_per_body: int,
     active_patch_radius_factor: float = 1.0,
+    active_patch_sweep_radius: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     centroids1 = _face_centroids(model.gear1.nodes, model.gear1_contact_faces)
     centroids2 = _face_centroids(model.gear2.nodes, model.gear2_contact_faces)
@@ -1493,8 +1501,20 @@ def _nearest_active_surface_ids(
     tree1 = cKDTree(centroids1)
     ids1 = _nearest_ids(tree1, centroids1[seed1], k=n, count=centroids1.shape[0])
     ids2_active = _nearest_ids(tree2, centroids2[seed2], k=n, count=centroids2.shape[0])
-    ids1 = _radius_expanded_ids(centroids1, centroids1[seed1], ids1, radius_factor=active_patch_radius_factor)
-    ids2_active = _radius_expanded_ids(centroids2, centroids2[seed2], ids2_active, radius_factor=active_patch_radius_factor)
+    ids1 = _radius_expanded_ids(
+        centroids1,
+        centroids1[seed1],
+        ids1,
+        radius_factor=active_patch_radius_factor,
+        extra_radius=active_patch_sweep_radius,
+    )
+    ids2_active = _radius_expanded_ids(
+        centroids2,
+        centroids2[seed2],
+        ids2_active,
+        radius_factor=active_patch_radius_factor,
+        extra_radius=active_patch_sweep_radius,
+    )
     if float(active_patch_radius_factor) > 1.0:
         opposite_count = min(4, centroids2.shape[0])
         mapped2 = np.asarray(tree2.query(centroids1[ids1], k=opposite_count)[1], dtype=np.int64).reshape(-1)
@@ -1509,11 +1529,45 @@ def _nearest_active_surface_ids(
     return ids1, ids2_active, float(distances[seed1]), drive
 
 
+def _source_dynamic_contact_window_sweep_radius(model: GearInputModel, *, duration: float) -> float:
+    """Return a geometry-derived swept-patch radius for source-drive contact.
+
+    The full source contact surface is too expensive for every diagnostic run,
+    but a static initial patch can miss the contact region after finite sliding.
+    This radius expands the initial closest patch by the arc length swept by the
+    prescribed source RP rotation over the requested time window.  It is only a
+    broad-phase contact-window size; the final gap, normal, payload, and
+    pressure law still come from the current surface query and constraint-region
+    contact formulation.
+    """
+
+    angle = abs(float(model.gear1_angular_velocity_z)) * max(float(duration), 0.0)
+    if angle <= 0.0:
+        return 0.0
+    centroids = [
+        _face_centroids(model.gear1.nodes, model.gear1_contact_faces),
+        _face_centroids(model.gear2.nodes, model.gear2_contact_faces),
+    ]
+    rps = [np.asarray(model.rp1, dtype=float).reshape(3), np.asarray(model.rp2, dtype=float).reshape(3)]
+    radii: list[float] = []
+    for points, rp in zip(centroids, rps, strict=True):
+        if points.size == 0:
+            continue
+        distances = np.linalg.norm(np.asarray(points, dtype=float) - rp.reshape(1, 3), axis=1)
+        distances = distances[np.isfinite(distances)]
+        if distances.size:
+            radii.append(float(np.percentile(distances, 95.0)))
+    if not radii:
+        return 0.0
+    return 1.25 * angle * max(radii)
+
+
 def build_full_active_pair(
     model: GearInputModel,
     *,
     active_faces_per_body: int,
     active_patch_radius_factor: float = 1.0,
+    active_patch_sweep_radius: float = 0.0,
 ) -> CroppedGearPair:
     """Return a complete two-gear volume model with active contact surfaces."""
 
@@ -1521,6 +1575,7 @@ def build_full_active_pair(
         model,
         active_faces_per_body=active_faces_per_body,
         active_patch_radius_factor=active_patch_radius_factor,
+        active_patch_sweep_radius=active_patch_sweep_radius,
     )
     gear1_faces = _orient_faces_toward(model.gear1.nodes, model.gear1_contact_faces[ids1], drive)
     gear2_faces = _orient_faces_toward(model.gear2.nodes, model.gear2_contact_faces[ids2], -drive)
@@ -1573,6 +1628,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source secondary path tracking: {summary.get('source_secondary_path_tracking', '')}",
         f"- source dynamic contact window: {summary.get('source_dynamic_contact_window', '')}",
         f"- source dynamic contact window applied: {summary.get('source_dynamic_contact_window_applied', '')}",
+        f"- source dynamic contact sweep radius: {summary.get('source_dynamic_contact_window_sweep_radius', '')}",
         f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
         f"- source max nonlinear iterations: {summary.get('source_max_iterations', '')}",
         f"- source convergence gate: {summary.get('source_convergence_gate_passed', '')}",
@@ -1826,11 +1882,15 @@ def run_full_gear(
         duration = float(model.dynamic_duration)
         dt = float(model.dynamic_initial_dt)
     dynamic_contact_window_applied = bool(source_dynamic_contact_window) and drive == "source_inp"
-    effective_active_faces_per_body = 0 if dynamic_contact_window_applied else int(active_faces_per_body)
+    dynamic_contact_window_sweep_radius = (
+        _source_dynamic_contact_window_sweep_radius(model, duration=duration) if dynamic_contact_window_applied else 0.0
+    )
+    effective_active_faces_per_body = int(active_faces_per_body)
     pair = build_full_active_pair(
         model,
         active_faces_per_body=effective_active_faces_per_body,
         active_patch_radius_factor=active_patch_radius_factor,
+        active_patch_sweep_radius=dynamic_contact_window_sweep_radius,
     )
     mode = str(contact_mode).lower()
     if mode not in {"penalty", "hard"}:
@@ -1931,6 +1991,7 @@ def run_full_gear(
     summary["effective_active_faces_per_body"] = int(effective_active_faces_per_body)
     summary["source_dynamic_contact_window"] = int(bool(source_dynamic_contact_window))
     summary["source_dynamic_contact_window_applied"] = int(bool(dynamic_contact_window_applied))
+    summary["source_dynamic_contact_window_sweep_radius"] = float(dynamic_contact_window_sweep_radius)
     summary["drive_mode"] = drive
     summary["sfc_match_source_step"] = bool(source_step_matched)
     summary["sfc_duration"] = float(duration)
@@ -2247,11 +2308,10 @@ def main(argv: list[str] | None = None) -> int:
         "--source-dynamic-contact-window",
         action="store_true",
         help=(
-            "For source-drive gear validation, use the complete source contact "
-            "surfaces so the current broad phase, rather than an initial static "
-            "patch crop, determines the active contact window. This is an "
-            "accuracy-first diagnostic path; active patch caching is a later "
-            "optimization."
+            "For source-drive gear validation, expand the initial active patch "
+            "by the source RP rotation sweep so the current broad phase and "
+            "path tracking, rather than a static initial crop, determine the "
+            "moving contact window."
         ),
     )
     parser.add_argument(
