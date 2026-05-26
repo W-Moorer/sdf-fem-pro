@@ -9,6 +9,7 @@ from sfc.fem.increment_control import (
     increment_convergence_decision,
     increment_cutback_candidate_dt,
     increment_gate_row,
+    increment_trial_ledger_gate_metrics,
     run_automatic_increment_controller,
 )
 
@@ -113,6 +114,97 @@ def test_increment_gate_row_uses_configurable_prefix() -> None:
     assert row["contact_increment_cutback_required"] == 1
     assert row["contact_increment_cutback_candidate_dt"] == pytest.approx(2.5e-4)
     assert row["contact_step_convergence_reason"] == "residual"
+
+
+def test_increment_trial_ledger_gate_rejects_cutback_as_accepted_state() -> None:
+    accepted_flags = {
+        "hard_increment_converged": 1,
+        "hard_increment_accepted": 1,
+        "hard_increment_cutback_required": 0,
+        "hard_residual_converged": 1,
+        "hard_correction_converged": 1,
+        "hard_contact_force_increment_converged": 1,
+        "hard_active_set_stable": 1,
+        "hard_iteration_limit_reached": 0,
+    }
+    history = [{"time": 5.0e-4, **accepted_flags}]
+    accepted_trial = {
+        "hard_trial_index": 2,
+        "hard_trial_start_time": 0.0,
+        "hard_trial_end_time": 5.0e-4,
+        "hard_trial_accepted": 1,
+        "hard_trial_retry_required": 0,
+        **accepted_flags,
+    }
+
+    gate = increment_trial_ledger_gate_metrics(history, [accepted_trial], prefix="hard")
+
+    assert int(gate["hard_trial_gate_passed"]) == 1
+    assert int(gate["hard_trial_accepted_count"]) == 1
+
+    accepted_cutback = dict(accepted_trial)
+    accepted_cutback["hard_increment_cutback_required"] = 1
+    failed = increment_trial_ledger_gate_metrics(history, [accepted_cutback], prefix="hard")
+
+    assert int(failed["hard_trial_gate_passed"]) == 0
+    assert int(failed["hard_trial_accepted_no_cutback"]) == 0
+
+
+def test_increment_trial_ledger_gate_allows_rejected_cutback_retry_only_as_diagnostic() -> None:
+    accepted_flags = {
+        "source_increment_converged": 1,
+        "source_increment_accepted": 1,
+        "source_increment_cutback_required": 0,
+        "source_residual_converged": 1,
+        "source_correction_converged": 1,
+        "source_contact_force_increment_converged": 1,
+        "source_active_set_stable": 1,
+        "source_iteration_limit_reached": 0,
+    }
+    history = [
+        {"time": 5.0e-4, **accepted_flags},
+        {"time": 1.0e-3, **accepted_flags},
+    ]
+    trial_rows = [
+        {
+            "source_trial_index": 1,
+            "source_trial_start_time": 0.0,
+            "source_trial_end_time": 1.0e-3,
+            "source_trial_accepted": 0,
+            "source_trial_retry_required": 1,
+            "source_increment_converged": 0,
+            "source_increment_accepted": 0,
+            "source_increment_cutback_required": 1,
+        },
+        {
+            "source_trial_index": 2,
+            "source_trial_start_time": 0.0,
+            "source_trial_end_time": 5.0e-4,
+            "source_trial_accepted": 1,
+            "source_trial_retry_required": 0,
+            **accepted_flags,
+        },
+        {
+            "source_trial_index": 3,
+            "source_trial_start_time": 5.0e-4,
+            "source_trial_end_time": 1.0e-3,
+            "source_trial_accepted": 1,
+            "source_trial_retry_required": 0,
+            **accepted_flags,
+        },
+    ]
+
+    gate = increment_trial_ledger_gate_metrics(history, trial_rows, prefix="source")
+
+    assert int(gate["source_trial_gate_passed"]) == 1
+    assert int(gate["source_trial_rejected_count"]) == 1
+    assert int(gate["source_trial_cutback_trials_consistent"]) == 1
+
+    bad_history = [{"time": 1.0e-3, **accepted_flags}]
+    bad = increment_trial_ledger_gate_metrics(bad_history, [trial_rows[0]], prefix="source")
+
+    assert int(bad["source_trial_gate_passed"]) == 0
+    assert int(bad["source_trial_rejected_only_history_hits"]) == 1
 
 
 def test_active_set_line_search_reports_unstable_candidates() -> None:

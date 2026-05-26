@@ -30,6 +30,9 @@ if str(ROOT) not in sys.path:
 from sfc.contact.validation_gates import (  # noqa: E402
     contact_total_priority_gate_metrics as _core_contact_total_priority_gate_metrics,
 )
+from sfc.fem.increment_control import (  # noqa: E402
+    increment_trial_ledger_gate_metrics as _core_increment_trial_ledger_gate_metrics,
+)
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, GearInputModel, GearMesh, parse_gear_input  # noqa: E402
 from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  # noqa: E402
     ABAQUS_STANDARD_MODERATE_DISSIPATION_ALPHA,
@@ -301,118 +304,12 @@ def source_increment_trial_gate_metrics(
     trial states.
     """
 
-    accepted_trials = [row for row in trial_rows if _row_int_flag(row, "source_trial_accepted") == 1]
-    rejected_trials = [row for row in trial_rows if _row_int_flag(row, "source_trial_accepted") == 0]
-    accepted_state_flags = (
-        ("source_increment_converged", 1),
-        ("source_increment_accepted", 1),
-        ("source_increment_cutback_required", 0),
-        ("source_residual_converged", 1),
-        ("source_correction_converged", 1),
-        ("source_contact_force_increment_converged", 1),
-        ("source_active_set_stable", 1),
-        ("source_iteration_limit_reached", 0),
-    )
-    history_times = [
-        time
-        for time in (_finite_row_float(row, "time", "source_trial_end_time") for row in history_rows)
-        if time is not None
-    ]
-    accepted_trial_times = [
-        time
-        for time in (_finite_row_float(row, "source_trial_end_time", "time") for row in accepted_trials)
-        if time is not None
-    ]
-    rejected_trial_times = [
-        time
-        for time in (_finite_row_float(row, "source_trial_end_time", "time") for row in rejected_trials)
-        if time is not None
-    ]
-    matched_count, max_time_error = _match_time_sequence(
-        history_times,
-        accepted_trial_times,
+    return _core_increment_trial_ledger_gate_metrics(
+        history_rows,
+        trial_rows,
+        prefix="source",
         tolerance=float(tolerance),
     )
-    unmatched_history_count = max(0, len(history_times) - matched_count)
-    history_all_accepted = all(_row_int_flag(row, "source_increment_accepted", default=1) == 1 for row in history_rows)
-    history_required_columns_present = all(
-        all(key in row for key, _expected in accepted_state_flags) for row in history_rows
-    )
-    history_strictly_converged = all(
-        all(_row_int_flag(row, key, default=expected) == expected for key, expected in accepted_state_flags)
-        for row in history_rows
-    )
-    accepted_required_columns_present = all(
-        all(key in row for key, _expected in accepted_state_flags) for row in accepted_trials
-    )
-    accepted_strictly_converged = all(
-        all(_row_int_flag(row, key, default=expected) == expected for key, expected in accepted_state_flags)
-        for row in accepted_trials
-    )
-    accepted_cutback_count = sum(
-        1 for row in accepted_trials if _row_int_flag(row, "source_increment_cutback_required", default=0) != 0
-    )
-    accepted_retry_count = sum(1 for row in accepted_trials if _row_int_flag(row, "source_trial_retry_required", default=0) != 0)
-    accepted_unconverged_count = sum(
-        1 for row in accepted_trials if _row_int_flag(row, "source_increment_converged", default=1) != 1
-    )
-    cutback_trials = [row for row in trial_rows if _row_int_flag(row, "source_increment_cutback_required", default=0) == 1]
-    cutback_trials_rejected = all(_row_int_flag(row, "source_trial_accepted", default=0) == 0 for row in cutback_trials)
-    cutback_trials_retry = all(_row_int_flag(row, "source_trial_retry_required", default=1) == 1 for row in cutback_trials)
-    rejected_only_history_hits = 0
-    for rejected_time in rejected_trial_times:
-        if not _time_in_list(rejected_time, accepted_trial_times, tolerance=float(tolerance)) and _time_in_list(
-            rejected_time,
-            history_times,
-            tolerance=float(tolerance),
-        ):
-            rejected_only_history_hits += 1
-    cutback_trials_consistent = bool(cutback_trials_rejected and cutback_trials_retry)
-    accepted_trials_strict = bool(
-        accepted_required_columns_present
-        and accepted_strictly_converged
-        and accepted_cutback_count == 0
-        and accepted_retry_count == 0
-        and accepted_unconverged_count == 0
-    )
-    history_rows_strict = bool(history_required_columns_present and history_strictly_converged)
-    gate_passed = int(
-        unmatched_history_count == 0
-        and history_all_accepted
-        and bool(history_rows_strict)
-        and bool(accepted_trials_strict)
-        and bool(cutback_trials_consistent)
-        and rejected_only_history_hits == 0
-    )
-    return {
-        "source_trial_gate_passed": gate_passed,
-        "source_trial_history_times_in_accepted_trials": int(unmatched_history_count == 0),
-        "source_trial_history_all_accepted": int(history_all_accepted),
-        "source_trial_history_required_columns_present": int(history_required_columns_present),
-        "source_trial_history_strictly_converged": int(history_strictly_converged),
-        "source_trial_accepted_required_columns_present": int(accepted_required_columns_present),
-        "source_trial_accepted_strictly_converged": int(accepted_strictly_converged),
-        "source_trial_accepted_no_cutback": int(accepted_cutback_count == 0),
-        "source_trial_accepted_no_retry": int(accepted_retry_count == 0),
-        "source_trial_accepted_no_unconverged": int(accepted_unconverged_count == 0),
-        "source_trial_cutback_trials_consistent": int(cutback_trials_consistent),
-        "source_trial_cutback_trials_rejected": int(cutback_trials_rejected),
-        "source_trial_cutback_trials_retry_required": int(cutback_trials_retry),
-        "source_trial_rejected_only_history_hits": int(rejected_only_history_hits),
-        "source_trial_accepted_count": int(len(accepted_trials)),
-        "source_trial_rejected_count": int(len(rejected_trials)),
-        "source_trial_cutback_count": int(len(cutback_trials)),
-        "source_trial_accepted_cutback_count": int(accepted_cutback_count),
-        "source_trial_accepted_retry_count": int(accepted_retry_count),
-        "source_trial_accepted_unconverged_count": int(accepted_unconverged_count),
-        "source_trial_history_row_count": int(len(history_rows)),
-        "source_trial_history_time_match_count": int(matched_count),
-        "source_trial_unmatched_history_count": int(unmatched_history_count),
-        "source_trial_accepted_history_time_linf": float(max_time_error),
-        "source_trial_last_history_time": float(history_times[-1]) if history_times else 0.0,
-        "source_trial_last_accepted_trial_time": float(accepted_trial_times[-1]) if accepted_trial_times else 0.0,
-        "source_trial_time_tolerance": float(tolerance),
-    }
 
 
 def source_convergence_gate_metrics(
