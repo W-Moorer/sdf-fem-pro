@@ -58,9 +58,11 @@ from .validation_gates import (
     CONTACT_PATH_TRACKING_REQUIRED_COLUMNS,
     CONTACT_TOTAL_PATH_COLUMNS,
     CONTACT_TOTAL_REQUIRED_COLUMNS,
+    CONSTRAINT_REGION_CONTACT_LAW_REQUIRED_COLUMNS,
     NODAL_CONTACT_DIAGNOSTIC_COLUMNS,
     contact_path_tracking_gate_metrics,
     contact_total_priority_gate_metrics,
+    constraint_region_contact_law_gate_metrics,
 )
 from .jacobian import (
     assemble_contact_jacobian,
@@ -96,6 +98,7 @@ __all__ = [
     "CONTACT_TOTAL_PATH_COLUMNS",
     "CONTACT_PATH_TRACKING_REQUIRED_COLUMNS",
     "CONTACT_TOTAL_REQUIRED_COLUMNS",
+    "CONSTRAINT_REGION_CONTACT_LAW_REQUIRED_COLUMNS",
     "ConstraintRegionContactResponse",
     "DynamicSurfaceSDFContactGeometry",
     "FieldContactConstraint",
@@ -141,6 +144,7 @@ __all__ = [
     "contact_region_path_tracking_metrics_from_arrays",
     "contact_region_integral_metrics_from_arrays",
     "contact_total_priority_gate_metrics",
+    "constraint_region_contact_law_gate_metrics",
     "field_contact_constraint_from_sample",
     "field_contact_jacobian_entries",
     "field_contact_jacobian_row",

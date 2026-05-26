@@ -46,6 +46,19 @@ CONTACT_PATH_TRACKING_REQUIRED_COLUMNS: tuple[str, ...] = (
     "contact_active_region_persistence_fraction",
 )
 
+CONSTRAINT_REGION_CONTACT_LAW_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "contact_constraint_law_source",
+    "contact_constraint_open_closed_source",
+    "contact_constraint_active_status_source",
+    "contact_constraint_normal_source",
+    "contact_constraint_region_area_source",
+    "contact_constraint_force_distribution",
+    "contact_constraint_secondary_node_regions_present",
+    "contact_constraint_master_payload_present",
+    "contact_constraint_area_positive",
+    "contact_constraint_independent_quadrature_penalty_disabled",
+)
+
 
 def contact_total_priority_gate_metrics(priority_rows: Sequence[Row]) -> dict[str, float | int | str]:
     """Gate total contact quantities before nodal CPRESS/COPEN checks."""
@@ -236,6 +249,92 @@ def contact_path_tracking_gate_metrics(
         "path_tracking_max_master_face_switch_threshold": float(max_master_face_switch_fraction),
         "path_tracking_max_master_face_invalid_jump_threshold": float(max_master_face_invalid_jump_fraction),
         "path_tracking_max_master_barycentric_drift_threshold": float(max_master_barycentric_drift),
+    }
+
+
+def constraint_region_contact_law_gate_metrics(history_rows: Sequence[Row]) -> dict[str, float | int | str]:
+    """Gate that active accepted contact uses secondary constraint regions.
+
+    Active rows must prove the surface-to-surface contact law is assembled from
+    slave/secondary constraint regions: signed area-average region gaps decide
+    open/closed status, area-average region normals define the contact
+    direction, region tributary area scales the pressure-overclosure law, and
+    slave shape-function plus master closest-feature payload distribute equal
+    and opposite forces.  Rows that still represent each quadrature point as an
+    independent node-to-surface penalty are rejected.
+    """
+
+    active_rows = [row for row in history_rows if _row_has_active_contact(row)]
+    active_contact_present = len(active_rows) > 0
+    row_columns_ok = True
+    row_law_ok = True
+    row_gap_ok = True
+    row_normal_ok = True
+    row_distribution_ok = True
+    row_region_area_ok = True
+    row_secondary_ok = True
+    row_master_payload_ok = True
+    row_area_positive_ok = True
+    row_no_independent_sample_penalty_ok = True
+    max_raw_to_region_ratio = 0.0
+    for row in active_rows:
+        row_columns_ok = row_columns_ok and all(
+            _row_has_value(row, key) for key in CONSTRAINT_REGION_CONTACT_LAW_REQUIRED_COLUMNS
+        )
+        row_law_ok = row_law_ok and str(row.get("contact_constraint_law_source", "")) == "slave_node_region_constraint"
+        row_gap_ok = (
+            row_gap_ok
+            and str(row.get("contact_constraint_open_closed_source", "")) == "signed_area_average_region_gap"
+            and str(row.get("contact_constraint_active_status_source", "")) == "aggregated_region_gap"
+        )
+        row_normal_ok = row_normal_ok and str(row.get("contact_constraint_normal_source", "")) == "area_average_region_normal"
+        row_region_area_ok = (
+            row_region_area_ok
+            and str(row.get("contact_constraint_region_area_source", "")) == "slave_shape_tributary_area"
+        )
+        row_distribution_ok = (
+            row_distribution_ok
+            and str(row.get("contact_constraint_force_distribution", "")) == "region_area_slave_shape_master_payload"
+        )
+        row_secondary_ok = row_secondary_ok and _row_int_flag(row, "contact_constraint_secondary_node_regions_present") == 1
+        row_master_payload_ok = row_master_payload_ok and _row_int_flag(row, "contact_constraint_master_payload_present") == 1
+        row_area_positive_ok = row_area_positive_ok and _row_int_flag(row, "contact_constraint_area_positive") == 1
+        row_no_independent_sample_penalty_ok = (
+            row_no_independent_sample_penalty_ok
+            and _row_int_flag(row, "contact_constraint_independent_quadrature_penalty_disabled") == 1
+        )
+        raw_count = _finite_row_float(row, "contact_constraint_raw_sample_count")
+        region_count = _finite_row_float(row, "contact_constraint_region_count")
+        if raw_count is not None and region_count is not None and region_count > 0.0:
+            max_raw_to_region_ratio = max(max_raw_to_region_ratio, float(raw_count) / float(region_count))
+    rows_ok = (
+        row_columns_ok
+        and row_law_ok
+        and row_gap_ok
+        and row_normal_ok
+        and row_distribution_ok
+        and row_region_area_ok
+        and row_secondary_ok
+        and row_master_payload_ok
+        and row_area_positive_ok
+        and row_no_independent_sample_penalty_ok
+    )
+    return {
+        "constraint_region_contact_law_gate_passed": int((not active_contact_present) or rows_ok),
+        "comparison_stage": "constraint_region_contact_law_before_totals",
+        "constraint_region_contact_law_active_contact_present": int(active_contact_present),
+        "constraint_region_contact_law_active_history_row_count": int(len(active_rows)),
+        "constraint_region_contact_law_required_columns_present": int(row_columns_ok),
+        "constraint_region_contact_law_row_law_ok": int(row_law_ok),
+        "constraint_region_contact_law_row_gap_status_ok": int(row_gap_ok),
+        "constraint_region_contact_law_row_normal_ok": int(row_normal_ok),
+        "constraint_region_contact_law_row_region_area_ok": int(row_region_area_ok),
+        "constraint_region_contact_law_row_distribution_ok": int(row_distribution_ok),
+        "constraint_region_contact_law_row_secondary_region_ok": int(row_secondary_ok),
+        "constraint_region_contact_law_row_master_payload_ok": int(row_master_payload_ok),
+        "constraint_region_contact_law_row_area_positive_ok": int(row_area_positive_ok),
+        "constraint_region_contact_law_no_independent_quadrature_penalty": int(row_no_independent_sample_penalty_ok),
+        "constraint_region_contact_law_max_raw_to_region_ratio": float(max_raw_to_region_ratio),
     }
 
 

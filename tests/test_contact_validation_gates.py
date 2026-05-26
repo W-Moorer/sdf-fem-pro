@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from sfc.contact.validation_gates import contact_path_tracking_gate_metrics, contact_total_priority_gate_metrics
+from sfc.contact.validation_gates import (
+    constraint_region_contact_law_gate_metrics,
+    contact_path_tracking_gate_metrics,
+    contact_total_priority_gate_metrics,
+)
 
 
 def _valid_total_row() -> dict[str, object]:
@@ -90,6 +94,81 @@ def test_contact_total_gate_rejects_force_mismatch_between_response_and_region_t
     assert int(gate["contact_total_gate_passed"]) == 0
     assert int(gate["contact_total_force_consistency_passed"]) == 0
     assert float(gate["contact_total_force_relative_mismatch_max"]) > 0.0
+
+
+def _valid_law_row(**overrides: object) -> dict[str, object]:
+    row = {
+        "active_contact_region_count": 2,
+        "contact_active_area": 1.0,
+        "contact_region_normal_force": 5.0,
+        "contact_constraint_law_source": "slave_node_region_constraint",
+        "contact_constraint_open_closed_source": "signed_area_average_region_gap",
+        "contact_constraint_active_status_source": "aggregated_region_gap",
+        "contact_constraint_normal_source": "area_average_region_normal",
+        "contact_constraint_region_area_source": "slave_shape_tributary_area",
+        "contact_constraint_force_distribution": "region_area_slave_shape_master_payload",
+        "contact_constraint_secondary_node_regions_present": 1,
+        "contact_constraint_master_payload_present": 1,
+        "contact_constraint_area_positive": 1,
+        "contact_constraint_independent_quadrature_penalty_disabled": 1,
+        "contact_constraint_raw_sample_count": 8,
+        "contact_constraint_region_count": 2,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_constraint_region_contact_law_gate_accepts_region_constraint_rows() -> None:
+    gate = constraint_region_contact_law_gate_metrics([_valid_law_row()])
+
+    assert int(gate["constraint_region_contact_law_gate_passed"]) == 1
+    assert int(gate["constraint_region_contact_law_required_columns_present"]) == 1
+    assert int(gate["constraint_region_contact_law_row_gap_status_ok"]) == 1
+    assert int(gate["constraint_region_contact_law_row_normal_ok"]) == 1
+    assert int(gate["constraint_region_contact_law_row_distribution_ok"]) == 1
+    assert float(gate["constraint_region_contact_law_max_raw_to_region_ratio"]) == 4.0
+
+
+def test_constraint_region_contact_law_gate_rejects_independent_quadrature_penalty() -> None:
+    gate = constraint_region_contact_law_gate_metrics(
+        [
+            _valid_law_row(
+                contact_constraint_law_source="independent_quadrature_penalty",
+                contact_constraint_force_distribution="sample_area_sample_shape_payload",
+                contact_constraint_independent_quadrature_penalty_disabled=0,
+            )
+        ]
+    )
+
+    assert int(gate["constraint_region_contact_law_gate_passed"]) == 0
+    assert int(gate["constraint_region_contact_law_row_law_ok"]) == 0
+    assert int(gate["constraint_region_contact_law_row_distribution_ok"]) == 0
+    assert int(gate["constraint_region_contact_law_no_independent_quadrature_penalty"]) == 0
+
+
+def test_constraint_region_contact_law_gate_rejects_missing_master_payload_or_average_normal() -> None:
+    gate = constraint_region_contact_law_gate_metrics(
+        [
+            _valid_law_row(
+                contact_constraint_normal_source="sample_normal",
+                contact_constraint_master_payload_present=0,
+            )
+        ]
+    )
+
+    assert int(gate["constraint_region_contact_law_gate_passed"]) == 0
+    assert int(gate["constraint_region_contact_law_row_normal_ok"]) == 0
+    assert int(gate["constraint_region_contact_law_row_master_payload_ok"]) == 0
+
+
+def test_constraint_region_contact_law_gate_rejects_missing_required_columns() -> None:
+    row = _valid_law_row()
+    row.pop("contact_constraint_active_status_source")
+
+    gate = constraint_region_contact_law_gate_metrics([row])
+
+    assert int(gate["constraint_region_contact_law_gate_passed"]) == 0
+    assert int(gate["constraint_region_contact_law_required_columns_present"]) == 0
 
 
 def _valid_path_row(**overrides: object) -> dict[str, object]:

@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 from sfc.contact.validation_gates import (  # noqa: E402
     contact_path_tracking_gate_metrics as _core_contact_path_tracking_gate_metrics,
     contact_total_priority_gate_metrics as _core_contact_total_priority_gate_metrics,
+    constraint_region_contact_law_gate_metrics as _core_constraint_region_contact_law_gate_metrics,
 )
 from sfc.contact.tracking_state import (  # noqa: E402
     accepted_contact_response_coverage_gate_metrics as _core_accepted_contact_response_coverage_gate_metrics,
@@ -567,78 +568,7 @@ def constraint_region_contact_law_gate_metrics(history_rows: list[Row]) -> Row:
     slave shape-function support, and master closest-feature payload.
     """
 
-    active_rows: list[Row] = []
-    for row in history_rows:
-        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
-        active_area = _finite_row_float(row, "contact_active_area") or 0.0
-        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
-        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
-            active_rows.append(row)
-    active_contact_present = len(active_rows) > 0
-    row_law_ok = True
-    row_gap_ok = True
-    row_normal_ok = True
-    row_distribution_ok = True
-    row_region_area_ok = True
-    row_secondary_ok = True
-    row_master_payload_ok = True
-    row_area_positive_ok = True
-    row_no_independent_sample_penalty_ok = True
-    max_raw_to_region_ratio = 0.0
-    for row in active_rows:
-        row_law_ok = row_law_ok and str(row.get("contact_constraint_law_source", "")) == "slave_node_region_constraint"
-        row_gap_ok = (
-            row_gap_ok
-            and str(row.get("contact_constraint_open_closed_source", "")) == "signed_area_average_region_gap"
-            and str(row.get("contact_constraint_active_status_source", "")) == "aggregated_region_gap"
-        )
-        row_normal_ok = row_normal_ok and str(row.get("contact_constraint_normal_source", "")) == "area_average_region_normal"
-        row_region_area_ok = (
-            row_region_area_ok
-            and str(row.get("contact_constraint_region_area_source", "")) == "slave_shape_tributary_area"
-        )
-        row_distribution_ok = (
-            row_distribution_ok
-            and str(row.get("contact_constraint_force_distribution", "")) == "region_area_slave_shape_master_payload"
-        )
-        row_secondary_ok = row_secondary_ok and _row_int_flag(row, "contact_constraint_secondary_node_regions_present") == 1
-        row_master_payload_ok = row_master_payload_ok and _row_int_flag(row, "contact_constraint_master_payload_present") == 1
-        row_area_positive_ok = row_area_positive_ok and _row_int_flag(row, "contact_constraint_area_positive") == 1
-        row_no_independent_sample_penalty_ok = (
-            row_no_independent_sample_penalty_ok
-            and _row_int_flag(row, "contact_constraint_independent_quadrature_penalty_disabled") == 1
-        )
-        raw_count = _finite_row_float(row, "contact_constraint_raw_sample_count")
-        region_count = _finite_row_float(row, "contact_constraint_region_count")
-        if raw_count is not None and region_count is not None and region_count > 0.0:
-            max_raw_to_region_ratio = max(max_raw_to_region_ratio, float(raw_count) / float(region_count))
-    rows_ok = (
-        row_law_ok
-        and row_gap_ok
-        and row_normal_ok
-        and row_distribution_ok
-        and row_region_area_ok
-        and row_secondary_ok
-        and row_master_payload_ok
-        and row_area_positive_ok
-        and row_no_independent_sample_penalty_ok
-    )
-    return {
-        "constraint_region_contact_law_gate_passed": int((not active_contact_present) or rows_ok),
-        "comparison_stage": "constraint_region_contact_law_before_totals",
-        "constraint_region_contact_law_active_contact_present": int(active_contact_present),
-        "constraint_region_contact_law_active_history_row_count": int(len(active_rows)),
-        "constraint_region_contact_law_row_law_ok": int(row_law_ok),
-        "constraint_region_contact_law_row_gap_status_ok": int(row_gap_ok),
-        "constraint_region_contact_law_row_normal_ok": int(row_normal_ok),
-        "constraint_region_contact_law_row_region_area_ok": int(row_region_area_ok),
-        "constraint_region_contact_law_row_distribution_ok": int(row_distribution_ok),
-        "constraint_region_contact_law_row_secondary_region_ok": int(row_secondary_ok),
-        "constraint_region_contact_law_row_master_payload_ok": int(row_master_payload_ok),
-        "constraint_region_contact_law_row_area_positive_ok": int(row_area_positive_ok),
-        "constraint_region_contact_law_no_independent_quadrature_penalty": int(row_no_independent_sample_penalty_ok),
-        "constraint_region_contact_law_max_raw_to_region_ratio": float(max_raw_to_region_ratio),
-    }
+    return dict(_core_constraint_region_contact_law_gate_metrics(history_rows))
 
 
 def path_tracking_gate_metrics(
