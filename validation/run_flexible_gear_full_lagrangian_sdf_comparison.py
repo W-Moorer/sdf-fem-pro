@@ -305,6 +305,7 @@ def source_increment_trial_gate_metrics(
         ("source_correction_converged", 1),
         ("source_contact_force_increment_converged", 1),
         ("source_active_set_stable", 1),
+        ("source_iteration_limit_reached", 0),
     )
     history_times = [
         time
@@ -430,7 +431,7 @@ def source_convergence_gate_metrics(
     unconverged_accepted = _row_int_flag(summary, "source_unconverged_accepted_count", default=0)
     rejected_trials = _row_int_flag(summary, "source_rejected_trial_count", default=0)
     cutback_count = _row_int_flag(summary, "source_cutback_required_count", default=0)
-    trial_gate_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
+    trial_gate_passed = _row_int_flag(summary, "source_trial_gate_passed", default=0)
     reuse_count = _row_int_flag(summary, "source_accepted_contact_response_reuse_count", default=0)
     requery_count = _row_int_flag(summary, "source_accepted_contact_response_requery_count", default=0)
     response_count = reuse_count + requery_count
@@ -866,7 +867,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     path-tracking diagnostics are all present in the accepted history.
     """
 
-    source_trial_passed = _row_int_flag(summary, "source_trial_gate_passed", default=1)
+    source_trial_passed = _row_int_flag(summary, "source_trial_gate_passed", default=0)
     source_convergence_passed = _row_int_flag(summary, "source_convergence_gate_passed", default=0)
     source_line_search_passed = _row_int_flag(summary, "source_active_set_line_search_gate_passed", default=0)
     contact_law_passed = _row_int_flag(summary, "constraint_region_contact_law_gate_passed", default=1)
@@ -908,6 +909,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     accepted_count = _row_int_flag(summary, "source_accepted_increment_count", default=0)
     expected_count = _row_int_flag(summary, "sfc_increment_count", default=accepted_count)
     strict_sync_min_steps_met = int(accepted_count >= int(min_strict_sync_steps))
+    strict_sync_count_matches_expected = int(expected_count <= 0 or accepted_count == expected_count)
     path_tracking_ready = int((not bool(active_contact_present)) or bool(path_columns_present))
     base_gate_passed = int(
         bool(patch_ladder_passed)
@@ -925,7 +927,11 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         and bool(source_final_time_ok)
         and bool(no_bad_accepted)
     )
-    strict_sync_ready = int(bool(base_gate_passed) and bool(strict_sync_min_steps_met))
+    strict_sync_ready = int(
+        bool(base_gate_passed)
+        and bool(strict_sync_min_steps_met)
+        and bool(strict_sync_count_matches_expected)
+    )
     contact_window_ready = int(bool(base_gate_passed) and bool(active_contact_present) and bool(path_continuity_observable))
     return {
         "full_gear_entry_gate_passed": base_gate_passed,
@@ -961,6 +967,7 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         "full_gear_entry_expected_increment_count": int(expected_count),
         "full_gear_entry_min_strict_sync_steps": int(min_strict_sync_steps),
         "full_gear_entry_strict_sync_min_steps_met": int(strict_sync_min_steps_met),
+        "full_gear_entry_strict_sync_count_matches_expected": int(strict_sync_count_matches_expected),
     }
 
 

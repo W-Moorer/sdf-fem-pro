@@ -57,6 +57,13 @@ def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
     assert int(failed_gate["source_convergence_gate_passed"]) == 0
     assert int(failed_gate["source_convergence_converged_count_matches_accepted"]) == 0
 
+    missing_trial_gate = dict(summary)
+    del missing_trial_gate["source_trial_gate_passed"]
+    failed_trial_authority = source_convergence_gate_metrics(missing_trial_gate, history)
+
+    assert int(failed_trial_authority["source_convergence_gate_passed"]) == 0
+    assert int(failed_trial_authority["source_convergence_trial_gate_passed"]) == 0
+
 
 def test_source_increment_trial_gate_rejects_accepted_cutback_or_unconverged_rows() -> None:
     accepted_flags = {
@@ -67,6 +74,7 @@ def test_source_increment_trial_gate_rejects_accepted_cutback_or_unconverged_row
         "source_correction_converged": 1,
         "source_contact_force_increment_converged": 1,
         "source_active_set_stable": 1,
+        "source_iteration_limit_reached": 0,
     }
     history = [{"time": 1.0e-5, **accepted_flags}]
     accepted_trial = {
@@ -102,6 +110,13 @@ def test_source_increment_trial_gate_rejects_accepted_cutback_or_unconverged_row
 
     assert int(failed_columns["source_trial_gate_passed"]) == 0
     assert int(failed_columns["source_trial_accepted_required_columns_present"]) == 0
+
+    accepted_iteration_limit = dict(accepted_trial)
+    accepted_iteration_limit["source_iteration_limit_reached"] = 1
+    failed_iteration_limit = source_increment_trial_gate_metrics(history, [accepted_iteration_limit])
+
+    assert int(failed_iteration_limit["source_trial_gate_passed"]) == 0
+    assert int(failed_iteration_limit["source_trial_accepted_strictly_converged"]) == 0
 
 
 def test_source_active_set_line_search_gate_requires_stable_accepted_tracking() -> None:
@@ -316,6 +331,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     assert int(gate["full_gear_entry_contact_window_gate_passed"]) == 1
     assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 1
     assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 1
+    assert int(gate["full_gear_entry_strict_sync_count_matches_expected"]) == 1
 
     missing_patch = dict(summary)
     missing_patch["tooth_patch_region_gate_passed"] = 0
@@ -358,6 +374,21 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(failed_line_search["full_gear_entry_gate_passed"]) == 0
     assert int(failed_line_search["full_gear_entry_source_active_set_line_search_gate_passed"]) == 0
+
+    missing_trial_gate = dict(summary)
+    del missing_trial_gate["source_trial_gate_passed"]
+    failed_trial_gate = full_gear_entry_gate_metrics(missing_trial_gate)
+
+    assert int(failed_trial_gate["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_trial_gate["full_gear_entry_source_trial_gate_passed"]) == 0
+
+    mismatched_sync = dict(summary)
+    mismatched_sync["source_accepted_increment_count"] = 9
+    mismatched_sync["sfc_increment_count"] = 10
+    failed_sync = full_gear_entry_gate_metrics(mismatched_sync)
+
+    assert int(failed_sync["full_gear_entry_ready_for_strict_sync_window"]) == 0
+    assert int(failed_sync["full_gear_entry_strict_sync_count_matches_expected"]) == 0
 
 
 def test_full_gear_entry_gate_blocks_contact_outputs_without_active_contact() -> None:
@@ -763,6 +794,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
             "source_correction_converged": 1,
             "source_contact_force_increment_converged": 1,
             "source_active_set_stable": 1,
+            "source_iteration_limit_reached": 0,
         }
         return (
             [
