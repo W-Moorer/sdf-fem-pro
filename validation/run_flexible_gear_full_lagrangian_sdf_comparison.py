@@ -832,12 +832,16 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         and bool(no_bad_accepted)
     )
     strict_sync_ready = int(bool(base_gate_passed) and bool(strict_sync_min_steps_met))
+    contact_window_ready = int(bool(base_gate_passed) and bool(active_contact_present) and bool(path_continuity_observable))
     return {
         "full_gear_entry_gate_passed": base_gate_passed,
         "full_gear_entry_stage": "region_totals_before_nodal_cpress_and_clouds",
-        "full_gear_entry_ready_for_nodal_contact_outputs": base_gate_passed,
+        "full_gear_entry_contact_window_gate_passed": contact_window_ready,
+        "full_gear_entry_ready_for_nodal_contact_outputs": contact_window_ready,
         "full_gear_entry_ready_for_strict_sync_window": strict_sync_ready,
-        "full_gear_entry_ready_for_stress_cloud_comparison": strict_sync_ready,
+        "full_gear_entry_ready_for_stress_cloud_comparison": int(
+            bool(strict_sync_ready) and bool(contact_window_ready)
+        ),
         "full_gear_entry_patch_ladder_gate_passed": int(patch_ladder_passed),
         "full_gear_entry_tooth_patch_region_gate_passed": int(tooth_patch_passed),
         "full_gear_entry_tooth_patch_ready_for_cropped_gear_patch": int(tooth_patch_ready),
@@ -888,6 +892,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     path_ok = _row_int_flag(summary, "path_tracking_gate_passed", default=0)
     totals_ok = _row_int_flag(summary, "contact_total_gate_passed", default=0)
     entry_ok = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
+    contact_window_ok = _row_int_flag(summary, "full_gear_entry_contact_window_gate_passed", default=0)
     strict_ok = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
     sfc_manifest_present = _artifact_present(summary, "sfc_vtk_manifest")
     abaqus_manifest_present = _artifact_present(summary, "abaqus_vtk_manifest")
@@ -905,17 +910,21 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     )
     nodal_allowed = int(
         bool(entry_ok)
+        and bool(contact_window_ok)
         and bool(sfc_manifest_present)
         and bool(abaqus_manifest_present)
         and bool(animation_metrics_present)
     )
     cloud_allowed = int(
         bool(strict_ok)
+        and bool(contact_window_ok)
         and bool(sfc_manifest_present)
         and bool(abaqus_manifest_present)
         and bool(animation_metrics_present)
     )
-    history_allowed = int(bool(strict_ok) and bool(abaqus_manifest_present) and bool(history_metrics_present))
+    history_allowed = int(
+        bool(strict_ok) and bool(contact_window_ok) and bool(abaqus_manifest_present) and bool(history_metrics_present)
+    )
 
     def row(
         stage: str,

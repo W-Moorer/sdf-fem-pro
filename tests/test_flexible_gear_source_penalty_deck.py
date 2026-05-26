@@ -243,6 +243,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     assert int(gate["full_gear_entry_gate_passed"]) == 1
     assert int(gate["full_gear_entry_patch_ladder_gate_passed"]) == 1
     assert int(gate["full_gear_entry_source_active_set_line_search_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_contact_window_gate_passed"]) == 1
     assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 1
     assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 1
 
@@ -287,6 +288,40 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(failed_line_search["full_gear_entry_gate_passed"]) == 0
     assert int(failed_line_search["full_gear_entry_source_active_set_line_search_gate_passed"]) == 0
+
+
+def test_full_gear_entry_gate_blocks_contact_outputs_without_active_contact() -> None:
+    summary = {
+        "tooth_patch_region_gate_passed": 1,
+        "tooth_patch_ready_for_cropped_gear_patch": 1,
+        "cropped_patch_gate_passed": 1,
+        "cropped_patch_pressure_stress_gate_passed": 1,
+        "cropped_patch_path_tracking_gate_passed": 1,
+        "cropped_patch_active_region_continuity_gate_passed": 1,
+        "source_trial_gate_passed": 1,
+        "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
+        "constraint_region_tangent_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "path_tracking_gate_passed": 1,
+        "contact_total_nodal_cpress_deferred": 1,
+        "contact_total_no_nodal_priority_columns": 1,
+        "contact_total_active_contact_present": 0,
+        "contact_total_path_columns_present": 1,
+        "source_convergence_final_time_matches_duration": 1,
+        "source_convergence_no_unstable_or_unconverged_accepted": 1,
+        "source_accepted_increment_count": 200,
+        "sfc_increment_count": 200,
+    }
+
+    gate = full_gear_entry_gate_metrics(summary)
+
+    assert int(gate["full_gear_entry_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 1
+    assert int(gate["full_gear_entry_contact_window_gate_passed"]) == 0
+    assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 0
+    assert int(gate["full_gear_entry_ready_for_stress_cloud_comparison"]) == 0
 
 
 def test_full_gear_patch_prerequisite_summary_loader_feeds_entry_gate(tmp_path: Path) -> None:
@@ -375,6 +410,8 @@ def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
     assert int(gate["full_gear_entry_gate_passed"]) == 1
     assert int(gate["full_gear_entry_strict_sync_min_steps_met"]) == 0
     assert int(gate["full_gear_entry_ready_for_strict_sync_window"]) == 0
+    assert int(gate["full_gear_entry_contact_window_gate_passed"]) == 0
+    assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 0
 
 
 def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
@@ -387,6 +424,7 @@ def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
         "path_tracking_gate_passed": 1,
         "contact_total_gate_passed": 1,
         "full_gear_entry_gate_passed": 1,
+        "full_gear_entry_contact_window_gate_passed": 1,
         "full_gear_entry_ready_for_strict_sync_window": 0,
         "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
         "sfc_vtk_manifest": "sfc_manifest.csv",
@@ -414,6 +452,7 @@ def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
         "path_tracking_gate_passed": 1,
         "contact_total_gate_passed": 1,
         "full_gear_entry_gate_passed": 1,
+        "full_gear_entry_contact_window_gate_passed": 1,
         "full_gear_entry_ready_for_strict_sync_window": 1,
         "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
         "sfc_vtk_manifest": "sfc_manifest.csv",
