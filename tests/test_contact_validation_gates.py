@@ -17,6 +17,9 @@ def _valid_total_row() -> dict[str, object]:
         "contact_path_cache_match_fraction": 1.0,
         "contact_master_face_switch_fraction": 0.0,
         "contact_secondary_pressure_recovery_source": "constraint_region",
+        "contact_pressure_recovery_source": "constraint_region",
+        "contact_legacy_pressure_alias_source": "secondary_constraint_region",
+        "contact_legacy_pressure_alias_matches_secondary": 1,
     }
 
 
@@ -28,6 +31,7 @@ def test_contact_total_gate_accepts_region_totals_before_nodal_clouds() -> None:
     assert int(gate["contact_total_nodal_cpress_deferred"]) == 1
     assert int(gate["contact_total_no_nodal_priority_columns"]) == 1
     assert int(gate["contact_total_secondary_pressure_recovery_from_region"]) == 1
+    assert int(gate["contact_total_legacy_pressure_alias_from_secondary"]) == 1
     assert int(gate["contact_total_force_consistency_passed"]) == 1
 
 
@@ -55,6 +59,23 @@ def test_contact_total_gate_rejects_missing_path_tracking_or_sample_pressure_sou
 
     assert int(source_gate["contact_total_gate_passed"]) == 0
     assert int(source_gate["contact_total_secondary_pressure_recovery_from_region"]) == 0
+
+
+def test_contact_total_gate_rejects_legacy_pressure_alias_not_from_secondary_region() -> None:
+    wrong_alias = _valid_total_row()
+    wrong_alias["contact_legacy_pressure_alias_source"] = "sample_scatter"
+
+    alias_gate = contact_total_priority_gate_metrics([wrong_alias])
+
+    assert int(alias_gate["contact_total_gate_passed"]) == 0
+    assert int(alias_gate["contact_total_legacy_pressure_alias_from_secondary"]) == 0
+
+    mismatch = _valid_total_row()
+    mismatch["contact_legacy_pressure_alias_matches_secondary"] = 0
+    mismatch_gate = contact_total_priority_gate_metrics([mismatch])
+
+    assert int(mismatch_gate["contact_total_gate_passed"]) == 0
+    assert int(mismatch_gate["contact_total_legacy_pressure_alias_from_secondary"]) == 0
 
 
 def test_contact_total_gate_rejects_force_mismatch_between_response_and_region_totals() -> None:

@@ -59,6 +59,9 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert "contact_constraint_open_closed_source" in total_rows[0]
     assert "contact_constraint_force_distribution" in total_rows[0]
     assert total_rows[0]["contact_secondary_pressure_recovery_source"] == "constraint_region"
+    assert total_rows[0]["contact_pressure_recovery_source"] == "constraint_region"
+    assert total_rows[0]["contact_legacy_pressure_alias_source"] == "secondary_constraint_region"
+    assert int(total_rows[0]["contact_legacy_pressure_alias_matches_secondary"]) == 1
     assert "max_contact_secondary_pressure_nodeavg" not in total_rows[0]
 
     with continuity.open(newline="", encoding="utf-8") as handle:
@@ -105,6 +108,9 @@ def test_two_block_gate_requires_flat_punch_and_region_law() -> None:
         "contact_constraint_force_distribution": "region_area_slave_shape_master_payload",
         "contact_constraint_independent_quadrature_penalty_disabled": 1,
         "contact_secondary_pressure_recovery_source": "constraint_region",
+        "contact_pressure_recovery_source": "constraint_region",
+        "contact_legacy_pressure_alias_source": "secondary_constraint_region",
+        "contact_legacy_pressure_alias_matches_secondary": 1,
     }
     rows = [dict(row), dict(row)]
 

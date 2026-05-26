@@ -1942,6 +1942,27 @@ def _promote_secondary_contact_diagnostics_to_legacy(diagnostics: dict[str, Any]
             metrics[new] = metrics[old]
     if "contact_secondary_pressure_recovery_source" in metrics:
         metrics["contact_pressure_recovery_source"] = metrics["contact_secondary_pressure_recovery_source"]
+    secondary_source = str(metrics.get("contact_secondary_pressure_recovery_source", ""))
+    metrics["contact_legacy_pressure_alias_source"] = (
+        "secondary_constraint_region" if secondary_source == "constraint_region" else f"secondary_{secondary_source}"
+    )
+    alias_pairs = (
+        ("contact_secondary_pressure_nodeavg", "contact_pressure_nodeavg"),
+        ("contact_secondary_penetration_nodeavg", "contact_penetration_nodeavg"),
+        ("contact_secondary_active_node", "contact_active_node"),
+    )
+    alias_matches = True
+    for secondary_key, legacy_key in alias_pairs:
+        if secondary_key not in fields or legacy_key not in fields:
+            alias_matches = False
+            continue
+        alias_matches = alias_matches and bool(
+            np.array_equal(
+                np.asarray(fields[secondary_key], dtype=float),
+                np.asarray(fields[legacy_key], dtype=float),
+            )
+        )
+    metrics["contact_legacy_pressure_alias_matches_secondary"] = int(alias_matches)
 
 
 def _new_contact_accumulators(n_nodes: int) -> dict[str, np.ndarray]:

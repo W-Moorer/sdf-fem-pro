@@ -110,6 +110,9 @@ CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
     "contact_constraint_area_positive",
     "contact_constraint_independent_quadrature_penalty_disabled",
     "contact_secondary_pressure_recovery_source",
+    "contact_pressure_recovery_source",
+    "contact_legacy_pressure_alias_source",
+    "contact_legacy_pressure_alias_matches_secondary",
 )
 
 NODAL_CONTACT_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (

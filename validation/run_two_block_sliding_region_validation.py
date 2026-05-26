@@ -41,6 +41,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _contact_region_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _constraint_region_contact_law_metrics_from_arrays,
+    _promote_secondary_contact_diagnostics_to_legacy,
     _secondary_region_contact_node_diagnostics_from_arrays,
 )
 from validation.run_flat_punch_region_penetration_validation import run_validation as run_flat_punch_validation  # noqa: E402
@@ -379,8 +380,13 @@ def run_validation(
         }
         row.update(region_metrics)
         if pressure_diagnostics is not None:
-            row["contact_secondary_pressure_recovery_source"] = pressure_diagnostics["metrics"][
-                "contact_secondary_pressure_recovery_source"
+            _promote_secondary_contact_diagnostics_to_legacy(pressure_diagnostics)
+            metrics = pressure_diagnostics["metrics"]
+            row["contact_secondary_pressure_recovery_source"] = metrics["contact_secondary_pressure_recovery_source"]
+            row["contact_pressure_recovery_source"] = metrics["contact_pressure_recovery_source"]
+            row["contact_legacy_pressure_alias_source"] = metrics["contact_legacy_pressure_alias_source"]
+            row["contact_legacy_pressure_alias_matches_secondary"] = metrics[
+                "contact_legacy_pressure_alias_matches_secondary"
             ]
         row.update(law_metrics)
         row.update(path_metrics)

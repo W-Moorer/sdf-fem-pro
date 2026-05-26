@@ -512,6 +512,8 @@ def test_contact_pressure_recovery_uses_secondary_region_nodes_when_available() 
     assert diagnostics["fields"]["contact_master_pressure_nodeavg"][4] > 0.0
     assert diagnostics["metrics"]["active_contact_node_count"] == 1
     assert diagnostics["metrics"]["max_contact_pressure_nodeavg"] == pytest.approx(10.0)
+    assert diagnostics["metrics"]["contact_legacy_pressure_alias_source"] == "secondary_constraint_region"
+    assert int(diagnostics["metrics"]["contact_legacy_pressure_alias_matches_secondary"]) == 1
 
 
 def test_contact_region_integral_metrics_report_force_work_energy_area() -> None:

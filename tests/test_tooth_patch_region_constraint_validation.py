@@ -52,6 +52,9 @@ def test_tooth_patch_region_constraint_gate_writes_totals_before_clouds(tmp_path
     assert "q4_master_payload_width" in total_rows[0]
     assert int(total_rows[0]["q4_master_payload_width"]) == 4
     assert total_rows[0]["contact_secondary_pressure_recovery_source"] == "constraint_region"
+    assert total_rows[0]["contact_pressure_recovery_source"] == "constraint_region"
+    assert total_rows[0]["contact_legacy_pressure_alias_source"] == "secondary_constraint_region"
+    assert int(total_rows[0]["contact_legacy_pressure_alias_matches_secondary"]) == 1
     assert "max_contact_secondary_pressure_nodeavg" not in total_rows[0]
 
     report_text = report.read_text(encoding="utf-8")
@@ -81,6 +84,9 @@ def test_tooth_patch_region_gate_rejects_missing_prerequisite_or_q4_payload() ->
         "contact_constraint_force_distribution": "region_area_slave_shape_master_payload",
         "contact_constraint_independent_quadrature_penalty_disabled": 1,
         "contact_secondary_pressure_recovery_source": "constraint_region",
+        "contact_pressure_recovery_source": "constraint_region",
+        "contact_legacy_pressure_alias_source": "secondary_constraint_region",
+        "contact_legacy_pressure_alias_matches_secondary": 1,
     }
     rows = [dict(row), dict(row)]
 
