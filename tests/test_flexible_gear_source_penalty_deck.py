@@ -140,6 +140,10 @@ def test_source_active_set_line_search_gate_requires_stable_accepted_tracking() 
             "source_line_search_unstable_count": 0,
             "source_line_search_last_alpha": 0.5,
             "source_accepted_tracking_committed": 2,
+            "source_active_set_stable": 1,
+            "source_increment_accepted": 1,
+            "source_increment_cutback_required": 0,
+            "source_iteration_limit_reached": 0,
         }
     ]
 
@@ -154,6 +158,13 @@ def test_source_active_set_line_search_gate_requires_stable_accepted_tracking() 
 
     assert int(failed_unstable["source_active_set_line_search_gate_passed"]) == 0
     assert int(failed_unstable["source_active_set_line_search_row_unstable_ok"]) == 0
+
+    unstable_active_set = [dict(history[0])]
+    unstable_active_set[0]["source_active_set_stable"] = 0
+    failed_active_set = source_active_set_line_search_gate_metrics(summary, unstable_active_set)
+
+    assert int(failed_active_set["source_active_set_line_search_gate_passed"]) == 0
+    assert int(failed_active_set["source_active_set_line_search_row_active_set_stable_ok"]) == 0
 
     missing_commit = dict(summary)
     missing_commit["source_accepted_tracking_commit_count"] = 0

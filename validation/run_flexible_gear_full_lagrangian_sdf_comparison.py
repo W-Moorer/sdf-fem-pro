@@ -526,9 +526,21 @@ def source_active_set_line_search_gate_metrics(summary: Row, history_rows: list[
                 "source_line_search_unstable_count",
                 "source_line_search_last_alpha",
                 "source_accepted_tracking_committed",
+                "source_active_set_stable",
+                "source_increment_accepted",
+                "source_increment_cutback_required",
+                "source_iteration_limit_reached",
             )
         )
         for row in history_rows
+    )
+    row_accepted_ok = all(_row_int_flag(row, "source_increment_accepted", default=1) == 1 for row in history_rows)
+    row_stable_ok = all(_row_int_flag(row, "source_active_set_stable", default=0) == 1 for row in history_rows)
+    row_no_cutback_ok = all(
+        _row_int_flag(row, "source_increment_cutback_required", default=0) == 0 for row in history_rows
+    )
+    row_no_iteration_limit_ok = all(
+        _row_int_flag(row, "source_iteration_limit_reached", default=0) == 0 for row in history_rows
     )
     row_unstable_ok = all(_row_int_flag(row, "source_line_search_unstable_count", default=0) == 0 for row in history_rows)
     row_alpha_ok = all(
@@ -544,6 +556,10 @@ def source_active_set_line_search_gate_metrics(summary: Row, history_rows: list[
         and bool(stability_enabled)
         and summary_unstable == 0
         and bool(row_columns_present)
+        and bool(row_accepted_ok)
+        and bool(row_stable_ok)
+        and bool(row_no_cutback_ok)
+        and bool(row_no_iteration_limit_ok)
         and bool(row_unstable_ok)
         and bool(row_alpha_ok)
         and bool(row_commit_ok)
@@ -560,6 +576,10 @@ def source_active_set_line_search_gate_metrics(summary: Row, history_rows: list[
         "source_active_set_line_search_summary_trial_count": int(summary_trials),
         "source_active_set_line_search_summary_commit_count": int(summary_commit),
         "source_active_set_line_search_row_columns_present": int(row_columns_present),
+        "source_active_set_line_search_row_accepted_ok": int(row_accepted_ok),
+        "source_active_set_line_search_row_active_set_stable_ok": int(row_stable_ok),
+        "source_active_set_line_search_row_no_cutback_ok": int(row_no_cutback_ok),
+        "source_active_set_line_search_row_no_iteration_limit_ok": int(row_no_iteration_limit_ok),
         "source_active_set_line_search_row_unstable_ok": int(row_unstable_ok),
         "source_active_set_line_search_row_alpha_ok": int(row_alpha_ok),
         "source_active_set_line_search_row_commit_ok": int(row_commit_ok),
