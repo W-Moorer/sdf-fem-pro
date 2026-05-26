@@ -1784,8 +1784,11 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
 
         The array path exposes the master Q4 face id, Q4 shape weights, and
         accepted-state tracking diagnostics needed by the secondary
-        constraint-region contact law.  The query still has an exact fallback:
-        cached faces are only evaluated first, not used as the sole candidate.
+        constraint-region contact law.  It reads accepted path-tracking caches
+        as search hints but does not mutate them; callers must commit the final
+        accepted arrays with :meth:`commit_secondary_tracking_from_sample_arrays`.
+        The query still has an exact fallback: cached faces are only evaluated
+        first, not used as the sole candidate.
         """
 
         if bool(self.clip_to_master_footprint):
@@ -1851,10 +1854,6 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
                     cache_hits.append(bool(hit))
                     cache_matches.append(match)
                     weight_distances.append(weight_distance)
-                    if bool(self.secondary_path_tracking):
-                        face_cache[cache_index] = int(payload.face_id)
-                        total = float(np.sum(payload_weights))
-                        weight_cache[cache_index] = payload_weights / total if total > 0.0 else payload_weights
         if not gaps:
             return {
                 "sample_node_ids": np.empty((0, 4), dtype=np.int64),

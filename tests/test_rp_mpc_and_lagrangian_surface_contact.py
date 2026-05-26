@@ -550,3 +550,53 @@ def test_lagrangian_sdf_q4_master_surface_contact_avoids_triangle_payload_split(
     assert samples[0].normal == pytest.approx([0.0, 0.0, -1.0])
     assert samples[0].master_node_ids == pytest.approx([4, 5, 6, 7])
     assert samples[0].master_shape_weights == pytest.approx([0.25, 0.25, 0.25, 0.25])
+
+
+def test_q4_path_tracking_cache_updates_only_after_accepted_commit() -> None:
+    slave_nodes = np.asarray(
+        [
+            [0.0, 0.0, -0.05],
+            [0.0, 1.0, -0.05],
+            [1.0, 1.0, -0.05],
+            [1.0, 0.0, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([slave_nodes, master_nodes])
+    contact = LagrangianSDFQ4MasterSurfaceContactGeometry(
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=4,
+        quadrature_order=1,
+        secondary_path_tracking=True,
+    )
+
+    trial_arrays = contact.sample_arrays(x_current)
+
+    assert trial_arrays["master_face_ids"].tolist() == [0]
+    assert trial_arrays["tracking_cache_hits"].tolist() == [False]
+    assert contact._secondary_face_cache is not None
+    assert contact._secondary_master_weight_cache is not None
+    np.testing.assert_array_equal(contact._secondary_face_cache, [-1])
+    assert np.isnan(contact._secondary_master_weight_cache).all()
+
+    assert contact.commit_secondary_tracking_from_sample_arrays(trial_arrays) == 1
+    np.testing.assert_array_equal(contact._secondary_face_cache, [0])
+    np.testing.assert_allclose(contact._secondary_master_weight_cache[0], [0.25, 0.25, 0.25, 0.25])
+
+    accepted_arrays = contact.sample_arrays(x_current)
+
+    assert accepted_arrays["tracking_cache_hits"].tolist() == [True]
+    assert accepted_arrays["tracking_cache_matches"].tolist() == [True]
+    np.testing.assert_array_equal(contact._secondary_face_cache, [0])
