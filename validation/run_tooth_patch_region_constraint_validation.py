@@ -119,14 +119,19 @@ def tooth_patch_region_gate_metrics(rows: list[Row], *, two_block_summary: Row |
     tracking_rows = rows[1:] if len(rows) > 1 else []
     cache_hit_min = min((float(row.get("contact_path_cache_hit_fraction", 0.0)) for row in tracking_rows), default=1.0)
     cache_match_min = min((float(row.get("contact_path_cache_match_fraction", 0.0)) for row in tracking_rows), default=1.0)
+    topological_continuity_min = min(
+        (float(row.get("contact_master_face_topological_continuity_fraction", 0.0)) for row in tracking_rows),
+        default=1.0,
+    )
     face_switch_max = max((float(row.get("contact_master_face_switch_fraction", 0.0)) for row in tracking_rows), default=0.0)
+    invalid_jump_max = max((float(row.get("contact_master_face_invalid_jump_fraction", 0.0)) for row in tracking_rows), default=0.0)
     bary_drift_max = max((float(row.get("contact_master_barycentric_drift_max", 0.0)) for row in tracking_rows), default=0.0)
     active_jaccard_min = min((float(row.get("contact_active_region_jaccard", 0.0)) for row in tracking_rows), default=1.0)
     path_ok = (
         bool(rows)
         and cache_hit_min >= 0.999
-        and cache_match_min >= 0.999
-        and face_switch_max <= 0.0
+        and (cache_match_min >= 0.999 or topological_continuity_min >= 0.999)
+        and invalid_jump_max <= 0.0
         and bary_drift_max <= 0.20
         and active_jaccard_min >= 0.999
     )
@@ -148,7 +153,9 @@ def tooth_patch_region_gate_metrics(rows: list[Row], *, two_block_summary: Row |
         "tooth_patch_virtual_work_relative_mismatch_max": float(max_work_mismatch),
         "tooth_patch_path_cache_hit_fraction_min_after_first": float(cache_hit_min),
         "tooth_patch_path_cache_match_fraction_min_after_first": float(cache_match_min),
+        "tooth_patch_master_face_topological_continuity_min_after_first": float(topological_continuity_min),
         "tooth_patch_master_face_switch_fraction_max": float(face_switch_max),
+        "tooth_patch_master_face_invalid_jump_fraction_max": float(invalid_jump_max),
         "tooth_patch_master_weight_drift_max": float(bary_drift_max),
         "tooth_patch_active_region_jaccard_min": float(active_jaccard_min),
         "tooth_patch_ready_for_cropped_gear_patch": int(gate_passed),
@@ -236,6 +243,7 @@ def run_validation(
             previous_path_region_ids,
             previous_master_face_ids,
             previous_master_barycentric,
+            master_face_neighbors=contact._master_face_tracking_neighborhoods,
         )
         previous_path_region_ids = current_path_region_ids if current_path_region_ids is not None else previous_path_region_ids
         previous_master_face_ids = current_master_face_ids if current_master_face_ids is not None else previous_master_face_ids
@@ -295,6 +303,8 @@ def run_validation(
         "contact_path_cache_hit_fraction",
         "contact_path_cache_match_fraction",
         "contact_master_face_switch_fraction",
+        "contact_master_face_topological_continuity_fraction",
+        "contact_master_face_invalid_jump_fraction",
         "contact_master_barycentric_drift_max",
         "contact_active_region_jaccard",
     ]

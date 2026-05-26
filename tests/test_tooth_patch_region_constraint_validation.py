@@ -50,6 +50,8 @@ def test_tooth_patch_region_constraint_gate_writes_totals_before_clouds(tmp_path
     assert "contact_region_normal_force" in total_rows[0]
     assert "contact_constraint_open_closed_source" in total_rows[0]
     assert "q4_master_payload_width" in total_rows[0]
+    assert "contact_master_face_topological_continuity_fraction" in total_rows[0]
+    assert "contact_master_face_invalid_jump_fraction" in total_rows[0]
     assert int(total_rows[0]["q4_master_payload_width"]) == 4
     assert total_rows[0]["contact_secondary_pressure_recovery_source"] == "constraint_region"
     assert total_rows[0]["contact_pressure_recovery_source"] == "constraint_region"
@@ -76,6 +78,8 @@ def test_tooth_patch_region_gate_rejects_missing_prerequisite_or_q4_payload() ->
         "contact_path_cache_hit_fraction": 1.0,
         "contact_path_cache_match_fraction": 1.0,
         "contact_master_face_switch_fraction": 0.0,
+        "contact_master_face_topological_continuity_fraction": 1.0,
+        "contact_master_face_invalid_jump_fraction": 0.0,
         "contact_active_region_jaccard": 1.0,
         "contact_master_barycentric_drift_max": 0.0,
         "contact_constraint_law_source": "slave_node_region_constraint",
@@ -95,6 +99,27 @@ def test_tooth_patch_region_gate_rejects_missing_prerequisite_or_q4_payload() ->
         two_block_summary={"two_block_sliding_region_gate_passed": 1},
     )
     assert int(passed["tooth_patch_region_gate_passed"]) == 1
+
+    adjacent_switch_rows = [dict(row), dict(row)]
+    adjacent_switch_rows[1]["contact_path_cache_match_fraction"] = 0.0
+    adjacent_switch_rows[1]["contact_master_face_switch_fraction"] = 0.25
+    adjacent_switch_rows[1]["contact_master_face_topological_continuity_fraction"] = 1.0
+    adjacent_switch_rows[1]["contact_master_face_invalid_jump_fraction"] = 0.0
+    adjacent_switch = tooth_patch_region_gate_metrics(
+        adjacent_switch_rows,
+        two_block_summary={"two_block_sliding_region_gate_passed": 1},
+    )
+    assert int(adjacent_switch["tooth_patch_region_gate_passed"]) == 1
+
+    random_jump_rows = [dict(row), dict(row)]
+    random_jump_rows[1]["contact_path_cache_match_fraction"] = 0.0
+    random_jump_rows[1]["contact_master_face_topological_continuity_fraction"] = 0.0
+    random_jump_rows[1]["contact_master_face_invalid_jump_fraction"] = 1.0
+    random_jump = tooth_patch_region_gate_metrics(
+        random_jump_rows,
+        two_block_summary={"two_block_sliding_region_gate_passed": 1},
+    )
+    assert int(random_jump["tooth_patch_region_gate_passed"]) == 0
 
     missing_prerequisite = tooth_patch_region_gate_metrics(
         rows,

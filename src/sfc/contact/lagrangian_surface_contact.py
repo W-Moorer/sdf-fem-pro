@@ -1684,9 +1684,11 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
     search_radius: float | None = None
     clip_to_master_footprint: bool = False
     secondary_path_tracking: bool = False
+    secondary_tracking_rings: int = 2
     _oracle: LagrangianQ4ClosestFeatureOracle = field(init=False, repr=False)
     _secondary_face_cache: np.ndarray | None = field(default=None, init=False, repr=False)
     _secondary_master_weight_cache: np.ndarray | None = field(default=None, init=False, repr=False)
+    _master_face_tracking_neighborhoods: tuple[np.ndarray, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         slave = np.asarray(self.slave_quads, dtype=np.int64)
@@ -1706,9 +1708,16 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
             raise ValueError("pressure_stiffness must be positive")
         if int(self.quadrature_order) < 1 or int(self.quadrature_order) > 6:
             raise ValueError("quadrature_order must be between 1 and 6")
+        if int(self.secondary_tracking_rings) < 0:
+            raise ValueError("secondary_tracking_rings must be non-negative")
         self.slave_quads = slave
         self.master_quads = master
         self.master_reference_nodes = master_nodes
+        self._master_face_tracking_neighborhoods = _face_neighborhoods(
+            master,
+            nodes_per_face=4,
+            rings=int(self.secondary_tracking_rings),
+        )
         self._oracle = LagrangianQ4ClosestFeatureOracle(
             master_nodes,
             master,
@@ -1772,6 +1781,25 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
             committed += 1
         return int(committed)
 
+    def _preferred_secondary_tracking_faces(self, previous_face: int) -> list[int] | None:
+        """Return accepted Q4 face and neighbors as ordered search hints."""
+
+        if not bool(self.secondary_path_tracking):
+            return None
+        if not (0 <= int(previous_face) < len(self._master_face_tracking_neighborhoods)):
+            return None
+        values: list[int] = []
+        seen: set[int] = set()
+        first = int(previous_face)
+        values.append(first)
+        seen.add(first)
+        for raw in self._master_face_tracking_neighborhoods[first]:
+            face_id = int(raw)
+            if 0 <= face_id < len(self._master_face_tracking_neighborhoods) and face_id not in seen:
+                values.append(face_id)
+                seen.add(face_id)
+        return values
+
     def sample_arrays(self, x_current: np.ndarray) -> dict[str, np.ndarray]:
         """Return Q4 closest-feature contact payloads as batched arrays.
 
@@ -1780,8 +1808,8 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
         constraint-region contact law.  It reads accepted path-tracking caches
         as search hints but does not mutate them; callers must commit the final
         accepted arrays with :meth:`commit_secondary_tracking_from_sample_arrays`.
-        The query still has an exact fallback: cached faces are only evaluated
-        first, not used as the sole candidate.
+        The query still has an exact fallback: cached faces and adjacent master
+        patches are only evaluated first, not used as the sole candidate.
         """
 
         if bool(self.clip_to_master_footprint):
@@ -1824,7 +1852,7 @@ class LagrangianSDFQ4MasterSurfaceContactGeometry:
                         continue
                     cache_index = int(face_id) * q * q + int(a) * q + int(b)
                     previous_face = int(face_cache[cache_index]) if 0 <= cache_index < face_cache.shape[0] else -1
-                    preferred = [previous_face] if bool(self.secondary_path_tracking) and previous_face >= 0 else None
+                    preferred = self._preferred_secondary_tracking_faces(previous_face)
                     point = shape @ qx
                     payload = self._oracle.query(point, preferred_face_ids=preferred)
                     payload_weights = np.asarray(payload.master_weights, dtype=float).reshape(4)
@@ -2008,18 +2036,20 @@ def _surface_nodal_normals(x_current: np.ndarray, faces: np.ndarray) -> np.ndarr
     return normals
 
 
-def _triangle_face_neighborhoods(faces: np.ndarray, *, rings: int) -> tuple[np.ndarray, ...]:
+def _face_neighborhoods(faces: np.ndarray, *, nodes_per_face: int, rings: int) -> tuple[np.ndarray, ...]:
     """Return edge-adjacent face neighborhoods for contact tracking."""
 
     F = np.asarray(faces, dtype=np.int64)
-    if F.ndim != 2 or F.shape[1] != 3:
-        raise ValueError("faces must have shape (n_faces, 3)")
+    if F.ndim != 2 or F.shape[1] != int(nodes_per_face):
+        raise ValueError(f"faces must have shape (n_faces, {int(nodes_per_face)})")
     if int(rings) < 0:
         raise ValueError("rings must be non-negative")
     edge_to_faces: dict[tuple[int, int], list[int]] = {}
     for face_id, face in enumerate(F):
         nodes = [int(v) for v in face]
-        for a, b in ((nodes[0], nodes[1]), (nodes[1], nodes[2]), (nodes[2], nodes[0])):
+        for local in range(int(nodes_per_face)):
+            a = nodes[local]
+            b = nodes[(local + 1) % int(nodes_per_face)]
             key = (a, b) if a <= b else (b, a)
             edge_to_faces.setdefault(key, []).append(int(face_id))
     adjacency: list[set[int]] = [set() for _ in range(F.shape[0])]
@@ -2043,6 +2073,12 @@ def _triangle_face_neighborhoods(faces: np.ndarray, *, rings: int) -> tuple[np.n
             frontier = next_frontier
         neighborhoods.append(np.asarray(sorted(seen), dtype=np.int64))
     return tuple(neighborhoods)
+
+
+def _triangle_face_neighborhoods(faces: np.ndarray, *, rings: int) -> tuple[np.ndarray, ...]:
+    """Return edge-adjacent triangle face neighborhoods for contact tracking."""
+
+    return _face_neighborhoods(faces, nodes_per_face=3, rings=int(rings))
 
 
 def _triangle_barycentric_unclipped(point: np.ndarray, tri: np.ndarray) -> np.ndarray | None:

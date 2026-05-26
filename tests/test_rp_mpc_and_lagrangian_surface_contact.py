@@ -602,6 +602,51 @@ def test_q4_path_tracking_cache_updates_only_after_accepted_commit() -> None:
     np.testing.assert_array_equal(contact._secondary_face_cache, [0])
 
 
+def test_q4_path_tracking_prefers_accepted_face_and_adjacent_master_patch() -> None:
+    slave_nodes = np.asarray(
+        [
+            [1.1, 0.1, -0.05],
+            [1.1, 0.9, -0.05],
+            [1.9, 0.9, -0.05],
+            [1.9, 0.1, -0.05],
+        ],
+        dtype=float,
+    )
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([slave_nodes, master_nodes])
+    contact = LagrangianSDFQ4MasterSurfaceContactGeometry(
+        np.asarray([[0, 1, 2, 3]], dtype=np.int64),
+        np.asarray([[0, 1, 2, 3], [1, 4, 5, 2]], dtype=np.int64),
+        master_nodes,
+        pressure_stiffness=100.0,
+        master_node_offset=4,
+        quadrature_order=1,
+        secondary_path_tracking=True,
+        secondary_tracking_rings=1,
+    )
+    contact._ensure_secondary_face_cache()[0] = 0
+    contact._ensure_secondary_master_weight_cache()[0] = [0.25, 0.25, 0.25, 0.25]
+
+    assert contact._preferred_secondary_tracking_faces(0) == [0, 1]
+
+    arrays = contact.sample_arrays(x_current)
+
+    assert arrays["tracking_cache_hits"].tolist() == [True]
+    assert arrays["tracking_cache_matches"].tolist() == [False]
+    assert arrays["master_face_ids"].tolist() == [1]
+    np.testing.assert_array_equal(contact._secondary_face_cache, [0])
+
+
 def test_tri_batch_path_tracking_cache_updates_only_after_accepted_commit() -> None:
     master_nodes = np.asarray(
         [
