@@ -592,7 +592,13 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
     row_active_count_ok = True
     row_scale_ok = True
     row_solve_ok = True
+    row_fd_present = False
+    row_fd_checked_ok = True
+    row_fd_active_set_stable_ok = True
+    row_fd_passed_ok = True
     max_active_count_mismatch = 0
+    max_fd_abs_error = 0.0
+    max_fd_rel_error = 0.0
     for row in active_rows:
         tangent_active = _row_int_flag(row, "contact_tangent_active_region_count", default=-1)
         active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
@@ -611,9 +617,20 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
         row_active_count_ok = row_active_count_ok and tangent_active == active_regions
         row_scale_ok = row_scale_ok and (_finite_row_float(row, "contact_tangent_scale_sum") or 0.0) > 0.0
         row_solve_ok = row_solve_ok and _row_int_flag(row, "source_constraint_region_tangent_solve_count") > 0
+        if _row_has_value(row, "contact_tangent_fd_checked"):
+            row_fd_present = True
+            row_fd_checked_ok = row_fd_checked_ok and _row_int_flag(row, "contact_tangent_fd_checked") == 1
+            row_fd_active_set_stable_ok = (
+                row_fd_active_set_stable_ok
+                and _row_int_flag(row, "contact_tangent_fd_active_set_stable") == 1
+            )
+            row_fd_passed_ok = row_fd_passed_ok and _row_int_flag(row, "contact_tangent_fd_passed") == 1
+            max_fd_abs_error = max(max_fd_abs_error, _finite_row_float(row, "contact_tangent_fd_error_abs") or 0.0)
+            max_fd_rel_error = max(max_fd_rel_error, _finite_row_float(row, "contact_tangent_fd_error_rel") or 0.0)
     summary_tangent_used = (not active_contact_present) or (
         source_solve_count > 0 and source_active_rows > 0 and source_j_nnz > 0 and source_scale_sum > 0.0
     )
+    row_fd_ok = (not row_fd_present) or (row_fd_checked_ok and row_fd_active_set_stable_ok and row_fd_passed_ok)
     rows_ok = (
         row_source_ok
         and row_jacobian_ok
@@ -623,6 +640,7 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
         and row_active_count_ok
         and row_scale_ok
         and row_solve_ok
+        and row_fd_ok
     )
     gate_passed = int((not active_contact_present) or (bool(summary_tangent_used) and bool(rows_ok)))
     return {
@@ -639,7 +657,13 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
         "constraint_region_tangent_row_active_count_ok": int(row_active_count_ok),
         "constraint_region_tangent_row_scale_ok": int(row_scale_ok),
         "constraint_region_tangent_row_solve_ok": int(row_solve_ok),
+        "constraint_region_tangent_row_fd_present": int(row_fd_present),
+        "constraint_region_tangent_row_fd_checked_ok": int(row_fd_checked_ok),
+        "constraint_region_tangent_row_fd_active_set_stable_ok": int(row_fd_active_set_stable_ok),
+        "constraint_region_tangent_row_fd_passed_ok": int(row_fd_passed_ok),
         "constraint_region_tangent_max_active_count_mismatch": int(max_active_count_mismatch),
+        "constraint_region_tangent_fd_error_abs_max": float(max_fd_abs_error),
+        "constraint_region_tangent_fd_error_rel_max": float(max_fd_rel_error),
         "constraint_region_tangent_source_solve_count": int(source_solve_count),
         "constraint_region_tangent_source_active_rows_sum": int(source_active_rows),
         "constraint_region_tangent_source_j_nnz_sum": int(source_j_nnz),

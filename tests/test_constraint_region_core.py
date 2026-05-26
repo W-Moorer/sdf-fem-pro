@@ -164,7 +164,7 @@ def test_constraint_region_tangent_fd_metrics_gate_fixed_active_set_consistency(
     assert metrics["contact_tangent_fd_active_set_stable"] == 1
     assert metrics["contact_tangent_fd_passed"] == 1
     assert metrics["contact_tangent_fd_error_rel"] < 1.0e-9
-    assert metrics["contact_tangent_fd_source"] == "constraint_region_fixed_payload_force_difference"
+    assert metrics["contact_tangent_fd_source"] == "constraint_region_fixed_payload_scaled_force_difference"
 
 
 def test_constraint_region_tangent_fd_metrics_reject_active_set_crossing() -> None:

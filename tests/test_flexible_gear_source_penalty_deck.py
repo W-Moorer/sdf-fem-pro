@@ -166,6 +166,11 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
             "contact_tangent_fixed_active_set": 1,
             "contact_tangent_active_region_count": 2,
             "contact_tangent_scale_sum": 6.0,
+            "contact_tangent_fd_checked": 1,
+            "contact_tangent_fd_active_set_stable": 1,
+            "contact_tangent_fd_passed": 1,
+            "contact_tangent_fd_error_abs": 1.0e-12,
+            "contact_tangent_fd_error_rel": 1.0e-13,
             "source_constraint_region_tangent_solve_count": 1,
         }
     ]
@@ -175,6 +180,8 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
     assert int(gate["constraint_region_tangent_gate_passed"]) == 1
     assert int(gate["constraint_region_tangent_row_active_count_ok"]) == 1
     assert int(gate["constraint_region_tangent_row_sign_convention_ok"]) == 1
+    assert int(gate["constraint_region_tangent_row_fd_present"]) == 1
+    assert int(gate["constraint_region_tangent_row_fd_passed_ok"]) == 1
 
     sample_tangent = [dict(history[0])]
     sample_tangent[0]["contact_tangent_source"] = "sample_arrays"
@@ -189,6 +196,13 @@ def test_constraint_region_tangent_gate_requires_consistent_active_rows() -> Non
 
     assert int(failed_sign["constraint_region_tangent_gate_passed"]) == 0
     assert int(failed_sign["constraint_region_tangent_row_sign_convention_ok"]) == 0
+
+    failed_fd = [dict(history[0])]
+    failed_fd[0]["contact_tangent_fd_passed"] = 0
+    failed_fd_gate = constraint_region_tangent_gate_metrics(summary, failed_fd)
+
+    assert int(failed_fd_gate["constraint_region_tangent_gate_passed"]) == 0
+    assert int(failed_fd_gate["constraint_region_tangent_row_fd_passed_ok"]) == 0
 
 
 def test_constraint_region_contact_law_gate_rejects_independent_sample_penalty() -> None:

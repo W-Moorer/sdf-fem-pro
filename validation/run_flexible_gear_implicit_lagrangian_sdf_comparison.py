@@ -3652,6 +3652,14 @@ def _constraint_region_linearization_metrics_from_arrays(
         pressure_stiffness=float(pressure_stiffness),
         equilibrium_scale=float(equilibrium_scale),
     )
+    metrics.update(
+        _constraint_region_tangent_fd_metrics_from_arrays(
+            sample_arrays,
+            n_nodes=int(n_nodes),
+            pressure_stiffness=float(pressure_stiffness),
+            equilibrium_scale=float(equilibrium_scale),
+        )
+    )
     if sample_arrays is None:
         metrics["contact_tangent_j_nnz"] = 0
         metrics["contact_tangent_matrix_nnz"] = 0
@@ -5570,8 +5578,9 @@ def solve_sfc_source_drive_pair(
             last_raw_sample_arrays,
             averaging_mode=contact_averaging,
         )
-        contact_tangent_metrics = _constraint_region_tangent_metrics_from_arrays(
+        contact_tangent_metrics = _constraint_region_linearization_metrics_from_arrays(
             last_sample_arrays,
+            n_nodes=model.n_nodes,
             pressure_stiffness=pressure_stiffness,
             equilibrium_scale=scale,
         )
@@ -6908,11 +6917,14 @@ def solve_sfc_cropped_pair_hard_contact(
         row.update(hard_increment_gate_row)
         row["nodal_cpress_deferred"] = 1
         if secondary_pressure_diagnostics is not None:
-            source = secondary_pressure_diagnostics.get("metrics", {}).get(
-                "contact_secondary_pressure_recovery_source",
-                "constraint_region",
-            )
-            row["contact_secondary_pressure_recovery_source"] = str(source)
+            _promote_secondary_contact_diagnostics_to_legacy(secondary_pressure_diagnostics)
+            metrics = secondary_pressure_diagnostics.get("metrics", {})
+            row["contact_secondary_pressure_recovery_source"] = metrics["contact_secondary_pressure_recovery_source"]
+            row["contact_pressure_recovery_source"] = metrics["contact_pressure_recovery_source"]
+            row["contact_legacy_pressure_alias_source"] = metrics["contact_legacy_pressure_alias_source"]
+            row["contact_legacy_pressure_alias_matches_secondary"] = metrics[
+                "contact_legacy_pressure_alias_matches_secondary"
+            ]
         row["path_tracking_constraint_regions"] = (
             int(np.asarray(tracking_regions["gaps"], dtype=float).size) if tracking_regions is not None else 0
         )
@@ -7074,6 +7086,14 @@ def _cropped_patch_contact_gate_metrics(
                 == int(row.get("active_contact_region_count", -2))
                 and int(row.get("contact_tangent_j_nnz", 0)) > 0
                 and float(row.get("contact_tangent_scale_max", 0.0)) > 0.0
+                and (
+                    "contact_tangent_fd_checked" not in row
+                    or (
+                        int(row.get("contact_tangent_fd_checked", 0)) == 1
+                        and int(row.get("contact_tangent_fd_active_set_stable", 0)) == 1
+                        and int(row.get("contact_tangent_fd_passed", 0)) == 1
+                    )
+                )
             )
         )
         for row in rows

@@ -398,7 +398,7 @@ def constraint_region_tangent_finite_difference_metrics_from_arrays(
     """Check fixed-payload active-set tangent by directional finite difference.
 
     The check intentionally perturbs only the region gaps through the fixed
-    gap Jacobian.  It therefore validates the consistent tangent used by the
+    gap Jacobian.  It validates the equilibrium-scaled tangent used by the
     active-set Newton step, not closest-feature re-search or normal variation.
     If the +/- perturbation changes the open/closed region set, the check is
     reported as unstable and must not be used as tangent evidence.
@@ -421,7 +421,7 @@ def constraint_region_tangent_finite_difference_metrics_from_arrays(
         "contact_tangent_fd_tolerance_rel": float(relative_tolerance),
         "contact_tangent_fd_epsilon": float(epsilon),
         "contact_tangent_fd_direction_norm": 0.0,
-        "contact_tangent_fd_source": "constraint_region_fixed_payload_force_difference",
+        "contact_tangent_fd_source": "constraint_region_fixed_payload_scaled_force_difference",
     }
     if sample_arrays is None:
         return base
@@ -475,7 +475,7 @@ def constraint_region_tangent_finite_difference_metrics_from_arrays(
             include_tangent=False,
         ).force.reshape(-1)
 
-    finite_difference = (force_at(plus_gaps) - force_at(minus_gaps)) / (2.0 * eps)
+    finite_difference = float(equilibrium_scale) * (force_at(plus_gaps) - force_at(minus_gaps)) / (2.0 * eps)
     expected = -np.asarray(tangent @ vec, dtype=float).reshape(-1)
     error_abs = float(np.linalg.norm(finite_difference - expected))
     scale = max(1.0, float(np.linalg.norm(finite_difference)), float(np.linalg.norm(expected)))

@@ -1203,6 +1203,9 @@ def test_contact_total_priority_gate_requires_totals_before_nodal_pressure(tmp_p
                 "contact_path_cache_match_fraction": 1.0,
                 "contact_master_face_switch_fraction": 0.0,
                 "contact_secondary_pressure_recovery_source": "constraint_region",
+                "contact_pressure_recovery_source": "constraint_region",
+                "contact_legacy_pressure_alias_source": "secondary_constraint_region",
+                "contact_legacy_pressure_alias_matches_secondary": 1,
                 "max_contact_secondary_pressure_nodeavg": 99.0,
             }
         ],
@@ -3575,6 +3578,9 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert int(history[-1]["contact_tangent_active_region_count"]) == int(history[-1]["active_contact_region_count"])
     assert int(history[-1]["contact_tangent_j_nnz"]) > 0
     assert int(history[-1]["contact_tangent_matrix_nnz"]) > 0
+    assert int(history[-1]["contact_tangent_fd_checked"]) == 1
+    assert int(history[-1]["contact_tangent_fd_active_set_stable"]) == 1
+    assert int(history[-1]["contact_tangent_fd_passed"]) == 1
     assert "contact_active_master_face_count" in history[-1]
     assert "active_contact_region_count" in history[-1]
 
@@ -3635,6 +3641,9 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert all(int(row["hard_accepted_tracking_committed"]) > 0 for row in history)
     assert all(int(row["contact_tangent_used_by_hard_kkt"]) == 1 for row in history)
     assert all(int(row["contact_tangent_active_region_count"]) == int(row["active_contact_region_count"]) for row in history)
+    assert all(int(row["contact_tangent_fd_checked"]) == 1 for row in history)
+    assert all(int(row["contact_tangent_fd_active_set_stable"]) == 1 for row in history)
+    assert all(int(row["contact_tangent_fd_passed"]) == 1 for row in history)
     assert float(gate["cropped_patch_final_p95_von_mises_nodeavg"]) > 0.0
     unstable_history = [dict(row) for row in history]
     unstable_history[-1]["hard_contact_force_increment_converged"] = 0
@@ -3658,6 +3667,16 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(wrong_sign_gate["cropped_patch_gate_passed"]) == 0
     assert int(wrong_sign_gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 0
     assert wrong_sign_gate["cropped_patch_gate_reason"] == "constraint_region_tangent_gate_failed"
+    bad_fd_history = [dict(row) for row in history]
+    bad_fd_history[-1]["contact_tangent_fd_passed"] = 0
+    bad_fd_gate = _cropped_patch_contact_gate_metrics(
+        bad_fd_history,
+        summary,
+        require_monotone_trend=False,
+    )
+    assert int(bad_fd_gate["cropped_patch_gate_passed"]) == 0
+    assert int(bad_fd_gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 0
+    assert bad_fd_gate["cropped_patch_gate_reason"] == "constraint_region_tangent_gate_failed"
     bad_line_search_history = [dict(row) for row in history]
     bad_line_search_history[-1]["hard_line_search_stable_count"] = 0
     bad_line_search_history[-1]["hard_line_search_last_alpha"] = 0.0
