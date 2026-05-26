@@ -100,11 +100,50 @@ def test_constraint_region_contact_tangent_is_fixed_active_set_jtwj() -> None:
     assert metrics["contact_tangent_source"] == "constraint_region_arrays"
     assert metrics["contact_tangent_gap_jacobian_source"] == "constraint_region_fixed_payload"
     assert metrics["contact_tangent_pressure_derivative"] == "linear_penalty_active_set"
+    assert metrics["contact_tangent_sign_convention"] == "d(-contact_force)/du"
     assert metrics["contact_tangent_fixed_active_set"] == 1
     assert metrics["contact_tangent_active_region_count"] == 2
     assert metrics["contact_tangent_active_secondary_node_count"] == 2
     assert metrics["contact_tangent_j_nnz"] == jacobian.nnz
     assert metrics["contact_tangent_matrix_nnz"] == tangent.nnz
+
+
+def test_constraint_region_tangent_matches_fixed_payload_force_finite_difference() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+    _, gap_jacobian = constraint_region_gap_jacobian_sparse_from_arrays(regions, n_nodes=13, active_only=False)
+    _, _, _, tangent, _ = constraint_region_contact_tangent_sparse_from_arrays(
+        regions,
+        n_nodes=13,
+        pressure_stiffness=100.0,
+        equilibrium_scale=1.0,
+    )
+    direction = np.zeros(39, dtype=float)
+    direction[2] = 0.01
+    direction[5] = -0.02
+    direction[30] = 0.015
+    direction[35] = -0.01
+    eps = 1.0e-6
+
+    def force_at(scale: float) -> np.ndarray:
+        shifted = {key: value.copy() if isinstance(value, np.ndarray) else value for key, value in regions.items()}
+        shifted["gaps"] = np.asarray(regions["gaps"], dtype=float) + np.asarray(gap_jacobian @ (scale * direction)).reshape(-1)
+        assert np.all(np.asarray(shifted["gaps"], dtype=float) < 0.0)
+        return constraint_region_penalty_response_from_arrays(
+            shifted,
+            n_nodes=13,
+            pressure_stiffness=100.0,
+            include_tangent=False,
+        ).force.reshape(-1)
+
+    finite_difference_contact_force = (force_at(eps) - force_at(-eps)) / (2.0 * eps)
+
+    np.testing.assert_allclose(
+        finite_difference_contact_force,
+        -np.asarray(tangent @ direction).reshape(-1),
+        rtol=1.0e-8,
+        atol=1.0e-9,
+    )
 
 
 def test_constraint_region_penalty_response_uses_region_rows_for_force_and_totals() -> None:
