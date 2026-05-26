@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -268,6 +269,8 @@ class LagrangianSDFSurfaceContactGeometry:
     _oracle: LagrangianSDFContactOracle = field(init=False, repr=False)
     _secondary_face_cache: np.ndarray | None = field(default=None, init=False, repr=False)
     _secondary_barycentric_cache: np.ndarray | None = field(default=None, init=False, repr=False)
+    _secondary_region_face_cache: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+    _secondary_region_barycentric_cache: dict[int, np.ndarray] = field(default_factory=dict, init=False, repr=False)
     _master_face_tracking_neighborhoods: tuple[np.ndarray, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -307,6 +310,8 @@ class LagrangianSDFSurfaceContactGeometry:
 
         self._secondary_face_cache = None
         self._secondary_barycentric_cache = None
+        self._secondary_region_face_cache.clear()
+        self._secondary_region_barycentric_cache.clear()
 
     def _secondary_cache_size(self) -> int:
         return int(self.slave_faces.shape[0]) * (3 if self.quadrature == "tri3" else 1)
@@ -340,6 +345,7 @@ class LagrangianSDFSurfaceContactGeometry:
         self,
         candidate_lists,
         cache_indices: np.ndarray,
+        region_hint_faces: Sequence[Sequence[int]] | None = None,
     ) -> list[list[int]]:
         """Merge global/BVH candidates with accepted path-tracking hints.
 
@@ -356,10 +362,21 @@ class LagrangianSDFSurfaceContactGeometry:
         cache = self._ensure_secondary_face_cache()
         merged: list[list[int]] = []
         n_faces = len(self._master_face_tracking_neighborhoods)
-        for raw, cache_index in zip(candidate_lists, np.asarray(cache_indices, dtype=np.int64).reshape(-1), strict=True):
+        region_lists = (
+            [() for _ in range(len(candidate_lists))]
+            if region_hint_faces is None
+            else [tuple(int(face) for face in faces) for faces in region_hint_faces]
+        )
+        for raw, cache_index, region_faces in zip(
+            candidate_lists,
+            np.asarray(cache_indices, dtype=np.int64).reshape(-1),
+            region_lists,
+            strict=True,
+        ):
             values: list[int] = []
             seen: set[int] = set()
-            for face_id in raw:
+
+            def add_face_with_neighbors(face_id: int) -> None:
                 fid = int(face_id)
                 if 0 <= fid < n_faces and fid not in seen:
                     values.append(fid)
@@ -370,22 +387,49 @@ class LagrangianSDFSurfaceContactGeometry:
                         if nid not in seen:
                             values.append(nid)
                             seen.add(nid)
+
             tracked = (
                 int(cache[int(cache_index)])
                 if bool(self.secondary_path_tracking) and 0 <= int(cache_index) < cache.shape[0]
                 else -1
             )
             if 0 <= tracked < n_faces:
-                if tracked not in seen:
-                    values.insert(0, tracked)
-                    seen.add(tracked)
-                for face_id in self._master_face_tracking_neighborhoods[tracked]:
-                    fid = int(face_id)
-                    if fid not in seen:
-                        values.append(fid)
-                        seen.add(fid)
+                add_face_with_neighbors(tracked)
+            for face_id in region_faces:
+                add_face_with_neighbors(int(face_id))
+            for face_id in raw:
+                add_face_with_neighbors(int(face_id))
             merged.append(values)
         return merged
+
+    def _secondary_region_hint_faces(self, node_ids: np.ndarray, weights: np.ndarray) -> list[int]:
+        """Return accepted master-face hints attached to secondary regions."""
+
+        if not bool(self.secondary_path_tracking):
+            return []
+        nodes = np.asarray(node_ids, dtype=np.int64).reshape(-1)
+        weight_values = np.asarray(weights, dtype=float).reshape(-1)
+        if nodes.shape != weight_values.shape:
+            return []
+        order = np.argsort(-np.maximum(weight_values, 0.0))
+        hints: list[int] = []
+        seen: set[int] = set()
+        n_faces = len(self._master_face_tracking_neighborhoods)
+        for index in order:
+            if float(weight_values[int(index)]) <= 0.0:
+                continue
+            face_id = self._secondary_region_face_cache.get(int(nodes[int(index)]), -1)
+            if 0 <= int(face_id) < n_faces and int(face_id) not in seen:
+                hints.append(int(face_id))
+                seen.add(int(face_id))
+        return hints
+
+    def _secondary_region_hint_face_lists(self, sample_nodes: np.ndarray, sample_weights: np.ndarray) -> list[list[int]]:
+        nodes = np.asarray(sample_nodes, dtype=np.int64)
+        weights = np.asarray(sample_weights, dtype=float)
+        if nodes.ndim != 2 or weights.shape != nodes.shape:
+            return [[] for _ in range(nodes.shape[0] if nodes.ndim else 0)]
+        return [self._secondary_region_hint_faces(nodes[row], weights[row]) for row in range(nodes.shape[0])]
 
     def _secondary_tracking_rank(
         self,
@@ -416,19 +460,121 @@ class LagrangianSDFSurfaceContactGeometry:
         barycentric: np.ndarray,
         abs_gap: float,
         cache_index: int | None,
+        region_nodes: np.ndarray | None = None,
+        region_weights: np.ndarray | None = None,
     ) -> tuple[float, float, float, float]:
-        if not bool(self.secondary_path_tracking) or cache_index is None:
+        if not bool(self.secondary_path_tracking):
             return 1.0, float(abs_gap), 0.0, 0.0
-        rank, neighbor_order = self._secondary_tracking_rank(int(face_id), cache_index=cache_index)
-        if rank >= 2:
+        candidates: list[tuple[int, float, float]] = []
+        if cache_index is not None:
+            rank, neighbor_order = self._secondary_tracking_rank(int(face_id), cache_index=cache_index)
+            if rank < 2:
+                bary_distance = self._secondary_sample_barycentric_distance(
+                    barycentric,
+                    cache_index=int(cache_index),
+                )
+                candidates.append((int(rank), float(neighbor_order), float(bary_distance)))
+        if region_nodes is not None and region_weights is not None:
+            region_rank = self._secondary_region_tracking_rank(
+                int(face_id),
+                barycentric=np.asarray(barycentric, dtype=float).reshape(3),
+                node_ids=np.asarray(region_nodes, dtype=np.int64).reshape(-1),
+                weights=np.asarray(region_weights, dtype=float).reshape(-1),
+            )
+            if region_rank is not None:
+                candidates.append(region_rank)
+        if not candidates:
             return 1.0, float(abs_gap), 0.0, 0.0
+        rank, neighbor_order, bary_distance = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+        return 0.0, float(rank), float(neighbor_order), float(bary_distance)
+
+    def _secondary_sample_barycentric_distance(self, barycentric: np.ndarray, *, cache_index: int) -> float:
         bary_cache = self._ensure_secondary_barycentric_cache()
-        bary_distance = 0.0
         if 0 <= int(cache_index) < bary_cache.shape[0]:
             previous = bary_cache[int(cache_index)]
             if np.all(np.isfinite(previous)):
+                return float(np.linalg.norm(np.asarray(barycentric, dtype=float).reshape(3) - previous))
+        return 0.0
+
+    def _secondary_region_tracking_rank(
+        self,
+        face_id: int,
+        *,
+        barycentric: np.ndarray,
+        node_ids: np.ndarray,
+        weights: np.ndarray,
+    ) -> tuple[int, float, float] | None:
+        if node_ids.shape != weights.shape:
+            return None
+        n_faces = len(self._master_face_tracking_neighborhoods)
+        best: tuple[int, float, float] | None = None
+        order = np.argsort(-np.maximum(weights, 0.0))
+        for local_order, index in enumerate(order):
+            if float(weights[int(index)]) <= 0.0:
+                continue
+            region_id = int(node_ids[int(index)])
+            tracked = int(self._secondary_region_face_cache.get(region_id, -1))
+            if not (0 <= tracked < n_faces):
+                continue
+            rank = 2
+            neighbor_order = np.inf
+            if int(face_id) == tracked:
+                rank = 0
+                neighbor_order = 0.0
+            else:
+                for neighbor_index, neighbor in enumerate(self._master_face_tracking_neighborhoods[tracked]):
+                    if int(neighbor) == int(face_id):
+                        rank = 1
+                        neighbor_order = float(neighbor_index + 1)
+                        break
+            if rank >= 2:
+                continue
+            previous = self._secondary_region_barycentric_cache.get(region_id)
+            bary_distance = 0.0
+            if previous is not None and np.all(np.isfinite(previous)):
                 bary_distance = float(np.linalg.norm(np.asarray(barycentric, dtype=float).reshape(3) - previous))
-        return 0.0, float(rank), float(neighbor_order), bary_distance
+            candidate = (int(rank), float(neighbor_order + 1.0e-6 * int(local_order)), float(bary_distance))
+            if best is None or candidate < best:
+                best = candidate
+        return best
+
+    def _secondary_region_tracking_flags(
+        self,
+        face_ids: np.ndarray,
+        barycentric: np.ndarray,
+        sample_nodes: np.ndarray,
+        sample_weights: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        face_values = np.asarray(face_ids, dtype=np.int64).reshape(-1)
+        bary_values = np.asarray(barycentric, dtype=float)
+        nodes = np.asarray(sample_nodes, dtype=np.int64)
+        weights = np.asarray(sample_weights, dtype=float)
+        hits = np.zeros(face_values.shape, dtype=bool)
+        matches = np.zeros(face_values.shape, dtype=bool)
+        distances = np.full(face_values.shape, np.nan, dtype=float)
+        if nodes.ndim != 2 or weights.shape != nodes.shape or bary_values.shape[0] != face_values.size:
+            return hits, matches, distances
+        for row, face_id in enumerate(face_values):
+            best_distance = np.inf
+            for node, weight in zip(nodes[row], weights[row], strict=True):
+                if float(weight) <= 0.0:
+                    continue
+                previous_face = int(self._secondary_region_face_cache.get(int(node), -1))
+                if previous_face < 0:
+                    continue
+                hits[row] = True
+                if previous_face != int(face_id):
+                    continue
+                matches[row] = True
+                previous_bary = self._secondary_region_barycentric_cache.get(int(node))
+                if previous_bary is not None and np.all(np.isfinite(previous_bary)):
+                    best_distance = min(
+                        best_distance,
+                        float(np.linalg.norm(np.asarray(bary_values[row], dtype=float).reshape(3) - previous_bary)),
+                    )
+            if np.isfinite(best_distance):
+                distances[row] = float(best_distance)
+        return hits, matches, distances
 
     def _update_secondary_tracking_cache(
         self,
@@ -463,19 +609,24 @@ class LagrangianSDFSurfaceContactGeometry:
 
         if not bool(self.secondary_path_tracking):
             return 0
-        if "secondary_cache_indices" not in sample_arrays or "master_face_ids" not in sample_arrays:
+        if "master_face_ids" not in sample_arrays:
             return 0
+        committed_regions = self._commit_secondary_region_tracking_from_sample_arrays(sample_arrays)
+        if "secondary_cache_indices" not in sample_arrays:
+            return int(committed_regions)
         cache_indices = np.asarray(sample_arrays["secondary_cache_indices"], dtype=np.int64).reshape(-1)
         face_ids = np.asarray(sample_arrays["master_face_ids"], dtype=np.int64).reshape(-1)
         bary = sample_arrays.get("master_barycentric", sample_arrays.get("master_weights"))
         if bary is None:
-            return 0
+            return int(committed_regions)
         barycentric = np.asarray(bary, dtype=float)
         if barycentric.ndim != 2 or barycentric.shape[1] != 3:
-            return 0
+            return int(committed_regions)
         count = min(cache_indices.size, face_ids.size, barycentric.shape[0])
         if count == 0:
-            return 0
+            return int(committed_regions)
+        if not np.any(cache_indices[:count] >= 0):
+            return int(committed_regions)
         face_cache = self._ensure_secondary_face_cache()
         bary_cache = self._ensure_secondary_barycentric_cache()
         committed = 0
@@ -491,6 +642,45 @@ class LagrangianSDFSurfaceContactGeometry:
             face_cache[cache_index] = face_id
             bary_cache[cache_index] = weights
             committed += 1
+        return int(committed if committed else committed_regions)
+
+    def _commit_secondary_region_tracking_from_sample_arrays(self, sample_arrays: dict[str, np.ndarray]) -> int:
+        if not bool(self.secondary_path_tracking):
+            return 0
+        if "master_face_ids" not in sample_arrays:
+            return 0
+        face_ids = np.asarray(sample_arrays["master_face_ids"], dtype=np.int64).reshape(-1)
+        bary = sample_arrays.get("master_barycentric", sample_arrays.get("master_weights"))
+        if bary is None:
+            return 0
+        barycentric = np.asarray(bary, dtype=float)
+        if barycentric.ndim != 2 or barycentric.shape[1] != 3:
+            return 0
+        if "secondary_node_ids" in sample_arrays:
+            region_ids = np.asarray(sample_arrays["secondary_node_ids"], dtype=np.int64).reshape(-1)
+            weights = np.ones((region_ids.size, 1), dtype=float)
+            node_rows = region_ids.reshape((-1, 1))
+        else:
+            node_rows = np.asarray(sample_arrays.get("sample_node_ids", np.empty((0, 0))), dtype=np.int64)
+            weights = np.asarray(sample_arrays.get("sample_weights", np.empty((0, 0))), dtype=float)
+            if node_rows.ndim != 2 or weights.shape != node_rows.shape:
+                return 0
+        count = min(face_ids.size, barycentric.shape[0], node_rows.shape[0])
+        committed = 0
+        for row in range(count):
+            face_id = int(face_ids[row])
+            if face_id < 0:
+                continue
+            weights_row = np.asarray(barycentric[row], dtype=float).reshape(3)
+            total = float(np.sum(weights_row))
+            if total > 0.0:
+                weights_row = weights_row / total
+            for node, weight in zip(node_rows[row], weights[row], strict=True):
+                if int(node) < 0 or float(weight) <= 0.0:
+                    continue
+                self._secondary_region_face_cache[int(node)] = int(face_id)
+                self._secondary_region_barycentric_cache[int(node)] = weights_row.copy()
+                committed += 1
         return int(committed)
 
     def samples(self, x_current: np.ndarray):
@@ -708,6 +898,8 @@ class LagrangianSDFSurfaceContactGeometry:
                     master_max_radius,
                     dot_threshold=float(dot_threshold),
                     cache_key=(int(face_id), "secondary", int(qp)),
+                    region_nodes=global_face,
+                    region_weights=weights,
                 )
                 yield ContactSample(
                     node_ids=global_face.copy(),
@@ -731,6 +923,8 @@ class LagrangianSDFSurfaceContactGeometry:
         *,
         dot_threshold: float,
         cache_key: object,
+        region_nodes: np.ndarray | None = None,
+        region_weights: np.ndarray | None = None,
     ) -> dict[str, np.ndarray | float | int]:
         x = np.asarray(point, dtype=float).reshape(3)
         ns = np.asarray(slave_normal, dtype=float).reshape(3)
@@ -752,7 +946,14 @@ class LagrangianSDFSurfaceContactGeometry:
             candidate_ids = np.arange(master_faces.shape[0], dtype=np.int64)
         cache_index = self._secondary_cache_index_for_key(cache_key)
         if cache_index is not None:
-            merged = self._merge_secondary_tracking_candidates([candidate_ids], np.asarray([cache_index], dtype=np.int64))
+            region_hint_faces = None
+            if region_nodes is not None and region_weights is not None:
+                region_hint_faces = [self._secondary_region_hint_faces(region_nodes, region_weights)]
+            merged = self._merge_secondary_tracking_candidates(
+                [candidate_ids],
+                np.asarray([cache_index], dtype=np.int64),
+                region_hint_faces=region_hint_faces,
+            )
             candidate_ids = np.asarray(merged[0], dtype=np.int64)
         best: dict[str, np.ndarray | float | int] | None = None
         best_key: tuple[float, float, float, float] = (np.inf, np.inf, np.inf, np.inf)
@@ -827,6 +1028,8 @@ class LagrangianSDFSurfaceContactGeometry:
                 barycentric=np.asarray(bary, dtype=float),
                 abs_gap=float(abs_gap),
                 cache_index=cache_index,
+                region_nodes=region_nodes,
+                region_weights=region_weights,
             )
             if key < best_key:
                 best_key = key
@@ -969,7 +1172,12 @@ class LagrangianSDFSurfaceContactGeometry:
         cache_indices = (kept_face_indices[:, None] * n_quadrature + np.arange(n_quadrature, dtype=np.int64)[None, :]).reshape(-1)
         candidate_radius = float(self.search_radius) + float(master_max_radius) + 1.0e-14
         raw_candidates = master_tree.query_ball_point(point_array, candidate_radius, return_sorted=False)
-        raw_candidates = self._merge_secondary_tracking_candidates(raw_candidates, cache_indices)
+        region_hint_faces = self._secondary_region_hint_face_lists(sample_nodes, sample_weights)
+        raw_candidates = self._merge_secondary_tracking_candidates(
+            raw_candidates,
+            cache_indices,
+            region_hint_faces=region_hint_faces,
+        )
         point_keep = np.fromiter((len(ids) > 0 for ids in raw_candidates), dtype=bool, count=len(raw_candidates))
         if not np.any(point_keep):
             return _empty_sample_arrays()
@@ -1055,6 +1263,8 @@ class LagrangianSDFSurfaceContactGeometry:
                     master_max_radius,
                     dot_threshold=float(dot_threshold),
                     cache_key=(int(face_index), "secondary", int(qp_index)),
+                    region_nodes=sample_nodes[int(local)],
+                    region_weights=sample_weights[int(local)],
                 )
                 nodes = np.asarray(payload["master_node_ids"], dtype=np.int64)
                 if nodes.shape != (3,):
@@ -1118,8 +1328,8 @@ class LagrangianSDFSurfaceContactGeometry:
                         gaps[release_outside] = np.abs(gaps[release_outside])
         cache = self._ensure_secondary_face_cache()
         previous_cache_face_ids = cache[valid_cache_indices].copy()
-        tracking_cache_hits = previous_cache_face_ids >= 0
-        tracking_cache_matches = tracking_cache_hits & (previous_cache_face_ids == face_ids)
+        sample_cache_hits = previous_cache_face_ids >= 0
+        sample_cache_matches = sample_cache_hits & (previous_cache_face_ids == face_ids)
         tracking_barycentric_distances = np.full(face_ids.shape, np.nan, dtype=float)
         if bool(self.secondary_path_tracking):
             bary_cache = self._ensure_secondary_barycentric_cache()
@@ -1134,6 +1344,19 @@ class LagrangianSDFSurfaceContactGeometry:
                     normalized[previous_good] - previous_barycentric[previous_good],
                     axis=1,
                 )
+        region_hits, region_matches, region_distances = self._secondary_region_tracking_flags(
+            face_ids,
+            master_bary,
+            sample_nodes,
+            sample_weights,
+        )
+        tracking_cache_hits = sample_cache_hits | region_hits
+        tracking_cache_matches = sample_cache_matches | region_matches
+        finite_region_distances = np.isfinite(region_distances)
+        replace_distances = finite_region_distances & (
+            ~np.isfinite(tracking_barycentric_distances) | (region_distances < tracking_barycentric_distances)
+        )
+        tracking_barycentric_distances[replace_distances] = region_distances[replace_distances]
         master_nodes = self.master_material.boundary_faces[face_ids] + int(self.master_node_offset)
         return {
             "sample_node_ids": np.asarray(sample_nodes, dtype=np.int64),

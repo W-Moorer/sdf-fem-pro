@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from sfc.contact.constraint_region import aggregate_contact_sample_arrays
 from sfc.contact.lagrangian_surface_contact import (
     LagrangianQ4ClosestFeatureOracle,
     LagrangianSDFQ4MasterSurfaceContactGeometry,
@@ -747,3 +748,73 @@ def test_secondary_normal_projection_path_tracking_cache_updates_only_after_acce
     assert accepted_arrays["tracking_cache_hits"].tolist() == [True]
     assert accepted_arrays["tracking_cache_matches"].tolist() == [True]
     np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [0])
+
+
+def test_secondary_region_tracking_commit_and_query_hint_are_region_based() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.2, 0.2, -0.05],
+            [0.4, 0.2, -0.05],
+            [0.2, 0.4, -0.05],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([master_nodes, slave_nodes])
+    material = MaterialSDF.from_triangle_surface(
+        master_nodes,
+        np.asarray([[0, 1, 2], [0, 1, 2]], dtype=np.int64),
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        material,
+        master_nodes,
+        pressure_stiffness=100.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        secondary_path_tracking=True,
+    )
+    raw = {
+        "sample_node_ids": np.asarray([[3, 4, 5]], dtype=np.int64),
+        "sample_weights": np.asarray([[1.0, 0.0, 0.0]], dtype=float),
+        "gaps": np.asarray([-0.05], dtype=float),
+        "normals": np.asarray([[0.0, 0.0, 1.0]], dtype=float),
+        "areas": np.asarray([0.5], dtype=float),
+        "master_node_ids": np.asarray([[0, 1, 2]], dtype=np.int64),
+        "master_weights": np.asarray([[0.2, 0.3, 0.5]], dtype=float),
+        "master_barycentric": np.asarray([[0.2, 0.3, 0.5]], dtype=float),
+        "master_face_ids": np.asarray([1], dtype=np.int64),
+    }
+    regions = aggregate_contact_sample_arrays(raw, "slave_node_region_constraint")
+    assert regions is not None
+
+    committed = contact.commit_secondary_tracking_from_sample_arrays(regions)
+
+    assert committed == 1
+    assert contact._secondary_region_face_cache == {3: 1}
+    assert contact._secondary_face_cache is None
+
+    payload = contact._secondary_projection_query(
+        x_current[3],
+        np.asarray([0.0, 0.0, -1.0], dtype=float),
+        master_nodes,
+        material.boundary_faces,
+        None,
+        0.0,
+        dot_threshold=0.0,
+        cache_key=(0, "secondary", 0),
+        region_nodes=np.asarray([3, 4, 5], dtype=np.int64),
+        region_weights=np.asarray([1.0, 0.0, 0.0], dtype=float),
+    )
+
+    assert int(payload["master_face_id"]) == 1
+    assert contact._secondary_region_hint_faces(np.asarray([3, 4, 5]), np.asarray([1.0, 0.0, 0.0])) == [1]

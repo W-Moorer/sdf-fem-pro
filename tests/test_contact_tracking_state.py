@@ -24,6 +24,11 @@ def test_tracking_snapshot_restore_includes_triangle_q4_and_oracle_caches() -> N
             [[0.1, 0.2, 0.7], [0.3, 0.3, 0.4], [np.nan, np.nan, np.nan]],
             dtype=float,
         ),
+        _secondary_region_face_cache={11: 5, 12: 6},
+        _secondary_region_barycentric_cache={
+            11: np.asarray([0.2, 0.3, 0.5], dtype=float),
+            12: np.asarray([0.4, 0.4, 0.2], dtype=float),
+        },
         _secondary_master_weight_cache=np.asarray(
             [[0.25, 0.25, 0.25, 0.25], [0.4, 0.3, 0.2, 0.1], [np.nan, np.nan, np.nan, np.nan]],
             dtype=float,
@@ -34,6 +39,9 @@ def test_tracking_snapshot_restore_includes_triangle_q4_and_oracle_caches() -> N
     snapshot = snapshot_contact_tracking_state([geometry])
     geometry._secondary_face_cache[:] = [9, 9, 9]
     geometry._secondary_barycentric_cache[:] = 0.0
+    geometry._secondary_region_face_cache[11] = 99
+    geometry._secondary_region_face_cache[13] = 101
+    geometry._secondary_region_barycentric_cache[11][:] = [1.0, 0.0, 0.0]
     geometry._secondary_master_weight_cache[:] = 1.0
     oracle._patch_cache["region-a"] = 99
     oracle._patch_cache["trial-only"] = 123
@@ -44,6 +52,9 @@ def test_tracking_snapshot_restore_includes_triangle_q4_and_oracle_caches() -> N
     np.testing.assert_array_equal(geometry._secondary_face_cache, [1, 2, -1])
     np.testing.assert_allclose(geometry._secondary_barycentric_cache[:2], [[0.1, 0.2, 0.7], [0.3, 0.3, 0.4]])
     assert np.isnan(geometry._secondary_barycentric_cache[2]).all()
+    assert geometry._secondary_region_face_cache == {11: 5, 12: 6}
+    np.testing.assert_allclose(geometry._secondary_region_barycentric_cache[11], [0.2, 0.3, 0.5])
+    np.testing.assert_allclose(geometry._secondary_region_barycentric_cache[12], [0.4, 0.4, 0.2])
     np.testing.assert_allclose(
         geometry._secondary_master_weight_cache[:2],
         [[0.25, 0.25, 0.25, 0.25], [0.4, 0.3, 0.2, 0.1]],

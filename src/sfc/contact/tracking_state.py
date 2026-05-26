@@ -30,6 +30,16 @@ def snapshot_contact_tracking_state(contact_geometries: Iterable[Any]) -> list[d
                 "secondary_barycentric_cache": _copy_optional_array(
                     getattr(geometry, "_secondary_barycentric_cache", None)
                 ),
+                "secondary_region_face_cache": (
+                    dict(getattr(geometry, "_secondary_region_face_cache"))
+                    if hasattr(geometry, "_secondary_region_face_cache")
+                    else None
+                ),
+                "secondary_region_barycentric_cache": _copy_array_dict(
+                    getattr(geometry, "_secondary_region_barycentric_cache", None)
+                )
+                if hasattr(geometry, "_secondary_region_barycentric_cache")
+                else None,
                 "secondary_master_weight_cache": _copy_optional_array(
                     getattr(geometry, "_secondary_master_weight_cache", None)
                 ),
@@ -54,6 +64,12 @@ def restore_contact_tracking_state(states: Iterable[Mapping[str, Any]]) -> None:
             "_secondary_barycentric_cache",
             state_row.get("secondary_barycentric_cache"),
             float,
+        )
+        _restore_optional_dict_attribute(geometry, "_secondary_region_face_cache", state_row.get("secondary_region_face_cache"))
+        _restore_optional_array_dict_attribute(
+            geometry,
+            "_secondary_region_barycentric_cache",
+            state_row.get("secondary_region_barycentric_cache"),
         )
         _restore_optional_array_attribute(
             geometry,
@@ -138,6 +154,28 @@ def _restore_optional_array_attribute(obj: Any, name: str, value: Any, dtype: An
         return
     try:
         setattr(obj, name, None if value is None else np.asarray(value, dtype=dtype).copy())
+    except AttributeError:
+        if value is None:
+            return
+        raise
+
+
+def _restore_optional_dict_attribute(obj: Any, name: str, value: Any) -> None:
+    if value is None and not hasattr(obj, name):
+        return
+    try:
+        setattr(obj, name, dict(value or {}))
+    except AttributeError:
+        if value is None:
+            return
+        raise
+
+
+def _restore_optional_array_dict_attribute(obj: Any, name: str, value: Any) -> None:
+    if value is None and not hasattr(obj, name):
+        return
+    try:
+        setattr(obj, name, _copy_array_dict(value) or {})
     except AttributeError:
         if value is None:
             return
