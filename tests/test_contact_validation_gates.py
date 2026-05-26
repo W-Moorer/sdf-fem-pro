@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sfc.contact.validation_gates import (
     constraint_region_contact_law_gate_metrics,
+    constraint_region_tangent_gate_metrics,
     contact_path_tracking_gate_metrics,
     contact_total_priority_gate_metrics,
 )
@@ -169,6 +170,103 @@ def test_constraint_region_contact_law_gate_rejects_missing_required_columns() -
 
     assert int(gate["constraint_region_contact_law_gate_passed"]) == 0
     assert int(gate["constraint_region_contact_law_required_columns_present"]) == 0
+
+
+def _valid_tangent_summary(**overrides: object) -> dict[str, object]:
+    summary = {
+        "source_constraint_region_tangent_solve_count": 2,
+        "source_constraint_region_tangent_active_rows_sum": 4,
+        "source_constraint_region_tangent_j_nnz_sum": 18,
+        "source_constraint_region_tangent_scale_sum": 12.0,
+    }
+    summary.update(overrides)
+    return summary
+
+
+def _valid_tangent_row(**overrides: object) -> dict[str, object]:
+    row = {
+        "active_contact_region_count": 2,
+        "contact_active_area": 3.0,
+        "contact_region_normal_force": 5.0,
+        "contact_tangent_source": "constraint_region_arrays",
+        "contact_tangent_gap_jacobian_source": "constraint_region_fixed_payload",
+        "contact_tangent_pressure_derivative": "linear_penalty_active_set",
+        "contact_tangent_pressure_scale_filter": "gap_negative_and_region_area_positive",
+        "contact_tangent_pressure_positive_scale_count": 2,
+        "contact_tangent_slave_gap_derivative_source": "secondary_region_shape_weights_times_normal",
+        "contact_tangent_master_gap_derivative_source": "master_payload_weights_times_negative_normal",
+        "contact_tangent_slave_gap_derivative_nnz": 9,
+        "contact_tangent_master_gap_derivative_nnz": 9,
+        "contact_tangent_slave_master_gap_derivative_present": 1,
+        "contact_tangent_sign_convention": "d(-contact_force)/du",
+        "contact_tangent_fixed_active_set": 1,
+        "contact_tangent_active_region_count": 2,
+        "contact_tangent_scale_sum": 6.0,
+        "contact_tangent_fd_checked": 1,
+        "contact_tangent_fd_active_set_stable": 1,
+        "contact_tangent_fd_passed": 1,
+        "contact_tangent_fd_error_abs": 1.0e-12,
+        "contact_tangent_fd_error_rel": 1.0e-13,
+        "source_constraint_region_tangent_solve_count": 1,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_constraint_region_tangent_gate_accepts_consistent_fixed_active_set_tangent() -> None:
+    gate = constraint_region_tangent_gate_metrics(_valid_tangent_summary(), [_valid_tangent_row()])
+
+    assert int(gate["constraint_region_tangent_gate_passed"]) == 1
+    assert int(gate["constraint_region_tangent_required_columns_present"]) == 1
+    assert int(gate["constraint_region_tangent_row_slave_gap_derivative_ok"]) == 1
+    assert int(gate["constraint_region_tangent_row_master_gap_derivative_ok"]) == 1
+    assert int(gate["constraint_region_tangent_row_fd_passed_ok"]) == 1
+
+
+def test_constraint_region_tangent_gate_rejects_wrong_sign_or_missing_master_derivative() -> None:
+    wrong_sign = constraint_region_tangent_gate_metrics(
+        _valid_tangent_summary(),
+        [_valid_tangent_row(contact_tangent_sign_convention="d(contact_force)/du")],
+    )
+
+    assert int(wrong_sign["constraint_region_tangent_gate_passed"]) == 0
+    assert int(wrong_sign["constraint_region_tangent_row_sign_convention_ok"]) == 0
+
+    missing_master = constraint_region_tangent_gate_metrics(
+        _valid_tangent_summary(),
+        [_valid_tangent_row(contact_tangent_master_gap_derivative_nnz=0)],
+    )
+
+    assert int(missing_master["constraint_region_tangent_gate_passed"]) == 0
+    assert int(missing_master["constraint_region_tangent_row_master_gap_derivative_ok"]) == 0
+
+
+def test_constraint_region_tangent_gate_rejects_failed_fd_or_missing_summary_solve() -> None:
+    failed_fd = constraint_region_tangent_gate_metrics(
+        _valid_tangent_summary(),
+        [_valid_tangent_row(contact_tangent_fd_passed=0)],
+    )
+
+    assert int(failed_fd["constraint_region_tangent_gate_passed"]) == 0
+    assert int(failed_fd["constraint_region_tangent_row_fd_passed_ok"]) == 0
+
+    no_summary_solve = constraint_region_tangent_gate_metrics(
+        _valid_tangent_summary(source_constraint_region_tangent_solve_count=0),
+        [_valid_tangent_row()],
+    )
+
+    assert int(no_summary_solve["constraint_region_tangent_gate_passed"]) == 0
+    assert int(no_summary_solve["constraint_region_tangent_summary_used"]) == 0
+
+
+def test_constraint_region_tangent_gate_rejects_missing_required_columns() -> None:
+    row = _valid_tangent_row()
+    row.pop("contact_tangent_pressure_derivative")
+
+    gate = constraint_region_tangent_gate_metrics(_valid_tangent_summary(), [row])
+
+    assert int(gate["constraint_region_tangent_gate_passed"]) == 0
+    assert int(gate["constraint_region_tangent_required_columns_present"]) == 0
 
 
 def _valid_path_row(**overrides: object) -> dict[str, object]:

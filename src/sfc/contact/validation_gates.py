@@ -59,6 +59,23 @@ CONSTRAINT_REGION_CONTACT_LAW_REQUIRED_COLUMNS: tuple[str, ...] = (
     "contact_constraint_independent_quadrature_penalty_disabled",
 )
 
+CONSTRAINT_REGION_TANGENT_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "contact_tangent_source",
+    "contact_tangent_gap_jacobian_source",
+    "contact_tangent_pressure_derivative",
+    "contact_tangent_pressure_scale_filter",
+    "contact_tangent_pressure_positive_scale_count",
+    "contact_tangent_slave_gap_derivative_source",
+    "contact_tangent_master_gap_derivative_source",
+    "contact_tangent_slave_gap_derivative_nnz",
+    "contact_tangent_master_gap_derivative_nnz",
+    "contact_tangent_slave_master_gap_derivative_present",
+    "contact_tangent_sign_convention",
+    "contact_tangent_fixed_active_set",
+    "contact_tangent_active_region_count",
+    "contact_tangent_scale_sum",
+)
+
 
 def contact_total_priority_gate_metrics(priority_rows: Sequence[Row]) -> dict[str, float | int | str]:
     """Gate total contact quantities before nodal CPRESS/COPEN checks."""
@@ -335,6 +352,156 @@ def constraint_region_contact_law_gate_metrics(history_rows: Sequence[Row]) -> d
         "constraint_region_contact_law_row_area_positive_ok": int(row_area_positive_ok),
         "constraint_region_contact_law_no_independent_quadrature_penalty": int(row_no_independent_sample_penalty_ok),
         "constraint_region_contact_law_max_raw_to_region_ratio": float(max_raw_to_region_ratio),
+    }
+
+
+def constraint_region_tangent_gate_metrics(
+    summary: Row,
+    history_rows: Sequence[Row],
+    *,
+    solver_prefix: str = "source",
+) -> dict[str, float | int | str]:
+    """Gate fixed-active-set consistent tangent evidence for region contact.
+
+    Active accepted rows must use the constraint-region gap Jacobian, include
+    slave and master payload derivatives with the correct signs, use the
+    linear pressure-overclosure derivative on the fixed active set, and carry a
+    source/solver tangent solve that actually exercised active contact rows.
+    Optional FD evidence is accepted only when checked, active-set-stable, and
+    passing.
+    """
+
+    label = str(solver_prefix).strip("_") or "source"
+    active_rows = [row for row in history_rows if _row_has_active_contact(row)]
+    active_contact_present = len(active_rows) > 0
+    source_solve_count = _row_int_flag(summary, f"{label}_constraint_region_tangent_solve_count", default=0)
+    source_active_rows = _row_int_flag(summary, f"{label}_constraint_region_tangent_active_rows_sum", default=0)
+    source_j_nnz = _row_int_flag(summary, f"{label}_constraint_region_tangent_j_nnz_sum", default=0)
+    source_scale_sum = _finite_row_float(summary, f"{label}_constraint_region_tangent_scale_sum") or 0.0
+    row_columns_ok = True
+    row_source_ok = True
+    row_jacobian_ok = True
+    row_derivative_ok = True
+    row_pressure_filter_ok = True
+    row_slave_gap_derivative_ok = True
+    row_master_gap_derivative_ok = True
+    row_slave_master_derivative_ok = True
+    row_sign_ok = True
+    row_fixed_active_ok = True
+    row_active_count_ok = True
+    row_scale_ok = True
+    row_solve_ok = True
+    row_fd_present = False
+    row_fd_checked_ok = True
+    row_fd_active_set_stable_ok = True
+    row_fd_passed_ok = True
+    max_active_count_mismatch = 0
+    max_fd_abs_error = 0.0
+    max_fd_rel_error = 0.0
+    for row in active_rows:
+        row_columns_ok = row_columns_ok and all(
+            _row_has_value(row, key) for key in CONSTRAINT_REGION_TANGENT_REQUIRED_COLUMNS
+        )
+        tangent_active = _row_int_flag(row, "contact_tangent_active_region_count", default=-1)
+        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+        max_active_count_mismatch = max(max_active_count_mismatch, abs(tangent_active - active_regions))
+        row_source_ok = row_source_ok and str(row.get("contact_tangent_source", "")) == "constraint_region_arrays"
+        row_jacobian_ok = (
+            row_jacobian_ok
+            and str(row.get("contact_tangent_gap_jacobian_source", "")) == "constraint_region_fixed_payload"
+        )
+        row_derivative_ok = (
+            row_derivative_ok
+            and str(row.get("contact_tangent_pressure_derivative", "")) == "linear_penalty_active_set"
+        )
+        row_pressure_filter_ok = (
+            row_pressure_filter_ok
+            and str(row.get("contact_tangent_pressure_scale_filter", "")) == "gap_negative_and_region_area_positive"
+            and _row_int_flag(row, "contact_tangent_pressure_positive_scale_count", default=0) > 0
+        )
+        row_slave_gap_derivative_ok = (
+            row_slave_gap_derivative_ok
+            and str(row.get("contact_tangent_slave_gap_derivative_source", ""))
+            == "secondary_region_shape_weights_times_normal"
+            and _row_int_flag(row, "contact_tangent_slave_gap_derivative_nnz", default=0) > 0
+        )
+        row_master_gap_derivative_ok = (
+            row_master_gap_derivative_ok
+            and str(row.get("contact_tangent_master_gap_derivative_source", ""))
+            == "master_payload_weights_times_negative_normal"
+            and _row_int_flag(row, "contact_tangent_master_gap_derivative_nnz", default=0) > 0
+        )
+        row_slave_master_derivative_ok = (
+            row_slave_master_derivative_ok
+            and _row_int_flag(row, "contact_tangent_slave_master_gap_derivative_present", default=0) == 1
+        )
+        row_sign_ok = row_sign_ok and str(row.get("contact_tangent_sign_convention", "")) == "d(-contact_force)/du"
+        row_fixed_active_ok = row_fixed_active_ok and _row_int_flag(row, "contact_tangent_fixed_active_set") == 1
+        row_active_count_ok = row_active_count_ok and tangent_active == active_regions
+        row_scale_ok = row_scale_ok and (_finite_row_float(row, "contact_tangent_scale_sum") or 0.0) > 0.0
+        row_solve_ok = row_solve_ok and _row_int_flag(row, f"{label}_constraint_region_tangent_solve_count") > 0
+        if _row_has_value(row, "contact_tangent_fd_checked"):
+            row_fd_present = True
+            row_fd_checked_ok = row_fd_checked_ok and _row_int_flag(row, "contact_tangent_fd_checked") == 1
+            row_fd_active_set_stable_ok = (
+                row_fd_active_set_stable_ok
+                and _row_int_flag(row, "contact_tangent_fd_active_set_stable") == 1
+            )
+            row_fd_passed_ok = row_fd_passed_ok and _row_int_flag(row, "contact_tangent_fd_passed") == 1
+            max_fd_abs_error = max(max_fd_abs_error, _finite_row_float(row, "contact_tangent_fd_error_abs") or 0.0)
+            max_fd_rel_error = max(max_fd_rel_error, _finite_row_float(row, "contact_tangent_fd_error_rel") or 0.0)
+    summary_tangent_used = (not active_contact_present) or (
+        source_solve_count > 0 and source_active_rows > 0 and source_j_nnz > 0 and source_scale_sum > 0.0
+    )
+    row_fd_ok = (not row_fd_present) or (row_fd_checked_ok and row_fd_active_set_stable_ok and row_fd_passed_ok)
+    rows_ok = (
+        row_columns_ok
+        and row_source_ok
+        and row_jacobian_ok
+        and row_derivative_ok
+        and row_pressure_filter_ok
+        and row_slave_gap_derivative_ok
+        and row_master_gap_derivative_ok
+        and row_slave_master_derivative_ok
+        and row_sign_ok
+        and row_fixed_active_ok
+        and row_active_count_ok
+        and row_scale_ok
+        and row_solve_ok
+        and row_fd_ok
+    )
+    gate_passed = int((not active_contact_present) or (bool(summary_tangent_used) and bool(rows_ok)))
+    return {
+        "constraint_region_tangent_gate_passed": gate_passed,
+        "comparison_stage": "constraint_region_tangent_before_clouds",
+        "constraint_region_tangent_active_contact_present": int(active_contact_present),
+        "constraint_region_tangent_active_history_row_count": int(len(active_rows)),
+        "constraint_region_tangent_solver_prefix": label,
+        "constraint_region_tangent_required_columns_present": int(row_columns_ok),
+        "constraint_region_tangent_summary_used": int(summary_tangent_used),
+        "constraint_region_tangent_row_source_ok": int(row_source_ok),
+        "constraint_region_tangent_row_jacobian_ok": int(row_jacobian_ok),
+        "constraint_region_tangent_row_pressure_derivative_ok": int(row_derivative_ok),
+        "constraint_region_tangent_row_pressure_filter_ok": int(row_pressure_filter_ok),
+        "constraint_region_tangent_row_slave_gap_derivative_ok": int(row_slave_gap_derivative_ok),
+        "constraint_region_tangent_row_master_gap_derivative_ok": int(row_master_gap_derivative_ok),
+        "constraint_region_tangent_row_slave_master_derivative_ok": int(row_slave_master_derivative_ok),
+        "constraint_region_tangent_row_sign_convention_ok": int(row_sign_ok),
+        "constraint_region_tangent_row_fixed_active_set_ok": int(row_fixed_active_ok),
+        "constraint_region_tangent_row_active_count_ok": int(row_active_count_ok),
+        "constraint_region_tangent_row_scale_ok": int(row_scale_ok),
+        "constraint_region_tangent_row_solve_ok": int(row_solve_ok),
+        "constraint_region_tangent_row_fd_present": int(row_fd_present),
+        "constraint_region_tangent_row_fd_checked_ok": int(row_fd_checked_ok),
+        "constraint_region_tangent_row_fd_active_set_stable_ok": int(row_fd_active_set_stable_ok),
+        "constraint_region_tangent_row_fd_passed_ok": int(row_fd_passed_ok),
+        "constraint_region_tangent_max_active_count_mismatch": int(max_active_count_mismatch),
+        "constraint_region_tangent_fd_error_abs_max": float(max_fd_abs_error),
+        "constraint_region_tangent_fd_error_rel_max": float(max_fd_rel_error),
+        "constraint_region_tangent_source_solve_count": int(source_solve_count),
+        "constraint_region_tangent_source_active_rows_sum": int(source_active_rows),
+        "constraint_region_tangent_source_j_nnz_sum": int(source_j_nnz),
+        "constraint_region_tangent_source_scale_sum": float(source_scale_sum),
     }
 
 
