@@ -42,6 +42,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _contact_active_region_continuity_metrics_from_arrays,
     _contact_region_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
+    _constraint_region_tangent_fd_metrics_from_arrays,
     _promote_secondary_contact_diagnostics_to_legacy,
     _secondary_region_contact_node_diagnostics_from_arrays,
 )
@@ -223,6 +224,11 @@ def run_validation(
             raise RuntimeError("slave_node_region_constraint aggregation unexpectedly fell back")
         response = _assemble_contact_arrays_force_only(regions, x.shape[0], stiffness=stiffness)
         region_metrics = _contact_region_integral_metrics_from_arrays(regions, stiffness=stiffness)
+        tangent_fd_metrics = _constraint_region_tangent_fd_metrics_from_arrays(
+            regions,
+            n_nodes=x.shape[0],
+            pressure_stiffness=stiffness,
+        )
         pressure_diagnostics = _secondary_region_contact_node_diagnostics_from_arrays(
             regions,
             x.shape[0],
@@ -276,6 +282,7 @@ def run_validation(
             ),
         }
         row.update(region_metrics)
+        row.update(tangent_fd_metrics)
         if pressure_diagnostics is not None:
             _promote_secondary_contact_diagnostics_to_legacy(pressure_diagnostics)
             metrics = pressure_diagnostics["metrics"]

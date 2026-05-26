@@ -66,6 +66,9 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert total_rows[0]["contact_pressure_recovery_source"] == "constraint_region"
     assert total_rows[0]["contact_legacy_pressure_alias_source"] == "secondary_constraint_region"
     assert int(total_rows[0]["contact_legacy_pressure_alias_matches_secondary"]) == 1
+    assert int(total_rows[0]["contact_tangent_fd_checked"]) == 1
+    assert int(total_rows[0]["contact_tangent_fd_active_set_stable"]) == 1
+    assert int(total_rows[0]["contact_tangent_fd_passed"]) == 1
     assert "max_contact_secondary_pressure_nodeavg" not in total_rows[0]
 
     with continuity.open(newline="", encoding="utf-8") as handle:

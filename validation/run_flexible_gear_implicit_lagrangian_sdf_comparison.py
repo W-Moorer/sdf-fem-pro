@@ -50,6 +50,7 @@ from sfc.contact.constraint_region import (  # noqa: E402
     constraint_region_penalty_response_from_arrays as _core_constraint_region_penalty_response_from_arrays,
     constraint_region_pressure_tangent_scales_from_arrays as _core_constraint_region_pressure_tangent_scales_from_arrays,
     constraint_region_reduced_gap_jacobian_sparse_from_arrays as _core_constraint_region_reduced_gap_jacobian_sparse_from_arrays,
+    constraint_region_tangent_finite_difference_metrics_from_arrays as _core_constraint_region_tangent_fd_metrics_from_arrays,
     constraint_region_tangent_metrics_from_arrays as _core_constraint_region_tangent_metrics_from_arrays,
     contact_path_tracking_metrics_from_arrays as _core_contact_path_tracking_metrics_from_arrays,
     contact_region_path_tracking_metrics_from_arrays as _core_contact_region_path_tracking_metrics_from_arrays,
@@ -3608,6 +3609,25 @@ def _constraint_region_tangent_metrics_from_arrays(
             sample_arrays,
             pressure_stiffness=pressure_stiffness,
             equilibrium_scale=equilibrium_scale,
+        )
+    )
+
+
+def _constraint_region_tangent_fd_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    n_nodes: int,
+    pressure_stiffness: float,
+    equilibrium_scale: float = 1.0,
+) -> Row:
+    """Return fixed-active constraint-region tangent finite-difference evidence."""
+
+    return dict(
+        _core_constraint_region_tangent_fd_metrics_from_arrays(
+            sample_arrays,
+            n_nodes=int(n_nodes),
+            pressure_stiffness=float(pressure_stiffness),
+            equilibrium_scale=float(equilibrium_scale),
         )
     )
 

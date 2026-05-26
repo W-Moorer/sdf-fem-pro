@@ -384,6 +384,114 @@ def constraint_region_reduced_contact_tangent_sparse_from_arrays(
     return active_ids, reduced_jacobian, scales, tangent, metrics
 
 
+def constraint_region_tangent_finite_difference_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    *,
+    n_nodes: int,
+    pressure_stiffness: float,
+    equilibrium_scale: float = 1.0,
+    epsilon: float = 1.0e-6,
+    relative_tolerance: float = 1.0e-6,
+    absolute_tolerance: float = 1.0e-8,
+    direction: np.ndarray | None = None,
+) -> dict[str, float | int | str]:
+    """Check fixed-payload active-set tangent by directional finite difference.
+
+    The check intentionally perturbs only the region gaps through the fixed
+    gap Jacobian.  It therefore validates the consistent tangent used by the
+    active-set Newton step, not closest-feature re-search or normal variation.
+    If the +/- perturbation changes the open/closed region set, the check is
+    reported as unstable and must not be used as tangent evidence.
+    """
+
+    if float(epsilon) <= 0.0:
+        raise ValueError("epsilon must be positive")
+    if float(relative_tolerance) < 0.0:
+        raise ValueError("relative_tolerance must be non-negative")
+    if float(absolute_tolerance) < 0.0:
+        raise ValueError("absolute_tolerance must be non-negative")
+    ndofs = 3 * int(n_nodes)
+    base = {
+        "contact_tangent_fd_checked": 0,
+        "contact_tangent_fd_active_set_stable": 0,
+        "contact_tangent_fd_passed": 0,
+        "contact_tangent_fd_error_abs": 0.0,
+        "contact_tangent_fd_error_rel": 0.0,
+        "contact_tangent_fd_tolerance_abs": float(absolute_tolerance),
+        "contact_tangent_fd_tolerance_rel": float(relative_tolerance),
+        "contact_tangent_fd_epsilon": float(epsilon),
+        "contact_tangent_fd_direction_norm": 0.0,
+        "contact_tangent_fd_source": "constraint_region_fixed_payload_force_difference",
+    }
+    if sample_arrays is None:
+        return base
+    gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
+    if gaps.size == 0 or not np.any(gaps < 0.0):
+        return base
+    _, full_jacobian = constraint_region_gap_jacobian_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=int(n_nodes),
+        active_only=False,
+    )
+    if direction is None:
+        vec = _deterministic_tangent_check_direction(ndofs, full_jacobian)
+    else:
+        vec = np.asarray(direction, dtype=float).reshape(-1)
+        if vec.size != ndofs:
+            raise ValueError("direction must have length 3*n_nodes")
+    norm = float(np.linalg.norm(vec))
+    if norm <= 0.0:
+        return {**base, "contact_tangent_fd_direction_norm": 0.0}
+    vec = vec / norm
+    gap_delta = np.asarray(full_jacobian @ vec, dtype=float).reshape(-1)
+    if not np.any(np.abs(gap_delta) > 0.0):
+        return {**base, "contact_tangent_fd_direction_norm": 1.0}
+
+    eps = float(epsilon)
+    active = gaps < 0.0
+    plus_gaps = gaps + eps * gap_delta
+    minus_gaps = gaps - eps * gap_delta
+    active_stable = bool(np.array_equal(plus_gaps < 0.0, active) and np.array_equal(minus_gaps < 0.0, active))
+    active_ids, _active_j, _scales, tangent, _metrics = constraint_region_contact_tangent_sparse_from_arrays(
+        sample_arrays,
+        n_nodes=int(n_nodes),
+        pressure_stiffness=float(pressure_stiffness),
+        equilibrium_scale=float(equilibrium_scale),
+    )
+    if active_ids.size == 0:
+        return {**base, "contact_tangent_fd_direction_norm": 1.0}
+
+    def force_at(shifted_gaps: np.ndarray) -> np.ndarray:
+        shifted = {
+            key: value.copy() if isinstance(value, np.ndarray) else value
+            for key, value in dict(sample_arrays).items()
+        }
+        shifted["gaps"] = np.asarray(shifted_gaps, dtype=float).copy()
+        return constraint_region_penalty_response_from_arrays(
+            shifted,
+            n_nodes=int(n_nodes),
+            pressure_stiffness=float(pressure_stiffness),
+            tangent_equilibrium_scale=float(equilibrium_scale),
+            include_tangent=False,
+        ).force.reshape(-1)
+
+    finite_difference = (force_at(plus_gaps) - force_at(minus_gaps)) / (2.0 * eps)
+    expected = -np.asarray(tangent @ vec, dtype=float).reshape(-1)
+    error_abs = float(np.linalg.norm(finite_difference - expected))
+    scale = max(1.0, float(np.linalg.norm(finite_difference)), float(np.linalg.norm(expected)))
+    error_rel = error_abs / scale
+    passed = bool(active_stable and error_abs <= float(absolute_tolerance) + float(relative_tolerance) * scale)
+    return {
+        **base,
+        "contact_tangent_fd_checked": 1,
+        "contact_tangent_fd_active_set_stable": int(active_stable),
+        "contact_tangent_fd_passed": int(passed),
+        "contact_tangent_fd_error_abs": error_abs,
+        "contact_tangent_fd_error_rel": float(error_rel),
+        "contact_tangent_fd_direction_norm": 1.0,
+    }
+
+
 def constraint_region_penalty_response_from_arrays(
     sample_arrays: dict[str, np.ndarray] | None,
     *,
@@ -1172,6 +1280,24 @@ def _empty_contact_region_integral_metrics() -> dict[str, float | int]:
         "contact_max_region_pressure": 0.0,
         "contact_mean_active_region_pressure": 0.0,
     }
+
+
+def _deterministic_tangent_check_direction(ndofs: int, jacobian: csr_matrix) -> np.ndarray:
+    """Return a reproducible nonzero direction touching the contact Jacobian."""
+
+    count = int(ndofs)
+    if count <= 0:
+        return np.empty(0, dtype=float)
+    values = np.sin(np.arange(count, dtype=float) + 1.0) + 0.5 * np.cos(0.37 * (np.arange(count, dtype=float) + 1.0))
+    if jacobian.shape[1] == count and jacobian.nnz:
+        columns = np.unique(jacobian.indices)
+        mask = np.zeros(count, dtype=bool)
+        mask[columns] = True
+        values = np.where(mask, values, 0.0)
+    norm = float(np.linalg.norm(values))
+    if norm <= 0.0:
+        values = np.ones(count, dtype=float)
+    return values
 
 
 def _percentile_or_zero(values: np.ndarray, percentile: float) -> float:

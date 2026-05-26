@@ -14,6 +14,7 @@ from sfc.contact.constraint_region import (
     constraint_region_pressure_tangent_scales_from_arrays,
     constraint_region_reduced_contact_tangent_sparse_from_arrays,
     constraint_region_reduced_gap_jacobian_sparse_from_arrays,
+    constraint_region_tangent_finite_difference_metrics_from_arrays,
     contact_path_tracking_metrics_from_arrays,
     contact_region_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays,
@@ -144,6 +145,45 @@ def test_constraint_region_tangent_matches_fixed_payload_force_finite_difference
         rtol=1.0e-8,
         atol=1.0e-9,
     )
+
+
+def test_constraint_region_tangent_fd_metrics_gate_fixed_active_set_consistency() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+
+    metrics = constraint_region_tangent_finite_difference_metrics_from_arrays(
+        regions,
+        n_nodes=13,
+        pressure_stiffness=100.0,
+        epsilon=1.0e-7,
+        relative_tolerance=1.0e-7,
+        absolute_tolerance=1.0e-8,
+    )
+
+    assert metrics["contact_tangent_fd_checked"] == 1
+    assert metrics["contact_tangent_fd_active_set_stable"] == 1
+    assert metrics["contact_tangent_fd_passed"] == 1
+    assert metrics["contact_tangent_fd_error_rel"] < 1.0e-9
+    assert metrics["contact_tangent_fd_source"] == "constraint_region_fixed_payload_force_difference"
+
+
+def test_constraint_region_tangent_fd_metrics_reject_active_set_crossing() -> None:
+    regions = aggregate_contact_sample_arrays(_raw_two_sample_arrays(), "slave_node_region_constraint")
+    assert regions is not None
+    direction = np.zeros(39, dtype=float)
+    direction[2] = 1.0
+
+    metrics = constraint_region_tangent_finite_difference_metrics_from_arrays(
+        regions,
+        n_nodes=13,
+        pressure_stiffness=100.0,
+        epsilon=1.0,
+        direction=direction,
+    )
+
+    assert metrics["contact_tangent_fd_checked"] == 1
+    assert metrics["contact_tangent_fd_active_set_stable"] == 0
+    assert metrics["contact_tangent_fd_passed"] == 0
 
 
 def test_constraint_region_penalty_response_uses_region_rows_for_force_and_totals() -> None:
