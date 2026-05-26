@@ -35,6 +35,7 @@ from .constraint_region import (
     constraint_region_penalty_response_from_arrays,
     contact_averaging_modes,
     contact_path_tracking_metrics_from_arrays,
+    contact_region_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays,
     secondary_node_pressure_recovery_from_regions,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "contact_jacobian_entries",
     "contact_jacobian_row",
     "contact_path_tracking_metrics_from_arrays",
+    "contact_region_path_tracking_metrics_from_arrays",
     "contact_region_integral_metrics_from_arrays",
     "contact_total_priority_gate_metrics",
     "field_contact_constraint_from_sample",

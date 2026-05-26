@@ -38,7 +38,7 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
     _aggregate_contact_sample_arrays,
     _assemble_contact_arrays_force_only,
     _contact_active_region_continuity_metrics_from_arrays,
-    _contact_path_tracking_metrics_from_arrays,
+    _contact_region_path_tracking_metrics_from_arrays,
     _contact_region_integral_metrics_from_arrays,
     _constraint_region_contact_law_metrics_from_arrays,
     _secondary_region_contact_node_diagnostics_from_arrays,
@@ -297,6 +297,7 @@ def run_validation(
         secondary_path_tracking=True,
     )
     previous_active_regions: tuple[int, ...] | None = None
+    previous_path_region_ids: np.ndarray | None = None
     previous_master_face_ids: np.ndarray | None = None
     previous_master_barycentric: np.ndarray | None = None
     rows: list[Row] = []
@@ -330,15 +331,28 @@ def run_validation(
             arrays,
             averaging_mode="slave_node_region_constraint",
         )
-        path_metrics, current_master_face_ids, current_master_barycentric = _contact_path_tracking_metrics_from_arrays(
+        (
+            path_metrics,
+            current_path_region_ids,
+            current_master_face_ids,
+            current_master_barycentric,
+        ) = _contact_region_path_tracking_metrics_from_arrays(
             regions,
+            previous_path_region_ids,
             previous_master_face_ids,
             previous_master_barycentric,
         )
+        if current_path_region_ids is not None:
+            previous_path_region_ids = current_path_region_ids
         if current_master_face_ids is not None:
             previous_master_face_ids = current_master_face_ids
         if current_master_barycentric is not None:
             previous_master_barycentric = current_master_barycentric
+        committed_tracking = (
+            contact.commit_secondary_tracking_from_sample_arrays(arrays)
+            if hasattr(contact, "commit_secondary_tracking_from_sample_arrays")
+            else 0
+        )
         continuity, current_active_regions = _contact_active_region_continuity_metrics_from_arrays(
             regions,
             previous_active_regions,
@@ -360,6 +374,7 @@ def run_validation(
             "normal_force": float(response.normal_force),
             "contact_energy": float(response.energy),
             "contact_virtual_work": float(2.0 * response.energy),
+            "accepted_path_tracking_committed": int(committed_tracking),
             "min_region_gap": float(np.min(np.asarray(regions["gaps"], dtype=float))) if np.asarray(regions["gaps"]).size else 0.0,
         }
         row.update(region_metrics)

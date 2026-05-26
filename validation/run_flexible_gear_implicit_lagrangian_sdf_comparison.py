@@ -52,6 +52,7 @@ from sfc.contact.constraint_region import (  # noqa: E402
     constraint_region_reduced_gap_jacobian_sparse_from_arrays as _core_constraint_region_reduced_gap_jacobian_sparse_from_arrays,
     constraint_region_tangent_metrics_from_arrays as _core_constraint_region_tangent_metrics_from_arrays,
     contact_path_tracking_metrics_from_arrays as _core_contact_path_tracking_metrics_from_arrays,
+    contact_region_path_tracking_metrics_from_arrays as _core_contact_region_path_tracking_metrics_from_arrays,
     contact_region_integral_metrics_from_arrays as _core_contact_region_integral_metrics_from_arrays,
     secondary_node_pressure_recovery_from_regions as _core_secondary_node_pressure_recovery_from_regions,
 )
@@ -364,6 +365,26 @@ def _contact_path_tracking_metrics_from_arrays(
         active_gap_tolerance=active_gap_tolerance,
     )
     return dict(metrics), current_faces, current_bary
+
+
+def _contact_region_path_tracking_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    previous_region_ids: np.ndarray | None,
+    previous_master_face_ids: np.ndarray | None,
+    previous_master_barycentric: np.ndarray | None = None,
+    *,
+    active_gap_tolerance: float = 0.0,
+) -> tuple[Row, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Measure master-face continuity keyed by secondary constraint region."""
+
+    metrics, current_regions, current_faces, current_bary = _core_contact_region_path_tracking_metrics_from_arrays(
+        sample_arrays,
+        previous_region_ids,
+        previous_master_face_ids,
+        previous_master_barycentric,
+        active_gap_tolerance=active_gap_tolerance,
+    )
+    return dict(metrics), current_regions, current_faces, current_bary
 
 
 def _contact_active_region_continuity_metrics_from_arrays(
@@ -4961,6 +4982,7 @@ def solve_sfc_source_drive_pair(
     start = time.perf_counter()
     base_preconditioner_lu: Any | None = None
     contact_aggregation_workspace = _ContactAggregationWorkspace()
+    previous_path_region_ids: np.ndarray | None = None
     previous_path_master_face_ids: np.ndarray | None = None
     previous_path_master_barycentric: np.ndarray | None = None
     previous_active_region_ids: tuple[int, ...] | None = None
@@ -5472,11 +5494,19 @@ def solve_sfc_source_drive_pair(
         source_cutback_required_count += int(bool(increment_decision.cutback_required))
         source_unconverged_accepted_count += int((not bool(increment_decision.converged)) and bool(increment_decision.accepted))
         source_unstable_accepted_count += int(bool(source_contact_active_set_stability) and not bool(active_set_stable))
-        path_tracking_metrics, current_path_master_face_ids, current_path_master_barycentric = _contact_path_tracking_metrics_from_arrays(
+        (
+            path_tracking_metrics,
+            current_path_region_ids,
+            current_path_master_face_ids,
+            current_path_master_barycentric,
+        ) = _contact_region_path_tracking_metrics_from_arrays(
             last_sample_arrays,
+            previous_path_region_ids,
             previous_path_master_face_ids,
             previous_path_master_barycentric,
         )
+        if current_path_region_ids is not None:
+            previous_path_region_ids = current_path_region_ids
         if current_path_master_face_ids is not None:
             previous_path_master_face_ids = current_path_master_face_ids
         if current_path_master_barycentric is not None:
@@ -6354,6 +6384,7 @@ def solve_sfc_cropped_pair_hard_contact(
     last_converged = True
     cutback_count = 0
     increment_count = 0
+    previous_path_region_ids: np.ndarray | None = None
     previous_path_master_face_ids: np.ndarray | None = None
     previous_path_master_barycentric: np.ndarray | None = None
     previous_active_region_ids: tuple[int, ...] | None = None
@@ -6668,18 +6699,28 @@ def solve_sfc_cropped_pair_hard_contact(
             if tracking_arrays is None
             else _aggregate_contact_sample_arrays(tracking_arrays, "slave_node_region_constraint")
         )
-        path_tracking_metrics, current_path_master_face_ids, current_path_master_barycentric = (
-            _contact_path_tracking_metrics_from_arrays(
+        (
+            path_tracking_metrics,
+            current_path_region_ids,
+            current_path_master_face_ids,
+            current_path_master_barycentric,
+        ) = (
+            _contact_region_path_tracking_metrics_from_arrays(
                 tracking_regions,
+                previous_path_region_ids,
                 previous_path_master_face_ids,
                 previous_path_master_barycentric,
                 active_gap_tolerance=np.inf,
             )
         )
+        if current_path_region_ids is not None:
+            previous_path_region_ids = current_path_region_ids
         if current_path_master_face_ids is not None:
             previous_path_master_face_ids = current_path_master_face_ids
         if current_path_master_barycentric is not None:
             previous_path_master_barycentric = current_path_master_barycentric
+        if tracking_arrays is not None and hasattr(tracking_contact, "commit_secondary_tracking_from_sample_arrays"):
+            tracking_contact.commit_secondary_tracking_from_sample_arrays(tracking_arrays)
         active_region_metrics, current_active_region_ids = _contact_active_region_continuity_metrics_from_arrays(
             tracking_regions,
             previous_active_region_ids,

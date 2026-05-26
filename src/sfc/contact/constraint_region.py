@@ -668,33 +668,64 @@ def contact_path_tracking_metrics_from_arrays(
     verification metric; it does not alter contact search or projection.
     """
 
+    metrics, _region_ids, current_faces, current_bary = contact_region_path_tracking_metrics_from_arrays(
+        sample_arrays,
+        None,
+        previous_master_face_ids,
+        previous_master_barycentric,
+        active_gap_tolerance=active_gap_tolerance,
+    )
+    return metrics, current_faces, current_bary
+
+
+def contact_region_path_tracking_metrics_from_arrays(
+    sample_arrays: dict[str, np.ndarray] | None,
+    previous_region_ids: np.ndarray | None,
+    previous_master_face_ids: np.ndarray | None,
+    previous_master_barycentric: np.ndarray | None = None,
+    *,
+    active_gap_tolerance: float = 0.0,
+) -> tuple[dict[str, float | int], np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Measure accepted-state master-face continuity by constraint region.
+
+    Region-level contact tracking is keyed by ``secondary_node_ids`` when the
+    arrays carry slave-node constraint regions.  This avoids treating a harmless
+    row-order change as a master-face switch.  When no region ids are present,
+    the function falls back to row-order comparison for legacy callers.
+    """
+
     empty = _empty_path_tracking_metrics()
     if sample_arrays is None or "master_face_ids" not in sample_arrays:
-        return empty, None, None
+        return empty, None, None, None
     face_ids = np.asarray(sample_arrays.get("master_face_ids", np.empty(0)), dtype=np.int64).reshape(-1)
     gaps = np.asarray(sample_arrays.get("gaps", np.empty(0)), dtype=float).reshape(-1)
     if face_ids.size == 0 or gaps.size == 0:
-        return empty, face_ids.copy(), None
+        return empty, _region_ids_from_arrays(sample_arrays, face_ids.size), face_ids.copy(), None
     if face_ids.shape != gaps.shape:
-        return empty, face_ids.copy(), None
+        return empty, _region_ids_from_arrays(sample_arrays, face_ids.size), face_ids.copy(), None
 
     usable = (face_ids >= 0) & _closed_or_near_closed_gap_mask(
         gaps,
         active_gap_tolerance=float(active_gap_tolerance),
     )
     active_faces = face_ids[usable]
-    comparable = np.zeros(face_ids.shape, dtype=bool)
-    switches = np.zeros(face_ids.shape, dtype=bool)
-    if previous_master_face_ids is not None:
-        previous = np.asarray(previous_master_face_ids, dtype=np.int64).reshape(-1)
-        if previous.shape == face_ids.shape:
-            comparable = usable & (previous >= 0)
-            switches = comparable & (previous != face_ids)
+    region_ids = _region_ids_from_arrays(sample_arrays, face_ids.size)
+    previous_faces_aligned = _align_previous_values_by_region(
+        current_region_ids=region_ids,
+        previous_region_ids=previous_region_ids,
+        previous_values=previous_master_face_ids,
+        value_width=1,
+    )
+    comparable = usable & (previous_faces_aligned.reshape(-1) >= 0)
+    switches = comparable & (previous_faces_aligned.reshape(-1) != face_ids)
     comparable_count = int(np.count_nonzero(comparable))
     switch_count = int(np.count_nonzero(switches))
     metrics: dict[str, float | int] = {
         "contact_active_master_face_count": int(active_faces.size),
         "contact_master_face_unique_count": int(np.unique(active_faces).size) if active_faces.size else 0,
+        "contact_master_face_tracking_region_aligned": int(
+            previous_master_face_ids is not None and previous_faces_aligned.shape == face_ids.shape
+        ),
         "contact_master_face_tracking_comparable_count": comparable_count,
         "contact_master_face_switch_count": switch_count,
         "contact_master_face_switch_fraction": (
@@ -734,26 +765,28 @@ def contact_path_tracking_metrics_from_arrays(
     current_bary = None
     if bary is not None:
         current_bary = np.asarray(bary, dtype=float).copy()
-        previous_bary = None if previous_master_barycentric is None else np.asarray(previous_master_barycentric, dtype=float)
-        if previous_bary is not None and previous_bary.shape == current_bary.shape and previous_master_face_ids is not None:
-            previous_faces = np.asarray(previous_master_face_ids, dtype=np.int64).reshape(-1)
-            if previous_faces.shape == face_ids.shape:
-                finite_bary = np.all(np.isfinite(current_bary), axis=1) & np.all(np.isfinite(previous_bary), axis=1)
-                bary_comparable = usable & finite_bary & (previous_faces == face_ids) & (face_ids >= 0)
-                if np.any(bary_comparable):
-                    drifts = np.linalg.norm(current_bary[bary_comparable] - previous_bary[bary_comparable], axis=1)
-                    metrics["contact_master_barycentric_tracking_comparable_count"] = int(drifts.size)
-                    metrics["contact_master_barycentric_drift_mean"] = float(np.mean(drifts))
-                    metrics["contact_master_barycentric_drift_max"] = float(np.max(drifts))
-                else:
-                    metrics.update(_empty_barycentric_tracking_metrics())
+        previous_bary = _align_previous_values_by_region(
+            current_region_ids=region_ids,
+            previous_region_ids=previous_region_ids,
+            previous_values=previous_master_barycentric,
+            value_width=current_bary.shape[1],
+            fill_value=np.nan,
+        )
+        if previous_bary.shape == current_bary.shape and previous_faces_aligned.shape == face_ids.shape:
+            finite_bary = np.all(np.isfinite(current_bary), axis=1) & np.all(np.isfinite(previous_bary), axis=1)
+            bary_comparable = usable & finite_bary & (previous_faces_aligned.reshape(-1) == face_ids) & (face_ids >= 0)
+            if np.any(bary_comparable):
+                drifts = np.linalg.norm(current_bary[bary_comparable] - previous_bary[bary_comparable], axis=1)
+                metrics["contact_master_barycentric_tracking_comparable_count"] = int(drifts.size)
+                metrics["contact_master_barycentric_drift_mean"] = float(np.mean(drifts))
+                metrics["contact_master_barycentric_drift_max"] = float(np.max(drifts))
             else:
                 metrics.update(_empty_barycentric_tracking_metrics())
         else:
             metrics.update(_empty_barycentric_tracking_metrics())
     else:
         metrics.update(_empty_barycentric_tracking_metrics())
-    return metrics, face_ids.copy(), current_bary
+    return metrics, region_ids.copy(), face_ids.copy(), current_bary
 
 
 def contact_active_region_continuity_metrics_from_arrays(
@@ -802,6 +835,61 @@ def contact_active_region_continuity_metrics_from_arrays(
         "contact_active_region_jaccard": float(len(intersection)) / float(len(union)) if union else 1.0,
     }
     return metrics, current_ids
+
+
+def _region_ids_from_arrays(sample_arrays: dict[str, np.ndarray], expected_rows: int) -> np.ndarray:
+    region_ids = np.asarray(sample_arrays.get("secondary_node_ids", np.empty(0)), dtype=np.int64).reshape(-1)
+    if region_ids.shape == (int(expected_rows),) and np.any(region_ids >= 0):
+        return region_ids.copy()
+    return np.arange(int(expected_rows), dtype=np.int64)
+
+
+def _align_previous_values_by_region(
+    *,
+    current_region_ids: np.ndarray,
+    previous_region_ids: np.ndarray | None,
+    previous_values: np.ndarray | None,
+    value_width: int,
+    fill_value: float | int = -1,
+) -> np.ndarray:
+    current = np.asarray(current_region_ids, dtype=np.int64).reshape(-1)
+    width = int(value_width)
+    if previous_values is None:
+        shape = current.shape if width == 1 else (current.size, width)
+        return np.full(shape, fill_value, dtype=float if isinstance(fill_value, float) else np.int64)
+    values = np.asarray(previous_values)
+    if width == 1:
+        flat_values = np.asarray(values, dtype=np.int64).reshape(-1)
+        if previous_region_ids is None:
+            if flat_values.shape == current.shape:
+                return flat_values.copy()
+            return np.full(current.shape, int(fill_value), dtype=np.int64)
+        previous_ids = np.asarray(previous_region_ids, dtype=np.int64).reshape(-1)
+        out = np.full(current.shape, int(fill_value), dtype=np.int64)
+        if previous_ids.shape != flat_values.shape:
+            return out
+        lookup = {int(region_id): int(value) for region_id, value in zip(previous_ids, flat_values, strict=True)}
+        for idx, region_id in enumerate(current):
+            out[idx] = lookup.get(int(region_id), int(fill_value))
+        return out
+
+    matrix = np.asarray(values, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[1] != width:
+        return np.full((current.size, width), float(fill_value), dtype=float)
+    if previous_region_ids is None:
+        if matrix.shape[0] == current.size:
+            return matrix.copy()
+        return np.full((current.size, width), float(fill_value), dtype=float)
+    previous_ids = np.asarray(previous_region_ids, dtype=np.int64).reshape(-1)
+    out = np.full((current.size, width), float(fill_value), dtype=float)
+    if previous_ids.shape[0] != matrix.shape[0]:
+        return out
+    lookup = {int(region_id): matrix[row].copy() for row, region_id in enumerate(previous_ids)}
+    for idx, region_id in enumerate(current):
+        value = lookup.get(int(region_id))
+        if value is not None:
+            out[idx] = value
+    return out
 
 
 def _expand_to_slave_node_regions(
