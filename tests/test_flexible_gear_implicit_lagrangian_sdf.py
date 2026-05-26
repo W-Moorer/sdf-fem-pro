@@ -2263,6 +2263,36 @@ def test_secondary_tracking_candidates_follow_master_face_adjacency() -> None:
     assert list(contact.secondary_normal_projection_samples(np.vstack([master_nodes, slave_nodes])))
 
 
+def test_secondary_path_tracking_uses_cached_face_when_search_tube_is_empty() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 2, 1], [1, 2, 3]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=10.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=0.0,
+        compiled_batch_projection=True,
+        secondary_path_tracking=True,
+        secondary_tracking_rings=1,
+    )
+    contact._ensure_secondary_face_cache()[0] = 1
+
+    merged = contact._merge_secondary_tracking_candidates([[]], np.asarray([0], dtype=np.int64))
+
+    assert merged == [[1, 0]]
+
+
 def test_secondary_normal_projection_sample_arrays_match_scalar_when_cpp_available() -> None:
     if not _cpp_projection.secondary_normal_indexed_faces_available():
         pytest.skip("C++ secondary-normal indexed projection backend is unavailable")

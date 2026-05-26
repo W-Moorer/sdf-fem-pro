@@ -341,6 +341,18 @@ class LagrangianSDFSurfaceContactGeometry:
         candidate_lists,
         cache_indices: np.ndarray,
     ) -> list[list[int]]:
+        """Merge global/BVH candidates with accepted path-tracking hints.
+
+        Candidate search remains conservative: global candidates and their
+        neighborhoods are kept, while accepted-state path hints are tried first
+        only when secondary path tracking is enabled.  A cached master face is
+        still used when the current search tube returns no raw candidates; this
+        is the path-tracking role needed for smooth sliding across accepted
+        states.  If the cached face is invalid, the caller still receives the
+        raw/global candidate list, possibly empty, and can fall back through its
+        existing closest-feature query path.
+        """
+
         cache = self._ensure_secondary_face_cache()
         merged: list[list[int]] = []
         n_faces = len(self._master_face_tracking_neighborhoods)
@@ -358,10 +370,11 @@ class LagrangianSDFSurfaceContactGeometry:
                         if nid not in seen:
                             values.append(nid)
                             seen.add(nid)
-            if not values:
-                merged.append(values)
-                continue
-            tracked = int(cache[int(cache_index)]) if 0 <= int(cache_index) < cache.shape[0] else -1
+            tracked = (
+                int(cache[int(cache_index)])
+                if bool(self.secondary_path_tracking) and 0 <= int(cache_index) < cache.shape[0]
+                else -1
+            )
             if 0 <= tracked < n_faces:
                 if tracked not in seen:
                     values.insert(0, tracked)
