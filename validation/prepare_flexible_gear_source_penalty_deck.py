@@ -1,9 +1,10 @@
-"""Prepare a source-gear Abaqus deck with linear penalty contact.
+"""Prepare the source-gear Abaqus node-to-surface linear-penalty deck.
 
 This utility is validation/post-processing code.  It keeps the original gear
 mesh, RP-MPCs, boundary conditions, torque, and implicit dynamic step from the
-source deck, while changing only the contact enforcement/output cadence needed
-for an apples-to-apples SFC penalty-contact comparison.
+source deck, while changing only the contact formulation, enforcement, and
+output cadence needed for an apples-to-apples SFC node-to-surface
+penalty-contact comparison.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ DEFAULT_SOURCE = (
     Path(__file__).resolve().parents[1]
     / "commercial_software_comparison"
     / "abaqus_flexible_body_gear_contact"
-    / "gear_contact.inp"
+    / "gear_contact_implicit_node_to_surface.inp"
 )
 
 
@@ -130,7 +131,7 @@ def prepare_source_penalty_deck_text(
     fixed_increment: bool = True,
     require_source_timing: bool = False,
 ) -> str:
-    """Return source deck text converted to linear penalty contact.
+    """Return source deck text converted to node-to-surface linear penalty contact.
 
     Only validation-facing Abaqus input is rewritten.  Meshes, node/element sets,
     MPCs, loads, and boundary conditions are left untouched.
@@ -161,7 +162,7 @@ def prepare_source_penalty_deck_text(
                 i += 1
             continue
         if key == "*contact pair":
-            rewritten = line
+            rewritten = _replace_or_add_param(line, "type", "NODE TO SURFACE")
             if contact_pair_penalty_parameter and "mechanical constraint" not in line.lower():
                 rewritten = _replace_or_add_param(rewritten, "mechanical constraint", "PENALTY")
             out.append(rewritten)
@@ -215,7 +216,7 @@ def write_source_penalty_deck(
     encoding: str = "cp936",
     require_source_timing: bool = False,
 ) -> None:
-    """Write a source-derived linear-penalty Abaqus deck."""
+    """Write a source-derived node-to-surface linear-penalty Abaqus deck."""
 
     text = Path(source).read_text(encoding=encoding, errors="replace")
     converted = prepare_source_penalty_deck_text(
@@ -224,7 +225,7 @@ def write_source_penalty_deck(
         frame_stride=frame_stride,
         dt=dt,
         duration=duration,
-        contact_pair_penalty_parameter=False,
+        contact_pair_penalty_parameter=True,
         fixed_increment=True,
         require_source_timing=bool(require_source_timing),
     )

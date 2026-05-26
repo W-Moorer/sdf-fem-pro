@@ -16,13 +16,15 @@ from validation.run_gear_inp_feature_audit import build_feature_rows
 pytestmark = pytest.mark.skipif(not DEFAULT_SOURCE.exists(), reason="commercial gear input is not present")
 
 
-def test_gear_inp_feature_audit_marks_hard_contact_and_torque_gap() -> None:
+def test_gear_inp_feature_audit_marks_node_to_surface_contact_and_torque_gap() -> None:
     rows = build_feature_rows(DEFAULT_SOURCE)
     by_feature = {str(row["feature"]): row for row in rows}
 
     assert by_feature["c3d4_tet4_volume_elements"]["sfc_status"] == "supported"
-    assert by_feature["surface_to_surface_hard_contact"]["sfc_status"] == "partial"
-    assert "hard normal active-set" in str(by_feature["surface_to_surface_hard_contact"]["evidence"])
+    assert by_feature["node_to_surface_linear_penalty_contact"]["sfc_status"] == "partial"
+    assert "node-to-surface gap/Jacobian" in str(
+        by_feature["node_to_surface_linear_penalty_contact"]["evidence"]
+    )
     assert "reduced global RP-MPC assembly" in str(by_feature["beam_mpc_hub_to_reference_point"]["evidence"])
     assert by_feature["moment_cload_on_rp"]["sfc_status"] == "partial"
     assert "torque dynamics" in str(by_feature["moment_cload_on_rp"]["evidence"])

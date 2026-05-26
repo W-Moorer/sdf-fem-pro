@@ -818,7 +818,8 @@ def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_ou
     assert "*Surface Behavior, pressure-overclosure=LINEAR" in text
     assert "5.000000000000e+09" in text
     assert "pressure-overclosure=HARD" not in text
-    assert "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE" in text
+    assert "*Contact Pair, interaction=IntProp-1, type=NODE TO SURFACE" in text
+    assert "type=SURFACE TO SURFACE" not in text
     assert "mechanical constraint=PENALTY" not in text
     assert "1.000000000000e-05,1.000000000000e-04,1.000000000000e-05,1.000000000000e-05" in text
     assert "*Output, field, variable=PRESELECT, frequency=5" in text
@@ -909,6 +910,8 @@ def test_prepare_source_penalty_deck_replaces_existing_linear_data() -> None:
 
     assert "7.000000000000e+09" in text
     assert "1.0e3" not in text
+    assert "type=NODE TO SURFACE" in text
+    assert "type=SURFACE TO SURFACE" not in text
     assert text.count("mechanical constraint=PENALTY") == 1
 
 
@@ -928,7 +931,7 @@ def test_prepare_source_penalty_deck_can_write_explicit_style_contact_pair_param
         contact_pair_penalty_parameter=True,
     )
 
-    assert "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE, mechanical constraint=PENALTY" in text
+    assert "*Contact Pair, interaction=IntProp-1, type=NODE TO SURFACE, mechanical constraint=PENALTY" in text
 
 
 def test_source_penalty_summary_states_external_validation_only(tmp_path: Path) -> None:

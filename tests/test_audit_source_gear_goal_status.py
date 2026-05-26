@@ -25,8 +25,9 @@ def test_parse_source_deck_extracts_drive_and_contact_settings(tmp_path: Path) -
                 "BEAM, A, B",
                 "*MPC",
                 "BEAM, C, D",
-                "*Surface Behavior, pressure-overclosure=HARD",
-                "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE",
+                "*Surface Behavior, pressure-overclosure=LINEAR",
+                "5.0e9",
+                "*Contact Pair, interaction=IntProp-1, type=NODE TO SURFACE, mechanical constraint=PENALTY",
                 "S1, S2",
                 "*Step, name=Step-1, nlgeom=YES, inc=2000",
                 "*Dynamic",
@@ -48,7 +49,8 @@ def test_parse_source_deck_extracts_drive_and_contact_settings(tmp_path: Path) -
     assert settings.gear1_angular_velocity_z == 52.36
     assert settings.gear2_torque_z == 50.0
     assert settings.mpc_beam_count == 2
-    assert settings.contact_behavior.endswith("HARD")
+    assert settings.contact_behavior.endswith("LINEAR")
+    assert "type=NODE TO SURFACE" in settings.contact_pair
 
 
 def test_audit_rows_flag_partial_duration_and_large_stress_error(tmp_path: Path) -> None:

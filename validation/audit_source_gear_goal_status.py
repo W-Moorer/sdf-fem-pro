@@ -355,7 +355,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--inp",
         type=Path,
-        default=Path("commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact.inp"),
+        default=Path(
+            "commercial_software_comparison/abaqus_flexible_body_gear_contact/gear_contact_implicit_node_to_surface.inp"
+        ),
     )
     parser.add_argument(
         "--sfc-manifest",

@@ -40,7 +40,7 @@ def test_parse_flexible_gear_input_extracts_contact_and_hub_data() -> None:
     assert model.dynamic_duration == pytest.approx(5.0e-2)
     assert model.dynamic_min_dt == pytest.approx(1.0e-10)
     assert model.dynamic_max_dt == pytest.approx(5.0e-5)
-    assert model.contact_pressure_overclosure == "HARD"
+    assert model.contact_pressure_overclosure == "LINEAR"
 
 
 def test_c3d4_surface_entries_use_abaqus_face_node_order() -> None:

@@ -106,11 +106,11 @@ def build_feature_rows(source: Path = DEFAULT_SOURCE) -> list[Row]:
             "gap": "full flexible gear torque residual coupling is not yet assembled in the global nonlinear solve",
         },
         {
-            "feature": "surface_to_surface_hard_contact",
-            "abaqus_usage": "frictionless HARD pressure-overclosure, SURFACE TO SURFACE contact pair",
+            "feature": "node_to_surface_linear_penalty_contact",
+            "abaqus_usage": "frictionless LINEAR pressure-overclosure, NODE TO SURFACE contact pair",
             "sfc_status": "partial",
-            "evidence": "SFC has Lagrangian-SDF penalty surface contact and a hard normal active-set layer aligned to an Abaqus node-to-surface small case",
-            "gap": "surface-to-surface hard contact must still be wired into the full Lagrangian-SDF gear solve",
+            "evidence": "SFC has Lagrangian-SDF penalty contact and node-to-surface gap/Jacobian validation paths",
+            "gap": "full flexible gear node-to-surface contact solve still needs long-window Abaqus alignment",
         },
         {
             "feature": "nlgeom_implicit_dynamic_step",

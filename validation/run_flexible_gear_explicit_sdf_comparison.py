@@ -43,7 +43,12 @@ from validation.run_abaqus_sphere_cantilever_explicit import (  # noqa: E402
 
 Row = dict[str, Any]
 
-DEFAULT_SOURCE = ROOT / "commercial_software_comparison" / "abaqus_flexible_body_gear_contact" / "flexible_gear_pair_contact.inp"
+DEFAULT_SOURCE = (
+    ROOT
+    / "commercial_software_comparison"
+    / "abaqus_flexible_body_gear_contact"
+    / "gear_contact_implicit_node_to_surface.inp"
+)
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_explicit_sdf"
 JOB_NAME = "flexible_gear_explicit_linear"
 LINEAR_PENALTY_STIFFNESS = 5.0e9

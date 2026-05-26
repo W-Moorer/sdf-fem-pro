@@ -4572,7 +4572,7 @@ def solve_sfc_source_drive_pair(
     resume_source_checkpoint: bool = False,
     source_checkpoint_stride: int = 10,
 ) -> tuple[list[Row], Row]:
-    """Solve the source ``gear_contact.inp`` RP-drive case with SFC contact.
+    """Solve the source implicit node-to-surface RP-drive case with SFC contact.
 
     The model keeps both flexible gear volume meshes.  Gear 1 follows the
     Abaqus source velocity boundary on RP dof 6, gear 2 keeps RP dofs 1--5
