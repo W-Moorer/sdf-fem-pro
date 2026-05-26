@@ -678,7 +678,10 @@ def contact_path_tracking_metrics_from_arrays(
     if face_ids.shape != gaps.shape:
         return empty, face_ids.copy(), None
 
-    usable = (face_ids >= 0) & (gaps <= float(active_gap_tolerance))
+    usable = (face_ids >= 0) & _closed_or_near_closed_gap_mask(
+        gaps,
+        active_gap_tolerance=float(active_gap_tolerance),
+    )
     active_faces = face_ids[usable]
     comparable = np.zeros(face_ids.shape, dtype=bool)
     switches = np.zeros(face_ids.shape, dtype=bool)
@@ -772,7 +775,10 @@ def contact_active_region_continuity_metrics_from_arrays(
         region_ids = np.arange(gaps.size, dtype=np.int64)
     else:
         region_ids = secondary_ids
-    active_mask = (gaps <= float(active_gap_tolerance)) & (region_ids >= 0)
+    active_mask = _closed_or_near_closed_gap_mask(
+        gaps,
+        active_gap_tolerance=float(active_gap_tolerance),
+    ) & (region_ids >= 0)
     current_ids = tuple(sorted({int(region_id) for region_id in region_ids[active_mask]}))
     if previous_active_region_ids is None:
         metrics = dict(empty)
@@ -1098,6 +1104,23 @@ def _empty_active_region_continuity_metrics() -> dict[str, float | int]:
         "contact_active_region_persistence_fraction": 0.0,
         "contact_active_region_jaccard": 0.0,
     }
+
+
+def _closed_or_near_closed_gap_mask(gaps: np.ndarray, *, active_gap_tolerance: float) -> np.ndarray:
+    """Return regions counted as active for tracking diagnostics.
+
+    Linear penalty contact closes a region only when the averaged gap is
+    strictly negative.  A positive tolerance can deliberately widen diagnostic
+    tracking to near-contact regions, but the default must not count zero-gap
+    open regions as active contact.
+    """
+
+    values = np.asarray(gaps, dtype=float).reshape(-1)
+    tolerance = float(active_gap_tolerance)
+    finite = np.isfinite(values)
+    if tolerance <= 0.0:
+        return finite & (values < 0.0)
+    return finite & (values <= tolerance)
 
 
 def _representative_barycentric_from_arrays(sample_arrays: dict[str, np.ndarray], expected_rows: int) -> np.ndarray | None:

@@ -239,6 +239,27 @@ def test_path_tracking_metrics_report_active_face_switch_and_cache_rates() -> No
     assert metrics["contact_path_cache_match_fraction"] == pytest.approx(0.5)
 
 
+def test_path_tracking_default_active_set_matches_penalty_closed_regions() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, 0.0, 0.02], dtype=float),
+        "master_face_ids": np.asarray([3, 4, 5], dtype=np.int64),
+        "tracking_cache_hits": np.asarray([True, True, True], dtype=bool),
+        "tracking_cache_matches": np.asarray([True, True, True], dtype=bool),
+    }
+    previous = np.asarray([3, 4, 5], dtype=np.int64)
+
+    default_metrics, _, _ = contact_path_tracking_metrics_from_arrays(arrays, previous)
+    tolerant_metrics, _, _ = contact_path_tracking_metrics_from_arrays(
+        arrays,
+        previous,
+        active_gap_tolerance=0.02,
+    )
+
+    assert default_metrics["contact_active_master_face_count"] == 1
+    assert default_metrics["contact_path_cache_hit_fraction"] == pytest.approx(1.0)
+    assert tolerant_metrics["contact_active_master_face_count"] == 3
+
+
 def test_active_region_continuity_metrics_use_secondary_constraint_regions() -> None:
     arrays = {
         "gaps": np.asarray([-0.10, -0.02, 0.01, -0.03], dtype=float),
@@ -256,3 +277,25 @@ def test_active_region_continuity_metrics_use_secondary_constraint_regions() -> 
     assert metrics["contact_active_region_dropped_count"] == 1
     assert metrics["contact_active_region_persistence_fraction"] == pytest.approx(0.5)
     assert metrics["contact_active_region_jaccard"] == pytest.approx(0.25)
+
+
+def test_active_region_continuity_default_excludes_zero_gap_regions() -> None:
+    arrays = {
+        "gaps": np.asarray([-0.10, 0.0, 0.01], dtype=float),
+        "secondary_node_ids": np.asarray([1, 2, 3], dtype=np.int64),
+    }
+
+    default_metrics, default_current = contact_active_region_continuity_metrics_from_arrays(
+        arrays,
+        previous_active_region_ids=None,
+    )
+    tolerant_metrics, tolerant_current = contact_active_region_continuity_metrics_from_arrays(
+        arrays,
+        previous_active_region_ids=None,
+        active_gap_tolerance=0.01,
+    )
+
+    assert default_current == (1,)
+    assert default_metrics["contact_active_region_continuity_current_count"] == 1
+    assert tolerant_current == (1, 2, 3)
+    assert tolerant_metrics["contact_active_region_continuity_current_count"] == 3
