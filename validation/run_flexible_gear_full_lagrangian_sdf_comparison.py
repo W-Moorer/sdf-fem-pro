@@ -521,6 +521,7 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
     row_source_ok = True
     row_jacobian_ok = True
     row_derivative_ok = True
+    row_sign_ok = True
     row_fixed_active_ok = True
     row_active_count_ok = True
     row_scale_ok = True
@@ -539,6 +540,7 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
             row_derivative_ok
             and str(row.get("contact_tangent_pressure_derivative", "")) == "linear_penalty_active_set"
         )
+        row_sign_ok = row_sign_ok and str(row.get("contact_tangent_sign_convention", "")) == "d(-contact_force)/du"
         row_fixed_active_ok = row_fixed_active_ok and _row_int_flag(row, "contact_tangent_fixed_active_set") == 1
         row_active_count_ok = row_active_count_ok and tangent_active == active_regions
         row_scale_ok = row_scale_ok and (_finite_row_float(row, "contact_tangent_scale_sum") or 0.0) > 0.0
@@ -550,6 +552,7 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
         row_source_ok
         and row_jacobian_ok
         and row_derivative_ok
+        and row_sign_ok
         and row_fixed_active_ok
         and row_active_count_ok
         and row_scale_ok
@@ -565,6 +568,7 @@ def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]
         "constraint_region_tangent_row_source_ok": int(row_source_ok),
         "constraint_region_tangent_row_jacobian_ok": int(row_jacobian_ok),
         "constraint_region_tangent_row_pressure_derivative_ok": int(row_derivative_ok),
+        "constraint_region_tangent_row_sign_convention_ok": int(row_sign_ok),
         "constraint_region_tangent_row_fixed_active_set_ok": int(row_fixed_active_ok),
         "constraint_region_tangent_row_active_count_ok": int(row_active_count_ok),
         "constraint_region_tangent_row_scale_ok": int(row_scale_ok),

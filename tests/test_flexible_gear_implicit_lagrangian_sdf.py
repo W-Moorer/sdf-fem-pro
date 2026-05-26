@@ -3550,6 +3550,7 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert history[-1]["contact_tangent_source"] == "constraint_region_arrays"
     assert history[-1]["contact_tangent_gap_jacobian_source"] == "constraint_region_fixed_payload"
     assert history[-1]["contact_tangent_pressure_derivative"] == "linear_penalty_active_set"
+    assert history[-1]["contact_tangent_sign_convention"] == "d(-contact_force)/du"
     assert int(history[-1]["contact_tangent_fixed_active_set"]) == 1
     assert int(history[-1]["contact_tangent_used_by_hard_kkt"]) == 1
     assert int(history[-1]["contact_tangent_active_region_count"]) == int(history[-1]["active_contact_region_count"])
@@ -3628,6 +3629,16 @@ def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     assert int(bad_tangent_gate["cropped_patch_gate_passed"]) == 0
     assert int(bad_tangent_gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 0
     assert bad_tangent_gate["cropped_patch_gate_reason"] == "constraint_region_tangent_gate_failed"
+    wrong_sign_history = [dict(row) for row in history]
+    wrong_sign_history[-1]["contact_tangent_sign_convention"] = "d(contact_force)/du"
+    wrong_sign_gate = _cropped_patch_contact_gate_metrics(
+        wrong_sign_history,
+        summary,
+        require_monotone_trend=False,
+    )
+    assert int(wrong_sign_gate["cropped_patch_gate_passed"]) == 0
+    assert int(wrong_sign_gate["cropped_patch_constraint_region_tangent_gate_passed"]) == 0
+    assert wrong_sign_gate["cropped_patch_gate_reason"] == "constraint_region_tangent_gate_failed"
     bad_line_search_history = [dict(row) for row in history]
     bad_line_search_history[-1]["hard_line_search_stable_count"] = 0
     bad_line_search_history[-1]["hard_line_search_last_alpha"] = 0.0

@@ -7024,6 +7024,7 @@ def _cropped_patch_contact_gate_metrics(
                 str(row.get("contact_tangent_source", "")) == "constraint_region_arrays"
                 and str(row.get("contact_tangent_gap_jacobian_source", "")) == "constraint_region_fixed_payload"
                 and str(row.get("contact_tangent_pressure_derivative", "")) == "linear_penalty_active_set"
+                and str(row.get("contact_tangent_sign_convention", "")) == "d(-contact_force)/du"
                 and int(row.get("contact_tangent_fixed_active_set", 0)) == 1
                 and int(row.get("contact_tangent_used_by_hard_kkt", 0)) == 1
                 and int(row.get("contact_tangent_active_region_count", -1))
