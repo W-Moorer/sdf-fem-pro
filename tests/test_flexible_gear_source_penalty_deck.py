@@ -296,6 +296,25 @@ def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
     assert int(failed["path_tracking_cache_hit_gate_passed"]) == 0
     assert int(failed["path_tracking_face_switch_gate_passed"]) == 0
 
+    single_active = [dict(history[0])]
+    unobservable = path_tracking_gate_metrics(single_active, min_cache_match_fraction=0.25)
+
+    assert int(unobservable["path_tracking_active_contact_present"]) == 1
+    assert int(unobservable["path_tracking_continuity_observable"]) == 0
+    assert int(unobservable["path_tracking_gate_passed"]) == 0
+
+    no_active = [
+        {
+            "active_contact_region_count": 0,
+            "contact_active_area": 0.0,
+            "contact_region_normal_force": 0.0,
+        }
+    ]
+    inactive_gate = path_tracking_gate_metrics(no_active, min_cache_match_fraction=0.25)
+
+    assert int(inactive_gate["path_tracking_active_contact_present"]) == 0
+    assert int(inactive_gate["path_tracking_gate_passed"]) == 1
+
 
 def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     summary = {

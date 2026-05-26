@@ -818,7 +818,7 @@ def path_tracking_gate_metrics(
     if not active_contact_present:
         gate_passed = 1
     elif not continuity_observable:
-        gate_passed = 1
+        gate_passed = 0
     else:
         gate_passed = int(
             columns_present
