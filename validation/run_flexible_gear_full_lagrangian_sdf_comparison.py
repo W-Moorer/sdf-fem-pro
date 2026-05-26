@@ -62,6 +62,10 @@ FULL_GEAR_0P003_STAGE_SECONDS = 3.0e-3
 FULL_GEAR_0P05_STAGE_SECONDS = 5.0e-2
 
 PATCH_PREREQUISITE_GATE_KEYS: tuple[str, ...] = (
+    "flat_punch_rf_penetration_gate_passed",
+    "flat_punch_ready_for_two_block_sliding",
+    "two_block_sliding_region_gate_passed",
+    "two_block_ready_for_cropped_gear_patch",
     "tooth_patch_region_gate_passed",
     "tooth_patch_ready_for_cropped_gear_patch",
     "tooth_patch_constraint_region_law_gate_passed",
@@ -779,6 +783,10 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     nodal_deferred = _row_int_flag(summary, "contact_total_nodal_cpress_deferred", default=0)
     no_nodal_priority_columns = _row_int_flag(summary, "contact_total_no_nodal_priority_columns", default=0)
     active_contact_present = _row_int_flag(summary, "contact_total_active_contact_present", default=0)
+    flat_punch_passed = _row_int_flag(summary, "flat_punch_rf_penetration_gate_passed", default=0)
+    flat_punch_ready = _row_int_flag(summary, "flat_punch_ready_for_two_block_sliding", default=0)
+    two_block_passed = _row_int_flag(summary, "two_block_sliding_region_gate_passed", default=0)
+    two_block_ready = _row_int_flag(summary, "two_block_ready_for_cropped_gear_patch", default=0)
     tooth_patch_passed = _row_int_flag(summary, "tooth_patch_region_gate_passed", default=0)
     tooth_patch_ready = _row_int_flag(summary, "tooth_patch_ready_for_cropped_gear_patch", default=0)
     cropped_patch_passed = _row_int_flag(summary, "cropped_patch_gate_passed", default=0)
@@ -790,7 +798,11 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
         default=0,
     )
     patch_ladder_passed = int(
-        bool(tooth_patch_passed)
+        bool(flat_punch_passed)
+        and bool(flat_punch_ready)
+        and bool(two_block_passed)
+        and bool(two_block_ready)
+        and bool(tooth_patch_passed)
         and bool(tooth_patch_ready)
         and bool(cropped_patch_passed)
         and bool(cropped_pressure_stress_passed)
@@ -846,6 +858,10 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
             bool(strict_sync_ready) and bool(contact_window_ready)
         ),
         "full_gear_entry_patch_ladder_gate_passed": int(patch_ladder_passed),
+        "full_gear_entry_flat_punch_gate_passed": int(flat_punch_passed),
+        "full_gear_entry_flat_punch_ready_for_two_block_sliding": int(flat_punch_ready),
+        "full_gear_entry_two_block_sliding_region_gate_passed": int(two_block_passed),
+        "full_gear_entry_two_block_ready_for_cropped_gear_patch": int(two_block_ready),
         "full_gear_entry_tooth_patch_region_gate_passed": int(tooth_patch_passed),
         "full_gear_entry_tooth_patch_ready_for_cropped_gear_patch": int(tooth_patch_ready),
         "full_gear_entry_cropped_patch_gate_passed": int(cropped_patch_passed),

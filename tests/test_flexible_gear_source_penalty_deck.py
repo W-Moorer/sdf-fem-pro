@@ -25,6 +25,15 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
 )
 
 
+def _early_validation_prerequisite_flags() -> dict[str, int]:
+    return {
+        "flat_punch_rf_penetration_gate_passed": 1,
+        "flat_punch_ready_for_two_block_sliding": 1,
+        "two_block_sliding_region_gate_passed": 1,
+        "two_block_ready_for_cropped_gear_patch": 1,
+    }
+
+
 def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
     summary = {
         "sfc_increment_count": 2,
@@ -355,6 +364,7 @@ def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
 
 def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
     summary = {
+        **_early_validation_prerequisite_flags(),
         "tooth_patch_region_gate_passed": 1,
         "tooth_patch_ready_for_cropped_gear_patch": 1,
         "cropped_patch_gate_passed": 1,
@@ -383,6 +393,8 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(gate["full_gear_entry_gate_passed"]) == 1
     assert int(gate["full_gear_entry_patch_ladder_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_flat_punch_gate_passed"]) == 1
+    assert int(gate["full_gear_entry_two_block_sliding_region_gate_passed"]) == 1
     assert int(gate["full_gear_entry_source_active_set_line_search_gate_passed"]) == 1
     assert int(gate["full_gear_entry_contact_window_gate_passed"]) == 1
     assert int(gate["full_gear_entry_ready_for_nodal_contact_outputs"]) == 1
@@ -395,6 +407,20 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
     assert int(failed_patch["full_gear_entry_gate_passed"]) == 0
     assert int(failed_patch["full_gear_entry_patch_ladder_gate_passed"]) == 0
+
+    missing_flat = dict(summary)
+    missing_flat["flat_punch_rf_penetration_gate_passed"] = 0
+    failed_flat = full_gear_entry_gate_metrics(missing_flat)
+
+    assert int(failed_flat["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_flat["full_gear_entry_flat_punch_gate_passed"]) == 0
+
+    missing_two_block = dict(summary)
+    missing_two_block["two_block_sliding_region_gate_passed"] = 0
+    failed_two_block = full_gear_entry_gate_metrics(missing_two_block)
+
+    assert int(failed_two_block["full_gear_entry_gate_passed"]) == 0
+    assert int(failed_two_block["full_gear_entry_two_block_sliding_region_gate_passed"]) == 0
 
     missing_totals = dict(summary)
     missing_totals["contact_total_gate_passed"] = 0
@@ -449,6 +475,7 @@ def test_full_gear_entry_gate_requires_region_totals_before_clouds() -> None:
 
 def test_full_gear_entry_gate_blocks_contact_outputs_without_active_contact() -> None:
     summary = {
+        **_early_validation_prerequisite_flags(),
         "tooth_patch_region_gate_passed": 1,
         "tooth_patch_ready_for_cropped_gear_patch": 1,
         "cropped_patch_gate_passed": 1,
@@ -482,6 +509,26 @@ def test_full_gear_entry_gate_blocks_contact_outputs_without_active_contact() ->
 
 
 def test_full_gear_patch_prerequisite_summary_loader_feeds_entry_gate(tmp_path: Path) -> None:
+    flat_summary = tmp_path / "flat_punch_region_summary.csv"
+    flat_summary.write_text(
+        "\n".join(
+            [
+                "flat_punch_rf_penetration_gate_passed,flat_punch_ready_for_two_block_sliding",
+                "1,1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    two_block_summary = tmp_path / "two_block_sliding_region_summary.csv"
+    two_block_summary.write_text(
+        "\n".join(
+            [
+                "two_block_sliding_region_gate_passed,two_block_ready_for_cropped_gear_patch",
+                "1,1",
+            ]
+        ),
+        encoding="utf-8",
+    )
     tooth_summary = tmp_path / "tooth_patch_region_summary.csv"
     tooth_summary.write_text(
         "\n".join(
@@ -505,10 +552,12 @@ def test_full_gear_patch_prerequisite_summary_loader_feeds_entry_gate(tmp_path: 
         encoding="utf-8",
     )
 
-    patch_evidence = load_patch_prerequisite_summary([tooth_summary, cropped_summary])
+    patch_evidence = load_patch_prerequisite_summary([flat_summary, two_block_summary, tooth_summary, cropped_summary])
 
-    assert int(patch_evidence["full_gear_patch_prerequisite_summary_count"]) == 2
+    assert int(patch_evidence["full_gear_patch_prerequisite_summary_count"]) == 4
     assert "unrelated_case_metric" not in patch_evidence
+    assert int(patch_evidence["flat_punch_rf_penetration_gate_passed"]) == 1
+    assert int(patch_evidence["two_block_sliding_region_gate_passed"]) == 1
     assert int(patch_evidence["tooth_patch_region_gate_passed"]) == 1
     assert int(patch_evidence["cropped_patch_gate_passed"]) == 1
 
@@ -540,6 +589,7 @@ def test_full_gear_patch_prerequisite_summary_loader_feeds_entry_gate(tmp_path: 
 
 def test_full_gear_entry_gate_reports_short_strict_sync_window() -> None:
     summary = {
+        **_early_validation_prerequisite_flags(),
         "tooth_patch_region_gate_passed": 1,
         "tooth_patch_ready_for_cropped_gear_patch": 1,
         "cropped_patch_gate_passed": 1,
@@ -1002,6 +1052,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                 "source_accepted_tracking_commit_count": 0,
                 "source_constraint_region_tangent_solve_count": 0,
                 "source_constraint_region_tangent_active_rows_sum": 0,
+                **_early_validation_prerequisite_flags(),
                 "tooth_patch_region_gate_passed": 1,
                 "tooth_patch_ready_for_cropped_gear_patch": 1,
                 "cropped_patch_gate_passed": 1,
