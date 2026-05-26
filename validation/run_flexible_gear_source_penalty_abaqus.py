@@ -49,6 +49,9 @@ def run_source_penalty_abaqus(
     frame_stride: int,
     dt: float | None,
     duration: float | None,
+    min_dt: float | None,
+    max_dt: float | None,
+    fixed_increment: bool,
     require_source_timing: bool,
     abaqus_command: str | None,
     include_tensors: bool,
@@ -69,6 +72,9 @@ def run_source_penalty_abaqus(
         frame_stride=frame_stride,
         dt=dt,
         duration=duration,
+        min_dt=min_dt,
+        max_dt=max_dt,
+        fixed_increment=bool(fixed_increment),
         require_source_timing=bool(require_source_timing),
     )
     inp_path = run_dir / f"{job_name}.inp"
@@ -126,6 +132,9 @@ def run_source_penalty_abaqus(
         "poisson": float(model.poisson),
         "dt_override": "" if dt is None else float(dt),
         "duration_override": "" if duration is None else float(duration),
+        "min_dt_override": "" if min_dt is None else float(min_dt),
+        "max_dt_override": "" if max_dt is None else float(max_dt),
+        "fixed_increment": int(bool(fixed_increment)),
         "vtk_frame_stride": int(max(1, int(frame_stride))),
         "abaqus_vtk_export_frame_stride": int(vtk_export_stride),
         "abaqus_vtk_pvd": str(vtk_dir / "abaqus.pvd"),
@@ -166,6 +175,8 @@ def write_source_penalty_summary(path: Path, row: Row) -> None:
         "- Contact: frictionless linear penalty pressure-overclosure in Abaqus/Standard node-to-surface contact.",
         f"- Pressure stiffness: `{float(row['pressure_stiffness']):.6e}`",
         f"- Abaqus output frequency: every `{int(row['vtk_frame_stride'])}` increments",
+        f"- Fixed increment: `{bool(int(row.get('fixed_increment', 0)))}`",
+        f"- Dynamic timing override: initial=`{row.get('dt_override', '')}`, total=`{row.get('duration_override', '')}`, min=`{row.get('min_dt_override', '')}`, max=`{row.get('max_dt_override', '')}`",
         f"- VTK export frame stride: `{int(row.get('abaqus_vtk_export_frame_stride', 1))}`",
         f"- Abaqus analysis wall time: `{float(row['abaqus_analysis_wall_seconds']):.6f} s`",
         f"- Abaqus reported wall time: `{float(row['abaqus_reported_wall_seconds']):.6f} s`",
@@ -200,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--duration", type=float, default=None)
+    parser.add_argument("--min-dt", type=float, default=None)
+    parser.add_argument("--max-dt", type=float, default=None)
+    parser.add_argument(
+        "--adaptive-increment",
+        action="store_true",
+        help="Allow Abaqus automatic cutbacks by writing independent min/max increments.",
+    )
     parser.add_argument(
         "--require-source-timing",
         action="store_true",
@@ -216,6 +234,9 @@ def main(argv: list[str] | None = None) -> int:
         frame_stride=int(args.frame_stride),
         dt=args.dt,
         duration=args.duration,
+        min_dt=args.min_dt,
+        max_dt=args.max_dt,
+        fixed_increment=not bool(args.adaptive_increment),
         require_source_timing=bool(args.require_source_timing),
         abaqus_command=args.abaqus_command,
         include_tensors=not bool(args.scalars_only),

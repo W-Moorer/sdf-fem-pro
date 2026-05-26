@@ -80,6 +80,8 @@ def _replace_dynamic_data(
     *,
     dt: float | None,
     duration: float | None,
+    min_dt: float | None,
+    max_dt: float | None,
     fixed_increment: bool,
 ) -> str:
     values = [value.strip() for value in line.strip().split(",")]
@@ -94,6 +96,15 @@ def _replace_dynamic_data(
             values.append(f"{float(dt):.12e}")
         values[2] = f"{float(dt):.12e}"
         values[3] = f"{float(dt):.12e}"
+    else:
+        if min_dt is not None:
+            while len(values) < 3:
+                values.append("")
+            values[2] = f"{float(min_dt):.12e}"
+        if max_dt is not None:
+            while len(values) < 4:
+                values.append("")
+            values[3] = f"{float(max_dt):.12e}"
     return ",".join(values)
 
 
@@ -143,6 +154,8 @@ def prepare_source_penalty_deck_text(
     frame_stride: int,
     dt: float | None = None,
     duration: float | None = None,
+    min_dt: float | None = None,
+    max_dt: float | None = None,
     contact_pair_penalty_parameter: bool = False,
     fixed_increment: bool = True,
     require_source_timing: bool = False,
@@ -207,7 +220,16 @@ def prepare_source_penalty_deck_text(
                     continue
                 if stripped.startswith("*"):
                     break
-                out.append(_replace_dynamic_data(data_line, dt=dt, duration=duration, fixed_increment=fixed_increment))
+                out.append(
+                    _replace_dynamic_data(
+                        data_line,
+                        dt=dt,
+                        duration=duration,
+                        min_dt=min_dt,
+                        max_dt=max_dt,
+                        fixed_increment=fixed_increment,
+                    )
+                )
                 saw_dynamic_data = True
                 i += 1
                 break
@@ -231,8 +253,11 @@ def write_source_penalty_deck(
     frame_stride: int,
     dt: float | None = None,
     duration: float | None = None,
+    min_dt: float | None = None,
+    max_dt: float | None = None,
     encoding: str = "cp936",
     require_source_timing: bool = False,
+    fixed_increment: bool = True,
 ) -> None:
     """Write a source-derived node-to-surface linear-penalty Abaqus deck."""
 
@@ -243,8 +268,10 @@ def write_source_penalty_deck(
         frame_stride=frame_stride,
         dt=dt,
         duration=duration,
+        min_dt=min_dt,
+        max_dt=max_dt,
         contact_pair_penalty_parameter=False,
-        fixed_increment=True,
+        fixed_increment=bool(fixed_increment),
         require_source_timing=bool(require_source_timing),
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,6 +286,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frame-stride", type=int, default=2)
     parser.add_argument("--dt", type=float, default=None, help="Optional override for the Abaqus *Dynamic initial increment.")
     parser.add_argument("--duration", type=float, default=None, help="Optional override for the Abaqus *Dynamic total time.")
+    parser.add_argument("--min-dt", type=float, default=None, help="Optional override for the Abaqus *Dynamic minimum increment.")
+    parser.add_argument("--max-dt", type=float, default=None, help="Optional override for the Abaqus *Dynamic maximum increment.")
+    parser.add_argument(
+        "--adaptive-increment",
+        action="store_true",
+        help="Do not force min_dt=max_dt=dt; write independent min/max increment controls.",
+    )
     parser.add_argument(
         "--require-source-timing",
         action="store_true",
@@ -272,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
         frame_stride=int(args.frame_stride),
         dt=args.dt,
         duration=args.duration,
+        min_dt=args.min_dt,
+        max_dt=args.max_dt,
+        fixed_increment=not bool(args.adaptive_increment),
         require_source_timing=bool(args.require_source_timing),
     )
     print(args.out)

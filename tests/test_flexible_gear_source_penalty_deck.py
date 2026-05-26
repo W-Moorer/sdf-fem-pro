@@ -849,6 +849,31 @@ def test_prepare_source_penalty_deck_can_preserve_automatic_increment_bounds() -
     assert "1.000000000000e-05,1.000000000000e-04,1e-10,5e-05" in text
 
 
+def test_prepare_source_penalty_deck_can_override_adaptive_increment_bounds() -> None:
+    source = "\n".join(
+        [
+            "*Surface Behavior, pressure-overclosure=HARD",
+            "*Contact Pair, interaction=IntProp-1, type=SURFACE TO SURFACE",
+            "S2, S1",
+            "*Dynamic",
+            "1e-05,0.05,1e-10,5e-05",
+        ]
+    )
+
+    text = prepare_source_penalty_deck_text(
+        source,
+        pressure_stiffness=5.0e9,
+        frame_stride=5,
+        dt=2.5e-6,
+        duration=1.0e-4,
+        min_dt=1.0e-12,
+        max_dt=2.5e-6,
+        fixed_increment=False,
+    )
+
+    assert "2.500000000000e-06,1.000000000000e-04,1.000000000000e-12,2.500000000000e-06" in text
+
+
 def test_prepare_source_penalty_deck_can_require_source_timing() -> None:
     source = "\n".join(
         [
