@@ -35,6 +35,9 @@ CONTACT_TOTAL_PATH_COLUMNS: tuple[str, ...] = (
     "contact_path_cache_hit_fraction",
     "contact_path_cache_match_fraction",
     "contact_master_face_switch_fraction",
+    "contact_master_face_topological_continuity_fraction",
+    "contact_master_face_invalid_jump_fraction",
+    "contact_master_barycentric_drift_max",
 )
 
 

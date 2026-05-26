@@ -108,6 +108,8 @@ def test_two_block_gate_requires_flat_punch_and_region_law() -> None:
         "path_tracking_min_cache_hit_threshold": 0.999,
         "contact_path_cache_match_fraction": 1.0,
         "contact_master_face_switch_fraction": 0.0,
+        "contact_master_face_topological_continuity_fraction": 1.0,
+        "contact_master_face_invalid_jump_fraction": 0.0,
         "contact_active_region_jaccard": 1.0,
         "contact_active_region_persistence_fraction": 1.0,
         "contact_master_barycentric_drift_max": 0.0,

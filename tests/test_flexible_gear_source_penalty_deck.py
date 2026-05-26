@@ -266,6 +266,8 @@ def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
             "contact_path_cache_hit_fraction": 0.0,
             "contact_path_cache_match_fraction": 0.0,
             "contact_master_face_switch_fraction": 0.0,
+            "contact_master_face_topological_continuity_fraction": 1.0,
+            "contact_master_face_invalid_jump_fraction": 0.0,
             "contact_active_region_jaccard": 0.0,
             "contact_active_region_persistence_fraction": 0.0,
             "contact_master_barycentric_drift_max": 0.0,
@@ -277,6 +279,8 @@ def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
             "contact_path_cache_hit_fraction": 1.0,
             "contact_path_cache_match_fraction": 0.5,
             "contact_master_face_switch_fraction": 0.25,
+            "contact_master_face_topological_continuity_fraction": 1.0,
+            "contact_master_face_invalid_jump_fraction": 0.0,
             "contact_active_region_jaccard": 0.75,
             "contact_active_region_persistence_fraction": 1.0,
             "contact_master_barycentric_drift_max": 0.1,
@@ -291,11 +295,15 @@ def test_path_tracking_gate_requires_accepted_state_continuity() -> None:
     random_jump = [dict(row) for row in history]
     random_jump[1]["contact_path_cache_hit_fraction"] = 0.25
     random_jump[1]["contact_master_face_switch_fraction"] = 1.0
+    random_jump[1]["contact_master_face_topological_continuity_fraction"] = 0.0
+    random_jump[1]["contact_master_face_invalid_jump_fraction"] = 1.0
     failed = path_tracking_gate_metrics(random_jump, min_cache_match_fraction=0.25)
 
     assert int(failed["path_tracking_gate_passed"]) == 0
     assert int(failed["path_tracking_cache_hit_gate_passed"]) == 0
     assert int(failed["path_tracking_face_switch_gate_passed"]) == 0
+    assert int(failed["path_tracking_topological_continuity_gate_passed"]) == 0
+    assert int(failed["path_tracking_invalid_jump_gate_passed"]) == 0
 
     single_active = [dict(history[0])]
     unobservable = path_tracking_gate_metrics(single_active, min_cache_match_fraction=0.25)

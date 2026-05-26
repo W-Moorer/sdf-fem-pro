@@ -90,6 +90,10 @@ CONTACT_TOTAL_PRIORITY_COLUMNS: tuple[str, ...] = (
     "contact_path_cache_hit_fraction",
     "contact_path_cache_match_fraction",
     "contact_master_face_switch_fraction",
+    "contact_master_face_topological_continuity_count",
+    "contact_master_face_topological_continuity_fraction",
+    "contact_master_face_invalid_jump_count",
+    "contact_master_face_invalid_jump_fraction",
     "contact_master_barycentric_drift_mean",
     "contact_master_barycentric_drift_max",
     "contact_active_region_continuity_previous_count",
@@ -764,7 +768,9 @@ def path_tracking_gate_metrics(
     min_cache_match_fraction: float = 0.0,
     min_active_region_jaccard: float = 0.25,
     min_active_region_persistence: float = 0.25,
+    min_topological_continuity_fraction: float = 0.95,
     max_master_face_switch_fraction: float = 0.85,
+    max_master_face_invalid_jump_fraction: float = 0.0,
     max_master_barycentric_drift: float = 1.50,
 ) -> Row:
     """Gate accepted-state master-payload path tracking before cloud checks.
@@ -791,6 +797,8 @@ def path_tracking_gate_metrics(
         "contact_path_cache_hit_fraction",
         "contact_path_cache_match_fraction",
         "contact_master_face_switch_fraction",
+        "contact_master_face_topological_continuity_fraction",
+        "contact_master_face_invalid_jump_fraction",
         "contact_active_region_jaccard",
         "contact_active_region_persistence_fraction",
         "contact_master_barycentric_drift_max",
@@ -801,6 +809,10 @@ def path_tracking_gate_metrics(
         cache_hit_min = min(float(row["contact_path_cache_hit_fraction"]) for row in tracking_rows)
         cache_match_min = min(float(row["contact_path_cache_match_fraction"]) for row in tracking_rows)
         face_switch_max = max(float(row["contact_master_face_switch_fraction"]) for row in tracking_rows)
+        topological_continuity_min = min(
+            float(row["contact_master_face_topological_continuity_fraction"]) for row in tracking_rows
+        )
+        invalid_jump_max = max(float(row["contact_master_face_invalid_jump_fraction"]) for row in tracking_rows)
         active_jaccard_min = min(float(row["contact_active_region_jaccard"]) for row in tracking_rows)
         active_persistence_min = min(float(row["contact_active_region_persistence_fraction"]) for row in tracking_rows)
         barycentric_drift_max = max(float(row["contact_master_barycentric_drift_max"]) for row in tracking_rows)
@@ -808,12 +820,16 @@ def path_tracking_gate_metrics(
         cache_hit_min = 1.0 if not active_contact_present else 0.0
         cache_match_min = 1.0 if not active_contact_present else 0.0
         face_switch_max = 0.0
+        topological_continuity_min = 1.0 if not active_contact_present else 0.0
+        invalid_jump_max = 0.0
         active_jaccard_min = 1.0 if not active_contact_present else 0.0
         active_persistence_min = 1.0 if not active_contact_present else 0.0
         barycentric_drift_max = 0.0
     cache_hit_ok = cache_hit_min >= float(min_cache_hit_fraction)
     cache_match_ok = cache_match_min >= float(min_cache_match_fraction)
     face_switch_ok = face_switch_max <= float(max_master_face_switch_fraction)
+    topological_ok = topological_continuity_min >= float(min_topological_continuity_fraction)
+    invalid_jump_ok = invalid_jump_max <= float(max_master_face_invalid_jump_fraction)
     active_jaccard_ok = active_jaccard_min >= float(min_active_region_jaccard)
     active_persistence_ok = active_persistence_min >= float(min_active_region_persistence)
     barycentric_ok = barycentric_drift_max <= float(max_master_barycentric_drift)
@@ -827,6 +843,8 @@ def path_tracking_gate_metrics(
             and cache_hit_ok
             and cache_match_ok
             and face_switch_ok
+            and topological_ok
+            and invalid_jump_ok
             and active_jaccard_ok
             and active_persistence_ok
             and barycentric_ok
@@ -841,12 +859,18 @@ def path_tracking_gate_metrics(
         "path_tracking_cache_hit_gate_passed": int(cache_hit_ok),
         "path_tracking_cache_match_gate_passed": int(cache_match_ok),
         "path_tracking_face_switch_gate_passed": int(face_switch_ok),
+        "path_tracking_topological_continuity_gate_passed": int(topological_ok),
+        "path_tracking_invalid_jump_gate_passed": int(invalid_jump_ok),
         "path_tracking_active_region_jaccard_gate_passed": int(active_jaccard_ok),
         "path_tracking_active_region_persistence_gate_passed": int(active_persistence_ok),
         "path_tracking_barycentric_drift_gate_passed": int(barycentric_ok),
         "path_tracking_cache_hit_fraction_min_after_first_active": float(cache_hit_min),
         "path_tracking_cache_match_fraction_min_after_first_active": float(cache_match_min),
         "path_tracking_master_face_switch_fraction_max_after_first_active": float(face_switch_max),
+        "path_tracking_master_face_topological_continuity_min_after_first_active": float(
+            topological_continuity_min
+        ),
+        "path_tracking_master_face_invalid_jump_fraction_max_after_first_active": float(invalid_jump_max),
         "path_tracking_active_region_jaccard_min_after_first_active": float(active_jaccard_min),
         "path_tracking_active_region_persistence_min_after_first_active": float(active_persistence_min),
         "path_tracking_master_barycentric_drift_max_after_first_active": float(barycentric_drift_max),
@@ -854,7 +878,9 @@ def path_tracking_gate_metrics(
         "path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
         "path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
         "path_tracking_min_active_region_persistence_threshold": float(min_active_region_persistence),
+        "path_tracking_min_topological_continuity_threshold": float(min_topological_continuity_fraction),
         "path_tracking_max_master_face_switch_threshold": float(max_master_face_switch_fraction),
+        "path_tracking_max_master_face_invalid_jump_threshold": float(max_master_face_invalid_jump_fraction),
         "path_tracking_max_master_barycentric_drift_threshold": float(max_master_barycentric_drift),
     }
 
