@@ -42,8 +42,8 @@ def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
         "sfc_duration": 2.0e-5,
     }
     history = [
-        {"time": 1.0e-5, "source_increment_accepted": 1},
-        {"time": 2.0e-5, "source_increment_accepted": 1},
+        {"time": 1.0e-5, "source_increment_accepted": 1, "source_accepted_contact_response_reused": 1},
+        {"time": 2.0e-5, "source_increment_accepted": 1, "source_accepted_contact_response_reused": 0},
     ]
 
     gate = source_convergence_gate_metrics(summary, history)
@@ -957,6 +957,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                     "source_line_search_unstable_count": 0,
                     "source_line_search_last_alpha": 1.0,
                     "source_accepted_tracking_committed": 0,
+                    "source_accepted_contact_response_reused": 1,
                 }
             ],
             {

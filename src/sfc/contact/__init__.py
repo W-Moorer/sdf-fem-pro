@@ -48,6 +48,7 @@ from .hard_contact import (
 )
 from .tracking_state import (
     accepted_contact_response_can_reuse,
+    accepted_contact_response_coverage_gate_metrics,
     commit_accepted_contact_tracking_from_sample_arrays,
     restore_contact_tracking_state,
     run_contact_tracking_trial,
@@ -112,6 +113,7 @@ __all__ = [
     "UniformTriangleAABBHash",
     "active_constraint_region_tangent_data_from_arrays",
     "accepted_contact_response_can_reuse",
+    "accepted_contact_response_coverage_gate_metrics",
     "assemble_contact_jacobian",
     "assemble_field_contact_jacobian",
     "aggregate_contact_sample_arrays",

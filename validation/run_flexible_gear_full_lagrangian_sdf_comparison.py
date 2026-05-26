@@ -30,6 +30,9 @@ if str(ROOT) not in sys.path:
 from sfc.contact.validation_gates import (  # noqa: E402
     contact_total_priority_gate_metrics as _core_contact_total_priority_gate_metrics,
 )
+from sfc.contact.tracking_state import (  # noqa: E402
+    accepted_contact_response_coverage_gate_metrics as _core_accepted_contact_response_coverage_gate_metrics,
+)
 from sfc.fem.increment_control import (  # noqa: E402
     increment_trial_ledger_gate_metrics as _core_increment_trial_ledger_gate_metrics,
 )
@@ -338,6 +341,8 @@ def source_convergence_gate_metrics(
     reuse_count = _row_int_flag(summary, "source_accepted_contact_response_reuse_count", default=0)
     requery_count = _row_int_flag(summary, "source_accepted_contact_response_requery_count", default=0)
     response_count = reuse_count + requery_count
+    response_gate = _core_accepted_contact_response_coverage_gate_metrics(summary, history_rows, prefix="source")
+    response_gate_passed = _row_int_flag(response_gate, "source_accepted_contact_response_gate_passed", default=0)
     tangent_solve_count = _row_int_flag(summary, "source_constraint_region_tangent_solve_count", default=0)
     tangent_active_rows = _row_int_flag(summary, "source_constraint_region_tangent_active_rows_sum", default=0)
     final_active_samples = _row_int_flag(summary, "final_active_contact_samples", default=0)
@@ -364,17 +369,20 @@ def source_convergence_gate_metrics(
         and bool(accepted_count_matches_expected)
         and bool(converged_count_matches_accepted)
         and bool(response_count_matches_accepted)
+        and bool(response_gate_passed)
         and bool(tangent_used_when_required)
         and bool(final_time_matches)
         and bool(no_bad_accepted_state)
     )
     return {
+        **response_gate,
         "source_convergence_gate_passed": gate_passed,
         "comparison_stage": "source_convergence_before_nodal_cpress",
         "source_convergence_history_all_accepted": int(history_all_accepted),
         "source_convergence_accepted_count_matches_expected": int(accepted_count_matches_expected),
         "source_convergence_converged_count_matches_accepted": int(converged_count_matches_accepted),
         "source_convergence_response_count_matches_accepted": int(response_count_matches_accepted),
+        "source_convergence_accepted_contact_response_gate_passed": int(response_gate_passed),
         "source_convergence_tangent_used_when_required": int(tangent_used_when_required),
         "source_convergence_final_time_matches_duration": int(final_time_matches),
         "source_convergence_no_unstable_or_unconverged_accepted": int(no_bad_accepted_state),

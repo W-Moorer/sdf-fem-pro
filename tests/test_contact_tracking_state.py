@@ -6,6 +6,7 @@ import numpy as np
 
 from sfc.contact.tracking_state import (
     accepted_contact_response_can_reuse,
+    accepted_contact_response_coverage_gate_metrics,
     commit_accepted_contact_tracking_from_sample_arrays,
     restore_contact_tracking_state,
     run_contact_tracking_trial,
@@ -121,3 +122,34 @@ def test_accepted_response_reuse_requires_converged_final_trial_arrays() -> None
     assert accepted_contact_response_can_reuse(converged=True, sample_arrays_present=True)
     assert not accepted_contact_response_can_reuse(converged=False, sample_arrays_present=True)
     assert not accepted_contact_response_can_reuse(converged=True, sample_arrays_present=False)
+
+
+def test_accepted_response_coverage_gate_requires_count_and_history_provenance() -> None:
+    summary = {
+        "source_accepted_increment_count": 2,
+        "source_accepted_contact_response_reuse_count": 1,
+        "source_accepted_contact_response_requery_count": 1,
+    }
+    history = [
+        {"source_increment_accepted": 1, "source_accepted_contact_response_reused": 1},
+        {"source_increment_accepted": 1, "source_accepted_contact_response_reused": 0},
+    ]
+
+    gate = accepted_contact_response_coverage_gate_metrics(summary, history, prefix="source")
+
+    assert int(gate["source_accepted_contact_response_gate_passed"]) == 1
+    assert int(gate["source_accepted_contact_response_count_matches_accepted"]) == 1
+    assert int(gate["source_accepted_contact_response_history_reuse_flag_present"]) == 1
+
+    missing_count = dict(summary)
+    missing_count["source_accepted_contact_response_requery_count"] = 0
+    failed_count = accepted_contact_response_coverage_gate_metrics(missing_count, history, prefix="source")
+
+    assert int(failed_count["source_accepted_contact_response_gate_passed"]) == 0
+    assert int(failed_count["source_accepted_contact_response_count_matches_accepted"]) == 0
+
+    missing_row_flag = [dict(history[0]), {"source_increment_accepted": 1}]
+    failed_row = accepted_contact_response_coverage_gate_metrics(summary, missing_row_flag, prefix="source")
+
+    assert int(failed_row["source_accepted_contact_response_gate_passed"]) == 0
+    assert int(failed_row["source_accepted_contact_response_history_reuse_flag_present"]) == 0

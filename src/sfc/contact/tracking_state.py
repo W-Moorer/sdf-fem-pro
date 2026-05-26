@@ -130,6 +130,55 @@ def accepted_contact_response_can_reuse(*, converged: bool, sample_arrays_presen
     return bool(converged and sample_arrays_present)
 
 
+def accepted_contact_response_coverage_gate_metrics(
+    summary: Mapping[str, Any],
+    history_rows: Sequence[Mapping[str, Any]],
+    *,
+    prefix: str = "source",
+) -> dict[str, Any]:
+    """Gate accepted increments against accepted-state response provenance.
+
+    Every accepted increment must be covered by either a final-trial response
+    reuse or an accepted-state requery.  History rows may be frame-strided, but
+    each emitted accepted row must still expose a binary reuse flag so outputs
+    cannot silently come from an unproven trial response.
+    """
+
+    label = str(prefix).strip("_")
+    accepted_count = _mapping_int_flag(summary, f"{label}_accepted_increment_count", default=len(history_rows))
+    reuse_count = _mapping_int_flag(summary, f"{label}_accepted_contact_response_reuse_count", default=0)
+    requery_count = _mapping_int_flag(summary, f"{label}_accepted_contact_response_requery_count", default=0)
+    total_count = int(reuse_count + requery_count)
+    reuse_key = f"{label}_accepted_contact_response_reused"
+    accepted_key = f"{label}_increment_accepted"
+    accepted_rows = [row for row in history_rows if _mapping_int_flag(row, accepted_key, default=1) == 1]
+    history_reuse_flag_present = all(reuse_key in row for row in accepted_rows)
+    history_reuse_flag_binary = all(_mapping_int_flag(row, reuse_key, default=-1) in (0, 1) for row in accepted_rows)
+    count_matches_accepted = total_count == int(accepted_count) or (total_count == 0 and int(accepted_count) == 0)
+    nonzero_when_accepted = int(accepted_count) == 0 or total_count > 0
+    history_row_count_ok = len(accepted_rows) <= int(accepted_count)
+    gate_passed = int(
+        bool(count_matches_accepted)
+        and bool(nonzero_when_accepted)
+        and bool(history_row_count_ok)
+        and bool(history_reuse_flag_present)
+        and bool(history_reuse_flag_binary)
+    )
+    return {
+        f"{label}_accepted_contact_response_gate_passed": int(gate_passed),
+        f"{label}_accepted_contact_response_count_matches_accepted": int(count_matches_accepted),
+        f"{label}_accepted_contact_response_nonzero_when_accepted": int(nonzero_when_accepted),
+        f"{label}_accepted_contact_response_history_reuse_flag_present": int(history_reuse_flag_present),
+        f"{label}_accepted_contact_response_history_reuse_flag_binary": int(history_reuse_flag_binary),
+        f"{label}_accepted_contact_response_history_row_count_ok": int(history_row_count_ok),
+        f"{label}_accepted_contact_response_accepted_increment_count": int(accepted_count),
+        f"{label}_accepted_contact_response_reuse_count": int(reuse_count),
+        f"{label}_accepted_contact_response_requery_count": int(requery_count),
+        f"{label}_accepted_contact_response_total_count": int(total_count),
+        f"{label}_accepted_contact_response_history_accepted_row_count": int(len(accepted_rows)),
+    }
+
+
 def _commit_one_geometry_tracking(geometry: Any, sample_arrays: Mapping[str, np.ndarray]) -> int:
     commit = getattr(geometry, "commit_secondary_tracking_from_sample_arrays", None)
     if not callable(commit):
@@ -180,3 +229,10 @@ def _restore_optional_array_dict_attribute(obj: Any, name: str, value: Any) -> N
         if value is None:
             return
         raise
+
+
+def _mapping_int_flag(row: Mapping[str, Any], key: str, *, default: int = 0) -> int:
+    try:
+        return int(row.get(key, default))
+    except (TypeError, ValueError):
+        return int(default)
