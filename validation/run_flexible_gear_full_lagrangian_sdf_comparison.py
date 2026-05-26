@@ -51,6 +51,8 @@ from validation.run_flexible_gear_implicit_lagrangian_sdf_comparison import (  #
 
 Row = dict[str, Any]
 DEFAULT_OUT_DIR = ROOT / "results" / "flexible_gear_full_lagrangian_sdf"
+FULL_GEAR_0P003_STAGE_SECONDS = 3.0e-3
+FULL_GEAR_0P05_STAGE_SECONDS = 5.0e-2
 
 PATCH_PREREQUISITE_GATE_KEYS: tuple[str, ...] = (
     "tooth_patch_region_gate_passed",
@@ -971,6 +973,114 @@ def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 1
     }
 
 
+def full_gear_duration_ladder_gate_metrics(
+    summary: Row,
+    *,
+    min_strict_sync_steps: int = 10,
+    short_window_seconds: float = FULL_GEAR_0P003_STAGE_SECONDS,
+    long_window_seconds: float = FULL_GEAR_0P05_STAGE_SECONDS,
+    tolerance: float = 1.0e-12,
+) -> Row:
+    """Gate the full-gear validation sequence by accepted synchronized time.
+
+    The full-gear runner is used for a staged evidence ladder: ten accepted
+    synchronized increments, then 0.003 s, then 0.05 s, and only then the full
+    source-deck duration.  This gate prevents short diagnostic windows from
+    being reused as evidence for longer dynamic comparisons.
+    """
+
+    duration = _finite_row_float(summary, "sfc_duration")
+    source_final_time = _finite_row_float(summary, "source_final_time")
+    source_target_duration = _finite_row_float(summary, "source_dynamic_duration")
+    accepted_count = _row_int_flag(summary, "source_accepted_increment_count", default=0)
+    expected_count = _row_int_flag(summary, "sfc_increment_count", default=accepted_count)
+    count_matches_expected = int(expected_count <= 0 or accepted_count == expected_count)
+    strict_count_met = int(accepted_count >= int(min_strict_sync_steps))
+    entry_ready = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
+    contact_window_ready = _row_int_flag(summary, "full_gear_entry_contact_window_gate_passed", default=0)
+    strict_sync_ready = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
+    final_time_matches_duration = _row_int_flag(summary, "source_convergence_final_time_matches_duration", default=0)
+
+    if duration is None and source_final_time is None:
+        accepted_time = 0.0
+        time_available = 0
+    elif duration is None:
+        accepted_time = float(source_final_time)
+        time_available = 1
+    elif source_final_time is None:
+        accepted_time = float(duration)
+        time_available = 1
+    else:
+        accepted_time = min(float(duration), float(source_final_time))
+        time_available = 1
+
+    tol_short = max(float(tolerance), abs(float(short_window_seconds)) * 1.0e-9)
+    tol_long = max(float(tolerance), abs(float(long_window_seconds)) * 1.0e-9)
+    reaches_short = int(bool(time_available) and accepted_time + tol_short >= float(short_window_seconds))
+    reaches_long = int(bool(time_available) and accepted_time + tol_long >= float(long_window_seconds))
+    full_target_present = int(source_target_duration is not None and float(source_target_duration) > 0.0)
+    if bool(full_target_present):
+        tol_full = max(float(tolerance), abs(float(source_target_duration)) * 1.0e-9)
+        full_duration_reached = int(accepted_time + tol_full >= float(source_target_duration))
+        requested_full_duration = int(
+            duration is not None and abs(float(duration) - float(source_target_duration)) <= tol_full
+        )
+    else:
+        tol_full = float(tolerance)
+        full_duration_reached = 0
+        requested_full_duration = 0
+
+    strict_10_step_passed = int(
+        bool(entry_ready)
+        and bool(contact_window_ready)
+        and bool(strict_sync_ready)
+        and bool(strict_count_met)
+        and bool(count_matches_expected)
+        and bool(final_time_matches_duration)
+    )
+    short_window_passed = int(bool(strict_10_step_passed) and bool(reaches_short))
+    long_window_passed = int(bool(short_window_passed) and bool(reaches_long))
+    full_duration_passed = int(
+        bool(long_window_passed)
+        and bool(full_target_present)
+        and bool(requested_full_duration)
+        and bool(full_duration_reached)
+    )
+
+    return {
+        "full_gear_duration_ladder_gate_passed": int(full_duration_passed),
+        "full_gear_duration_stage": "strict10_to_0p003_to_0p05_to_full_duration",
+        "full_gear_duration_10_step_strict_sync_passed": int(strict_10_step_passed),
+        "full_gear_duration_0p003_passed": int(short_window_passed),
+        "full_gear_duration_0p05_passed": int(long_window_passed),
+        "full_gear_duration_full_run_passed": int(full_duration_passed),
+        "full_gear_duration_entry_gate_passed": int(entry_ready),
+        "full_gear_duration_contact_window_gate_passed": int(contact_window_ready),
+        "full_gear_duration_strict_sync_gate_passed": int(strict_sync_ready),
+        "full_gear_duration_final_time_matches_duration": int(final_time_matches_duration),
+        "full_gear_duration_count_matches_expected": int(count_matches_expected),
+        "full_gear_duration_strict_count_met": int(strict_count_met),
+        "full_gear_duration_time_available": int(time_available),
+        "full_gear_duration_reaches_0p003": int(reaches_short),
+        "full_gear_duration_reaches_0p05": int(reaches_long),
+        "full_gear_duration_full_target_present": int(full_target_present),
+        "full_gear_duration_requested_full_duration": int(requested_full_duration),
+        "full_gear_duration_reaches_full_target": int(full_duration_reached),
+        "full_gear_duration_accepted_time": float(accepted_time),
+        "full_gear_duration_sfc_duration": 0.0 if duration is None else float(duration),
+        "full_gear_duration_source_final_time": 0.0 if source_final_time is None else float(source_final_time),
+        "full_gear_duration_source_target_duration": (
+            0.0 if source_target_duration is None else float(source_target_duration)
+        ),
+        "full_gear_duration_min_strict_sync_steps": int(min_strict_sync_steps),
+        "full_gear_duration_accepted_increment_count": int(accepted_count),
+        "full_gear_duration_expected_increment_count": int(expected_count),
+        "full_gear_duration_short_window_seconds": float(short_window_seconds),
+        "full_gear_duration_long_window_seconds": float(long_window_seconds),
+        "full_gear_duration_tolerance": float(tolerance),
+    }
+
+
 def _artifact_present(summary: Row, key: str) -> int:
     value = summary.get(key)
     return int(value not in ("", None))
@@ -995,6 +1105,11 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     entry_ok = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
     contact_window_ok = _row_int_flag(summary, "full_gear_entry_contact_window_gate_passed", default=0)
     strict_ok = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
+    strict10_ok = _row_int_flag(summary, "full_gear_duration_10_step_strict_sync_passed", default=strict_ok)
+    window_0p003_ok = _row_int_flag(summary, "full_gear_duration_0p003_passed", default=0)
+    window_0p05_ok = _row_int_flag(summary, "full_gear_duration_0p05_passed", default=0)
+    full_duration_ok = _row_int_flag(summary, "full_gear_duration_full_run_passed", default=0)
+    sfc_history_present = _artifact_present(summary, "sfc_history")
     sfc_manifest_present = _artifact_present(summary, "sfc_vtk_manifest")
     abaqus_manifest_present = _artifact_present(summary, "abaqus_vtk_manifest")
     animation_metrics_present = _artifact_present(summary, "animation_metric_errors")
@@ -1023,9 +1138,13 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
         and bool(abaqus_manifest_present)
         and bool(animation_metrics_present)
     )
+    strict10_allowed = int(bool(strict10_ok) and bool(sfc_history_present))
     history_allowed = int(
-        bool(strict_ok) and bool(contact_window_ok) and bool(abaqus_manifest_present) and bool(history_metrics_present)
+        bool(strict10_allowed) and bool(contact_window_ok) and bool(abaqus_manifest_present) and bool(history_metrics_present)
     )
+    stage_0p003_allowed = int(bool(window_0p003_ok) and bool(history_metrics_present))
+    stage_0p05_allowed = int(bool(window_0p05_ok) and bool(history_metrics_present))
+    full_duration_allowed = int(bool(full_duration_ok) and bool(history_metrics_present))
 
     def row(
         stage: str,
@@ -1054,6 +1173,11 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "patch_ladder_gate_passed": int(patch_ladder_ok),
             "full_gear_entry_gate_passed": int(entry_ok),
             "full_gear_strict_sync_ready": int(strict_ok),
+            "full_gear_10_step_strict_sync_passed": int(strict10_ok),
+            "full_gear_0p003_passed": int(window_0p003_ok),
+            "full_gear_0p05_passed": int(window_0p05_ok),
+            "full_gear_full_duration_passed": int(full_duration_ok),
+            "sfc_history_present": int(sfc_history_present),
         }
 
     rows: list[Row] = []
@@ -1082,6 +1206,42 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             required_before="stress_strain_clouds",
             artifact_key="history_metric_errors",
             blocking_reason="strict_sync_or_history_manifest_missing",
+        )
+    )
+    rows.append(
+        row(
+            "full_gear_10_step_strict_sync",
+            allowed=strict10_allowed,
+            required_before="full_gear_0p003_window",
+            artifact_key="sfc_history",
+            blocking_reason="strict_sync_entry_gate_or_sfc_history_missing",
+        )
+    )
+    rows.append(
+        row(
+            "full_gear_0p003_window",
+            allowed=stage_0p003_allowed,
+            required_before="full_gear_0p05_window",
+            artifact_key="history_metric_errors",
+            blocking_reason="0p003_duration_gate_or_history_metrics_missing",
+        )
+    )
+    rows.append(
+        row(
+            "full_gear_0p05_window",
+            allowed=stage_0p05_allowed,
+            required_before="full_gear_full_duration",
+            artifact_key="history_metric_errors",
+            blocking_reason="0p05_duration_gate_or_history_metrics_missing",
+        )
+    )
+    rows.append(
+        row(
+            "full_gear_full_duration",
+            allowed=full_duration_allowed,
+            required_before="solver_timing_claim",
+            artifact_key="history_metric_errors",
+            blocking_reason="full_duration_gate_or_history_metrics_missing",
         )
     )
     rows.append(
@@ -1746,6 +1906,11 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- full-gear entry gate: {summary.get('full_gear_entry_gate_passed', '')}",
         "- full-gear strict-sync ready: "
         f"{summary.get('full_gear_entry_ready_for_strict_sync_window', '')}",
+        "- full-gear duration ladder: "
+        f"10-step={summary.get('full_gear_duration_10_step_strict_sync_passed', '')}, "
+        f"0.003s={summary.get('full_gear_duration_0p003_passed', '')}, "
+        f"0.05s={summary.get('full_gear_duration_0p05_passed', '')}, "
+        f"full={summary.get('full_gear_duration_full_run_passed', '')}",
         f"- full-gear evidence manifest: {summary.get('full_gear_evidence_ladder', '')}",
         f"- source contact footprint clipping: {summary.get('source_contact_footprint_clipping', '')}",
         f"- source internal kinematics: {summary.get('source_internal_kinematics', '')}",
@@ -2111,6 +2276,7 @@ def run_full_gear(
         summary["gear2_torque_z"] = float(model.gear2_torque_z)
     history_path = out_dir / "sfc_full_gear_lagrangian_sdf_history.csv"
     _write_csv(history_path, history)
+    summary["sfc_history"] = str(history_path)
     source_increment_trial_rows = summary.pop("_source_increment_trial_rows", None)
     if isinstance(source_increment_trial_rows, list):
         trial_path = out_dir / "sfc_source_increment_trials.csv"
@@ -2162,6 +2328,11 @@ def run_full_gear(
     _write_csv(full_gear_entry_gate_path, [full_gear_entry_gate])
     summary.update(full_gear_entry_gate)
     summary["full_gear_entry_gate"] = str(full_gear_entry_gate_path)
+    full_gear_duration_ladder_gate = full_gear_duration_ladder_gate_metrics(summary)
+    full_gear_duration_ladder_gate_path = out_dir / "sfc_full_gear_duration_ladder_gate.csv"
+    _write_csv(full_gear_duration_ladder_gate_path, [full_gear_duration_ladder_gate])
+    summary.update(full_gear_duration_ladder_gate)
+    summary["full_gear_duration_ladder_gate"] = str(full_gear_duration_ladder_gate_path)
     deck_path = out_dir / "abaqus_full_gear_alignment.inp"
     _write_abaqus_alignment_deck(
         deck_path,

@@ -12,6 +12,7 @@ from validation.run_flexible_gear_source_penalty_abaqus import write_source_pena
 from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     constraint_region_contact_law_gate_metrics,
     constraint_region_tangent_gate_metrics,
+    full_gear_duration_ladder_gate_metrics,
     full_gear_evidence_ladder_rows,
     full_gear_entry_gate_metrics,
     load_patch_prerequisite_summary,
@@ -574,6 +575,7 @@ def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
         "full_gear_entry_gate_passed": 1,
         "full_gear_entry_contact_window_gate_passed": 1,
         "full_gear_entry_ready_for_strict_sync_window": 1,
+        "sfc_history": "sfc_full_gear_lagrangian_sdf_history.csv",
         "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
         "sfc_vtk_manifest": "sfc_manifest.csv",
         "abaqus_vtk_manifest": "abaqus_manifest.csv",
@@ -587,6 +589,80 @@ def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
     assert int(rows["history_vs_abaqus_manifest_totals"]["paper_evidence_allowed"]) == 1
     assert int(rows["nodal_cpress_copen"]["paper_evidence_allowed"]) == 1
     assert int(rows["stress_strain_clouds"]["paper_evidence_allowed"]) == 1
+
+
+def test_full_gear_duration_ladder_requires_ordered_windows() -> None:
+    summary = {
+        "full_gear_entry_gate_passed": 1,
+        "full_gear_entry_contact_window_gate_passed": 1,
+        "full_gear_entry_ready_for_strict_sync_window": 1,
+        "source_convergence_final_time_matches_duration": 1,
+        "source_accepted_increment_count": 12,
+        "sfc_increment_count": 12,
+        "sfc_duration": 0.003,
+        "source_final_time": 0.003,
+        "source_dynamic_duration": 0.05,
+    }
+
+    gate = full_gear_duration_ladder_gate_metrics(summary)
+
+    assert int(gate["full_gear_duration_10_step_strict_sync_passed"]) == 1
+    assert int(gate["full_gear_duration_0p003_passed"]) == 1
+    assert int(gate["full_gear_duration_0p05_passed"]) == 0
+    assert int(gate["full_gear_duration_full_run_passed"]) == 0
+
+    full_window = dict(summary)
+    full_window.update(
+        {
+            "source_accepted_increment_count": 200,
+            "sfc_increment_count": 200,
+            "sfc_duration": 0.05,
+            "source_final_time": 0.05,
+        }
+    )
+    full_gate = full_gear_duration_ladder_gate_metrics(full_window)
+
+    assert int(full_gate["full_gear_duration_0p05_passed"]) == 1
+    assert int(full_gate["full_gear_duration_full_run_passed"]) == 1
+
+    mismatched = dict(full_window)
+    mismatched["source_accepted_increment_count"] = 199
+    mismatch_gate = full_gear_duration_ladder_gate_metrics(mismatched)
+
+    assert int(mismatch_gate["full_gear_duration_10_step_strict_sync_passed"]) == 0
+    assert int(mismatch_gate["full_gear_duration_count_matches_expected"]) == 0
+
+
+def test_full_gear_evidence_ladder_separates_duration_windows() -> None:
+    summary = {
+        "full_gear_entry_patch_ladder_gate_passed": 1,
+        "source_convergence_gate_passed": 1,
+        "source_active_set_line_search_gate_passed": 1,
+        "constraint_region_contact_law_gate_passed": 1,
+        "constraint_region_tangent_gate_passed": 1,
+        "path_tracking_gate_passed": 1,
+        "contact_total_gate_passed": 1,
+        "full_gear_entry_gate_passed": 1,
+        "full_gear_entry_contact_window_gate_passed": 1,
+        "full_gear_entry_ready_for_strict_sync_window": 1,
+        "full_gear_duration_10_step_strict_sync_passed": 1,
+        "full_gear_duration_0p003_passed": 1,
+        "full_gear_duration_0p05_passed": 0,
+        "full_gear_duration_full_run_passed": 0,
+        "sfc_history": "sfc_full_gear_lagrangian_sdf_history.csv",
+        "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
+        "sfc_vtk_manifest": "sfc_manifest.csv",
+        "abaqus_vtk_manifest": "abaqus_manifest.csv",
+        "animation_metric_errors": "sfc_vs_abaqus_vtk_metric_errors.csv",
+        "history_metric_errors": "sfc_vs_abaqus_history_metric_errors.csv",
+    }
+
+    rows = {row["evidence_stage"]: row for row in full_gear_evidence_ladder_rows(summary)}
+
+    assert int(rows["full_gear_10_step_strict_sync"]["paper_evidence_allowed"]) == 1
+    assert int(rows["full_gear_0p003_window"]["paper_evidence_allowed"]) == 1
+    assert int(rows["full_gear_0p05_window"]["paper_evidence_allowed"]) == 0
+    assert int(rows["full_gear_full_duration"]["paper_evidence_allowed"]) == 0
 
 
 def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:
