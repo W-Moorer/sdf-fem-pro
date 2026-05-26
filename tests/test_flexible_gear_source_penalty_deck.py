@@ -18,6 +18,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     load_patch_prerequisite_summary,
     path_tracking_gate_metrics,
     run_full_gear,
+    sfc_vtk_secondary_pressure_field_gate_metrics,
     source_active_set_line_search_gate_metrics,
     source_convergence_gate_metrics,
     source_increment_trial_gate_metrics,
@@ -566,6 +567,7 @@ def test_full_gear_evidence_ladder_blocks_clouds_until_strict_sync() -> None:
         "full_gear_entry_gate_passed": 1,
         "full_gear_entry_contact_window_gate_passed": 1,
         "full_gear_entry_ready_for_strict_sync_window": 0,
+        "sfc_vtk_secondary_pressure_field_gate_passed": 1,
         "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
         "sfc_vtk_manifest": "sfc_manifest.csv",
         "abaqus_vtk_manifest": "abaqus_manifest.csv",
@@ -594,6 +596,7 @@ def test_full_gear_evidence_ladder_allows_clouds_after_strict_sync() -> None:
         "full_gear_entry_gate_passed": 1,
         "full_gear_entry_contact_window_gate_passed": 1,
         "full_gear_entry_ready_for_strict_sync_window": 1,
+        "sfc_vtk_secondary_pressure_field_gate_passed": 1,
         "sfc_history": "sfc_full_gear_lagrangian_sdf_history.csv",
         "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
         "sfc_vtk_manifest": "sfc_manifest.csv",
@@ -668,6 +671,7 @@ def test_full_gear_evidence_ladder_separates_duration_windows() -> None:
         "full_gear_duration_0p003_passed": 1,
         "full_gear_duration_0p05_passed": 0,
         "full_gear_duration_full_run_passed": 0,
+        "sfc_vtk_secondary_pressure_field_gate_passed": 1,
         "sfc_history": "sfc_full_gear_lagrangian_sdf_history.csv",
         "contact_total_priority_metrics": "sfc_contact_total_priority_metrics.csv",
         "sfc_vtk_manifest": "sfc_manifest.csv",
@@ -682,6 +686,38 @@ def test_full_gear_evidence_ladder_separates_duration_windows() -> None:
     assert int(rows["full_gear_0p003_window"]["paper_evidence_allowed"]) == 1
     assert int(rows["full_gear_0p05_window"]["paper_evidence_allowed"]) == 0
     assert int(rows["full_gear_full_duration"]["paper_evidence_allowed"]) == 0
+
+
+def test_sfc_vtk_secondary_pressure_field_gate_requires_region_alias() -> None:
+    row = {
+        "active_contact_secondary_node_count": 2,
+        "max_contact_secondary_pressure_nodeavg": 5.0,
+        "vtk_secondary_pressure_fields_present": 1,
+        "vtk_legacy_contact_fields_present": 1,
+        "vtk_legacy_contact_fields_match_secondary": 1,
+        "contact_secondary_pressure_recovery_source": "constraint_region",
+        "contact_pressure_recovery_source": "constraint_region",
+        "contact_legacy_pressure_alias_source": "secondary_constraint_region",
+        "contact_legacy_pressure_alias_matches_secondary": 1,
+    }
+
+    gate = sfc_vtk_secondary_pressure_field_gate_metrics([row])
+
+    assert int(gate["sfc_vtk_secondary_pressure_field_gate_passed"]) == 1
+
+    missing_secondary = [dict(row)]
+    missing_secondary[0]["vtk_secondary_pressure_fields_present"] = 0
+    missing_gate = sfc_vtk_secondary_pressure_field_gate_metrics(missing_secondary)
+
+    assert int(missing_gate["sfc_vtk_secondary_pressure_field_gate_passed"]) == 0
+    assert int(missing_gate["sfc_vtk_secondary_pressure_fields_present"]) == 0
+
+    sample_alias = [dict(row)]
+    sample_alias[0]["contact_secondary_pressure_recovery_source"] = "slave_sample_alias"
+    alias_gate = sfc_vtk_secondary_pressure_field_gate_metrics(sample_alias)
+
+    assert int(alias_gate["sfc_vtk_secondary_pressure_field_gate_passed"]) == 0
+    assert int(alias_gate["sfc_vtk_active_secondary_pressure_source_from_region"]) == 0
 
 
 def test_prepare_source_penalty_deck_uses_standard_linear_penalty_and_strided_output() -> None:

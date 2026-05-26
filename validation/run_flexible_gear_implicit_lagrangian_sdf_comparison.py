@@ -2820,6 +2820,47 @@ def _write_sfc_tet4_vtk_frame(
     }
     row.update(object_metric_columns)
     row.update(contact_metrics)
+    required_secondary_fields = (
+        "contact_secondary_pressure_nodeavg",
+        "contact_secondary_penetration_nodeavg",
+        "contact_secondary_active_node",
+    )
+    required_legacy_fields = (
+        "contact_pressure_nodeavg",
+        "contact_penetration_nodeavg",
+        "contact_active_node",
+    )
+    row["vtk_has_contact_secondary_pressure_nodeavg"] = int(
+        "contact_secondary_pressure_nodeavg" in contact_fields
+    )
+    row["vtk_has_contact_secondary_penetration_nodeavg"] = int(
+        "contact_secondary_penetration_nodeavg" in contact_fields
+    )
+    row["vtk_has_contact_secondary_active_node"] = int("contact_secondary_active_node" in contact_fields)
+    row["vtk_has_legacy_contact_pressure_nodeavg"] = int("contact_pressure_nodeavg" in contact_fields)
+    row["vtk_has_legacy_contact_penetration_nodeavg"] = int("contact_penetration_nodeavg" in contact_fields)
+    row["vtk_has_legacy_contact_active_node"] = int("contact_active_node" in contact_fields)
+    row["vtk_secondary_pressure_fields_present"] = int(
+        all(field in contact_fields for field in required_secondary_fields)
+    )
+    row["vtk_legacy_contact_fields_present"] = int(all(field in contact_fields for field in required_legacy_fields))
+    alias_pairs = (
+        ("contact_secondary_pressure_nodeavg", "contact_pressure_nodeavg"),
+        ("contact_secondary_penetration_nodeavg", "contact_penetration_nodeavg"),
+        ("contact_secondary_active_node", "contact_active_node"),
+    )
+    alias_matches = True
+    for secondary_key, legacy_key in alias_pairs:
+        if secondary_key not in contact_fields or legacy_key not in contact_fields:
+            alias_matches = False
+            break
+        alias_matches = alias_matches and bool(
+            np.array_equal(
+                np.asarray(contact_fields[secondary_key], dtype=float),
+                np.asarray(contact_fields[legacy_key], dtype=float),
+            )
+        )
+    row["vtk_legacy_contact_fields_match_secondary"] = int(alias_matches)
     return row
 
 

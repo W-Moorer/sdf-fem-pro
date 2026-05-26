@@ -1132,6 +1132,63 @@ def _artifact_present(summary: Row, key: str) -> int:
     return int(value not in ("", None))
 
 
+def sfc_vtk_secondary_pressure_field_gate_metrics(manifest_rows: list[Row]) -> Row:
+    """Gate SFC VTK contact fields before nodal CPRESS/COPEN comparison.
+
+    Paper-facing nodal pressure fields must come from secondary constraint
+    regions.  The unqualified legacy fields are allowed only as compatibility
+    aliases that exactly mirror the secondary-region fields.
+    """
+
+    has_rows = bool(manifest_rows)
+    active_rows: list[Row] = []
+    for row in manifest_rows:
+        active_nodes = _row_int_flag(row, "active_contact_secondary_node_count", default=0)
+        active_legacy_nodes = _row_int_flag(row, "active_contact_node_count", default=0)
+        max_secondary_pressure = _finite_row_float(row, "max_contact_secondary_pressure_nodeavg") or 0.0
+        max_legacy_pressure = _finite_row_float(row, "max_contact_pressure_nodeavg") or 0.0
+        if active_nodes > 0 or active_legacy_nodes > 0 or max_secondary_pressure > 0.0 or max_legacy_pressure > 0.0:
+            active_rows.append(row)
+
+    secondary_fields_present = all(
+        _row_int_flag(row, "vtk_secondary_pressure_fields_present", default=0) == 1 for row in manifest_rows
+    )
+    legacy_fields_present = all(
+        _row_int_flag(row, "vtk_legacy_contact_fields_present", default=0) == 1 for row in manifest_rows
+    )
+    legacy_matches_secondary = all(
+        _row_int_flag(row, "vtk_legacy_contact_fields_match_secondary", default=0) == 1 for row in manifest_rows
+    )
+    active_source_from_region = all(
+        str(row.get("contact_secondary_pressure_recovery_source", "")) == "constraint_region" for row in active_rows
+    )
+    active_legacy_source_from_secondary = all(
+        str(row.get("contact_pressure_recovery_source", "")) == "constraint_region"
+        and str(row.get("contact_legacy_pressure_alias_source", "")) == "secondary_constraint_region"
+        and _row_int_flag(row, "contact_legacy_pressure_alias_matches_secondary", default=0) == 1
+        for row in active_rows
+    )
+    gate_passed = int(
+        bool(has_rows)
+        and bool(secondary_fields_present)
+        and bool(legacy_fields_present)
+        and bool(legacy_matches_secondary)
+        and bool(active_source_from_region)
+        and bool(active_legacy_source_from_secondary)
+    )
+    return {
+        "sfc_vtk_secondary_pressure_field_gate_passed": int(gate_passed),
+        "comparison_stage": "secondary_pressure_vtk_fields_before_nodal_cpress",
+        "sfc_vtk_secondary_pressure_field_row_count": int(len(manifest_rows)),
+        "sfc_vtk_secondary_pressure_field_active_row_count": int(len(active_rows)),
+        "sfc_vtk_secondary_pressure_fields_present": int(secondary_fields_present),
+        "sfc_vtk_legacy_contact_fields_present": int(legacy_fields_present),
+        "sfc_vtk_legacy_contact_fields_match_secondary": int(legacy_matches_secondary),
+        "sfc_vtk_active_secondary_pressure_source_from_region": int(active_source_from_region),
+        "sfc_vtk_active_legacy_pressure_alias_from_secondary": int(active_legacy_source_from_secondary),
+    }
+
+
 def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     """Return the paper-evidence ladder for full-gear validation artifacts.
 
@@ -1151,6 +1208,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     entry_ok = _row_int_flag(summary, "full_gear_entry_gate_passed", default=0)
     contact_window_ok = _row_int_flag(summary, "full_gear_entry_contact_window_gate_passed", default=0)
     strict_ok = _row_int_flag(summary, "full_gear_entry_ready_for_strict_sync_window", default=0)
+    pressure_field_ok = _row_int_flag(summary, "sfc_vtk_secondary_pressure_field_gate_passed", default=0)
     strict10_ok = _row_int_flag(summary, "full_gear_duration_10_step_strict_sync_passed", default=strict_ok)
     window_0p003_ok = _row_int_flag(summary, "full_gear_duration_0p003_passed", default=0)
     window_0p05_ok = _row_int_flag(summary, "full_gear_duration_0p05_passed", default=0)
@@ -1173,6 +1231,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     nodal_allowed = int(
         bool(entry_ok)
         and bool(contact_window_ok)
+        and bool(pressure_field_ok)
         and bool(sfc_manifest_present)
         and bool(abaqus_manifest_present)
         and bool(animation_metrics_present)
@@ -1180,6 +1239,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
     cloud_allowed = int(
         bool(strict_ok)
         and bool(contact_window_ok)
+        and bool(pressure_field_ok)
         and bool(sfc_manifest_present)
         and bool(abaqus_manifest_present)
         and bool(animation_metrics_present)
@@ -1218,6 +1278,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             "contact_total_gate_passed": int(totals_ok),
             "patch_ladder_gate_passed": int(patch_ladder_ok),
             "full_gear_entry_gate_passed": int(entry_ok),
+            "sfc_vtk_secondary_pressure_field_gate_passed": int(pressure_field_ok),
             "full_gear_strict_sync_ready": int(strict_ok),
             "full_gear_10_step_strict_sync_passed": int(strict10_ok),
             "full_gear_0p003_passed": int(window_0p003_ok),
@@ -1296,7 +1357,7 @@ def full_gear_evidence_ladder_rows(summary: Row) -> list[Row]:
             allowed=nodal_allowed,
             required_before="stress_strain_clouds",
             artifact_key="animation_metric_errors",
-            blocking_reason="full_gear_entry_gate_or_vtk_manifest_missing",
+            blocking_reason="full_gear_entry_pressure_field_gate_or_vtk_manifest_missing",
         )
     )
     rows.append(
@@ -1950,6 +2011,7 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- accepted-state path tracking gate: {summary.get('path_tracking_gate_passed', '')}",
         f"- contact-total gate: {summary.get('contact_total_gate_passed', '')}",
         f"- full-gear entry gate: {summary.get('full_gear_entry_gate_passed', '')}",
+        f"- SFC VTK secondary pressure field gate: {summary.get('sfc_vtk_secondary_pressure_field_gate_passed', '')}",
         "- full-gear strict-sync ready: "
         f"{summary.get('full_gear_entry_ready_for_strict_sync_window', '')}",
         "- full-gear duration ladder: "
@@ -2009,6 +2071,11 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         lines.append(f"- full-gear entry gate CSV: `{Path(str(summary.get('full_gear_entry_gate'))).name}`")
     if summary.get("full_gear_evidence_ladder"):
         lines.append(f"- full-gear evidence ladder CSV: `{Path(str(summary.get('full_gear_evidence_ladder'))).name}`")
+    if summary.get("sfc_vtk_secondary_pressure_field_gate"):
+        lines.append(
+            "- SFC VTK secondary pressure field gate CSV: "
+            f"`{Path(str(summary.get('sfc_vtk_secondary_pressure_field_gate'))).name}`"
+        )
     if summary.get("source_increment_trials"):
         lines.append(f"- source increment trial ledger: `{Path(str(summary.get('source_increment_trials'))).name}`")
     if summary.get("sfc_vtk_pvd"):
@@ -2462,6 +2529,14 @@ def run_full_gear(
                 abaqus_pvd=Path(str(summary["abaqus_vtk_pvd"])) if summary.get("abaqus_vtk_pvd") else None,
             )
         )
+    if summary.get("sfc_vtk_manifest"):
+        sfc_vtk_pressure_gate = sfc_vtk_secondary_pressure_field_gate_metrics(
+            _read_csv_rows(Path(str(summary["sfc_vtk_manifest"])))
+        )
+        sfc_vtk_pressure_gate_path = out_dir / "sfc_vtk_secondary_pressure_field_gate.csv"
+        _write_csv(sfc_vtk_pressure_gate_path, [sfc_vtk_pressure_gate])
+        summary.update(sfc_vtk_pressure_gate)
+        summary["sfc_vtk_secondary_pressure_field_gate"] = str(sfc_vtk_pressure_gate_path)
     evidence_ladder_path = out_dir / "sfc_full_gear_evidence_ladder.csv"
     _write_csv(evidence_ladder_path, full_gear_evidence_ladder_rows(summary))
     summary["full_gear_evidence_ladder"] = str(evidence_ladder_path)
