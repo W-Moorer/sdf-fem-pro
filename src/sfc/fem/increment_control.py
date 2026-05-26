@@ -95,6 +95,106 @@ def active_set_stability_after_line_search(
     return bool(active_set_stable) and (not bool(line_search_attempted) or bool(line_search_stable))
 
 
+def active_set_line_search_gate_metrics(
+    summary: Mapping[str, Any],
+    history_rows: Sequence[Mapping[str, Any]],
+    *,
+    prefix: str = "source",
+    active_contact_present: bool | None = None,
+) -> dict[str, Any]:
+    """Gate accepted increments after active-set line search/cutback handling.
+
+    This is an accepted-state gate: unstable line-search candidates may be
+    explored during a trial, but accepted history rows must be stable, accepted,
+    uncut, not iteration-limited, and carry committed accepted tracking when
+    active contact is present.
+    """
+
+    label = str(prefix).strip("_")
+    active_rows = [row for row in history_rows if _row_has_active_contact(row)]
+    if active_contact_present is None:
+        active_contact = (
+            bool(active_rows)
+            or _row_int_flag(summary, f"{label}_final_active_contact_samples", default=0) > 0
+            or _row_int_flag(summary, "final_active_contact_samples", default=0) > 0
+        )
+    else:
+        active_contact = bool(active_contact_present)
+    line_search_enabled = str(summary.get(f"{label}_active_set_line_search", "true")).lower() == "true"
+    stability_enabled = str(summary.get(f"{label}_contact_active_set_stability", "true")).lower() == "true"
+    summary_unstable = _row_int_flag(summary, f"{label}_line_search_unstable_count", default=0)
+    summary_trials = _row_int_flag(summary, f"{label}_line_search_trial_count", default=0)
+    summary_commit = _row_int_flag(summary, f"{label}_accepted_tracking_commit_count", default=0)
+    required_columns = (
+        f"{label}_line_search_trial_count",
+        f"{label}_line_search_reduced_count",
+        f"{label}_line_search_stable_count",
+        f"{label}_line_search_unstable_count",
+        f"{label}_line_search_last_alpha",
+        f"{label}_accepted_tracking_committed",
+        f"{label}_active_set_stable",
+        f"{label}_increment_accepted",
+        f"{label}_increment_cutback_required",
+        f"{label}_iteration_limit_reached",
+    )
+    row_columns_present = all(all(key in row for key in required_columns) for row in history_rows)
+    row_accepted_ok = all(_row_int_flag(row, f"{label}_increment_accepted", default=1) == 1 for row in history_rows)
+    row_stable_ok = all(_row_int_flag(row, f"{label}_active_set_stable", default=0) == 1 for row in history_rows)
+    row_no_cutback_ok = all(
+        _row_int_flag(row, f"{label}_increment_cutback_required", default=0) == 0 for row in history_rows
+    )
+    row_no_iteration_limit_ok = all(
+        _row_int_flag(row, f"{label}_iteration_limit_reached", default=0) == 0 for row in history_rows
+    )
+    row_unstable_ok = all(_row_int_flag(row, f"{label}_line_search_unstable_count", default=0) == 0 for row in history_rows)
+    row_alpha_ok = all(
+        0.0 < (_row_float_with_keys(row, (f"{label}_line_search_last_alpha",)) or 1.0) <= 1.0
+        for row in history_rows
+    )
+    row_commit_ok = (not active_contact) or any(
+        _row_int_flag(row, f"{label}_accepted_tracking_committed", default=0) > 0 for row in active_rows
+    )
+    summary_commit_ok = (not active_contact) or summary_commit > 0
+    summary_trials_ok = (not active_contact) or summary_trials > 0 or not bool(line_search_enabled)
+    gate_passed = int(
+        bool(line_search_enabled)
+        and bool(stability_enabled)
+        and summary_unstable == 0
+        and bool(row_columns_present)
+        and bool(row_accepted_ok)
+        and bool(row_stable_ok)
+        and bool(row_no_cutback_ok)
+        and bool(row_no_iteration_limit_ok)
+        and bool(row_unstable_ok)
+        and bool(row_alpha_ok)
+        and bool(row_commit_ok)
+        and bool(summary_commit_ok)
+        and bool(summary_trials_ok)
+    )
+    return {
+        f"{label}_active_set_line_search_gate_passed": gate_passed,
+        "comparison_stage": "active_set_line_search_before_full_gear_sync",
+        f"{label}_active_set_line_search_active_contact_present": int(active_contact),
+        f"{label}_active_set_line_search_enabled": int(bool(line_search_enabled)),
+        f"{label}_active_set_stability_enabled": int(bool(stability_enabled)),
+        f"{label}_active_set_line_search_summary_unstable_count": int(summary_unstable),
+        f"{label}_active_set_line_search_summary_trial_count": int(summary_trials),
+        f"{label}_active_set_line_search_summary_commit_count": int(summary_commit),
+        f"{label}_active_set_line_search_row_columns_present": int(row_columns_present),
+        f"{label}_active_set_line_search_row_accepted_ok": int(row_accepted_ok),
+        f"{label}_active_set_line_search_row_active_set_stable_ok": int(row_stable_ok),
+        f"{label}_active_set_line_search_row_no_cutback_ok": int(row_no_cutback_ok),
+        f"{label}_active_set_line_search_row_no_iteration_limit_ok": int(row_no_iteration_limit_ok),
+        f"{label}_active_set_line_search_row_unstable_ok": int(row_unstable_ok),
+        f"{label}_active_set_line_search_row_alpha_ok": int(row_alpha_ok),
+        f"{label}_active_set_line_search_row_commit_ok": int(row_commit_ok),
+        f"{label}_active_set_line_search_summary_commit_ok": int(summary_commit_ok),
+        f"{label}_active_set_line_search_summary_trials_ok": int(summary_trials_ok),
+        f"{label}_active_set_line_search_history_row_count": int(len(history_rows)),
+        f"{label}_active_set_line_search_active_history_row_count": int(len(active_rows)),
+    }
+
+
 def increment_convergence_decision(
     *,
     residual_converged: bool,
@@ -293,6 +393,13 @@ def _row_float_with_keys(row: Mapping[str, Any], keys: Sequence[str]) -> float |
         if math.isfinite(number):
             return float(number)
     return None
+
+
+def _row_has_active_contact(row: Mapping[str, Any]) -> bool:
+    active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
+    active_area = _row_float_with_keys(row, ("contact_active_area",)) or 0.0
+    normal_force = abs(_row_float_with_keys(row, ("contact_region_normal_force", "normal_force")) or 0.0)
+    return bool(active_regions > 0 or active_area > 0.0 or normal_force > 0.0)
 
 
 def _match_time_sequence(

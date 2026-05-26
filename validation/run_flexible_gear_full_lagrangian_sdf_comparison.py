@@ -34,6 +34,7 @@ from sfc.contact.tracking_state import (  # noqa: E402
     accepted_contact_response_coverage_gate_metrics as _core_accepted_contact_response_coverage_gate_metrics,
 )
 from sfc.fem.increment_control import (  # noqa: E402
+    active_set_line_search_gate_metrics as _core_active_set_line_search_gate_metrics,
     increment_trial_ledger_gate_metrics as _core_increment_trial_ledger_gate_metrics,
 )
 from validation.run_flexible_gear_explicit_sdf_comparison import DEFAULT_SOURCE, GearInputModel, GearMesh, parse_gear_input  # noqa: E402
@@ -408,91 +409,7 @@ def source_convergence_gate_metrics(
 def source_active_set_line_search_gate_metrics(summary: Row, history_rows: list[Row]) -> Row:
     """Gate active-set line-search and accepted tracking before full gear use."""
 
-    active_rows: list[Row] = []
-    for row in history_rows:
-        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
-        active_area = _finite_row_float(row, "contact_active_area") or 0.0
-        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
-        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
-            active_rows.append(row)
-    active_contact_present = bool(active_rows) or _row_int_flag(summary, "final_active_contact_samples", default=0) > 0
-    line_search_enabled = str(summary.get("source_active_set_line_search", "true")).lower() == "true"
-    stability_enabled = str(summary.get("source_contact_active_set_stability", "true")).lower() == "true"
-    summary_unstable = _row_int_flag(summary, "source_line_search_unstable_count", default=0)
-    summary_trials = _row_int_flag(summary, "source_line_search_trial_count", default=0)
-    summary_commit = _row_int_flag(summary, "source_accepted_tracking_commit_count", default=0)
-    row_columns_present = all(
-        all(
-            key in row
-            for key in (
-                "source_line_search_trial_count",
-                "source_line_search_reduced_count",
-                "source_line_search_stable_count",
-                "source_line_search_unstable_count",
-                "source_line_search_last_alpha",
-                "source_accepted_tracking_committed",
-                "source_active_set_stable",
-                "source_increment_accepted",
-                "source_increment_cutback_required",
-                "source_iteration_limit_reached",
-            )
-        )
-        for row in history_rows
-    )
-    row_accepted_ok = all(_row_int_flag(row, "source_increment_accepted", default=1) == 1 for row in history_rows)
-    row_stable_ok = all(_row_int_flag(row, "source_active_set_stable", default=0) == 1 for row in history_rows)
-    row_no_cutback_ok = all(
-        _row_int_flag(row, "source_increment_cutback_required", default=0) == 0 for row in history_rows
-    )
-    row_no_iteration_limit_ok = all(
-        _row_int_flag(row, "source_iteration_limit_reached", default=0) == 0 for row in history_rows
-    )
-    row_unstable_ok = all(_row_int_flag(row, "source_line_search_unstable_count", default=0) == 0 for row in history_rows)
-    row_alpha_ok = all(
-        0.0 < (_finite_row_float(row, "source_line_search_last_alpha") or 1.0) <= 1.0 for row in history_rows
-    )
-    row_commit_ok = (not active_contact_present) or any(
-        _row_int_flag(row, "source_accepted_tracking_committed", default=0) > 0 for row in active_rows
-    )
-    summary_commit_ok = (not active_contact_present) or summary_commit > 0
-    summary_trials_ok = (not active_contact_present) or summary_trials > 0 or not bool(line_search_enabled)
-    gate_passed = int(
-        bool(line_search_enabled)
-        and bool(stability_enabled)
-        and summary_unstable == 0
-        and bool(row_columns_present)
-        and bool(row_accepted_ok)
-        and bool(row_stable_ok)
-        and bool(row_no_cutback_ok)
-        and bool(row_no_iteration_limit_ok)
-        and bool(row_unstable_ok)
-        and bool(row_alpha_ok)
-        and bool(row_commit_ok)
-        and bool(summary_commit_ok)
-        and bool(summary_trials_ok)
-    )
-    return {
-        "source_active_set_line_search_gate_passed": gate_passed,
-        "comparison_stage": "active_set_line_search_before_full_gear_sync",
-        "source_active_set_line_search_active_contact_present": int(active_contact_present),
-        "source_active_set_line_search_enabled": int(bool(line_search_enabled)),
-        "source_active_set_stability_enabled": int(bool(stability_enabled)),
-        "source_active_set_line_search_summary_unstable_count": int(summary_unstable),
-        "source_active_set_line_search_summary_trial_count": int(summary_trials),
-        "source_active_set_line_search_summary_commit_count": int(summary_commit),
-        "source_active_set_line_search_row_columns_present": int(row_columns_present),
-        "source_active_set_line_search_row_accepted_ok": int(row_accepted_ok),
-        "source_active_set_line_search_row_active_set_stable_ok": int(row_stable_ok),
-        "source_active_set_line_search_row_no_cutback_ok": int(row_no_cutback_ok),
-        "source_active_set_line_search_row_no_iteration_limit_ok": int(row_no_iteration_limit_ok),
-        "source_active_set_line_search_row_unstable_ok": int(row_unstable_ok),
-        "source_active_set_line_search_row_alpha_ok": int(row_alpha_ok),
-        "source_active_set_line_search_row_commit_ok": int(row_commit_ok),
-        "source_active_set_line_search_summary_commit_ok": int(summary_commit_ok),
-        "source_active_set_line_search_summary_trials_ok": int(summary_trials_ok),
-        "source_active_set_line_search_history_row_count": int(len(history_rows)),
-        "source_active_set_line_search_active_history_row_count": int(len(active_rows)),
-    }
+    return _core_active_set_line_search_gate_metrics(summary, history_rows, prefix="source")
 
 
 def constraint_region_tangent_gate_metrics(summary: Row, history_rows: list[Row]) -> Row:

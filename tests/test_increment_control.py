@@ -4,6 +4,7 @@ import pytest
 
 from sfc.fem.increment_control import (
     active_set_line_search_choice,
+    active_set_line_search_gate_metrics,
     active_set_stability_after_line_search,
     contact_active_set_is_stable,
     increment_convergence_decision,
@@ -223,3 +224,83 @@ def test_active_set_line_search_reports_unstable_candidates() -> None:
         line_search_attempted=True,
         line_search_stable=False,
     )
+
+
+def test_active_set_line_search_gate_requires_stable_accepted_rows() -> None:
+    summary = {
+        "source_active_set_line_search": True,
+        "source_contact_active_set_stability": True,
+        "source_line_search_trial_count": 2,
+        "source_line_search_unstable_count": 0,
+        "source_accepted_tracking_commit_count": 1,
+        "final_active_contact_samples": 1,
+    }
+    history = [
+        {
+            "active_contact_region_count": 1,
+            "contact_active_area": 2.0,
+            "contact_region_normal_force": 3.0,
+            "source_line_search_trial_count": 1,
+            "source_line_search_reduced_count": 0,
+            "source_line_search_stable_count": 1,
+            "source_line_search_unstable_count": 0,
+            "source_line_search_last_alpha": 1.0,
+            "source_accepted_tracking_committed": 1,
+            "source_active_set_stable": 1,
+            "source_increment_accepted": 1,
+            "source_increment_cutback_required": 0,
+            "source_iteration_limit_reached": 0,
+        }
+    ]
+
+    gate = active_set_line_search_gate_metrics(summary, history, prefix="source")
+
+    assert int(gate["source_active_set_line_search_gate_passed"]) == 1
+    assert int(gate["source_active_set_line_search_row_active_set_stable_ok"]) == 1
+    assert int(gate["source_active_set_line_search_row_commit_ok"]) == 1
+
+    unstable = [dict(history[0])]
+    unstable[0]["source_active_set_stable"] = 0
+    failed_unstable = active_set_line_search_gate_metrics(summary, unstable, prefix="source")
+
+    assert int(failed_unstable["source_active_set_line_search_gate_passed"]) == 0
+    assert int(failed_unstable["source_active_set_line_search_row_active_set_stable_ok"]) == 0
+
+    cutback = [dict(history[0])]
+    cutback[0]["source_increment_cutback_required"] = 1
+    failed_cutback = active_set_line_search_gate_metrics(summary, cutback, prefix="source")
+
+    assert int(failed_cutback["source_active_set_line_search_gate_passed"]) == 0
+    assert int(failed_cutback["source_active_set_line_search_row_no_cutback_ok"]) == 0
+
+
+def test_active_set_line_search_gate_requires_committed_tracking_for_active_contact() -> None:
+    summary = {
+        "hard_active_set_line_search": True,
+        "hard_contact_active_set_stability": True,
+        "hard_line_search_trial_count": 1,
+        "hard_line_search_unstable_count": 0,
+        "hard_accepted_tracking_commit_count": 0,
+        "hard_final_active_contact_samples": 1,
+    }
+    history = [
+        {
+            "active_contact_region_count": 1,
+            "hard_line_search_trial_count": 1,
+            "hard_line_search_reduced_count": 0,
+            "hard_line_search_stable_count": 1,
+            "hard_line_search_unstable_count": 0,
+            "hard_line_search_last_alpha": 1.0,
+            "hard_accepted_tracking_committed": 0,
+            "hard_active_set_stable": 1,
+            "hard_increment_accepted": 1,
+            "hard_increment_cutback_required": 0,
+            "hard_iteration_limit_reached": 0,
+        }
+    ]
+
+    gate = active_set_line_search_gate_metrics(summary, history, prefix="hard")
+
+    assert int(gate["hard_active_set_line_search_gate_passed"]) == 0
+    assert int(gate["hard_active_set_line_search_summary_commit_ok"]) == 0
+    assert int(gate["hard_active_set_line_search_row_commit_ok"]) == 0
