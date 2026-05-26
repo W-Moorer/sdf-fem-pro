@@ -6767,6 +6767,20 @@ def solve_sfc_cropped_pair_hard_contact(
             h_trial = float(hard_cutback_candidate_dt) if hard_cutback_candidate_dt is not None else max(min_dt, h * float(cutback_factor))
             cutback_count += 1
             continue
+        if not converged:
+            reason = (
+                hard_increment_decision.reason
+                if hard_increment_decision is not None
+                else "iteration_limit"
+            )
+            raise RuntimeError(
+                "hard-contact increment failed Abaqus-style convergence gates "
+                f"at t={t_candidate:.6e}, dt={h:.6e}: reason={reason}, "
+                f"normalized_residual={normalized_residual:.6e}, "
+                f"normalized_correction={normalized_correction:.6e}, "
+                f"normalized_contact_force_increment={normalized_contact_force_increment:.6e}, "
+                "no unconverged accepted state was written"
+            )
         previous_rhs_before_step = previous_rhs_balance.copy()
         u_new = solution.displacement
         a_new = c0 * (u_new - u_pred)

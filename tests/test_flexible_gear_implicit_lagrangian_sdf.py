@@ -3594,6 +3594,30 @@ def test_cropped_gear_hard_contact_path_runs_one_implicit_step() -> None:
     assert "active_contact_region_count" in history[-1]
 
 
+def test_cropped_gear_hard_contact_refuses_unconverged_accepted_state() -> None:
+    model = parse_gear_input(DEFAULT_SOURCE)
+    pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
+
+    with pytest.raises(RuntimeError, match="no unconverged accepted state"):
+        solve_sfc_cropped_pair_hard_contact(
+            pair,
+            young=model.young,
+            poisson=model.poisson,
+            density=model.density,
+            pressure_stiffness=5.0e9,
+            duration=1.0e-5,
+            dt=1.0e-5,
+            target_overclosure=1.0e-4,
+            rotation_rate_z=0.0,
+            max_iterations=1,
+            hard_enforcement="pressure_compliance",
+            automatic_increment=False,
+            residual_tolerance=1.0e-30,
+            correction_tolerance=1.0e-30,
+            contact_force_increment_tolerance=1.0e-30,
+        )
+
+
 def test_cropped_patch_gate_checks_region_path_tracking_and_response() -> None:
     model = parse_gear_input(DEFAULT_SOURCE)
     pair = build_cropped_pair(model, faces_per_body=3, expansion_rings=0)
@@ -3738,7 +3762,7 @@ def test_cropped_gear_hard_contact_supports_element_pressure_smoothing() -> None
         dt=1.0e-3,
         target_overclosure=1.0e-5,
         rotation_rate_z=0.0,
-        max_iterations=4,
+        max_iterations=8,
         hard_enforcement="element_pressure_smoothing",
         pressure_smoothing_factor=4.0,
         automatic_increment=False,
@@ -3764,7 +3788,7 @@ def test_cropped_gear_hard_contact_supports_abaqus_standard_penalty() -> None:
         dt=1.0e-3,
         target_overclosure=1.0e-5,
         rotation_rate_z=0.0,
-        max_iterations=4,
+        max_iterations=8,
         hard_enforcement="abaqus_standard_penalty",
         automatic_increment=False,
     )
