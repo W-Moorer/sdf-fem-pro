@@ -600,3 +600,105 @@ def test_q4_path_tracking_cache_updates_only_after_accepted_commit() -> None:
     assert accepted_arrays["tracking_cache_hits"].tolist() == [True]
     assert accepted_arrays["tracking_cache_matches"].tolist() == [True]
     np.testing.assert_array_equal(contact._secondary_face_cache, [0])
+
+
+def test_tri_batch_path_tracking_cache_updates_only_after_accepted_commit() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.1, 0.1, -0.05],
+            [0.3, 0.1, -0.05],
+            [0.1, 0.3, -0.05],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([master_nodes, slave_nodes])
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=100.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=True,
+        secondary_path_tracking=True,
+    )
+
+    trial_arrays = contact.sample_arrays(x_current)
+    if trial_arrays is None:
+        pytest.skip("compiled triangle batch projection backend is unavailable")
+
+    assert trial_arrays["master_face_ids"].tolist() == [0]
+    assert trial_arrays["tracking_cache_hits"].tolist() == [False]
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [-1])
+    assert np.isnan(contact._ensure_secondary_barycentric_cache()).all()
+
+    assert contact.commit_secondary_tracking_from_sample_arrays(trial_arrays) == 1
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [0])
+    np.testing.assert_allclose(np.sum(contact._ensure_secondary_barycentric_cache()[0]), 1.0)
+
+    accepted_arrays = contact.sample_arrays(x_current)
+    assert accepted_arrays is not None
+    assert accepted_arrays["tracking_cache_hits"].tolist() == [True]
+    assert accepted_arrays["tracking_cache_matches"].tolist() == [True]
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [0])
+
+
+def test_secondary_normal_projection_path_tracking_cache_updates_only_after_accepted_commit() -> None:
+    master_nodes = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    slave_nodes = np.asarray(
+        [
+            [0.1, 0.1, -0.05],
+            [0.3, 0.1, -0.05],
+            [0.1, 0.3, -0.05],
+        ],
+        dtype=float,
+    )
+    x_current = np.vstack([master_nodes, slave_nodes])
+    contact = LagrangianSDFSurfaceContactGeometry(
+        np.asarray([[0, 2, 1]], dtype=np.int64),
+        MaterialSDF.from_triangle_surface(master_nodes, np.asarray([[0, 1, 2]], dtype=np.int64)),
+        master_nodes,
+        pressure_stiffness=100.0,
+        slave_node_offset=master_nodes.shape[0],
+        master_node_offset=0,
+        quadrature="centroid",
+        search_radius=1.0,
+        compiled_batch_projection=True,
+        secondary_path_tracking=True,
+    )
+
+    trial_arrays = contact.secondary_normal_projection_sample_arrays(x_current)
+    if trial_arrays is None:
+        pytest.skip("compiled secondary-normal projection backend is unavailable")
+
+    assert trial_arrays["master_face_ids"].tolist() == [0]
+    assert trial_arrays["tracking_cache_hits"].tolist() == [False]
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [-1])
+    assert np.isnan(contact._ensure_secondary_barycentric_cache()).all()
+
+    assert contact.commit_secondary_tracking_from_sample_arrays(trial_arrays) == 1
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [0])
+    np.testing.assert_allclose(np.sum(contact._ensure_secondary_barycentric_cache()[0]), 1.0)
+
+    accepted_arrays = contact.secondary_normal_projection_sample_arrays(x_current)
+    assert accepted_arrays is not None
+    assert accepted_arrays["tracking_cache_hits"].tolist() == [True]
+    assert accepted_arrays["tracking_cache_matches"].tolist() == [True]
+    np.testing.assert_array_equal(contact._ensure_secondary_face_cache(), [0])

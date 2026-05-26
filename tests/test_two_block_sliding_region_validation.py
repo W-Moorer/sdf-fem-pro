@@ -30,7 +30,9 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert int(summary["contact_total_secondary_pressure_recovery_from_region"]) == 1
     assert float(summary["active_region_jaccard_min"]) >= float(summary["path_tracking_min_active_region_jaccard_threshold"])
     assert float(summary["path_cache_hit_fraction_min_after_first"]) >= float(summary["path_tracking_min_cache_hit_threshold"])
-    assert float(summary["path_cache_match_fraction_min_after_first"]) >= float(summary["path_tracking_min_cache_match_threshold"])
+    assert float(summary["master_face_topological_continuity_min_after_first"]) >= float(
+        summary["path_tracking_min_topological_continuity_threshold"]
+    )
     assert float(summary["master_face_switch_fraction_max"]) <= float(summary["path_tracking_max_face_switch_threshold"])
     assert float(summary["master_barycentric_drift_max"]) <= float(summary["path_tracking_max_barycentric_drift_threshold"])
 
@@ -53,6 +55,8 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
     assert "contact_active_area" in total_rows[0]
     assert "contact_active_region_jaccard" in total_rows[0]
     assert "contact_master_face_switch_fraction" in total_rows[0]
+    assert "contact_master_face_topological_continuity_fraction" in total_rows[0]
+    assert "contact_master_face_invalid_jump_fraction" in total_rows[0]
     assert "contact_path_cache_hit_fraction" in total_rows[0]
     assert "contact_master_barycentric_drift_max" in total_rows[0]
     assert "nodal_cpress_deferred" in total_rows[0]
@@ -74,6 +78,8 @@ def test_two_block_sliding_region_validation_writes_totals_before_clouds(tmp_pat
         tracking_rows = list(csv.DictReader(handle))
     assert len(tracking_rows) == 5
     assert "contact_master_face_switch_count" in tracking_rows[0]
+    assert "contact_master_face_topological_continuity_fraction" in tracking_rows[0]
+    assert "contact_master_face_invalid_jump_count" in tracking_rows[0]
     assert "contact_path_cache_match_fraction" in tracking_rows[0]
     assert "contact_master_barycentric_drift_mean" in tracking_rows[0]
     assert float(summary["path_cache_hit_fraction_min_after_first"]) > 0.0

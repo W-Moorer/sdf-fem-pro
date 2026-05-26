@@ -857,12 +857,6 @@ class LagrangianSDFSurfaceContactGeometry:
             total = float(np.sum(weights))
             if total > 0.0:
                 best["master_weights"] = weights / total
-            if cache_index is not None and best_face_id >= 0:
-                self._update_secondary_tracking_cache(
-                    cache_index=cache_index,
-                    face_id=int(best_face_id),
-                    barycentric=np.asarray(best["master_weights"], dtype=float),
-                )
             return best
         if rejected_line is not None:
             weights = np.asarray(rejected_line["master_weights"], dtype=float)
@@ -871,12 +865,6 @@ class LagrangianSDFSurfaceContactGeometry:
                 rejected_line["master_weights"] = weights / total
             return rejected_line
         query = self._oracle.query(x, cache_key=cache_key)
-        if cache_index is not None and int(query.face_id) >= 0:
-            self._update_secondary_tracking_cache(
-                cache_index=cache_index,
-                face_id=int(query.face_id),
-                barycentric=np.asarray(query.master_weights, dtype=float),
-            )
         normal = -ns if float(query.normal @ ns) < 0.0 else ns
         return {
             "gap": float(query.gap),
@@ -926,7 +914,10 @@ class LagrangianSDFSurfaceContactGeometry:
         The scalar Python ``secondary_normal_projection_samples`` method is a
         reference implementation.  This method follows the same Abaqus-style
         secondary-surface normal direction, but performs the per-candidate line
-        projection in the compiled indexed projection kernel.
+        projection in the compiled indexed projection kernel.  Accepted
+        path-tracking caches are read as hints only; callers must explicitly
+        commit accepted arrays with
+        :meth:`commit_secondary_tracking_from_sample_arrays`.
         """
 
         if not (
@@ -1129,7 +1120,6 @@ class LagrangianSDFSurfaceContactGeometry:
         previous_cache_face_ids = cache[valid_cache_indices].copy()
         tracking_cache_hits = previous_cache_face_ids >= 0
         tracking_cache_matches = tracking_cache_hits & (previous_cache_face_ids == face_ids)
-        cache[valid_cache_indices] = face_ids
         tracking_barycentric_distances = np.full(face_ids.shape, np.nan, dtype=float)
         if bool(self.secondary_path_tracking):
             bary_cache = self._ensure_secondary_barycentric_cache()
@@ -1144,7 +1134,6 @@ class LagrangianSDFSurfaceContactGeometry:
                     normalized[previous_good] - previous_barycentric[previous_good],
                     axis=1,
                 )
-            bary_cache[valid_cache_indices] = normalized
         master_nodes = self.master_material.boundary_faces[face_ids] + int(self.master_node_offset)
         return {
             "sample_node_ids": np.asarray(sample_nodes, dtype=np.int64),
@@ -1419,7 +1408,13 @@ class LagrangianSDFSurfaceContactGeometry:
         }
 
     def sample_arrays(self, x_current: np.ndarray) -> dict[str, np.ndarray] | None:
-        """Return batched sample arrays for compiled closest-feature queries."""
+        """Return batched sample arrays for compiled closest-feature queries.
+
+        Accepted path-tracking caches are read as candidate hints and
+        diagnostics only.  Trial queries must not mutate those caches; accepted
+        arrays are committed explicitly by
+        :meth:`commit_secondary_tracking_from_sample_arrays`.
+        """
 
         if not (bool(self.compiled_batch_projection) and _cpp_projection_available() and _cpp_closest_points_all_faces is not None):
             return None
@@ -1530,7 +1525,6 @@ class LagrangianSDFSurfaceContactGeometry:
             previous_cache_face_ids = cache[cache_indices].copy()
             tracking_cache_hits = previous_cache_face_ids >= 0
             tracking_cache_matches = tracking_cache_hits & (previous_cache_face_ids == face_ids)
-            cache[cache_indices] = face_ids
             tracking_barycentric_distances = np.full(face_ids.shape, np.nan, dtype=float)
             bary_cache = self._ensure_secondary_barycentric_cache()
             previous_barycentric = bary_cache[cache_indices].copy()
@@ -1544,7 +1538,6 @@ class LagrangianSDFSurfaceContactGeometry:
                     normalized[previous_good] - previous_barycentric[previous_good],
                     axis=1,
                 )
-            bary_cache[cache_indices] = normalized
             tracking_payload = {
                 "secondary_cache_indices": np.asarray(cache_indices, dtype=np.int64),
                 "tracking_cache_hits": tracking_cache_hits.astype(bool, copy=False),

@@ -270,6 +270,7 @@ def test_path_tracking_metrics_report_active_face_switch_and_cache_rates() -> No
     assert metrics["contact_master_face_tracking_comparable_count"] == 2
     assert metrics["contact_master_face_switch_count"] == 1
     assert metrics["contact_master_face_switch_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_master_face_invalid_jump_count"] == 1
     assert metrics["contact_master_barycentric_tracking_comparable_count"] == 1
     assert metrics["contact_master_barycentric_drift_mean"] == pytest.approx(np.sqrt(0.02))
     assert metrics["contact_master_barycentric_drift_max"] == pytest.approx(np.sqrt(0.02))
@@ -349,6 +350,19 @@ def test_region_path_tracking_reports_real_switch_after_region_alignment() -> No
     assert metrics["contact_master_face_tracking_comparable_count"] == 2
     assert metrics["contact_master_face_switch_count"] == 1
     assert metrics["contact_master_face_switch_fraction"] == pytest.approx(0.5)
+    assert metrics["contact_master_face_invalid_jump_count"] == 1
+
+    neighbor_metrics, _, _, _ = contact_region_path_tracking_metrics_from_arrays(
+        arrays,
+        np.asarray([10, 20], dtype=np.int64),
+        np.asarray([3, 4], dtype=np.int64),
+        master_face_neighbors=(np.asarray([3], dtype=np.int64),) * 4 + (np.asarray([4, 8], dtype=np.int64),),
+    )
+
+    assert neighbor_metrics["contact_master_face_switch_count"] == 1
+    assert neighbor_metrics["contact_master_face_topological_continuity_count"] == 2
+    assert neighbor_metrics["contact_master_face_topological_continuity_fraction"] == pytest.approx(1.0)
+    assert neighbor_metrics["contact_master_face_invalid_jump_count"] == 0
 
 
 def test_active_region_continuity_metrics_use_secondary_constraint_regions() -> None:

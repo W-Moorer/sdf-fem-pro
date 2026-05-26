@@ -374,6 +374,7 @@ def _contact_region_path_tracking_metrics_from_arrays(
     previous_master_barycentric: np.ndarray | None = None,
     *,
     active_gap_tolerance: float = 0.0,
+    master_face_neighbors: object | None = None,
 ) -> tuple[Row, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Measure master-face continuity keyed by secondary constraint region."""
 
@@ -383,6 +384,7 @@ def _contact_region_path_tracking_metrics_from_arrays(
         previous_master_face_ids,
         previous_master_barycentric,
         active_gap_tolerance=active_gap_tolerance,
+        master_face_neighbors=master_face_neighbors,
     )
     return dict(metrics), current_regions, current_faces, current_bary
 

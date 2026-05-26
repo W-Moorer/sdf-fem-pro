@@ -9,6 +9,7 @@ node-to-surface penalty sample.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -687,6 +688,7 @@ def contact_region_path_tracking_metrics_from_arrays(
     previous_master_barycentric: np.ndarray | None = None,
     *,
     active_gap_tolerance: float = 0.0,
+    master_face_neighbors: Sequence[np.ndarray] | None = None,
 ) -> tuple[dict[str, float | int], np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Measure accepted-state master-face continuity by constraint region.
 
@@ -722,6 +724,17 @@ def contact_region_path_tracking_metrics_from_arrays(
     switches = comparable & (previous_faces_aligned.reshape(-1) != face_ids)
     comparable_count = int(np.count_nonzero(comparable))
     switch_count = int(np.count_nonzero(switches))
+    topological = comparable & ~switches
+    if master_face_neighbors is not None and np.any(switches):
+        for row_id in np.flatnonzero(switches):
+            previous_face = int(previous_faces_aligned[int(row_id)])
+            current_face = int(face_ids[int(row_id)])
+            if 0 <= previous_face < len(master_face_neighbors):
+                neighbors = np.asarray(master_face_neighbors[previous_face], dtype=np.int64).reshape(-1)
+                if np.any(neighbors == current_face):
+                    topological[int(row_id)] = True
+    topological_count = int(np.count_nonzero(topological))
+    invalid_jump_count = max(0, comparable_count - topological_count)
     metrics: dict[str, float | int] = {
         "contact_active_master_face_count": int(active_faces.size),
         "contact_master_face_unique_count": int(np.unique(active_faces).size) if active_faces.size else 0,
@@ -732,6 +745,14 @@ def contact_region_path_tracking_metrics_from_arrays(
         "contact_master_face_switch_count": switch_count,
         "contact_master_face_switch_fraction": (
             float(switch_count) / float(comparable_count) if comparable_count else 0.0
+        ),
+        "contact_master_face_topological_continuity_count": topological_count,
+        "contact_master_face_topological_continuity_fraction": (
+            float(topological_count) / float(comparable_count) if comparable_count else 0.0
+        ),
+        "contact_master_face_invalid_jump_count": invalid_jump_count,
+        "contact_master_face_invalid_jump_fraction": (
+            float(invalid_jump_count) / float(comparable_count) if comparable_count else 0.0
         ),
     }
     cache_hits = np.asarray(
@@ -1167,6 +1188,10 @@ def _empty_path_tracking_metrics() -> dict[str, float | int]:
         "contact_master_face_tracking_comparable_count": 0,
         "contact_master_face_switch_count": 0,
         "contact_master_face_switch_fraction": 0.0,
+        "contact_master_face_topological_continuity_count": 0,
+        "contact_master_face_topological_continuity_fraction": 0.0,
+        "contact_master_face_invalid_jump_count": 0,
+        "contact_master_face_invalid_jump_fraction": 0.0,
         "contact_path_cache_hit_count": 0,
         "contact_path_cache_hit_fraction": 0.0,
         "contact_path_cache_match_count": 0,

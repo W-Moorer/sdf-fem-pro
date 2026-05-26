@@ -125,6 +125,7 @@ def two_block_sliding_region_gate_metrics(
     flat_punch_summary: Row | None,
     min_cache_hit_fraction: float = 0.999,
     min_cache_match_fraction: float = 0.999,
+    min_topological_continuity_fraction: float = 0.999,
     min_active_region_jaccard: float = 0.999,
     max_master_face_switch_fraction: float = 0.60,
     max_master_barycentric_drift: float = 0.75,
@@ -178,18 +179,25 @@ def two_block_sliding_region_gate_metrics(
     tracking_rows = rows[1:] if len(rows) > 1 else []
     cache_hit_values = [float(row.get("contact_path_cache_hit_fraction", 0.0)) for row in tracking_rows]
     cache_match_values = [float(row.get("contact_path_cache_match_fraction", 0.0)) for row in tracking_rows]
+    topological_values = [
+        float(row.get("contact_master_face_topological_continuity_fraction", 0.0)) for row in tracking_rows
+    ]
     switch_values = [float(row.get("contact_master_face_switch_fraction", 0.0)) for row in tracking_rows]
     barycentric_values = [float(row.get("contact_master_barycentric_drift_max", 0.0)) for row in tracking_rows]
     active_jaccard_values = [float(row.get("contact_active_region_jaccard", 0.0)) for row in tracking_rows]
     cache_hit_min = min(cache_hit_values) if cache_hit_values else 1.0
     cache_match_min = min(cache_match_values) if cache_match_values else 1.0
+    topological_continuity_min = min(topological_values) if topological_values else 1.0
     master_face_switch_fraction_max = max(switch_values) if switch_values else 0.0
     master_barycentric_drift_max = max(barycentric_values) if barycentric_values else 0.0
     active_jaccard_min = min(active_jaccard_values) if active_jaccard_values else 1.0
     path_tracking_ok = (
         bool(rows)
         and cache_hit_min >= float(min_cache_hit_fraction)
-        and cache_match_min >= float(min_cache_match_fraction)
+        and (
+            cache_match_min >= float(min_cache_match_fraction)
+            or topological_continuity_min >= float(min_topological_continuity_fraction)
+        )
         and active_jaccard_min >= float(min_active_region_jaccard)
         and master_face_switch_fraction_max <= float(max_master_face_switch_fraction)
         and master_barycentric_drift_max <= float(max_master_barycentric_drift)
@@ -225,11 +233,15 @@ def two_block_sliding_region_gate_metrics(
         "two_block_virtual_work_relative_mismatch_max": float(max_work_mismatch),
         "two_block_path_cache_hit_fraction_min_after_first": float(cache_hit_min),
         "two_block_path_cache_match_fraction_min_after_first": float(cache_match_min),
+        "two_block_master_face_topological_continuity_min_after_first": float(topological_continuity_min),
         "two_block_active_region_jaccard_min": float(active_jaccard_min),
         "two_block_master_face_switch_fraction_max": float(master_face_switch_fraction_max),
         "two_block_master_barycentric_drift_max": float(master_barycentric_drift_max),
         "two_block_path_tracking_min_cache_hit_threshold": float(min_cache_hit_fraction),
         "two_block_path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
+        "two_block_path_tracking_min_topological_continuity_threshold": float(
+            min_topological_continuity_fraction
+        ),
         "two_block_path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
         "two_block_path_tracking_max_face_switch_threshold": float(max_master_face_switch_fraction),
         "two_block_path_tracking_max_barycentric_drift_threshold": float(max_master_barycentric_drift),
@@ -249,6 +261,7 @@ def run_validation(
     quadrature: str = "tri3",
     min_cache_hit_fraction: float = 0.999,
     min_cache_match_fraction: float = 0.999,
+    min_topological_continuity_fraction: float = 0.999,
     min_active_region_jaccard: float = 0.999,
     max_master_face_switch_fraction: float = 0.60,
     max_master_barycentric_drift: float = 0.75,
@@ -264,6 +277,8 @@ def run_validation(
         raise ValueError("min_cache_hit_fraction must be in [0, 1]")
     if not (0.0 <= float(min_cache_match_fraction) <= 1.0):
         raise ValueError("min_cache_match_fraction must be in [0, 1]")
+    if not (0.0 <= float(min_topological_continuity_fraction) <= 1.0):
+        raise ValueError("min_topological_continuity_fraction must be in [0, 1]")
     if not (0.0 <= float(min_active_region_jaccard) <= 1.0):
         raise ValueError("min_active_region_jaccard must be in [0, 1]")
     if not (0.0 <= float(max_master_face_switch_fraction) <= 1.0):
@@ -342,6 +357,7 @@ def run_validation(
             previous_path_region_ids,
             previous_master_face_ids,
             previous_master_barycentric,
+            master_face_neighbors=contact._master_face_tracking_neighborhoods,
         )
         if current_path_region_ids is not None:
             previous_path_region_ids = current_path_region_ids
@@ -423,6 +439,10 @@ def run_validation(
         "contact_master_face_tracking_comparable_count",
         "contact_master_face_switch_count",
         "contact_master_face_switch_fraction",
+        "contact_master_face_topological_continuity_count",
+        "contact_master_face_topological_continuity_fraction",
+        "contact_master_face_invalid_jump_count",
+        "contact_master_face_invalid_jump_fraction",
         "contact_path_cache_hit_count",
         "contact_path_cache_hit_fraction",
         "contact_path_cache_match_count",
@@ -458,6 +478,11 @@ def run_validation(
             if len(rows) > 1
             else 0.0
         ),
+        "master_face_topological_continuity_min_after_first": (
+            float(min(float(row["contact_master_face_topological_continuity_fraction"]) for row in rows[1:]))
+            if len(rows) > 1
+            else 0.0
+        ),
         "master_barycentric_drift_max": (
             float(max(float(row["contact_master_barycentric_drift_max"]) for row in tracking_rows))
             if tracking_rows
@@ -465,6 +490,7 @@ def run_validation(
         ),
         "path_tracking_min_cache_hit_threshold": float(min_cache_hit_fraction),
         "path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
+        "path_tracking_min_topological_continuity_threshold": float(min_topological_continuity_fraction),
         "path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
         "path_tracking_max_face_switch_threshold": float(max_master_face_switch_fraction),
         "path_tracking_max_barycentric_drift_threshold": float(max_master_barycentric_drift),
@@ -475,7 +501,11 @@ def run_validation(
     }
     summary["path_tracking_gate_passed"] = int(
         float(summary["path_cache_hit_fraction_min_after_first"]) >= float(min_cache_hit_fraction)
-        and float(summary["path_cache_match_fraction_min_after_first"]) >= float(min_cache_match_fraction)
+        and (
+            float(summary["path_cache_match_fraction_min_after_first"]) >= float(min_cache_match_fraction)
+            or float(summary["master_face_topological_continuity_min_after_first"])
+            >= float(min_topological_continuity_fraction)
+        )
         and float(summary["active_region_jaccard_min"]) >= float(min_active_region_jaccard)
         and float(summary["master_face_switch_fraction_max"]) <= float(max_master_face_switch_fraction)
         and float(summary["master_barycentric_drift_max"]) <= float(max_master_barycentric_drift)
@@ -483,11 +513,15 @@ def run_validation(
     for row in rows:
         row["path_tracking_min_cache_hit_threshold"] = float(min_cache_hit_fraction)
         row["path_tracking_min_cache_match_threshold"] = float(min_cache_match_fraction)
+        row["path_tracking_min_topological_continuity_threshold"] = float(
+            min_topological_continuity_fraction
+        )
     gate = two_block_sliding_region_gate_metrics(
         rows,
         flat_punch_summary=flat_punch_summary,
         min_cache_hit_fraction=float(min_cache_hit_fraction),
         min_cache_match_fraction=float(min_cache_match_fraction),
+        min_topological_continuity_fraction=float(min_topological_continuity_fraction),
         min_active_region_jaccard=float(min_active_region_jaccard),
         max_master_face_switch_fraction=float(max_master_face_switch_fraction),
         max_master_barycentric_drift=float(max_master_barycentric_drift),
@@ -513,6 +547,7 @@ def run_validation(
                 f"- max master-face switch fraction: {summary['master_face_switch_fraction_max']:.12e}",
                 f"- min path-cache hit fraction after first frame: {summary['path_cache_hit_fraction_min_after_first']:.12e}",
                 f"- min path-cache match fraction after first frame: {summary['path_cache_match_fraction_min_after_first']:.12e}",
+                f"- min topological face continuity after first frame: {summary['master_face_topological_continuity_min_after_first']:.12e}",
                 f"- max master-barycentric drift: {summary['master_barycentric_drift_max']:.12e}",
                 f"- accepted-state path tracking gate: {'PASS' if int(summary['path_tracking_gate_passed']) else 'FAIL'}",
                 f"- flat-punch prerequisite gate: {'PASS' if int(summary['flat_punch_prerequisite_gate_passed']) else 'FAIL'}",
@@ -521,8 +556,8 @@ def run_validation(
                 f"- constraint-region law gate: {'PASS' if int(summary['two_block_constraint_region_law_gate_passed']) else 'FAIL'}",
                 "",
                 "Face switches are permitted when the smooth sliding path crosses the two-triangle split of a planar quad. "
-                "The gate therefore requires accepted-state cache hit/match continuity and bounded switch fraction rather "
-                "than requiring a fixed triangle id for all frames.",
+                "The gate therefore requires accepted-state cache hits, topological continuity across adjacent master faces, "
+                "and bounded switch fraction rather than requiring a fixed triangle id for all frames.",
                 f"- totals CSV: `{totals_path.name}`",
                 f"- continuity CSV: `{continuity_path.name}`",
                 f"- path tracking CSV: `{tracking_path.name}`",
@@ -547,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pressure-stiffness", type=float, default=6.0e4)
     parser.add_argument("--min-cache-hit-fraction", type=float, default=0.999)
     parser.add_argument("--min-cache-match-fraction", type=float, default=0.999)
+    parser.add_argument("--min-topological-continuity-fraction", type=float, default=0.999)
     parser.add_argument("--min-active-region-jaccard", type=float, default=0.999)
     parser.add_argument("--max-master-face-switch-fraction", type=float, default=0.60)
     parser.add_argument("--max-master-barycentric-drift", type=float, default=0.75)
@@ -564,6 +600,7 @@ def main(argv: list[str] | None = None) -> int:
         pressure_stiffness=float(args.pressure_stiffness),
         min_cache_hit_fraction=float(args.min_cache_hit_fraction),
         min_cache_match_fraction=float(args.min_cache_match_fraction),
+        min_topological_continuity_fraction=float(args.min_topological_continuity_fraction),
         min_active_region_jaccard=float(args.min_active_region_jaccard),
         max_master_face_switch_fraction=float(args.max_master_face_switch_fraction),
         max_master_barycentric_drift=float(args.max_master_barycentric_drift),
