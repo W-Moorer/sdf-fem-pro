@@ -19,6 +19,7 @@ from validation.run_flexible_gear_full_lagrangian_sdf_comparison import (
     run_full_gear,
     source_active_set_line_search_gate_metrics,
     source_convergence_gate_metrics,
+    source_increment_trial_gate_metrics,
 )
 
 
@@ -55,6 +56,52 @@ def test_source_convergence_gate_requires_converged_accepted_steps() -> None:
 
     assert int(failed_gate["source_convergence_gate_passed"]) == 0
     assert int(failed_gate["source_convergence_converged_count_matches_accepted"]) == 0
+
+
+def test_source_increment_trial_gate_rejects_accepted_cutback_or_unconverged_rows() -> None:
+    accepted_flags = {
+        "source_increment_converged": 1,
+        "source_increment_accepted": 1,
+        "source_increment_cutback_required": 0,
+        "source_residual_converged": 1,
+        "source_correction_converged": 1,
+        "source_contact_force_increment_converged": 1,
+        "source_active_set_stable": 1,
+    }
+    history = [{"time": 1.0e-5, **accepted_flags}]
+    accepted_trial = {
+        "source_trial_index": 1,
+        "source_trial_start_time": 0.0,
+        "source_trial_end_time": 1.0e-5,
+        "source_trial_accepted": 1,
+        "source_trial_retry_required": 0,
+        **accepted_flags,
+    }
+
+    gate = source_increment_trial_gate_metrics(history, [accepted_trial])
+
+    assert int(gate["source_trial_gate_passed"]) == 1
+
+    accepted_cutback = dict(accepted_trial)
+    accepted_cutback["source_increment_cutback_required"] = 1
+    failed_cutback = source_increment_trial_gate_metrics(history, [accepted_cutback])
+
+    assert int(failed_cutback["source_trial_gate_passed"]) == 0
+    assert int(failed_cutback["source_trial_accepted_no_cutback"]) == 0
+
+    unconverged_history = [dict(history[0])]
+    unconverged_history[0]["source_contact_force_increment_converged"] = 0
+    failed_history = source_increment_trial_gate_metrics(unconverged_history, [accepted_trial])
+
+    assert int(failed_history["source_trial_gate_passed"]) == 0
+    assert int(failed_history["source_trial_history_strictly_converged"]) == 0
+
+    missing_columns = dict(accepted_trial)
+    del missing_columns["source_active_set_stable"]
+    failed_columns = source_increment_trial_gate_metrics(history, [missing_columns])
+
+    assert int(failed_columns["source_trial_gate_passed"]) == 0
+    assert int(failed_columns["source_trial_accepted_required_columns_present"]) == 0
 
 
 def test_source_active_set_line_search_gate_requires_stable_accepted_tracking() -> None:
@@ -694,10 +741,20 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         captured["history_frame_stride"] = int(kwargs["history_frame_stride"])
         captured["source_stress_postprocess"] = str(kwargs["source_stress_postprocess"])
         captured["source_checkpoint_stride"] = int(kwargs["source_checkpoint_stride"])
+        accepted_flags = {
+            "source_increment_converged": 1,
+            "source_increment_accepted": 1,
+            "source_increment_cutback_required": 0,
+            "source_residual_converged": 1,
+            "source_correction_converged": 1,
+            "source_contact_force_increment_converged": 1,
+            "source_active_set_stable": 1,
+        }
         return (
             [
                 {
                     "time": 0.1,
+                    **accepted_flags,
                     "source_line_search_trial_count": 0,
                     "source_line_search_reduced_count": 0,
                     "source_line_search_stable_count": 0,
@@ -745,6 +802,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
                         "source_trial_end_time": 0.1,
                         "source_trial_accepted": 1,
                         "source_trial_retry_required": 0,
+                        **accepted_flags,
                     }
                 ],
             },

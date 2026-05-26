@@ -1824,9 +1824,18 @@ def test_source_drive_cutback_retries_without_accepting_failed_trial(
 
 
 def test_source_increment_trial_gate_allows_cutback_history_subset() -> None:
+    accepted_flags = {
+        "source_increment_converged": 1,
+        "source_increment_accepted": 1,
+        "source_increment_cutback_required": 0,
+        "source_residual_converged": 1,
+        "source_correction_converged": 1,
+        "source_contact_force_increment_converged": 1,
+        "source_active_set_stable": 1,
+    }
     history = [
-        {"time": 5.0e-6, "source_increment_accepted": 1},
-        {"time": 1.0e-5, "source_increment_accepted": 1},
+        {"time": 5.0e-6, **accepted_flags},
+        {"time": 1.0e-5, **accepted_flags},
     ]
     trial_rows = [
         {
@@ -1835,6 +1844,9 @@ def test_source_increment_trial_gate_allows_cutback_history_subset() -> None:
             "source_trial_end_time": 1.0e-5,
             "source_trial_accepted": 0,
             "source_trial_retry_required": 1,
+            "source_increment_converged": 0,
+            "source_increment_accepted": 0,
+            "source_increment_cutback_required": 1,
         },
         {
             "source_trial_index": 2,
@@ -1842,6 +1854,7 @@ def test_source_increment_trial_gate_allows_cutback_history_subset() -> None:
             "source_trial_end_time": 5.0e-6,
             "source_trial_accepted": 1,
             "source_trial_retry_required": 0,
+            **accepted_flags,
         },
         {
             "source_trial_index": 3,
@@ -1849,12 +1862,16 @@ def test_source_increment_trial_gate_allows_cutback_history_subset() -> None:
             "source_trial_end_time": 1.0e-5,
             "source_trial_accepted": 1,
             "source_trial_retry_required": 0,
+            **accepted_flags,
         },
     ]
 
     gate = source_increment_trial_gate_metrics(history, trial_rows)
 
     assert int(gate["source_trial_gate_passed"]) == 1
+    assert int(gate["source_trial_accepted_required_columns_present"]) == 1
+    assert int(gate["source_trial_history_required_columns_present"]) == 1
+    assert int(gate["source_trial_cutback_trials_consistent"]) == 1
     assert int(gate["source_trial_accepted_count"]) == 2
     assert int(gate["source_trial_rejected_count"]) == 1
     assert int(gate["source_trial_history_row_count"]) == 2
