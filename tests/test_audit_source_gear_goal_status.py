@@ -27,7 +27,7 @@ def test_parse_source_deck_extracts_drive_and_contact_settings(tmp_path: Path) -
                 "BEAM, C, D",
                 "*Surface Behavior, pressure-overclosure=LINEAR",
                 "5.0e9",
-                "*Contact Pair, interaction=IntProp-1, type=NODE TO SURFACE, mechanical constraint=PENALTY",
+                "*Contact Pair, interaction=IntProp-1, type=NODE TO SURFACE",
                 "S1, S2",
                 "*Step, name=Step-1, nlgeom=YES, inc=2000",
                 "*Dynamic",

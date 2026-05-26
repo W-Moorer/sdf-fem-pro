@@ -163,7 +163,7 @@ def write_source_penalty_summary(path: Path, row: Row) -> None:
         "",
         "- Purpose: external validation reference for SFC Lagrangian-SDF penalty contact.",
         "- Model: source gear deck geometry, RP-MPCs, angular velocity, torque, and dynamic step are preserved.",
-        "- Contact: frictionless linear penalty pressure-overclosure in Abaqus/Standard surface-to-surface contact.",
+        "- Contact: frictionless linear penalty pressure-overclosure in Abaqus/Standard node-to-surface contact.",
         f"- Pressure stiffness: `{float(row['pressure_stiffness']):.6e}`",
         f"- Abaqus output frequency: every `{int(row['vtk_frame_stride'])}` increments",
         f"- VTK export frame stride: `{int(row.get('abaqus_vtk_export_frame_stride', 1))}`",

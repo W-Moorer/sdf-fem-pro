@@ -59,6 +59,22 @@ def _replace_or_add_param(keyword_line: str, name: str, value: str) -> str:
     return ", ".join(kept)
 
 
+def _remove_param(keyword_line: str, name: str) -> str:
+    """Return ``keyword_line`` without the Abaqus keyword parameter ``name``."""
+
+    parts = [part.strip() for part in keyword_line.strip().split(",")]
+    prefix = parts[0]
+    lower_name = name.lower()
+    kept = [prefix]
+    for part in parts[1:]:
+        if not part:
+            continue
+        key = part.split("=", 1)[0].strip().lower()
+        if key != lower_name:
+            kept.append(part)
+    return ", ".join(kept)
+
+
 def _replace_dynamic_data(
     line: str,
     *,
@@ -163,8 +179,10 @@ def prepare_source_penalty_deck_text(
             continue
         if key == "*contact pair":
             rewritten = _replace_or_add_param(line, "type", "NODE TO SURFACE")
-            if contact_pair_penalty_parameter and "mechanical constraint" not in line.lower():
-                rewritten = _replace_or_add_param(rewritten, "mechanical constraint", "PENALTY")
+            # Abaqus/Standard node-to-surface contact does not accept the
+            # ``mechanical constraint`` keyword parameter.  The linear
+            # pressure-overclosure law above supplies the penalty law.
+            rewritten = _remove_param(rewritten, "mechanical constraint")
             out.append(rewritten)
             saw_contact_pair = True
             i += 1
@@ -225,7 +243,7 @@ def write_source_penalty_deck(
         frame_stride=frame_stride,
         dt=dt,
         duration=duration,
-        contact_pair_penalty_parameter=True,
+        contact_pair_penalty_parameter=False,
         fixed_increment=True,
         require_source_timing=bool(require_source_timing),
     )
