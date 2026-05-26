@@ -1555,6 +1555,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         "",
         f"- nodes/elements: {summary['nodes']} / {summary['elements']}",
         f"- active contact faces: {summary['gear1_contact_faces']} / {summary['gear2_contact_faces']}",
+        f"- requested active faces per body: {summary.get('requested_active_faces_per_body', '')}",
+        f"- effective active faces per body: {summary.get('effective_active_faces_per_body', '')}",
         f"- active patch radius factor: {float(summary.get('active_patch_radius_factor', 1.0)):.3f}",
         f"- support nodes: {summary['gear1_support_nodes']} / {summary['gear2_support_nodes']}",
         f"- linear solver: {summary.get('linear_solver', 'sparse')}",
@@ -1569,6 +1571,8 @@ def write_full_summary(path: Path, summary: Row, history_path: Path, *, abaqus_r
         f"- source secondary normal min projection: {summary.get('source_secondary_normal_min_projection', '')}",
         f"- source secondary line hard distance limit: {summary.get('source_secondary_line_hard_distance_limit', '')}",
         f"- source secondary path tracking: {summary.get('source_secondary_path_tracking', '')}",
+        f"- source dynamic contact window: {summary.get('source_dynamic_contact_window', '')}",
+        f"- source dynamic contact window applied: {summary.get('source_dynamic_contact_window_applied', '')}",
         f"- source active-set stability: {summary.get('source_contact_active_set_stability', '')}",
         f"- source max nonlinear iterations: {summary.get('source_max_iterations', '')}",
         f"- source convergence gate: {summary.get('source_convergence_gate_passed', '')}",
@@ -1793,6 +1797,7 @@ def run_full_gear(
     source_secondary_line_distance_limit: float | None = None,
     source_secondary_line_hard_distance_limit: float | None = None,
     source_secondary_path_tracking: bool = True,
+    source_dynamic_contact_window: bool = False,
     source_contact_active_set_stability: bool = True,
     source_contact_footprint_clipping: bool = False,
     source_internal_kinematics: str = "finite_stvk_visual",
@@ -1820,9 +1825,11 @@ def run_full_gear(
     if source_step_matched:
         duration = float(model.dynamic_duration)
         dt = float(model.dynamic_initial_dt)
+    dynamic_contact_window_applied = bool(source_dynamic_contact_window) and drive == "source_inp"
+    effective_active_faces_per_body = 0 if dynamic_contact_window_applied else int(active_faces_per_body)
     pair = build_full_active_pair(
         model,
-        active_faces_per_body=active_faces_per_body,
+        active_faces_per_body=effective_active_faces_per_body,
         active_patch_radius_factor=active_patch_radius_factor,
     )
     mode = str(contact_mode).lower()
@@ -1920,6 +1927,10 @@ def run_full_gear(
             history[-1].get("p95_equivalent_elastic_strain_nodeavg", 0.0)
         )
     summary["active_patch_radius_factor"] = float(active_patch_radius_factor)
+    summary["requested_active_faces_per_body"] = int(active_faces_per_body)
+    summary["effective_active_faces_per_body"] = int(effective_active_faces_per_body)
+    summary["source_dynamic_contact_window"] = int(bool(source_dynamic_contact_window))
+    summary["source_dynamic_contact_window_applied"] = int(bool(dynamic_contact_window_applied))
     summary["drive_mode"] = drive
     summary["sfc_match_source_step"] = bool(source_step_matched)
     summary["sfc_duration"] = float(duration)
@@ -2233,6 +2244,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable secondary-normal path-tracking hints for diagnostics.",
     )
     parser.add_argument(
+        "--source-dynamic-contact-window",
+        action="store_true",
+        help=(
+            "For source-drive gear validation, use the complete source contact "
+            "surfaces so the current broad phase, rather than an initial static "
+            "patch crop, determines the active contact window. This is an "
+            "accuracy-first diagnostic path; active patch caching is a later "
+            "optimization."
+        ),
+    )
+    parser.add_argument(
         "--source-contact-active-set-stability",
         dest="source_contact_active_set_stability",
         action="store_true",
@@ -2372,6 +2394,7 @@ def main(argv: list[str] | None = None) -> int:
         source_secondary_line_distance_limit=args.source_secondary_line_distance_limit,
         source_secondary_line_hard_distance_limit=args.source_secondary_line_hard_distance_limit,
         source_secondary_path_tracking=bool(args.source_secondary_path_tracking),
+        source_dynamic_contact_window=bool(args.source_dynamic_contact_window),
         source_contact_active_set_stability=bool(args.source_contact_active_set_stability),
         source_contact_footprint_clipping=bool(args.source_contact_footprint_clipping),
         source_internal_kinematics=str(args.source_internal_kinematics),

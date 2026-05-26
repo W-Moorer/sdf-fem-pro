@@ -655,6 +655,8 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         return Model()
 
     def fake_build(*_args, **_kwargs):
+        captured["effective_active_faces_per_body"] = int(_kwargs["active_faces_per_body"])
+
         class Patch:
             nodes = __import__("numpy").zeros((1, 3))
             elements = __import__("numpy").zeros((0, 4), dtype=int)
@@ -742,7 +744,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     _history, summary = run_full_gear(
         source=tmp_path / "dummy.inp",
         out_dir=tmp_path,
-        active_faces_per_body=0,
+        active_faces_per_body=16,
         active_patch_radius_factor=1.0,
         duration=0.1,
         dt=0.1,
@@ -757,6 +759,7 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
         tet4_mass_kind="consistent",
         history_frame_stride=3,
         source_stress_postprocess="finite_stvk_visual",
+        source_dynamic_contact_window=True,
         source_checkpoint_path=tmp_path / "checkpoint.npz",
         resume_source_checkpoint=True,
         source_checkpoint_stride=7,
@@ -767,6 +770,11 @@ def test_full_gear_runner_exposes_hht_alpha_parameter(monkeypatch, tmp_path: Pat
     assert captured["history_frame_stride"] == 3
     assert captured["source_stress_postprocess"] == "finite_stvk_visual"
     assert captured["source_checkpoint_stride"] == 7
+    assert captured["effective_active_faces_per_body"] == 0
+    assert int(summary["requested_active_faces_per_body"]) == 16
+    assert int(summary["effective_active_faces_per_body"]) == 0
+    assert int(summary["source_dynamic_contact_window"]) == 1
+    assert int(summary["source_dynamic_contact_window_applied"]) == 1
     assert "source_increment_trials" in summary
     assert "source_increment_trial_gate" in summary
     assert "source_convergence_gate" in summary
