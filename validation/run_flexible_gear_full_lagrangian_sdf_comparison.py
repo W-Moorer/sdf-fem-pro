@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sfc.contact.validation_gates import (  # noqa: E402
+    contact_path_tracking_gate_metrics as _core_contact_path_tracking_gate_metrics,
     contact_total_priority_gate_metrics as _core_contact_total_priority_gate_metrics,
 )
 from sfc.contact.tracking_state import (  # noqa: E402
@@ -663,105 +664,19 @@ def path_tracking_gate_metrics(
     barycentric drift on same-face samples, and persistent active regions.
     """
 
-    active_rows: list[Row] = []
-    for row in history_rows:
-        active_regions = _row_int_flag(row, "active_contact_region_count", default=0)
-        active_area = _finite_row_float(row, "contact_active_area") or 0.0
-        normal_force = abs(_finite_row_float(row, "contact_region_normal_force", "normal_force") or 0.0)
-        if active_regions > 0 or active_area > 0.0 or normal_force > 0.0:
-            active_rows.append(row)
-    active_contact_present = len(active_rows) > 0
-    tracking_rows = active_rows[1:] if len(active_rows) > 1 else []
-    required_columns = (
-        "contact_path_cache_hit_fraction",
-        "contact_path_cache_match_fraction",
-        "contact_master_face_switch_fraction",
-        "contact_master_face_topological_continuity_fraction",
-        "contact_master_face_invalid_jump_fraction",
-        "contact_active_region_jaccard",
-        "contact_active_region_persistence_fraction",
-        "contact_master_barycentric_drift_max",
+    return dict(
+        _core_contact_path_tracking_gate_metrics(
+            history_rows,
+            min_cache_hit_fraction=float(min_cache_hit_fraction),
+            min_cache_match_fraction=float(min_cache_match_fraction),
+            min_active_region_jaccard=float(min_active_region_jaccard),
+            min_active_region_persistence=float(min_active_region_persistence),
+            min_topological_continuity_fraction=float(min_topological_continuity_fraction),
+            max_master_face_switch_fraction=float(max_master_face_switch_fraction),
+            max_master_face_invalid_jump_fraction=float(max_master_face_invalid_jump_fraction),
+            max_master_barycentric_drift=float(max_master_barycentric_drift),
+        )
     )
-    columns_present = all(_row_has_value(row, key) for row in tracking_rows for key in required_columns)
-    continuity_observable = len(tracking_rows) > 0
-    if tracking_rows and columns_present:
-        cache_hit_min = min(float(row["contact_path_cache_hit_fraction"]) for row in tracking_rows)
-        cache_match_min = min(float(row["contact_path_cache_match_fraction"]) for row in tracking_rows)
-        face_switch_max = max(float(row["contact_master_face_switch_fraction"]) for row in tracking_rows)
-        topological_continuity_min = min(
-            float(row["contact_master_face_topological_continuity_fraction"]) for row in tracking_rows
-        )
-        invalid_jump_max = max(float(row["contact_master_face_invalid_jump_fraction"]) for row in tracking_rows)
-        active_jaccard_min = min(float(row["contact_active_region_jaccard"]) for row in tracking_rows)
-        active_persistence_min = min(float(row["contact_active_region_persistence_fraction"]) for row in tracking_rows)
-        barycentric_drift_max = max(float(row["contact_master_barycentric_drift_max"]) for row in tracking_rows)
-    else:
-        cache_hit_min = 1.0 if not active_contact_present else 0.0
-        cache_match_min = 1.0 if not active_contact_present else 0.0
-        face_switch_max = 0.0
-        topological_continuity_min = 1.0 if not active_contact_present else 0.0
-        invalid_jump_max = 0.0
-        active_jaccard_min = 1.0 if not active_contact_present else 0.0
-        active_persistence_min = 1.0 if not active_contact_present else 0.0
-        barycentric_drift_max = 0.0
-    cache_hit_ok = cache_hit_min >= float(min_cache_hit_fraction)
-    cache_match_ok = cache_match_min >= float(min_cache_match_fraction)
-    face_switch_ok = face_switch_max <= float(max_master_face_switch_fraction)
-    topological_ok = topological_continuity_min >= float(min_topological_continuity_fraction)
-    invalid_jump_ok = invalid_jump_max <= float(max_master_face_invalid_jump_fraction)
-    active_jaccard_ok = active_jaccard_min >= float(min_active_region_jaccard)
-    active_persistence_ok = active_persistence_min >= float(min_active_region_persistence)
-    barycentric_ok = barycentric_drift_max <= float(max_master_barycentric_drift)
-    if not active_contact_present:
-        gate_passed = 1
-    elif not continuity_observable:
-        gate_passed = 0
-    else:
-        gate_passed = int(
-            columns_present
-            and cache_hit_ok
-            and cache_match_ok
-            and face_switch_ok
-            and topological_ok
-            and invalid_jump_ok
-            and active_jaccard_ok
-            and active_persistence_ok
-            and barycentric_ok
-        )
-    return {
-        "path_tracking_gate_passed": int(gate_passed),
-        "comparison_stage": "accepted_state_path_tracking_before_nodal_cpress",
-        "path_tracking_active_contact_present": int(active_contact_present),
-        "path_tracking_active_history_row_count": int(len(active_rows)),
-        "path_tracking_continuity_observable": int(continuity_observable),
-        "path_tracking_required_columns_present": int(columns_present),
-        "path_tracking_cache_hit_gate_passed": int(cache_hit_ok),
-        "path_tracking_cache_match_gate_passed": int(cache_match_ok),
-        "path_tracking_face_switch_gate_passed": int(face_switch_ok),
-        "path_tracking_topological_continuity_gate_passed": int(topological_ok),
-        "path_tracking_invalid_jump_gate_passed": int(invalid_jump_ok),
-        "path_tracking_active_region_jaccard_gate_passed": int(active_jaccard_ok),
-        "path_tracking_active_region_persistence_gate_passed": int(active_persistence_ok),
-        "path_tracking_barycentric_drift_gate_passed": int(barycentric_ok),
-        "path_tracking_cache_hit_fraction_min_after_first_active": float(cache_hit_min),
-        "path_tracking_cache_match_fraction_min_after_first_active": float(cache_match_min),
-        "path_tracking_master_face_switch_fraction_max_after_first_active": float(face_switch_max),
-        "path_tracking_master_face_topological_continuity_min_after_first_active": float(
-            topological_continuity_min
-        ),
-        "path_tracking_master_face_invalid_jump_fraction_max_after_first_active": float(invalid_jump_max),
-        "path_tracking_active_region_jaccard_min_after_first_active": float(active_jaccard_min),
-        "path_tracking_active_region_persistence_min_after_first_active": float(active_persistence_min),
-        "path_tracking_master_barycentric_drift_max_after_first_active": float(barycentric_drift_max),
-        "path_tracking_min_cache_hit_threshold": float(min_cache_hit_fraction),
-        "path_tracking_min_cache_match_threshold": float(min_cache_match_fraction),
-        "path_tracking_min_active_region_jaccard_threshold": float(min_active_region_jaccard),
-        "path_tracking_min_active_region_persistence_threshold": float(min_active_region_persistence),
-        "path_tracking_min_topological_continuity_threshold": float(min_topological_continuity_fraction),
-        "path_tracking_max_master_face_switch_threshold": float(max_master_face_switch_fraction),
-        "path_tracking_max_master_face_invalid_jump_threshold": float(max_master_face_invalid_jump_fraction),
-        "path_tracking_max_master_barycentric_drift_threshold": float(max_master_barycentric_drift),
-    }
 
 
 def full_gear_entry_gate_metrics(summary: Row, *, min_strict_sync_steps: int = 10) -> Row:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sfc.contact.validation_gates import contact_total_priority_gate_metrics
+from sfc.contact.validation_gates import contact_path_tracking_gate_metrics, contact_total_priority_gate_metrics
 
 
 def _valid_total_row() -> dict[str, object]:
@@ -90,3 +90,62 @@ def test_contact_total_gate_rejects_force_mismatch_between_response_and_region_t
     assert int(gate["contact_total_gate_passed"]) == 0
     assert int(gate["contact_total_force_consistency_passed"]) == 0
     assert float(gate["contact_total_force_relative_mismatch_max"]) > 0.0
+
+
+def _valid_path_row(**overrides: object) -> dict[str, object]:
+    row = {
+        "active_contact_region_count": 3,
+        "contact_active_area": 2.0,
+        "contact_region_normal_force": 5.0,
+        "contact_path_cache_hit_fraction": 1.0,
+        "contact_path_cache_match_fraction": 1.0,
+        "contact_master_face_switch_fraction": 0.0,
+        "contact_master_face_topological_continuity_fraction": 1.0,
+        "contact_master_face_invalid_jump_fraction": 0.0,
+        "contact_active_region_jaccard": 1.0,
+        "contact_active_region_persistence_fraction": 1.0,
+        "contact_master_barycentric_drift_max": 0.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_path_tracking_gate_accepts_coherent_accepted_region_history() -> None:
+    gate = contact_path_tracking_gate_metrics([_valid_path_row(), _valid_path_row()])
+
+    assert int(gate["path_tracking_gate_passed"]) == 1
+    assert int(gate["path_tracking_continuity_observable"]) == 1
+    assert int(gate["path_tracking_required_columns_present"]) == 1
+    assert int(gate["path_tracking_invalid_jump_gate_passed"]) == 1
+
+
+def test_path_tracking_gate_rejects_single_frame_or_random_master_face_jumps() -> None:
+    single = contact_path_tracking_gate_metrics([_valid_path_row()])
+
+    assert int(single["path_tracking_gate_passed"]) == 0
+    assert int(single["path_tracking_continuity_observable"]) == 0
+
+    jump = contact_path_tracking_gate_metrics(
+        [
+            _valid_path_row(),
+            _valid_path_row(
+                contact_master_face_switch_fraction=1.0,
+                contact_master_face_topological_continuity_fraction=0.0,
+                contact_master_face_invalid_jump_fraction=1.0,
+            ),
+        ]
+    )
+
+    assert int(jump["path_tracking_gate_passed"]) == 0
+    assert int(jump["path_tracking_topological_continuity_gate_passed"]) == 0
+    assert int(jump["path_tracking_invalid_jump_gate_passed"]) == 0
+
+
+def test_path_tracking_gate_rejects_missing_active_region_continuity_columns() -> None:
+    row = _valid_path_row()
+    row.pop("contact_active_region_jaccard")
+
+    gate = contact_path_tracking_gate_metrics([_valid_path_row(), row])
+
+    assert int(gate["path_tracking_gate_passed"]) == 0
+    assert int(gate["path_tracking_required_columns_present"]) == 0
